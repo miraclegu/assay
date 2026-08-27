@@ -200,6 +200,11 @@ function showCatalog(){
   $('#filter').style.display=''; $('#expand').style.display='';
   renderCatalog();
 }
+// 同一语义版本下可能有多份字节版本（差异仅注释/排版）。
+// 取【最近跑过】的那份作为代表 —— 它最接近磁盘上的当前文件。
+function newest(rs){
+  return rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1)[0];
+}
 function agg(rs){                // 一组回测的汇总
   const a=rs.map(r=>r.annual_return).filter(v=>v!=null);
   return {n:rs.length, best:a.length?Math.max(...a):null,
@@ -275,7 +280,9 @@ function renderNode(node,depth,keyPrefix,auto){
   // 策略文件
   Object.keys(node.files).sort().forEach(f=>{
     const rs=node.files[f], k=keyPrefix+'/'+f, op=auto||OPEN.has(k);
-    const byv={}; rs.forEach(r=>(byv[r.code_sha]=byv[r.code_sha]||[]).push(r));
+    // ★ 版本层按【语义哈希】分组：改注释/排版/简介不算新版本。
+    //   字节哈希仍在每条回测里保留（审计追溯：归档里躺的是哪份字节）。
+    const byv={}; rs.forEach(r=>{const k=r.sem_sha||r.code_sha;(byv[k]=byv[k]||[]).push(r);});
     const vs=Object.keys(byv).sort((a,b)=>
       (agg(byv[b]).latest.ran_at||'')<(agg(byv[a]).latest.ran_at||'')?-1:1);
     const a=agg(rs);
@@ -286,7 +293,7 @@ function renderNode(node,depth,keyPrefix,auto){
         <span class="sub">${vs.length} 个版本 · ${rs.length} 次回测</span>
         ${vs.length===1?`<span class="vnote">${esc(byv[vs[0]][0].note||'（未填简介）')}${
             byv[vs[0]][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
-          <span class="vopen" data-ver="${byv[vs[0]][0].code_sha256||vs[0]}">代码 / 回测 →</span>`:''}
+          <span class="vopen" data-ver="${newest(byv[vs[0]]).code_sha256}">代码 / 回测 →</span>`:''}
         <span class="sp"></span>
         <span class="sub">年化 <b class="${sign(a.best)}">${pct(a.best,1)}</b>
           ~ <b class="${sign(a.worst)}">${pct(a.worst,1)}</b>
@@ -302,10 +309,12 @@ function renderNode(node,depth,keyPrefix,auto){
               style="padding-left:${14+(depth+1)*20}px">
             <span class="ar">▶</span><span class="ic">⌗</span>
             <span class="nm sha">${v}</span>
+            ${(()=>{const nb=new Set(byv[v].map(r=>r.code_sha)).size;
+                return nb>1?`<span class="pill" title="行为相同，仅注释/排版/简介不同">${nb} 份字节版本</span>`:'';})()}
             <span class="vnote">${esc(byv[v][0].note||'（未填简介）')}${
               byv[v][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
             <span class="sp"></span>
-            <span class="vopen" data-ver="${byv[v][0].code_sha256||v}"
+            <span class="vopen" data-ver="${newest(byv[v]).code_sha256}"
               >代码 / 回测 →</span></div>
           <div class="body ${vop?'op':''}">${runTable(byv[v])}</div>`;
       });
@@ -372,7 +381,11 @@ async function openVersion(sha){
   catch(e){ $('#vp').innerHTML=`<div class="note" style="padding:40px 0">
       加载失败：${esc(e.message)}　<a href="#">返回目录</a></div>`; return; }
   VER=v;
-  const runs=RUNS.filter(r=>r.code_sha256===v.code_sha256);
+  // ★ 版本页以【语义版本】为单位：同一行为下的所有回测都在这里，
+  //   哪怕它们的字节版本不同（差异仅注释/排版/简介）。
+  const runs=RUNS.filter(r=>(r.sem_sha256||r.code_sha256)===(v.sem_sha256||v.code_sha256));
+  const bytes={};
+  runs.forEach(r=>{(bytes[r.code_sha]=bytes[r.code_sha]||[]).push(r);});
   const ps=v.current_params||v.params||[];   // 按【会被执行的代码】列参数
   const last=runs.slice().sort((a,b)=>(a.ran_at||'')<(b.ran_at||'')?1:-1)[0]||{};
 
@@ -380,7 +393,8 @@ async function openVersion(sha){
     <div id="hd">
       <div class="row1"><h2>${esc(v.strategy||'')}</h2>
         <span class="meta">${esc(v.group||'')} · <span class="mono">${esc(v.strategy_path||'')}</span>
-          · 版本 <span class="sha">${esc(v.code_sha)}</span> · ${runs.length} 次回测</span></div>
+          · 版本 <span class="sha">${esc(v.sem_sha||v.code_sha)}</span>
+          <span class="cmt">(行为哈希)</span> · ${runs.length} 次回测</span></div>
       <div class="row1"><span class="vnote">${esc(v.note||'（未填简介）')}${
           v.note_src==='docstring'?'<span class="cmt" style="margin-left:8px">—— 该版本没写 NOTE，这句取自 docstring；同一文件的多个旧版本会显示相同内容</span>':''}</span></div>
     </div>
@@ -421,14 +435,30 @@ async function openVersion(sha){
       <pre id="joblog"></pre>
     </div>
 
+    ${Object.keys(bytes).length>1?`<div class="sec">
+      <h3>本版本下的字节版本 <span class="cmt">—— 行为相同，差异仅注释 / 排版 / 简介</span></h3>
+      <div class="note">版本分组用的是<b>行为哈希</b>（AST 结构 + 字面量，注释不在 AST 里）。
+        下面这些字节不同但行为一致，所以归在同一版本。
+        字节哈希仍逐条保留 —— 归档里躺的到底是哪份字节，可以一字不差地追溯。</div>
+      <div style="margin-top:8px">${Object.keys(bytes).sort((a,b)=>
+        (newest(bytes[b]).ran_at||'')<(newest(bytes[a]).ran_at||'')?-1:1).map(bs=>
+        `<div style="padding:4px 0"><span class="sha">${bs}</span>
+          <span class="cmt" style="margin-left:8px">${bytes[bs].length} 次回测 ·
+          最近 ${(newest(bytes[bs]).ran_at||'').replace('T',' ').slice(5,16)}</span>
+          ${bs===v.code_sha?'<span class="pill" style="margin-left:8px">当前展示</span>':
+            `<span class="vopen" data-ver="${bytes[bs][0].code_sha256}"
+               style="margin-left:8px">看这份代码 →</span>`}</div>`).join('')}</div></div>`:''}
+
     <div class="sec"><h3>策略代码 <span class="cmt">${(v.code||'').split('\n').length} 行 ·
-      SHA256 ${esc(v.code_sha256)}</span></h3>
+      字节 SHA256 ${esc(v.code_sha256)}</span></h3>
       <pre>${esc(v.code)}</pre></div>
 
     <div class="sec"><h3>该版本的历次回测</h3>${runs.length?runTable(runs):'<div class="note">还没有回测</div>'}</div>`;
 
   document.querySelectorAll('#vp .runs tbody tr[data-id]').forEach(e=>e.onclick=()=>{
     location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
+  document.querySelectorAll('#vp .vopen[data-ver]').forEach(e=>e.onclick=ev=>{
+    ev.stopPropagation(); location.hash='#/ver/'+e.dataset.ver;});
   const btn=$('#f_run'); if(btn && v.runnable) btn.onclick=startBacktest;
 }
 
@@ -476,7 +506,7 @@ function pollJob(id, btn){
 
 async function loadRuns0(){ RUNS=await j('/api/runs'); }
 function renderVersionRuns(){
-  const runs=RUNS.filter(r=>r.code_sha256===VER.code_sha256);
+  const runs=RUNS.filter(r=>(r.sem_sha256||r.code_sha256)===(VER.sem_sha256||VER.code_sha256));
   const secs=document.querySelectorAll('#vp .sec');
   const box=secs[secs.length-1];
   if(!box) return;

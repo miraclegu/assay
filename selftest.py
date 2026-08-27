@@ -341,11 +341,20 @@ def t_deterministic():
     41.31% / 40.73% / 42.52%，跨度 1.8pp —— 意味着我们做过的每一次对比
     都含 ±0.9pp 不可归因的噪声，比任何一个确定性 bug 都更根本。
 
-    根因：ASOF JOIN 右表键不唯一 —— fin_quarterly 8.617%、
-    fin_indicator_q 8.775% 的行与另一行共享 (code, pub_date)（补披露/延迟披露
-    会在同一天公布多个报告期）。已在 std->mart 处按 (code, pub_date) 去重。
+    根因：ASOF JOIN 右表键不唯一（补披露/延迟披露会在同一天公布多个报告期）。
 
-    这里做静态检查：右表键唯一 + _FAILED 标记机制存在。
+    ★★ 2026-08-27 断言方向【反转】—— 原先要求 std/fin_quarterly 键唯一，
+       那个要求本身是错的，且造成了更严重的缺陷：
+       去重「同日多期取最新那期」会丢年报（A 股常在 4 月同日披露年报+一季报，
+       23,398 组），而 np_ttm = 本期累计 + 【上年年报】 - 上年同期累计，
+       于是 np_ttm/pe_ttm 大面积 NULL（面板 pe_ttm NULL 一度达 60.8%），
+       策略被静默剔掉一半股票（`pe BETWEEN 5 AND 50` 遇 NULL 得 NULL）。
+
+       所以现在：
+         · std/fin_quarterly **必须**保留全部报告期 -> (code,pub_date) 必然重复
+         · 去重只加在 ASOF 右表 _fin3_asof 上 -> 确定性仍然由它保证
+       本用例改为核对这个新契约，并**直接验证年报覆盖**（缺失率是那次缺陷的
+       直接指标），而不是核对一个已知有害的「键唯一」。
     """
     import os
     feed = PanelFeed('2024-01-01', '2024-03-31')
@@ -355,22 +364,48 @@ def t_deterministic():
         dups[tbl] = feed.con.execute(
             "SELECT count(*) - count(DISTINCT (code, pub_date)) FROM read_parquet('%s')"
             % f).fetchone()[0]
-    # fin_indicator_q 由 load_jq_indicator_q.py 产出，仍保留真实的「同日多期披露」重复；
-    # fin_quarterly 由 panel 构建脚本顺带写出，已随去重一起变唯一。
+    # 两张 std 表都【应当】保留真实的「同日多期披露」重复 —— 它们是推导表，
+    # np_ttm 之类的计算需要完整报告期。键唯一只是 ASOF 右表的要求。
     assert dups['fin_indicator_q'] > 0, \
         'fin_indicator_q 没有重复键，用例失去意义（源数据变了？）'
-    assert dups['fin_quarterly'] == 0, \
-        'fin_quarterly 有 %d 个重复键 —— 去重未生效' % dups['fin_quarterly']
+    assert dups['fin_quarterly'] > 0, \
+        'fin_quarterly 键唯一 —— 说明去重又被加回推导链了，年报会被丢掉'
+
+    # ★ 年报覆盖：上一次缺陷的直接指标。缺年报 -> np_ttm 断链 -> pe_ttm NULL
+    fq = os.path.join(feed.root, 'std', 'fin_quarterly.parquet')
+    miss_q3, miss_pct = feed.con.execute("""
+        WITH y AS (SELECT code, year(report_date) yr,
+             max(CASE WHEN month(report_date)=12 THEN 1 ELSE 0 END) a,
+             max(CASE WHEN month(report_date)=9  THEN 1 ELSE 0 END) q
+           FROM read_parquet('%s') GROUP BY 1,2)
+        SELECT sum(CASE WHEN q=1 AND a=0 THEN 1 ELSE 0 END),
+               100.0*sum(CASE WHEN q=1 AND a=0 THEN 1 ELSE 0 END)/nullif(sum(q),0)
+        FROM y""" % fq).fetchone()
+    assert miss_pct < 5.0, \
+        '有 Q3 却缺年报 %d 组 (%.1f%%) —— 去重又在丢年报了（修复前是 34.6%%）' % (
+            miss_q3, miss_pct)
+    ttm_null = feed.con.execute(
+        "SELECT 100.0*sum(CASE WHEN pe_ttm IS NULL THEN 1 ELSE 0 END)/count(*) "
+        'FROM %s' % feed.panel).fetchone()[0]
+    assert ttm_null < 45.0, \
+        'pe_ttm NULL 率 %.1f%% 过高 —— 年报链条可能又断了（修复前 2025 年是 60.7%%）' % ttm_null
+
     pk = feed.con.execute(
         'SELECT count(*) - count(DISTINCT (date, jq_code)) FROM ' + feed.panel).fetchone()[0]
     assert pk == 0, '面板主键有 %d 个重复 —— ASOF 去重失效' % pk
     src = open(os.path.join(feed.root, 'build', 'build_panel_daily.py'),
                encoding='utf-8').read()
+    # 确定性仍必须由 ASOF 右表的去重保证 —— 换了位置，不是取消
+    assert '_fin3_asof' in src, 'ASOF 专用右表 _fin3_asof 不见了 —— 确定性保证丢失'
+    assert 'PARTITION BY t.code, t.pub_date' in src, \
+        '_fin3_asof 里没有按 (code, pub_date) 去重 —— ASOF 键可能不唯一'
     assert '_FAILED' in src, '构建脚本缺少 _FAILED 标记机制'
     assert '_FAILED' in open('assay/feed.py', encoding='utf-8').read(), \
         'PanelFeed 缺少拒绝加载失败面板的守卫'
-    return ('fin_indicator_q 仍有 %d 重复键(真实同日多期) / fin_quarterly 已唯一 / '
-            '面板主键唯一 / _FAILED 守卫就位' % dups['fin_indicator_q'])
+    return ('两张 std 表都保留同日多期(fin_quarterly %d / fin_indicator_q %d) / '
+            '有Q3缺年报 %.1f%% / pe_ttm NULL %.1f%% / 面板主键唯一 / '
+            '_fin3_asof 去重与 _FAILED 守卫就位'
+            % (dups['fin_quarterly'], dups['fin_indicator_q'], miss_pct, ttm_null))
 
 
 @case('停牌挂账可见 + 期末守卫')
@@ -720,6 +755,79 @@ def t_version_page():
         httpd.shutdown()
     return ('简介 %d 条/旧统计已移除/源码 %d 字符/参数 %d 个与引擎一致/'
             '非法参数名与危险值均被拦' % (n_note, min(lens), n_param))
+
+
+@case('版本身份：改注释不算新版本，改行为才算')
+def t_semantic_version():
+    """字节哈希把「改一个注释」也算成新版本，版本节点会爆炸。
+
+    ★ 本用例锁的是判别边界，两侧都要测：
+      · 注释 / 排版 / docstring / NOTE 改动 -> 必须【同】版本
+      · 任何影响回测结果的改动         -> 必须【新】版本
+      只测一侧会漏 —— 一个恒返回同值的哈希也能通过「改注释同版本」。
+
+    ★ 刻意不对 SQL 字符串做归一化：那需要 SQL 解析器，弄错会把真实逻辑改动
+      误判成同一版本，比多几个版本节点危险得多。所以 SQL 内改注释【算】新版本，
+      这条也在下面显式断言。
+    """
+    import hashlib as _hl
+    import io as _io
+    from assay import registry as reg
+
+    f = 'strategies/红利/傻瓜基准.py'
+    base = _io.open(f, encoding='utf-8').read()
+    s0 = reg.semantic_sha256(base)
+    b0 = _hl.sha256(base.encode('utf-8')).hexdigest()
+
+    def mut(old, new):
+        assert old in base, '样本代码里找不到 %r，用例需要更新' % old[:40]
+        return base.replace(old, new, 1)
+
+    # ---- 应当【同】版本 ----
+    same = [
+        ('改行内注释', mut('# 月内第几个交易日调仓', '# 每月第几个交易日调仓')),
+        ('加注释行', mut('def pick(context):', '# 选股入口\ndef pick(context):')),
+        ('加空行', mut('def trade(context):', 'def trade(context):\n')),
+        ('改 NOTE 简介', mut("NOTE = '", "NOTE = '【改过】")),
+        ('改 docstring', mut('复刻 JQ/红利', '复刻（已核对）JQ/红利')),
+    ]
+    # ---- 应当【新】版本 ----
+    diff = [
+        ('改股息率门槛', mut("'div_min', 0.03", "'div_min', 0.04")),
+        ('改持仓数', mut("'target_num', 30", "'target_num', 20")),
+        ('改 SQL 里的注释（刻意不归一化）',
+         mut('-- 近 365 天已实施的现金分红总额（登记日在窗口内）',
+             '-- 近一年分红')
+         if '-- 近 365 天已实施的现金分红总额（登记日在窗口内）' in base
+         else mut('ORDER BY dy DESC', 'ORDER BY dy DESC  -- 降序')),
+    ]
+
+    for name, code in same:
+        assert _hl.sha256(code.encode('utf-8')).hexdigest() != b0, \
+            '%s：样本没真的改动，用例失效' % name
+        assert reg.semantic_sha256(code) == s0, '%s：应为同一版本，实际变了' % name
+    for name, code in diff:
+        assert reg.semantic_sha256(code) != s0, '%s：应为新版本，实际没变' % name
+
+    # ---- 归档与展示链路：新归档写入 semantic_sha256；旧归档能现算 ----
+    import json as _json
+    from assay import server as sv
+    metas = 0
+    for rid, d in sv._scan().items():
+        m = _json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
+        if m.get('semantic_sha256'):
+            metas += 1
+    rows = sv.api_runs({})
+    assert rows and all(r.get('sem_sha') for r in rows), \
+        '有回测缺 sem_sha（旧归档现算失败？）'
+    nb = len({r['code_sha'] for r in rows})
+    ns = len({r['sem_sha'] for r in rows})
+    assert ns <= nb, '语义版本数不该多于字节版本数（%d > %d）' % (ns, nb)
+
+    return ('同版本 %d 例 / 新版本 %d 例 全部符合；'
+            '归档 %d 条中 %d 条 meta 已含语义哈希，其余现算；'
+            '字节版本 %d -> 语义版本 %d'
+            % (len(same), len(diff), len(rows), metas, nb, ns))
 
 
 @case('股票名称按【当时】解析且源正确')

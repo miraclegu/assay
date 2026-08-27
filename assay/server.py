@@ -170,7 +170,7 @@ def _records(df, cols=None):
 # ---------------- API ----------------
 def api_runs(_q):
     idx = _scan()
-    notes = _note_by_sha()
+    shameta = _sha_meta()
     out = []
     for rid, d in idx.items():
         try:
@@ -187,8 +187,11 @@ def api_runs(_q):
             'strategy_path': meta.get('strategy_path'),
             'code_sha': (meta.get('code_sha256') or '')[:8],
             'code_sha256': meta.get('code_sha256'),
-            'note': (notes.get(meta.get('code_sha256') or '') or ('', ''))[0],
-            'note_src': (notes.get(meta.get('code_sha256') or '') or ('', ''))[1],
+            'note': (shameta.get(meta.get('code_sha256') or '') or ('', '', ''))[0],
+            'note_src': (shameta.get(meta.get('code_sha256') or '') or ('', '', ''))[1],
+            # ★ 版本分组用【语义哈希】：改注释/排版/简介不算新版本
+            'sem_sha256': (shameta.get(meta.get('code_sha256') or '') or ('', '', ''))[2],
+            'sem_sha': ((shameta.get(meta.get('code_sha256') or '') or ('', '', ''))[2] or '')[:8],
             'elapsed_sec': meta.get('elapsed_sec'),
             'trading_days': meta.get('trading_days'),
             'data_fp': ((meta.get('data_fingerprint') or {}).get('overall') or '')[:8],
@@ -401,7 +404,9 @@ def _version_info(sha):
     cp = os.path.join(d, 'strategy.py')
     code = open(cp, encoding='utf-8').read() if os.path.exists(cp) else ''
     note, nsrc = _parse_note(code)
+    sem = meta.get('semantic_sha256') or registry.safe_semantic_sha256(code)
     info = {'code_sha256': full, 'code_sha': full[:8], 'code': code,
+            'sem_sha256': sem, 'sem_sha': sem[:8],
             'note': note, 'note_src': nsrc, 'params': _parse_params(code),
             'strategy_path': meta.get('strategy_path'),
             'group': meta.get('group'), 'strategy': meta.get('strategy')}
@@ -410,8 +415,13 @@ def _version_info(sha):
     return info
 
 
-def _note_by_sha():
-    """全部版本的简介，供目录树一次性取用。"""
+def _sha_meta():
+    """字节哈希 -> (简介, 简介来源, 语义哈希)。目录树一次性取用。
+
+    ★ 语义哈希对**旧归档现算**（从归档的 strategy.py 快照解析），
+      所以 200 条已有归档立刻都能按行为分组，不必重跑回测。
+      meta.json 里有记录的直接用，没有的才算 —— 新归档不重复解析。
+    """
     out = {}
     for rid, d in _scan().items():
         try:
@@ -422,8 +432,12 @@ def _note_by_sha():
         if not full or full in out:
             continue
         cp = os.path.join(d, 'strategy.py')
-        if os.path.exists(cp):
-            out[full] = _parse_note(open(cp, encoding='utf-8').read())
+        if not os.path.exists(cp):
+            continue
+        code = open(cp, encoding='utf-8').read()
+        note, src = _parse_note(code)
+        sem = meta.get('semantic_sha256') or registry.safe_semantic_sha256(code)
+        out[full] = (note, src, sem)
     return out
 
 
