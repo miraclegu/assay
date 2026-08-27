@@ -111,6 +111,14 @@ def initialize(context):
 
     g.monthday = getattr(g, 'monthday', 1)  # 月内第几个交易日调仓
     g.div_method = getattr(g, 'div_method', 'rolling365')  # A-1/A-6: rolling365 / fiscal_year
+    # ---- A-4：buy_list 为空时的现金闲置（g.idle_fix）----
+    # JQ「修复与优化记录.md §212」列为待做项，但 JQ 自己【从未修】：
+    #   trade 里 buy_list 为空而 sell_list 非空时，卖出的钱闲置到下月。
+    #   与已修的「炸板卖出后现金闲置」同类（那个在 再入场.txt 里修了）。
+    # 0 = 原版行为（默认，保真）；1 = 把闲置现金按等权补进已持有的目标票。
+    # ★ 只有在「本月无新票可买、但卖掉了非目标票」时才有差别 —— 频率不高，
+    #   所以预期效应很小；做成参数是为了能【测出来】而不是猜。
+    g.idle_fix = getattr(g, 'idle_fix', 0)
     g.equal_weight = getattr(g, 'equal_weight', 0)  # 0=原版只分配新钱 / 1=等权再平衡
 
     g.target_list = getattr(g, 'target_list', [])
@@ -181,6 +189,13 @@ def trade(context):
     #   正好随袖内个股的趋势性递增，这就是同一个根因的指纹。
     buy = [s for s in g.target_list if s not in held]
     if not buy:
+        # A-4：原版在此直接 return，卖出所得闲置到下月。
+        if g.idle_fix and g.target_list:
+            held_tgt = [s for s in g.target_list if s in context.portfolio.positions]
+            if held_tgt and context.portfolio.cash > 0:
+                add = context.portfolio.cash / len(held_tgt)
+                for s in held_tgt:
+                    order_target_value(s, context.portfolio.positions[s].value + add)
         return
     per = context.portfolio.cash / len(buy)
     for s in buy:

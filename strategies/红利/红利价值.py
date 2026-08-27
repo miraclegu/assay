@@ -138,12 +138,12 @@ WITH div AS (
 ), fund AS (
   SELECT p.jq_code, p.totalmv FROM {panel} p JOIN ind i ON i.code = p.jq_code AND i.rn = 1
   WHERE p.date = DATE '{t1}' AND {uni}
-    AND p.pe_ttm BETWEEN 5 AND 50
+    AND p.pe_ttm BETWEEN {pe_lo} AND {pe_hi}
     -- ★ 阈值除以 100：std 层所有比率都存【小数】(0.05 = 5%)，
     --   原版是百分数口径 between 5 and 100
-    AND i.inc_return BETWEEN 0.05 AND 1.00
-    AND i.inc_rev BETWEEN 0.05 AND 1.00
-    AND i.inc_np BETWEEN 0.10 AND 1.00
+    AND i.inc_return BETWEEN {roe_lo} AND {roe_hi}
+    AND i.inc_rev BETWEEN {rev_lo} AND {rev_hi}
+    AND i.inc_np BETWEEN {np_lo} AND {np_hi}
 ), r AS (
   -- ★ 顺序必须是【先按股息率降序截分位，再过 >3% 阈值】。
   --   原版 get_dividend_ratio_filter_list:
@@ -176,6 +176,51 @@ def initialize(context):
     # '09:31' 用开盘价成交，最接近原版的 10:00。
     g.exit_time = getattr(g, 'exit_time', '10:00')
     g.div_method = getattr(g, 'div_method', 'rolling365')
+    # ---- B-1：Sleeve B 的 8 个 between 阈值 ----
+    # JQ 把这 8 个数标为「拍的、有过拟合风险」，但任何地方都没给细节，也从未修过。
+    # 参数化只为做敏感性 —— 不是修 bug，默认值严格等于原版：
+    #   pe_ratio                        between 5   and 50
+    #   inc_return（扣非ROE, %）          between 5   and 100
+    #   inc_total_revenue_year_on_year  between 5   and 100
+    #   inc_net_profit_year_on_year     between 10  and 100
+    # ★ 本地 std 层比率存【小数】，所以 inc_* 三项阈值要 ÷100
+    #   （曾照抄 5/100 选出 0 只票才发现）。pe 不用除。
+    g.pe_lo = getattr(g, 'pe_lo', 5.0)
+    g.pe_hi = getattr(g, 'pe_hi', 50.0)
+    g.roe_lo = getattr(g, 'roe_lo', 0.05)
+    g.roe_hi = getattr(g, 'roe_hi', 1.00)
+    g.rev_lo = getattr(g, 'rev_lo', 0.05)
+    g.rev_hi = getattr(g, 'rev_hi', 1.00)
+    g.np_lo = getattr(g, 'np_lo', 0.10)
+    g.np_hi = getattr(g, 'np_hi', 1.00)
+    # ---- B-1 的三种口径（g.b1_mode）----
+    # JQ「修复与优化记录.md §216」把这 8 个阈值标为 🔴 最大过拟合源，并给了修法：
+    #   · 删所有上界：三个 100 完全相同（复制粘贴痕迹），扣非ROE>100% 近乎不存在
+    #     -> 基本不 binding，纯粹是「剔除样本内异常值」的过拟合手法
+    #   · 统一下界：5/5/10 无理论依据，是逐个手调的痕迹，统一成「只要正增长」
+    #   · 8 个参数 -> 1~2 个
+    # ★ 验收判据是文档指定的：**极差不变（<=3.5pp）+ 参数变少 = 通过**，
+    #   不看收益。文档明言「年化大概率低于当前，这是预期内的也是正确的 ——
+    #   现在的数字里包含多余参数在样本内的拟合收益」。
+    #   'orig'    8 参数，严格等于 JQ 原版（默认）
+    #   'no_hi'   删掉三个上界（100/100/100），保留下界 5/5/10 —— 6 -> 5 个参数
+    #   'simple'  删上界 + 下界统一为「正增长」-> 只剩 pe 两个界，8 -> 2 个参数
+    g.b1_mode = getattr(g, 'b1_mode', 'orig')
+    # ---- A-4：buy_list 为空时的现金闲置（g.idle_fix）----
+    # JQ「修复与优化记录.md §212」列为待做项，但 JQ 自己【从未修】：
+    #   trade 里 buy_list 为空而 sell_list 非空时，卖出的钱闲置到下月。
+    #   与已修的「炸板卖出后现金闲置」同类（那个在 再入场.txt 里修了）。
+    # 0 = 原版行为（默认，保真）；1 = 把闲置现金按等权补进已持有的目标票。
+    # ★ 只有在「本月无新票可买、但卖掉了非目标票」时才有差别 —— 频率不高，
+    #   所以预期效应很小；做成参数是为了能【测出来】而不是猜。
+    g.idle_fix = getattr(g, 'idle_fix', 0)
+    # B-1 口径：把上界/下界按 b1_mode 覆写（默认 orig 时保持原值不动）
+    _BIG = 1e9
+    if g.b1_mode == 'no_hi':
+        g.roe_hi = g.rev_hi = g.np_hi = _BIG
+    elif g.b1_mode == 'simple':
+        g.roe_hi = g.rev_hi = g.np_hi = _BIG
+        g.roe_lo = g.rev_lo = g.np_lo = 0.0   # 只要正增长
     g.yoy_mode = getattr(g, 'yoy_mode', 'single_q')  # single_q(=JQ原版) / single_q_parent / cumulative  # A-1/A-6: rolling365 / fiscal_year
     g.equal_weight = getattr(g, 'equal_weight', 0)  # 0=原版只分配新钱 / 1=等权再平衡
 
@@ -212,7 +257,9 @@ def pick(context):
     ind_cte = IND_BY_MODE[g.yoy_mode]
     sql = SQL.replace("{div}", div_cte).replace("{ind}", ind_cte)
     df = context.data.query(sql, t1=d, uni=UNIVERSE, dmin=g.div_min,
-                            dtop=g.div_top_pct)
+                            dtop=g.div_top_pct,
+              pe_lo=g.pe_lo, pe_hi=g.pe_hi, roe_lo=g.roe_lo, roe_hi=g.roe_hi,
+              rev_lo=g.rev_lo, rev_hi=g.rev_hi, np_lo=g.np_lo, np_hi=g.np_hi)
     ranked = df['jq_code'].tolist()
     g.target_list = ranked[:g.target_num]
     g.backup_list = ranked[g.target_num:g.target_num + g.backup_num]
@@ -256,6 +303,13 @@ def trade(context):
     #    趋势性单调递增，正是同一个根因的指纹。
     buy = [s for s in g.target_list if s not in held]
     if not buy:
+        # A-4：原版在此直接 return，卖出所得闲置到下月。
+        if g.idle_fix and g.target_list:
+            held_tgt = [s for s in g.target_list if s in context.portfolio.positions]
+            if held_tgt and context.portfolio.cash > 0:
+                add = context.portfolio.cash / len(held_tgt)
+                for s in held_tgt:
+                    order_target_value(s, context.portfolio.positions[s].value + add)
         return
     per = context.portfolio.cash / len(buy)
     for s in buy:
