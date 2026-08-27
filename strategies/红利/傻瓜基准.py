@@ -97,6 +97,12 @@ def initialize(context):
     g.limit_up_exit = getattr(g, 'limit_up_exit', 0)  # 0/1 —— Run E / Run F
     g.reentry = getattr(g, 'reentry', 0)  # 需 limit_up_exit=1 才有意义
     g.monthday = getattr(g, 'monthday', 1)  # 月内第几个交易日调仓
+    # 仓位口径。★ 本策略【原版就是真等权再平衡】（JQ 文件里 per = total_value/N
+    #   且会把超配仓位削回 per），这是它与其余三个策略的关键差异之一。
+    #   加这个开关只为把「选股」与「仓位口径」两个变量分开做归因 ——
+    #   否则「傻瓜基准跑赢」同时占了「30 只分散」和「真等权」两个优势，
+    #   无法判断赢在哪一个。默认 1 = 保持原版。
+    g.equal_weight = getattr(g, 'equal_weight', 1)
     g.div_method = getattr(g, 'div_method', 'rolling365')  # A-1/A-6: rolling365 / fiscal_year
 
     g.target_list = getattr(g, 'target_list', [])
@@ -141,6 +147,22 @@ def trade(context):
         log.warn('目标池为空，跳过调仓')
         return
     tgt = set(g.target_list)
+    held = set(context.portfolio.positions)
+
+    if not g.equal_weight:
+        # 对照口径（= 另三个策略/JQ 原版的写法）：只把腾出的现金分给新买入的票，
+        # 已持有仓位一律不动 -> 反复入选的票权重滚雪球，且权重永久携带历史路径。
+        for s in list(context.portfolio.positions):
+            if s not in tgt:
+                order_target_value(s, 0)
+        buy = [s for s in g.target_list if s not in held]
+        if not buy:
+            return
+        per = context.portfolio.cash / len(buy)
+        for s in buy:
+            order_target_value(s, per)
+        return
+
     # 目标市值按【调仓前】总权益算一次，避免边交易边漂移。
     # 与原版一致用 total_value / N（不留缓冲）—— 因此会有少量「现金不足」拒单，
     # 那是等权再平衡的固有约束，如实留痕而不是靠调参数掩盖。

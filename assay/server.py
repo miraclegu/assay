@@ -195,6 +195,8 @@ def api_runs(_q):
             'elapsed_sec': meta.get('elapsed_sec'),
             'trading_days': meta.get('trading_days'),
             'data_fp': ((meta.get('data_fingerprint') or {}).get('overall') or '')[:8],
+            'stale': _staleness(meta)[0],
+            'stale_parts': ','.join(_staleness(meta)[1]),
             'params': meta.get('params') or {},
             'annual_return': st.get('annual_return'),
             'max_drawdown': st.get('max_drawdown'),
@@ -568,6 +570,61 @@ def api_job(q):
 
 
 
+# ---------------- 数据版本：归档是否仍与当前数据一致 ----------------
+# ★ 面板/std 重建后，旧归档的数字就是【旧数据】算出来的，但报告看着完全正常。
+#   实测过一次代价：面板修复年报缺失后，175 条归档的收益全部失效，
+#   而我在之后几轮里还在拿它们跨表对照 —— 必须让失效在看板上可见。
+#   **只标记不删除**：归档是自包含的历史记录，删了就没法复盘。
+_cur_fp = None
+
+
+def _current_fp():
+    global _cur_fp
+    if _cur_fp is None:
+        try:
+            from .feed import PanelFeed
+            _cur_fp = PanelFeed('2024-01-01', '2024-01-31').fingerprint()
+        except Exception:                                   # noqa: BLE001
+            _cur_fp = {'overall': None, 'parts': {}}
+    return _cur_fp
+
+
+def _staleness(meta):
+    """返回 (是否失效, 变了哪些部件)。逐部件比对 —— 只说「变了」没用，
+    要能指出是 panel 还是 std 变的，才知道影响哪些字段。"""
+    cur = _current_fp()
+    if not cur.get('overall'):
+        return False, []
+    fp = meta.get('data_fingerprint') or {}
+    if not fp.get('overall'):
+        return True, ['(归档时无指纹)']
+    if fp['overall'] == cur['overall']:
+        return False, []
+    changed = []
+    for name, c in (cur.get('parts') or {}).items():
+        old = (fp.get('parts') or {}).get(name) or {}
+        if old.get('hash') != c.get('hash'):
+            changed.append(name)
+    return True, changed or ['(部件未记录)']
+
+
+def api_datafp(_q):
+    cur = _current_fp()
+    n_stale = n_ok = 0
+    for rid, d in _scan().items():
+        try:
+            meta = json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
+        except Exception:                                   # noqa: BLE001
+            continue
+        st, _ = _staleness(meta)
+        if st:
+            n_stale += 1
+        else:
+            n_ok += 1
+    return {'current': cur.get('overall'), 'parts': cur.get('parts'),
+            'n_stale': n_stale, 'n_current': n_ok}
+
+
 ROUTES = {
     '/api/runs': api_runs,
     '/api/run': api_run,
@@ -578,6 +635,7 @@ ROUTES = {
     '/api/code': lambda q: api_text(q, 'strategy.py'),
     '/api/log': lambda q: api_text(q, 'run.log'),
     '/api/version': api_version,
+    '/api/datafp': api_datafp,
     '/api/job': api_job,
 }
 

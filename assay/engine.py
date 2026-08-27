@@ -33,6 +33,15 @@ def _phase(t):
 class Engine:
     def __init__(self, strategy, feed, cash=1e6, cost=None, params=None):
         self.params = dict(params or {})
+        # ★ 空仓统计：数据缺失会让选股 SQL 返回空集 -> 策略长期空仓，
+        #   而回测照常出报告、年化看着完全合理。实测过一次：beta_daily
+        #   起点错设成 2013，红利低波在 2005-2012 连续 8 年空仓（占 38% 时间），
+        #   只有逐年拆表才发现。这类失败必须响亮。
+        self.empty_days = 0          # 无任何持仓的交易日数
+        self.max_empty_run = 0       # 最长连续空仓交易日
+        self._empty_run = 0
+        self.empty_span = None       # 最长那段的起止 (start, end)
+        self._empty_start = None
         self.strategy = strategy
         self.feed = feed
         self.cost = cost or Cost()
@@ -150,6 +159,17 @@ class Engine:
                 if self._bench_px is not None and d in self._bench_px:
                     self.bench.append((d, self._bench_px[d]))
                 mv = self.pf.positions_value
+                if not self.pf.positions:
+                    self.empty_days += 1
+                    self._empty_run += 1
+                    if self._empty_start is None:
+                        self._empty_start = d
+                    if self._empty_run > self.max_empty_run:
+                        self.max_empty_run = self._empty_run
+                        self.empty_span = (self._empty_start, d)
+                else:
+                    self._empty_run = 0
+                    self._empty_start = None
                 self.daily.append({
                     'date': d, 'cash': self.pf.cash, 'positions_value': mv,
                     'total_value': tv, 'n_positions': len(self.pf.positions),

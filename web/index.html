@@ -55,6 +55,11 @@ a{color:var(--accent);text-decoration:none}
 .cd0{font-family:"SF Mono",Menlo,monospace;font-size:11.5px}
 .pill{font-size:10px;padding:1px 6px;border-radius:3px;background:#243040;color:var(--dim);
   margin-right:4px;white-space:nowrap}
+.stale{color:var(--warn);font-size:10px;border:1px solid #5a4520;border-radius:3px;
+  padding:0 4px;margin-left:5px;white-space:nowrap}
+#fpbar{background:#2a2113;border:1px solid #5a4520;border-radius:7px;
+  padding:9px 13px;margin:12px 0 0;font-size:12px;color:#e0c98c;line-height:1.7}
+#fpbar b{color:var(--warn)}
 /* ---- 版本页 ---- */
 .vnote{color:var(--warn);font-size:11.5px}
 .vopen{color:var(--accent);font-size:11px;border:1px solid var(--line);
@@ -190,7 +195,24 @@ $('#back').onclick=()=>{location.hash='';};
 
 /* ============ 目录页 ============ */
 const OPEN=new Set();          // 展开状态：'g:小市值' / 's:小市值/v0b'
-async function loadRuns(){ RUNS=await j('/api/runs'); route(); }
+let DFP=null;
+async function loadRuns(){
+  RUNS=await j('/api/runs');
+  try{ DFP=await j('/api/datafp'); }catch(e){ DFP=null; }
+  route();
+}
+// 数据版本横幅：归档是自包含的历史，但它的【数字】依赖当时的数据。
+// 面板/std 重建后旧归档就不可比了，而报告本身看着完全正常 —— 必须显式提示。
+function fpBar(){
+  if(!DFP || !DFP.n_stale) return '';
+  const tot=DFP.n_stale+DFP.n_current;
+  return `<div id="fpbar">⚠ <b>${DFP.n_stale}/${tot}</b> 条归档的数据版本与当前不一致
+    —— 它们的收益/回撤是<b>旧数据</b>算出来的，<b>不可与新回测直接对照</b>。
+    <br>当前数据指纹 <span class="mono">${esc((DFP.current||'').slice(0,12))}</span>
+    ${Object.entries(DFP.parts||{}).map(([k,v])=>
+      `· ${k} <span class="mono">${esc((v.hash||'').slice(0,8))}</span>`).join(' ')}
+    <br><span class="cmt">归档只标记不删除 —— 删了就没法复盘。要重新对照请按当前数据重跑。</span></div>`;
+}
 
 function showCatalog(){
   stopPoll();
@@ -222,7 +244,7 @@ function runTable(rs){
   return `<div class="runs"><table><thead><tr>${RUNCOLS.map(([,t,l])=>
       `<th class="${l?'l':''}">${t}</th>`).join('')}</tr></thead><tbody>
     ${rs.map(r=>`<tr data-id="${r.run_id}">
-      <td class="l mono">${r.run_id}</td>
+      <td class="l mono">${r.run_id}${r.stale?`<span class="stale" title="归档时的数据与当前不一致，变化部件：${esc(r.stale_parts)}">数据已变</span>`:''}</td>
       <td class="l">${r.start} ~ ${r.end}</td>
       <td>${(+r.cash).toLocaleString()}</td>
       <td class="l">${Object.entries(r.params||{}).map(([k,v])=>
@@ -330,7 +352,7 @@ function renderCatalog(){
   if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
     (RUNS.length?'没有匹配的回测':'还没有归档 —— 先跑一次 <code>python3 run.py ...</code>')+'</div>';return;}
   const auto=!!q;            // 过滤时自动展开，否则默认全收起
-  $('#cat').innerHTML='<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
+  $('#cat').innerHTML=fpBar()+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
     `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
       所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
       回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;

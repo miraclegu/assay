@@ -37,7 +37,7 @@ def _mdd(vals):
     return mdd, hi, lo
 
 
-def summarize(curve, starting_cash, bench=None, broker=None, bench_base=None):
+def summarize(curve, starting_cash, bench=None, broker=None, bench_base=None, engine=None):
     if not curve:
         return {}
     dates = [d for d, _ in curve]
@@ -125,6 +125,15 @@ def summarize(curve, starting_cash, bench=None, broker=None, bench_base=None):
             m['avg_loss'] = sum(loss) / len(loss) if loss else 0.0
             m['profit_factor'] = abs(m['avg_win'] / m['avg_loss']) if m['avg_loss'] else None
             m['avg_holding_days'] = sum(t['holding_days'] for t in broker.trades) / len(rts)
+
+    # ★ 空仓统计：数据缺失（如某张表区间不够）会让选股 SQL 返空 -> 长期空仓，
+    #   而回测照常出报告。实测过一次 8 年空仓仍给出「年化 10.85%」。
+    if engine is not None:
+        m['empty_days'] = engine.empty_days
+        m['max_empty_run'] = engine.max_empty_run
+        m['empty_pct'] = (100.0 * engine.empty_days / len(engine.curve)
+                          if engine.curve else 0.0)
+        m['empty_span'] = engine.empty_span
     return m
 
 
@@ -165,9 +174,9 @@ def _num(v, w=13, p=2):
 
 
 def report(curve, starting_cash, broker=None, bench=None, bench_code=None,
-           holdings=None, monthly=False, bench_base=None):
+           holdings=None, monthly=False, bench_base=None, engine=None):
     m = summarize(curve, starting_cash, bench=bench, broker=broker,
-                  bench_base=bench_base)
+                  bench_base=bench_base, engine=engine)
     m.update(concentration(holdings or []))
     print('=' * 66)
     print('  期末权益   %14s' % format(int(m['end_value']), ','))
@@ -215,6 +224,20 @@ def report(curve, starting_cash, broker=None, bench=None, bench_code=None,
             print('  拒单 %d 笔:' % len(broker.rejects))
             for k, v in c.most_common():
                 print('      %-28s %6d' % (k, v))
+    # ★ 长期空仓 = 响亮告警。数据缺失（某张表区间不够、字段全 NULL）会让选股
+    #   SQL 返空集，策略连续空仓，而年化/夏普照常输出、看着完全合理。
+    #   实测过一次：beta_daily 起点错设成 2013，红利低波 2005-2012 连续 8 年
+    #   空仓（占 38% 时间），报告给出「年化 10.85%」，只有逐年拆表才发现。
+    if m.get('empty_days'):
+        span = m.get('empty_span')
+        print('  %s 空仓 %d 交易日（占 %.1f%%）  最长连续 %d 日%s'
+              % ('⚠⚠' if m['empty_pct'] >= 10 else '⚠',
+                 m['empty_days'], m['empty_pct'], m['max_empty_run'],
+                 ('  %s ~ %s' % (span[0], span[1])) if span else ''))
+        if m['empty_pct'] >= 10:
+            print('     ↑ 空仓占比过高，收益/回撤/夏普均被稀释，**结论不可用**。')
+            print('       先查选股 SQL 依赖的表区间是否覆盖回测起点'
+                  '（如 std/beta_daily.parquet 从 2005 起）。')
     if m.get('max_weight_avg') is not None:
         print('  集中度     最大权重均值 %.1f%% / 峰值 %.1f%% / HHI %.3f'
               % (m['max_weight_avg'] * 100, m['max_weight_peak'] * 100, m['hhi_avg']))

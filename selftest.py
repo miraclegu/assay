@@ -30,11 +30,12 @@ def case(name):
     return deco
 
 
-def _run(path, start, end, cash, **cost):
+def _run(path, start, end, cash, params=None, **cost):
     feed = PanelFeed(start, end)
-    eng = Engine(load(path), feed, cash=cash, cost=Cost(**cost))
+    eng = Engine(load(path), feed, cash=cash, cost=Cost(**cost), params=params)
     curve = eng.run()
-    return summarize(curve, cash), eng
+    # ★ 必须传 engine：空仓指标挂在 engine 上，不传就拿不到（而缺失是静默的）
+    return summarize(curve, cash, broker=eng.broker, engine=eng), eng
 
 
 @case('PIT 防火墙拦住未来函数')
@@ -828,6 +829,98 @@ def t_semantic_version():
             '归档 %d 条中 %d 条 meta 已含语义哈希，其余现算；'
             '字节版本 %d -> 语义版本 %d'
             % (len(same), len(diff), len(rows), metas, nb, ns))
+
+
+@case('长期空仓必须响亮告警')
+def t_empty_guard():
+    """数据缺失会让选股 SQL 返空集 -> 策略长期空仓，而年化/夏普照常输出。
+
+    ★ 真实事故：beta_daily 的 START 错设成 '2013-01-01'（当时只为对标 JQ 的
+      2016 起回测往前留 3 年缓冲）。红利低波把该表做【内连接】，2005-2012
+      匹配不到行 -> 候选池清空 -> 连续 8 年空仓（占 38% 时间），
+      报告给出「年化 10.85%」看着完全合理，只有逐年拆表才发现。
+      修正 START 后同区间是 20.31%（差 9.46pp）。
+
+    ★ 两侧都测：正常区间【不该】告警，全空仓【必须】告警且标注结论不可用。
+      只测「空仓会告警」会漏 —— 一个永远告警的实现也能通过。
+    """
+    # ① 正常：不该有空仓
+    m, eng = _run('strategies/红利/红利低波.py', '2016-01-01', '2020-12-31', 1e6, **JQ)
+    assert eng.empty_days == 0, '正常区间却有 %d 个空仓日' % eng.empty_days
+    assert not m.get('empty_days'), '正常区间不该产出空仓指标'
+
+    # ② 造必然空仓：股息率门槛 99%，没有票满足
+    m2, eng2 = _run('strategies/红利/红利低波.py', '2016-01-01', '2018-12-31', 1e6,
+                    params=dict(div_min=0.99), **JQ)
+    n = len(eng2.curve)
+    assert eng2.empty_days == n, '应全程空仓，实际 %d/%d' % (eng2.empty_days, n)
+    assert m2['empty_pct'] >= 99.9, 'empty_pct 应约 100%%，实际 %.1f%%' % m2['empty_pct']
+    assert m2['max_empty_run'] == n, '最长连续空仓应等于全期'
+    assert m2['empty_span'] is not None, '缺少空仓起止区间'
+
+    # ③ beta_daily 必须覆盖到 2005 —— 这是事故的直接成因
+    import duckdb, os
+    feed = PanelFeed('2024-01-01', '2024-01-31')
+    bp = os.path.join(feed.root, 'std', 'beta_daily.parquet')
+    d0 = duckdb.sql("SELECT min(date) FROM read_parquet('%s')" % bp).fetchone()[0]
+    assert str(d0)[:4] <= '2005', \
+        'beta_daily 起点 %s 晚于 2005 —— 红利低波会在早期年份静默空仓' % d0
+
+    return ('正常区间 0 空仓日；全空仓场景 %d/%d 日(%.0f%%) 被捕获并标注不可用；'
+            'beta_daily 起点 %s' % (eng2.empty_days, n, m2['empty_pct'], d0))
+
+
+@case('归档的数据版本失效必须可见')
+def t_data_staleness():
+    """归档是自包含的历史，但它的【数字】依赖当时的数据。
+    面板/std 重建后旧归档就不可比了，而报告本身看着完全正常。
+
+    ★ 真实代价：面板修复年报缺失后 175 条归档全部失效，
+      而我在之后几轮里仍拿它们跨表对照，得出过错误结论
+      （「红利低波最差」「傻瓜基准跑赢」都源于此类混用）。
+
+    ★ 只标记不删除 —— 删了就没法复盘。本用例同时断言「不删」：
+      归档目录数在检查前后不变。
+    """
+    import json as _json
+    from assay import server as sv
+    from assay.feed import PanelFeed
+
+    idx = sv._scan()
+    n_before = len(idx)
+    cur = PanelFeed('2024-01-01', '2024-01-31').fingerprint()
+    assert cur.get('overall'), '当前数据指纹取不到'
+
+    # 逐部件比对必须能指出【哪一部分】变了，只说「变了」没有价值
+    rows = sv.api_runs({})
+    assert rows, '没有归档可检查'
+    for r in rows:
+        assert 'stale' in r and 'stale_parts' in r, 'api_runs 缺失效字段'
+    stale = [r for r in rows if r['stale']]
+    if stale:
+        assert any(r['stale_parts'] for r in stale), '标了失效却说不出变化部件'
+
+    # 构造一个「指纹与当前一致」的 meta -> 必须判定为未失效
+    ok, parts = sv._staleness({'data_fingerprint': cur})
+    assert ok is False and parts == [], '指纹一致却被判失效'
+    # 构造一个明显不同的 -> 必须判失效且列出部件
+    bad = {'overall': 'deadbeefdead',
+           'parts': {k: dict(v, hash='0' * 12) for k, v in cur['parts'].items()}}
+    ok2, parts2 = sv._staleness({'data_fingerprint': bad})
+    assert ok2 is True and parts2, '指纹不同却未判失效'
+    assert set(parts2) == set(cur['parts']), '应列出全部变化部件，实际 %s' % parts2
+    # 归档时无指纹（早期归档）也必须判失效
+    ok3, parts3 = sv._staleness({})
+    assert ok3 is True, '无指纹的归档应判失效'
+
+    # ★ 只标记不删除
+    assert len(sv._scan()) == n_before, '归档数变了 —— 失效检查不该删除任何东西'
+
+    d = sv.api_datafp({})
+    return ('当前指纹 %s；%d/%d 条归档失效且均能指出变化部件；'
+            '指纹一致/不一致/无指纹三种判定正确；归档数 %d 未变'
+            % ((d['current'] or '')[:12], d['n_stale'],
+               d['n_stale'] + d['n_current'], n_before))
 
 
 @case('股票名称按【当时】解析且源正确')

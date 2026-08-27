@@ -155,7 +155,7 @@ def main():
             eng._bench_cli = True
         curve = eng.run(verbose=a.verbose)
         print()
-        stats = report(curve, a.cash, eng.broker, bench=eng.bench,
+        stats = report(curve, a.cash, eng.broker, engine=eng, bench=eng.bench,
                        bench_code=eng.bench_code, holdings=eng.holdings,
                        monthly=a.monthly, bench_base=eng.bench_base)
         elapsed = time.time() - t0
