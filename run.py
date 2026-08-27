@@ -8,6 +8,7 @@
 import argparse
 import importlib.util
 import io
+import datetime
 import os
 import sys
 import time
@@ -117,6 +118,9 @@ def main():
                     help='单笔委托占当日成交额上限，默认 0.25；0 = 不限制')
     ap.add_argument('--open-tax', type=float, default=None,
                     help='买入印花税，默认 0（A 股买入不征）')
+    ap.add_argument('--warmup-months', type=int, default=0, metavar='N',
+                    help='统计前跳过前 N 个自然月：策略照常从 --start 运行并建仓，只是收益/回撤/夏普/胜率等从第 N+1 个月首个交易日起算。'
+                         ' 用途：不同 monthday 的首次建仓时点不同，会污染整段对比。')
     ap.add_argument('--jq-cost', action='store_true',
                     help='一键套用聚宽原版设定（滑点 0、佣金万 3、印花税千一固定），对标用')
     ap.add_argument('--datalake', default=None)
@@ -155,9 +159,47 @@ def main():
             eng._bench_cli = True
         curve = eng.run(verbose=a.verbose)
         print()
-        stats = report(curve, a.cash, eng.broker, engine=eng, bench=eng.bench,
-                       bench_code=eng.bench_code, holdings=eng.holdings,
-                       monthly=a.monthly, bench_base=eng.bench_base)
+        # ★★ 预热期：不同 monthday 的【首次建仓时点】不同，会污染整段对比。
+        #    实测：组合版 md=-1 在 2016-01 平均仓位仅 5.0%（首次调仓在 1-29），
+        #    整月空仓躲过两次熔断，凭此在 2016 年领先 md=1 达 +26.20pp；
+        #    而剔掉 2016 后 md=-1 在 2017-2025 年化【低 2.97pp】、四项指标全差。
+        #    那 +26pp 衡量的是「1 月该不该在场」，与调仓日选择无关 —— 是回测
+        #    起点的人为产物。本选项把这段不可比的头部从统计里剪掉：
+        #    策略照常运行建仓，只是指标从预热期结束后起算。
+        base_cash, curve_st, bench_st, trades_bak = a.cash, curve, eng.bench, None
+        if a.warmup_months > 0 and curve:
+            y, m = curve[0][0].year, curve[0][0].month + a.warmup_months
+            y, m = y + (m - 1) // 12, (m - 1) % 12 + 1
+            cut = datetime.date(y, m, 1)
+            keep = [x for x in curve if x[0] >= cut]
+            if len(keep) < 2:
+                print('⚠ 预热 %d 个月后剩余交易日不足，忽略 --warmup-months'
+                      % a.warmup_months)
+            else:
+                curve_st = keep
+                base_cash = keep[0][1]          # 预热末的权益作为新起点
+                bench_st = [x for x in (eng.bench or []) if x[0] >= cut] or None
+                # 成交也要一起裁，否则胜率/换手仍含预热期
+                trades_bak = eng.broker.trades
+                eng.broker.trades = [t for t in trades_bak
+                                     if t.get('exit_date', cut) >= cut]
+                print('预热 %d 个月：统计自 %s 起算（权益 %s），'
+                      '预热期内 %d 笔平仓不计入'
+                      % (a.warmup_months, keep[0][0], format(int(base_cash), ','),
+                         len(trades_bak) - len(eng.broker.trades)))
+                print()
+        hold_st = ([h for h in eng.holdings if h['date'] >= curve_st[0][0]]
+                   if a.warmup_months > 0 else eng.holdings)
+        stats = report(curve_st, base_cash, eng.broker, engine=eng, bench=bench_st,
+                       bench_code=eng.bench_code, holdings=hold_st,
+                       monthly=a.monthly,
+                       bench_base=(bench_st[0][1]
+                                   if (bench_st and a.warmup_months > 0)
+                                   else eng.bench_base))
+        if trades_bak is not None:
+            eng.broker.trades = trades_bak   # 归档仍存完整成交，不改动历史
+        stats['warmup_months'] = a.warmup_months
+        stats['stats_from'] = str(curve_st[0][0])
         elapsed = time.time() - t0
         if not a.no_archive:
             d, rid = registry.save(a.strategy, group, eng, stats, a, tee.buf.getvalue(), elapsed)
