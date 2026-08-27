@@ -1,0 +1,815 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>assay 回测归档</title>
+<style>
+:root{
+  --bg:#0f1216; --panel:#171b21; --panel2:#1d2229; --line:#2a313a;
+  --fg:#dfe5ec; --dim:#8b97a6; --up:#f05b5b; --down:#2fb87a;
+  --accent:#5b9cf0; --warn:#e0a33c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+a{color:var(--accent);text-decoration:none}
+#app{max-width:1500px;margin:0 auto;padding:0 22px 60px}
+/* ---- 顶栏 ---- */
+#top{position:sticky;top:0;background:var(--bg);z-index:9;padding:13px 0 10px;
+  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px}
+#top h1{margin:0;font-size:15px;letter-spacing:.5px;color:var(--dim);font-weight:600;
+  cursor:pointer;white-space:nowrap}
+#top h1 b{color:var(--fg)}
+#top .sp{flex:1}
+#filter{padding:5px 10px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:5px;color:var(--fg);font-size:12px;width:270px}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:5px;padding:4px 12px;font-size:12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--accent)}
+/* ---- 目录树：任意深度，样式按 depth 生成而不是每层写一套 ---- */
+#cat{padding-top:14px}
+.tree{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  margin-bottom:9px;overflow:hidden}
+.nd{display:flex;align-items:center;gap:9px;cursor:pointer;user-select:none;
+  padding:8px 14px;border-bottom:1px solid #20262e}
+.nd:hover{background:var(--panel2)}
+.nd .ar{color:var(--dim);width:11px;font-size:10px;flex:0 0 11px;
+  transition:transform .12s}
+.nd.op .ar{transform:rotate(90deg)}
+.nd .ic{flex:0 0 auto;font-size:12px;color:var(--dim)}
+.nd .nm{font-weight:600}
+.nd .sub{color:var(--dim);font-size:11.5px}
+.nd .sp{flex:1}
+.nd.d0 .nm{font-size:14px}
+.nd.d0{background:var(--panel)}
+.nd.leaf{cursor:default}
+.body{display:none}
+.body.op{display:block}
+.sha{font-family:"SF Mono",Menlo,monospace;font-size:11px;color:var(--accent)}
+.runs{background:var(--bg);padding:0 0 4px}
+.runs table{font-size:12px}
+.runs th{position:static;background:var(--bg);padding:6px 9px;box-shadow:none}
+.runs tbody tr{cursor:pointer}
+.runs tbody tr:hover{background:var(--panel2)}
+.runs td{border-bottom:1px solid #20262e}
+.mono{font-family:"SF Mono",Menlo,monospace;font-size:11px}
+.cd{color:var(--dim);font-size:10.5px;font-family:"SF Mono",Menlo,monospace;margin-left:5px}
+.cd0{font-family:"SF Mono",Menlo,monospace;font-size:11.5px}
+.pill{font-size:10px;padding:1px 6px;border-radius:3px;background:#243040;color:var(--dim);
+  margin-right:4px;white-space:nowrap}
+/* ---- 版本页 ---- */
+.vnote{color:var(--warn);font-size:11.5px}
+.vopen{color:var(--accent);font-size:11px;border:1px solid var(--line);
+  border-radius:4px;padding:1px 7px;cursor:pointer}
+.vopen:hover{border-color:var(--accent);background:var(--panel2)}
+#vp .sec{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:14px 16px;margin-bottom:12px}
+#vp h3{margin:0 0 10px;font-size:13px;color:var(--dim);font-weight:600}
+#vp pre{margin:0;max-height:460px;overflow:auto;background:#12161b;
+  border:1px solid var(--line);border-radius:6px;padding:12px 14px;
+  font:11.5px/1.65 "SF Mono",Menlo,monospace;color:#cbd4de;white-space:pre}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.pf label{display:block;color:var(--dim);font-size:11px;margin-bottom:3px}
+.pf input{width:100%;padding:5px 8px;background:var(--panel2);color:var(--fg);
+  border:1px solid var(--line);border-radius:5px;font-size:12px}
+.pf input:focus{outline:none;border-color:var(--accent)}
+.pf .cmt{color:#6f7c8c;font-size:10.5px;margin-top:3px;min-height:13px}
+.pf .dv{color:var(--accent);font-family:"SF Mono",Menlo,monospace}
+#joblog{margin:0;max-height:300px;overflow:auto;background:#12161b;
+  border:1px solid var(--line);border-radius:6px;padding:10px 12px;
+  font:11px/1.6 "SF Mono",Menlo,monospace;color:#a8b4c2;white-space:pre-wrap}
+.bad{color:var(--warn)}
+/* ---- 详情 ---- */
+#hd{position:sticky;top:47px;background:var(--bg);padding:12px 0 10px;z-index:5;
+  border-bottom:1px solid var(--line)}
+#hd .row1{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+#hd h2{margin:0;font-size:17px}
+#hd .meta{color:var(--dim);font-size:12px}
+#tabs{display:flex;gap:2px;margin-top:11px;flex-wrap:wrap}
+#tabs div{padding:6px 13px;cursor:pointer;color:var(--dim);border-radius:5px 5px 0 0;
+  font-size:12px}
+#tabs div:hover{color:var(--fg)}
+#tabs div.on{background:var(--panel);color:var(--fg);box-shadow:inset 0 -2px 0 var(--accent)}
+.pane{display:none;padding-top:16px}
+.pane.on{display:block}
+/* ---- 统计卡 ---- */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:9px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+.card .k{color:var(--dim);font-size:11px}
+.card .v{font-size:19px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums}
+.card .n{color:var(--dim);font-size:10px;margin-top:1px}
+.pos{color:var(--up)} .neg{color:var(--down)}
+h3.sec{margin:22px 0 9px;font-size:13px;color:var(--dim);font-weight:600;
+  border-bottom:1px solid var(--line);padding-bottom:5px}
+/* ---- 图 ---- */
+.chart{background:var(--panel);border:1px solid var(--line);border-radius:7px;
+  padding:10px 6px 4px;margin-top:10px;position:relative}
+.chart .ttl{position:absolute;left:12px;top:8px;font-size:11px;color:var(--dim);z-index:2}
+.chart .ctl{position:absolute;right:10px;top:6px;font-size:11px;color:var(--dim);z-index:2}
+.chart .ctl span{cursor:pointer;padding:2px 7px;border-radius:4px}
+.chart .ctl span.on{background:var(--panel2);color:var(--fg)}
+svg{display:block;width:100%;overflow:visible}
+.gl{stroke:var(--line);stroke-width:1}
+.ax{fill:var(--dim);font-size:10px}
+#tip{position:fixed;pointer-events:none;background:#0b0e12ee;border:1px solid var(--line);
+  border-radius:5px;padding:6px 9px;font-size:11.5px;display:none;z-index:99;white-space:pre}
+/* ---- 表 ---- */
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:5px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+/* .tw 自己是滚动容器 -> th 贴【容器】顶部，top 必须是 0。
+   原先写 top:52px（那是给整页滚动准备的偏移），把表头往下推了 52px；
+   背景也要用 --panel2 与 .tw 的 --panel 区分，否则滚动时行会透上来。 */
+th{color:var(--dim);font-weight:600;font-size:11px;text-align:right;
+  position:sticky;top:0;z-index:2;background:var(--panel2);
+  cursor:pointer;user-select:none;box-shadow:inset 0 -1px 0 var(--line)}
+th:first-child,td:first-child,th.l,td.l{text-align:left}
+tbody tr:hover{background:var(--panel)}
+.tw{max-height:calc(100vh - 230px);overflow:auto;border:1px solid var(--line);
+  border-radius:7px;background:var(--panel)}
+/* 日期分隔块：粘在表头下方，滚动时始终知道当前看的是哪一天 */
+tr.dayhd td{position:sticky;top:var(--thh,26px);z-index:1;background:#202832;color:var(--fg);
+  font-weight:600;border-top:1px solid var(--line);text-align:left;font-size:12px}
+tr.dayhd td span{color:var(--dim);font-weight:400;margin-left:12px;font-size:11px}
+.pg{display:flex;align-items:center;gap:8px;margin:9px 0;font-size:12px;color:var(--dim)}
+.pg button{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer}
+.pg button:disabled{opacity:.35;cursor:default}
+.pg input{width:52px;background:var(--panel2);border:1px solid var(--line);
+  color:var(--fg);border-radius:5px;padding:3px 6px;font-size:12px;text-align:center}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:13px;
+  overflow:auto;max-height:calc(100vh - 200px);font:12px/1.65 "SF Mono",Menlo,monospace;
+  color:#c8d3e0}
+.kv{display:grid;grid-template-columns:170px 1fr;gap:3px 14px;font-size:12px}
+.kv .k{color:var(--dim)}
+.kv .v{font-family:"SF Mono",Menlo,monospace;word-break:break-all}
+.note{color:var(--dim);font-size:11.5px;margin:7px 0}
+.warn{color:var(--warn)}
+#empty{padding:60px 0;text-align:center;color:var(--dim)}
+select,input[type=date]{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  border-radius:5px;padding:4px 7px;font-size:12px}
+</style>
+
+<div id="app">
+  <div id="top">
+    <h1 id="home"><b>assay</b> 回测归档</h1>
+    <button class="btn" id="back" style="display:none">‹ 返回目录</button>
+    <div class="sp"></div>
+    <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
+    <button class="btn" id="expand">全部展开</button>
+  </div>
+  <div id="cat"></div>
+  <div id="vp"></div>
+  <div id="main"></div>
+</div>
+<div id="tip"></div>
+
+<script>
+const $=s=>document.querySelector(s), fmtN=(v,d=2)=>v==null?'—':(+v).toFixed(d);
+/* 名称是【当时】的名称（服务端按行日期从 security_name 解析）——
+   拿当前名称标一笔 2016 年的交易是误导：002711 走过
+   欧浦钢网→欧浦智网→ST欧浦→*ST欧浦→欧浦退。名称缺失时退化为只显示代码。 */
+const nmcode=(v,r)=>r.name?`${r.name}<span class="cd">${v}</span>`:`<span class="cd0">${v}</span>`;
+const esc=t=>String(t==null?'':t).replace(/[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pct=(v,d=2)=>v==null?'—':(v*100).toFixed(d)+'%';
+const sign=v=>v==null?'':(v>0?'pos':(v<0?'neg':''));
+let RUNS=[], CUR=null, DATA={}, HD={off:0,lim:100};
+
+async function j(u){const r=await fetch(u);const o=await r.json();
+  if(o&&o.error) throw new Error(o.error); return o;}
+
+/* ============ 路由：用 location.hash，让浏览器前进/后退天然可用 ============ */
+function route(){
+  const m=/^#\/run\/(.+)$/.exec(location.hash||'');
+  if(m){ openRun(decodeURIComponent(m[1])); return; }
+  const v=/^#\/ver\/([0-9a-f]{6,64})$/.exec(location.hash||'');
+  if(v){ openVersion(v[1]); return; }
+  showCatalog();
+}
+window.onhashchange=route;
+$('#home').onclick=()=>{location.hash='';};
+$('#back').onclick=()=>{location.hash='';};
+
+/* ============ 目录页 ============ */
+const OPEN=new Set();          // 展开状态：'g:小市值' / 's:小市值/v0b'
+async function loadRuns(){ RUNS=await j('/api/runs'); route(); }
+
+function showCatalog(){
+  stopPoll();
+  $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#main').innerHTML=''; $('#main').style.display='none';
+  $('#cat').style.display=''; $('#back').style.display='none';
+  $('#filter').style.display=''; $('#expand').style.display='';
+  renderCatalog();
+}
+function agg(rs){                // 一组回测的汇总
+  const a=rs.map(r=>r.annual_return).filter(v=>v!=null);
+  return {n:rs.length, best:a.length?Math.max(...a):null,
+          worst:a.length?Math.min(...a):null,
+          latest:rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1)[0]};
+}
+const RUNCOLS=[
+  ['run_id','run_id',1],['start','区间',1],['cash','初始资金'],['params','参数',1],
+  ['annual_return','年化'],['max_drawdown','回撤'],['excess_annual','超额年化'],
+  ['info_ratio','信息比率'],['sharpe','夏普'],['turnover_per_year','年换手'],
+  ['n_trades','交易'],['win_rate','胜率'],['ran_at','跑于',1]];
+function runTable(rs){
+  // 按【回测运行时间】倒序 —— 最近跑的在最上面
+  rs=rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1);
+  return `<div class="runs"><table><thead><tr>${RUNCOLS.map(([,t,l])=>
+      `<th class="${l?'l':''}">${t}</th>`).join('')}</tr></thead><tbody>
+    ${rs.map(r=>`<tr data-id="${r.run_id}">
+      <td class="l mono">${r.run_id}</td>
+      <td class="l">${r.start} ~ ${r.end}</td>
+      <td>${(+r.cash).toLocaleString()}</td>
+      <td class="l">${Object.entries(r.params||{}).map(([k,v])=>
+        `<span class="pill">${k}=${v}</span>`).join('')||'—'}</td>
+      <td class="${sign(r.annual_return)}"><b>${pct(r.annual_return,2)}</b></td>
+      <td class="neg">${pct(r.max_drawdown,2)}</td>
+      <td class="${sign(r.excess_annual)}">${pct(r.excess_annual,2)}</td>
+      <td>${fmtN(r.info_ratio)}</td><td>${fmtN(r.sharpe)}</td>
+      <td>${fmtN(r.turnover_per_year,1)}</td>
+      <td>${r.n_trades??'—'}</td><td>${pct(r.win_rate,1)}</td>
+      <td class="l">${(r.ran_at||'').replace('T',' ').slice(5,16)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+/* 建任意深度的目录树：
+     文件夹（可嵌套文件夹）→ 策略文件 → 【代码版本】→ 回测
+   ★ 策略身份 = 文件内容哈希：同一路径改一个字符就是另一个策略，
+     所以版本是独立的一层。只有一个版本时跳过这层，免得多点一次。 */
+function buildTree(rs){
+  const root={dirs:{}, files:{}};
+  rs.forEach(r=>{
+    let parts=(r.strategy_path||'').split('/');
+    if(parts[0]==='strategies') parts=parts.slice(1);
+    if(parts.length<1||!parts[0]) parts=['_未知路径', r.strategy+'.py'];
+    const file=parts.pop();
+    let node=root;
+    parts.forEach(d=>{ node.dirs[d]=node.dirs[d]||{dirs:{},files:{}}; node=node.dirs[d]; });
+    (node.files[file]=node.files[file]||[]).push(r);
+  });
+  return root;
+}
+function countTree(node){
+  let files=0,runs=0,strats=0,best=null;
+  Object.values(node.dirs).forEach(d=>{const c=countTree(d);
+    files+=c.files; runs+=c.runs; strats+=c.strats;
+    if(c.best!=null&&(best==null||c.best>best)) best=c.best;});
+  Object.values(node.files).forEach(rs=>{files++; runs+=rs.length;
+    strats+=new Set(rs.map(r=>r.code_sha)).size;
+    rs.forEach(r=>{if(r.annual_return!=null&&(best==null||r.annual_return>best)) best=r.annual_return;});});
+  return {files,runs,strats,best};
+}
+function renderNode(node,depth,keyPrefix,auto){
+  let h='';
+  // 文件夹（可嵌套）
+  Object.keys(node.dirs).sort().forEach(d=>{
+    const k=keyPrefix+'/'+d, op=auto||OPEN.has(k), c=countTree(node.dirs[d]);
+    h+=`<div class="nd d${depth} ${op?'op':''}" data-k="${k}"
+          style="padding-left:${14+depth*20}px">
+        <span class="ar">▶</span><span class="ic">📁</span>
+        <span class="nm">${d}</span>
+        <span class="sub">${c.files} 个文件 · ${c.strats} 个策略 · ${c.runs} 次回测</span>
+        <span class="sp"></span>
+        <span class="sub">最佳年化 <b class="${sign(c.best)}">${pct(c.best,1)}</b></span></div>
+      <div class="body ${op?'op':''}">${renderNode(node.dirs[d],depth+1,k,auto)}</div>`;
+  });
+  // 策略文件
+  Object.keys(node.files).sort().forEach(f=>{
+    const rs=node.files[f], k=keyPrefix+'/'+f, op=auto||OPEN.has(k);
+    const byv={}; rs.forEach(r=>(byv[r.code_sha]=byv[r.code_sha]||[]).push(r));
+    const vs=Object.keys(byv).sort((a,b)=>
+      (agg(byv[b]).latest.ran_at||'')<(agg(byv[a]).latest.ran_at||'')?-1:1);
+    const a=agg(rs);
+    h+=`<div class="nd d${depth} ${op?'op':''}" data-k="${k}"
+          style="padding-left:${14+depth*20}px">
+        <span class="ar">▶</span><span class="ic">📄</span>
+        <span class="nm">${f}</span>
+        <span class="sub">${vs.length} 个版本 · ${rs.length} 次回测</span>
+        ${vs.length===1?`<span class="vnote">${esc(byv[vs[0]][0].note||'（未填简介）')}${
+            byv[vs[0]][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
+          <span class="vopen" data-ver="${byv[vs[0]][0].code_sha256||vs[0]}">代码 / 回测 →</span>`:''}
+        <span class="sp"></span>
+        <span class="sub">年化 <b class="${sign(a.best)}">${pct(a.best,1)}</b>
+          ~ <b class="${sign(a.worst)}">${pct(a.worst,1)}</b>
+          · 最近 ${(a.latest.ran_at||'').replace('T',' ').slice(5,16)}</span></div>
+      <div class="body ${op?'op':''}">`;
+    if(vs.length===1){
+      // 只有一个版本 -> 直接列回测，不多套一层
+      h+=runTable(rs);
+    }else{
+      vs.forEach(v=>{
+        const vk=k+'@'+v, vop=auto||OPEN.has(vk), va=agg(byv[v]);
+        h+=`<div class="nd d${depth+1} ${vop?'op':''}" data-k="${vk}"
+              style="padding-left:${14+(depth+1)*20}px">
+            <span class="ar">▶</span><span class="ic">⌗</span>
+            <span class="nm sha">${v}</span>
+            <span class="vnote">${esc(byv[v][0].note||'（未填简介）')}${
+              byv[v][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
+            <span class="sp"></span>
+            <span class="vopen" data-ver="${byv[v][0].code_sha256||v}"
+              >代码 / 回测 →</span></div>
+          <div class="body ${vop?'op':''}">${runTable(byv[v])}</div>`;
+      });
+    }
+    h+='</div>';
+  });
+  return h;
+}
+function renderCatalog(){
+  const q=$('#filter').value.trim().toLowerCase();
+  const rs=RUNS.filter(r=>!q||((r.strategy_path||'')+' '+r.strategy+' '+r.run_id+' '+r.code_sha+' '+
+      Object.entries(r.params||{}).map(([k,v])=>k+'='+v).join(' ')).toLowerCase().includes(q));
+  if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
+    (RUNS.length?'没有匹配的回测':'还没有归档 —— 先跑一次 <code>python3 run.py ...</code>')+'</div>';return;}
+  const auto=!!q;            // 过滤时自动展开，否则默认全收起
+  $('#cat').innerHTML='<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
+    `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
+      所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
+      回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;
+  document.querySelectorAll('.vopen[data-ver]').forEach(e=>e.onclick=ev=>{
+    ev.stopPropagation();          // 否则会连带切换所在节点的展开状态
+    location.hash='#/ver/'+e.dataset.ver;});
+  document.querySelectorAll('.nd[data-k]').forEach(e=>e.onclick=ev=>{
+    ev.stopPropagation();
+    const body=e.nextElementSibling; if(!body||!body.classList.contains('body')) return;
+    const now=!e.classList.contains('op');
+    e.classList.toggle('op',now); body.classList.toggle('op',now);
+    now?OPEN.add(e.dataset.k):OPEN.delete(e.dataset.k);});
+  document.querySelectorAll('.runs tbody tr').forEach(e=>
+    e.onclick=ev=>{ev.stopPropagation();
+      location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
+}
+$('#filter').oninput=()=>{ if(!location.hash) renderCatalog(); };
+$('#expand').onclick=()=>{
+  const anyClosed=document.querySelector('.nd[data-k]:not(.op)');
+  if(anyClosed) document.querySelectorAll('.nd[data-k]').forEach(e=>OPEN.add(e.dataset.k));
+  else OPEN.clear();
+  $('#expand').textContent=anyClosed?'全部收起':'全部展开';
+  renderCatalog();
+  // 展开是逐层的：新露出来的节点这一轮才存在，需要再补一次
+  if(anyClosed) for(let i=0;i<6;i++){
+    const more=document.querySelectorAll('.nd[data-k]:not(.op)');
+    if(!more.length) break;
+    more.forEach(e=>OPEN.add(e.dataset.k)); renderCatalog();
+  }
+};
+
+
+/* ============ 版本页：源码 + 可填参数 + 触发回测 ============ */
+/* 版本 = 代码哈希。同一版本下所有回测的代码完全相同，所以「看代码」「按参数
+   再跑一次」都属于版本这一层，而不是单次回测那一层。 */
+let VER=null, POLL=null;
+function stopPoll(){ if(POLL){clearInterval(POLL); POLL=null;} }
+
+async function openVersion(sha){
+  stopPoll();
+  $('#cat').style.display='none'; $('#main').innerHTML='';
+  $('#main').style.display='none'; $('#vp').style.display='';
+  $('#back').style.display=''; $('#filter').style.display='none';
+  $('#expand').style.display='none';
+  $('#vp').innerHTML='<div class="note" style="padding:40px 0">加载中…</div>';
+  let v;
+  try{ v=await j('/api/version?sha='+encodeURIComponent(sha)); }
+  catch(e){ $('#vp').innerHTML=`<div class="note" style="padding:40px 0">
+      加载失败：${esc(e.message)}　<a href="#">返回目录</a></div>`; return; }
+  VER=v;
+  const runs=RUNS.filter(r=>r.code_sha256===v.code_sha256);
+  const ps=v.current_params||v.params||[];   // 按【会被执行的代码】列参数
+  const last=runs.slice().sort((a,b)=>(a.ran_at||'')<(b.ran_at||'')?1:-1)[0]||{};
+
+  $('#vp').innerHTML=`
+    <div id="hd">
+      <div class="row1"><h2>${esc(v.strategy||'')}</h2>
+        <span class="meta">${esc(v.group||'')} · <span class="mono">${esc(v.strategy_path||'')}</span>
+          · 版本 <span class="sha">${esc(v.code_sha)}</span> · ${runs.length} 次回测</span></div>
+      <div class="row1"><span class="vnote">${esc(v.note||'（未填简介）')}${
+          v.note_src==='docstring'?'<span class="cmt" style="margin-left:8px">—— 该版本没写 NOTE，这句取自 docstring；同一文件的多个旧版本会显示相同内容</span>':''}</span></div>
+    </div>
+
+    <div class="sec">
+      <h3>回测参数</h3>
+      ${v.not_runnable_why?`<div class="note bad" style="margin-bottom:10px">
+        ⚠️ ${esc(v.not_runnable_why)}</div>`:''}
+      <div class="pgrid pf" style="margin-bottom:12px">
+        <div><label>起始日期</label><input id="f_start" value="${esc(last.start||'2016-01-01')}">
+          <div class="cmt">YYYY-MM-DD</div></div>
+        <div><label>结束日期</label><input id="f_end" value="${esc(last.end||'2026-06-30')}">
+          <div class="cmt">YYYY-MM-DD</div></div>
+        <div><label>初始资金</label><input id="f_cash" value="${last.cash!=null?last.cash:500000}">
+          <div class="cmt">不填用引擎默认 50 万</div></div>
+        <div><label>成本口径</label>
+          <div style="padding:5px 0"><label style="display:inline;color:var(--fg)">
+            <input type="checkbox" id="f_jq" style="width:auto" checked>
+            聚宽口径 <span class="cmt" style="display:inline">滑点0/佣金万3/印花税千一</span></label></div></div>
+      </div>
+      <h3>策略参数（${ps.length} 个）${ps.length?'<span class="cmt" style="display:inline"> —— 留空 = 用该版本默认值</span>':''}</h3>
+      ${ps.length?`<div class="pgrid pf">${ps.map(pp=>`
+        <div><label>${esc(pp.name)}</label>
+          <input data-p="${esc(pp.name)}" placeholder="${esc(pp.default)}">
+          <div class="cmt">默认 <span class="dv">${esc(pp.default)}</span>
+            ${pp.comment?' · '+esc(pp.comment):''}</div></div>`).join('')}</div>`
+        :`<div class="note">该版本没有用 <span class="mono">g.x = getattr(g,'x',默认)</span>
+           的写法声明参数，所以没有可填项。</div>`}
+      <div style="margin-top:14px;display:flex;align-items:center;gap:12px">
+        <button class="btn" id="f_run" ${v.runnable?'':'disabled style="opacity:.45;cursor:not-allowed"'}
+          >${v.same_version?'开始回测':'按当前版本回测'}</button>
+        <span class="cmt" id="f_msg"></span>
+      </div>
+    </div>
+
+    <div class="sec" id="jobsec" style="display:none">
+      <h3>运行日志 <span class="cmt" id="jobstate"></span></h3>
+      <pre id="joblog"></pre>
+    </div>
+
+    <div class="sec"><h3>策略代码 <span class="cmt">${(v.code||'').split('\n').length} 行 ·
+      SHA256 ${esc(v.code_sha256)}</span></h3>
+      <pre>${esc(v.code)}</pre></div>
+
+    <div class="sec"><h3>该版本的历次回测</h3>${runs.length?runTable(runs):'<div class="note">还没有回测</div>'}</div>`;
+
+  document.querySelectorAll('#vp .runs tbody tr[data-id]').forEach(e=>e.onclick=()=>{
+    location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
+  const btn=$('#f_run'); if(btn && v.runnable) btn.onclick=startBacktest;
+}
+
+async function startBacktest(){
+  const btn=$('#f_run'), msg=$('#f_msg');
+  const params={};
+  document.querySelectorAll('#vp input[data-p]').forEach(e=>{
+    const t=e.value.trim(); if(t) params[e.dataset.p]=t;});
+  const body={sha:VER.code_sha256, params,
+    start:$('#f_start').value.trim(), end:$('#f_end').value.trim(),
+    cash:$('#f_cash').value.trim(), jq_cost:$('#f_jq').checked};
+  btn.disabled=true; btn.style.opacity=.45; msg.textContent='提交中…';
+  let r;
+  try{
+    r=await (await fetch('/api/backtest',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  }catch(e){ r={error:String(e)}; }
+  if(r.error){ msg.innerHTML='<span class="bad">'+esc(r.error)+'</span>';
+    btn.disabled=false; btn.style.opacity=1; return; }
+  msg.textContent='';
+  $('#jobsec').style.display='';
+  $('#joblog').textContent=r.cmd+'\n';
+  pollJob(r.job_id, btn);
+}
+
+function pollJob(id, btn){
+  stopPoll();
+  const log=$('#joblog'), st=$('#jobstate');
+  POLL=setInterval(async()=>{
+    let o; try{ o=await j('/api/job?id='+encodeURIComponent(id)); }catch(e){ return; }
+    log.textContent=(o.lines||[]).join('\n');
+    log.scrollTop=log.scrollHeight;
+    if(o.state==='running'){ st.textContent='运行中…'; return; }
+    stopPoll();
+    btn.disabled=false; btn.style.opacity=1;
+    if(o.state==='done'){
+      st.innerHTML='完成'+(o.run_id?` · <a href="#/run/${encodeURIComponent(o.run_id)}">查看结果 →</a>`:'');
+      // 归档变了，刷新列表，这样目录树和「历次回测」都能立刻看到新记录
+      loadRuns0().then(()=>{ if(VER) renderVersionRuns(); });
+    }else{
+      st.innerHTML='<span class="bad">失败（退出码 '+o.rc+'）</span>';
+    }
+  },1200);
+}
+
+async function loadRuns0(){ RUNS=await j('/api/runs'); }
+function renderVersionRuns(){
+  const runs=RUNS.filter(r=>r.code_sha256===VER.code_sha256);
+  const secs=document.querySelectorAll('#vp .sec');
+  const box=secs[secs.length-1];
+  if(!box) return;
+  box.innerHTML='<h3>该版本的历次回测</h3>'+(runs.length?runTable(runs):'<div class="note">还没有回测</div>');
+  box.querySelectorAll('.runs tbody tr[data-id]').forEach(e=>e.onclick=()=>{
+    location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
+}
+
+/* ============ 详情页 ============ */
+async function openRun(id){
+  CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100};
+  stopPoll();
+  $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#cat').style.display='none'; $('#main').style.display='';
+  $('#back').style.display=''; $('#filter').style.display='none';
+  $('#expand').style.display='none';
+  $('#main').innerHTML='<div class="note" style="padding:40px 0">加载中…</div>';
+  let run,eq;
+  try{ [run,eq]=await Promise.all([j('/api/run?id='+encodeURIComponent(id)),
+                                   j('/api/equity?id='+encodeURIComponent(id))]); }
+  catch(e){ $('#main').innerHTML=`<div class="note" style="padding:40px 0">
+      加载失败：${e.message}　<a href="#">返回目录</a></div>`; return; }
+  DATA.run=run; DATA.eq=eq;
+  const m=run.meta;
+  $('#main').innerHTML=`
+   <div id="hd">
+     <div class="row1"><h2>${m.strategy}</h2>
+       <span class="meta">${m.group} · ${m.first_day} ~ ${m.last_day} ·
+         初始 ${(+m.cash).toLocaleString()} · ${m.trading_days} 交易日
+         ${Object.keys(m.params||{}).length?' · '+Object.entries(m.params).map(
+            ([k,v])=>k+'='+v).join(' '):''}</span></div>
+     <div class="row1"><span class="meta">run_id ${m.run_id} ·
+       代码 ${(m.code_sha256||'').slice(0,8)} ·
+       数据 ${((m.data_fingerprint||{}).overall||'—').slice(0,8)} ·
+       跑于 ${m.ran_at} (${m.elapsed_sec}s)</span></div>
+     <div id="tabs">
+       ${['概览','权益曲线','月度收益','交易记录','持仓','拒单','策略代码','日志','元信息']
+         .map((t,i)=>`<div data-i="${i}" class="${i?'':'on'}">${t}</div>`).join('')}
+     </div>
+   </div>
+   ${[0,1,2,3,4,5,6,7,8].map(i=>`<div class="pane ${i?'':'on'}" id="p${i}"></div>`).join('')}`;
+  document.querySelectorAll('#tabs div').forEach(e=>e.onclick=()=>tab(+e.dataset.i));
+  paneOverview(); paneEquity();
+  window.scrollTo(0,0);
+}
+function tab(i){
+  document.querySelectorAll('#tabs div').forEach((e,k)=>e.classList.toggle('on',k===i));
+  document.querySelectorAll('.pane').forEach((e,k)=>e.classList.toggle('on',k===i));
+  ({2:paneMonthly,3:paneTrades,4:paneHoldings,5:paneRejects,6:paneCode,7:paneLog,
+    8:paneMeta}[i]||(()=>{}))();
+}
+
+/* ============ 概览 ============ */
+function card(k,v,cls,note){return `<div class="card"><div class="k">${k}</div>
+  <div class="v ${cls||''}">${v}</div>${note?`<div class="n">${note}</div>`:''}</div>`;}
+function paneOverview(){
+  const s=DATA.run.stats, m=DATA.run.meta, c=m.cost||{};
+  const g1=[
+    card('累计收益',pct(s.total_return,1),sign(s.total_return)),
+    card('年化收益',pct(s.annual_return,2),sign(s.annual_return)),
+    card('最大回撤',pct(s.max_drawdown,2),'neg','日频'),
+    card('年化波动',pct(s.volatility,1)),
+    card('夏普',fmtN(s.sharpe)),card('索提诺',fmtN(s.sortino)),
+    card('卡玛',fmtN(s.calmar)),card('期末权益',(+s.end_value).toLocaleString('en',{maximumFractionDigits:0})),
+  ].join('');
+  const g2=s.benchmark_return==null?'<div class="note">未设基准</div>':[
+    card('基准收益',pct(s.benchmark_return,2),'',s.benchmark||''),
+    card('超额收益',pct(s.excess_return,1),sign(s.excess_return)),
+    card('超额年化',pct(s.excess_annual,2),sign(s.excess_annual)),
+    card('超额回撤',pct(s.excess_max_drawdown,2),'neg'),
+    card('信息比率',fmtN(s.info_ratio)),
+    card('alpha',pct(s.alpha,2),sign(s.alpha)),card('beta',fmtN(s.beta,3)),
+  ].join('');
+  const g3=[
+    card('平仓笔数',s.n_trades??'—'),card('胜率',pct(s.win_rate,1)),
+    card('盈亏比',fmtN(s.profit_factor)),
+    card('平均持有',fmtN(s.avg_holding_days,1),'','天'),
+    card('年换手',fmtN(s.turnover_per_year),'','次全仓往返'),
+    card('费用合计',(+(s.fee_paid||0)).toLocaleString('en',{maximumFractionDigits:0})),
+    card('红利税',(+(s.div_tax_paid||0)).toLocaleString('en',{maximumFractionDigits:0})),
+    card('退市清算',s.n_delisted??'—','','笔'),
+  ].join('');
+  const risk=[
+    card('最大单仓权重',pct(s.max_weight_avg,1),'','均值'),
+    card('单仓权重峰值',pct(s.max_weight_peak,1),
+      (s.max_weight_peak>0.3?'warn':'')),
+    card('HHI',fmtN(s.hhi_avg,3),'','集中度'),
+    card('停牌挂账',s.frozen_days??0,'','持仓日'),
+    card('最长停牌',s.max_frozen_run??0,'','连续交易日'),
+    card('期末停牌持仓',s.n_frozen_at_end??0,
+      (s.n_frozen_at_end?'warn':''),s.n_frozen_at_end?'权益含陈价':''),
+    card('拒单',s.n_rejects??0,'','笔'),
+  ].join('');
+  $('#p0').innerHTML=`<h3 class="sec">收益与风险</h3><div class="cards">${g1}</div>
+    <h3 class="sec">相对基准</h3><div class="cards">${g2}</div>
+    <h3 class="sec">交易与成本</h3><div class="cards">${g3}</div>
+    <h3 class="sec">风险暴露</h3><div class="cards">${risk}</div>
+    <h3 class="sec">成本假设</h3><div class="note">
+      滑点 ${c.slippage} 双边 · 佣金 ${c.commission}（最低 ${c.min_commission} 元）·
+      印花税 ${c.close_tax==='auto'?'按日期分段（2023-08-28 起减半）':c.close_tax} ·
+      买入印花税 ${c.open_tax} · 红利税 ${c.dividend_tax?'计':'不计'} ·
+      成交量上限 ${c.volume_ratio?'当日成交额 '+(c.volume_ratio*100)+'%':'不限'}
+      ${(c.locked_by_cli||[]).length?' · 命令行指定: '+c.locked_by_cli.join(', '):''}</div>`;
+}
+
+/* ============ SVG 折线图 ============ */
+function lineChart(el,series,opt){
+  opt=opt||{}; const W=1160,H=opt.h||330,L=54,R=16,T=opt.t||22,B=26;
+  const n=series[0].v.length; if(!n){el.innerHTML='<div class="note">无数据</div>';return;}
+  const log=!!opt.log;
+  const tf=v=>log?Math.log10(Math.max(v,1e-6)):v;
+  let lo=Infinity,hi=-Infinity;
+  series.forEach(s=>s.v.forEach(v=>{if(v==null)return;const t=tf(v);
+    if(t<lo)lo=t; if(t>hi)hi=t;}));
+  if(!(hi>lo)){hi=lo+1;}
+  const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
+  const X=i=>L+(W-L-R)*(n<2?0:i/(n-1)), Y=v=>T+(H-T-B)*(1-(tf(v)-lo)/(hi-lo));
+  const path=s=>{let d='',on=false;
+    s.v.forEach((v,i)=>{if(v==null){on=false;return;}
+      d+=(on?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' ';on=true;});return d;};
+  // y 轴刻度
+  let ticks=[];
+  for(let k=0;k<=4;k++){const t=lo+(hi-lo)*k/4; ticks.push(log?Math.pow(10,t):t);}
+  const yl=v=>opt.pctAxis?((v-1)*100).toFixed(0)+'%':(v>=10?v.toFixed(0)+'x':v.toFixed(2)+'x');
+  // x 轴：取 6 个日期
+  const xs=[]; for(let k=0;k<6;k++){const i=Math.round((n-1)*k/5); xs.push([i,opt.dates[i]]);}
+  el.innerHTML=`
+   ${opt.title?`<div class="ttl">${opt.title}</div>`:''}
+   ${opt.ctl||''}
+   <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+     ${ticks.map(v=>`<line class="gl" x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/>
+        <text class="ax" x="${L-7}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end">${yl(v)}</text>`).join('')}
+     ${xs.map(([i,d])=>`<text class="ax" x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle">${d}</text>`).join('')}
+     ${series.map(s=>`<path d="${path(s)}" fill="none" stroke="${s.c}"
+        stroke-width="${s.w||1.6}" stroke-linejoin="round"/>`).join('')}
+     <rect id="hz" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent"/>
+   </svg>
+   <div class="note" style="padding-left:8px">${series.map(s=>
+      `<span style="color:${s.c}">━</span> ${s.n}`).join('　')}</div>`;
+  // hover
+  const svg=el.querySelector('svg'), tip=$('#tip');
+  svg.onmousemove=e=>{const r=svg.getBoundingClientRect();
+    const i=Math.round((n-1)*Math.min(1,Math.max(0,((e.clientX-r.left)/r.width*W-L)/(W-L-R))));
+    tip.style.display='block'; tip.style.left=(e.clientX+12)+'px';
+    tip.style.top=(e.clientY+10)+'px';
+    tip.textContent=opt.dates[i]+'\n'+series.map(s=>s.n+'  '+
+      (s.v[i]==null?'—':(opt.pctAxis?((s.v[i]-1)*100).toFixed(1)+'%':s.v[i].toFixed(3)+'x'))).join('\n');};
+  svg.onmouseleave=()=>{$('#tip').style.display='none';};
+}
+let EQLOG=true;
+function paneEquity(){
+  const e=DATA.eq, s=DATA.run.stats;
+  // 回撤序列
+  let peak=0; const dd=e.equity.map(v=>{peak=Math.max(peak,v);return v/peak-1;});
+  const ser=[{n:'策略',v:e.equity,c:'#5b9cf0',w:1.8}];
+  if(e.benchmark) ser.push({n:'基准 '+(e.benchmark_code||''),v:e.benchmark,c:'#8b97a6',w:1.3});
+  $('#p1').innerHTML=`<div class="chart" id="c1"></div>
+    <div class="note">纵轴为净值倍数（起点 1x）。${EQLOG?'当前<b>对数坐标</b> —— 累计收益达 '+pct(s.total_return,0)+' 时线性坐标会让前几年完全看不见。':'当前线性坐标。'}
+      基准在图上按<b>回测首日</b>归一，而统计卡里的基准收益按<b>首日前一交易日</b>收盘为基点（与聚宽一致），两者口径不同。</div>
+    <div class="chart" id="c2"></div>`;
+  lineChart($('#c1'),ser,{dates:e.dates,log:EQLOG,title:'净值曲线',h:360,
+    ctl:`<div class="ctl"><span class="${EQLOG?'on':''}" id="lg">对数</span><span class="${EQLOG?'':'on'}" id="ln">线性</span></div>`});
+  $('#lg').onclick=()=>{EQLOG=true;paneEquity();};
+  $('#ln').onclick=()=>{EQLOG=false;paneEquity();};
+  lineChart($('#c2'),[{n:'回撤',v:dd.map(v=>v+1),c:'#e05b5b',w:1.4}],
+    {dates:e.dates,title:'回撤（水下图）',h:190,pctAxis:true});
+}
+
+/* ============ 月度收益热力 ============ */
+function paneMonthly(){
+  const e=DATA.eq, by={};
+  let prev=null;
+  e.dates.forEach((d,i)=>{const k=d.slice(0,7);
+    if(!(k in by)) by[k]=[prev==null?e.equity[i]:prev,e.equity[i]];
+    by[k][1]=e.equity[i]; prev=e.equity[i];});
+  const ys=[...new Set(Object.keys(by).map(k=>k.slice(0,4)))].sort();
+  const mv={}; Object.entries(by).forEach(([k,[a,b]])=>{mv[k]=a?b/a-1:null;});
+  const col=v=>v==null?'transparent':
+    (v>0?`rgba(240,91,91,${Math.min(.85,.15+Math.abs(v)*3)})`
+        :`rgba(47,184,122,${Math.min(.85,.15+Math.abs(v)*3)})`);
+  $('#p2').innerHTML=`<div class="note">看「哪一年哪个月崩的」比看一个总回撤有用得多。红涨绿跌，深浅表示幅度。</div>
+   <div class="tw"><table><thead><tr><th class="l">年</th>
+   ${[...Array(12)].map((_,i)=>`<th>${i+1}月</th>`).join('')}<th>全年</th></tr></thead><tbody>
+   ${ys.map(y=>{let acc=1,any=false;
+     const tds=[...Array(12)].map((_,i)=>{const v=mv[y+'-'+String(i+1).padStart(2,'0')];
+       if(v!=null){acc*=1+v;any=true;}
+       return `<td style="background:${col(v)}">${v==null?'':(v*100).toFixed(1)}</td>`;}).join('');
+     return `<tr><td class="l"><b>${y}</b></td>${tds}
+       <td class="${any?sign(acc-1):''}"><b>${any?((acc-1)*100).toFixed(1):''}</b></td></tr>`;}).join('')}
+   </tbody></table></div>`;
+}
+
+/* ============ 通用表格（可排序） ============ */
+/* opt.group: 按该列分组，值变化时插一条粘性分隔行（同组行必须相邻，由后端排序保证）。
+   opt.groupNote(rows) 给分隔行右侧加汇总。点列头排序会打散分组，此时自动关掉分隔行。 */
+function tbl(el,rows,cols,note,opt){
+  opt=opt||{};
+  if(!rows.length){el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
+    '<div class="note">无数据</div>';return;}
+  let sk=null,sd=-1;
+  const body=rs=>{
+    let out='',last=null;
+    const grp=opt.group&&!sk;   // 排序后分组无意义（同组行不再相邻）
+    rs.forEach(r=>{
+      if(grp&&r[opt.group]!==last){
+        last=r[opt.group];
+        const same=rs.filter(x=>x[opt.group]===last);
+        out+=`<tr class="dayhd"><td colspan="${cols.length}">${last}`+
+             `<span>${opt.groupNote?opt.groupNote(same):same.length+' 只'}</span></td></tr>`;
+      }
+      out+='<tr>'+cols.map(c=>{const v=r[c.k];
+        const f=c.f?c.f(v,r):(v==null?'—':v);
+        return `<td class="${c.l?'l':''} ${c.s?sign(v):''}">${f}</td>`;}).join('')+'</tr>';
+    });
+    return out;
+  };
+  const draw=()=>{
+    let rs=rows.slice();
+    if(sk) rs.sort((a,b)=>{const x=a[sk],y=b[sk];
+      if(x==null)return 1; if(y==null)return -1;
+      return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sd;});
+    el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
+     `<div class="tw"><table><thead><tr>${cols.map(c=>
+        `<th data-k="${c.k}" class="${c.l?'l':''}">${c.t}${sk===c.k?(sd>0?' ▲':' ▼'):''}</th>`).join('')}
+      </tr></thead><tbody>${body(rs)}</tbody></table></div>`;
+    el.querySelectorAll('th').forEach(t=>t.onclick=()=>{
+      const k=t.dataset.k; sd=(sk===k)?-sd:-1; sk=k; draw();});
+    // 日期分隔行要贴在表头【下方】，而表头高度取决于字号/padding/浏览器 ——
+    // 与其估一个 px 值（估错就会重叠或留缝），渲染后量出来写进 CSS 变量。
+    const th=el.querySelector('th');
+    if(th) el.querySelector('.tw').style.setProperty('--thh',
+      Math.round(th.getBoundingClientRect().height)+'px');
+  };
+  draw();
+}
+async function paneTrades(){
+  if(!DATA.tr) DATA.tr=await j('/api/trades?id='+CUR);
+  const R={rebalance:'调仓',intraday:'盘中(涨停打开)',delist:'退市清算'};
+  tbl($('#p3'),DATA.tr.rows,[
+    {k:'code',t:'股票',l:1,f:nmcode},{k:'entry_date',t:'建仓日',l:1},{k:'exit_date',t:'平仓日',l:1},
+    {k:'holding_days',t:'持有天'},
+    {k:'entry_price',t:'建仓价(后复权)',f:v=>fmtN(v,3)},
+    {k:'exit_price',t:'平仓价',f:v=>fmtN(v,3)},
+    {k:'ret',t:'收益率',f:v=>pct(v,2),s:1},
+    {k:'pnl',t:'盈亏',f:v=>v==null?'—':(+v).toFixed(0),s:1},
+    {k:'fee',t:'费用',f:v=>fmtN(v,0)},
+    {k:'div_gross',t:'分红',f:v=>fmtN(v,0)},{k:'div_tax',t:'红利税',f:v=>fmtN(v,0)},
+    {k:'reason',t:'卖出原因',l:1,f:v=>R[v]||v},
+  ],`共 ${DATA.tr.total} 笔平仓。<b>同一天同一只票可能有多行</b> ——
+     加减仓走 FIFO 分批，每行是一批，带的是<b>该批</b>的建仓日与持有期
+     （红利税按批的持有期分档，所以必须分开记）。收益率只反映<b>价差</b>，分红单列。`);
+}
+async function paneHoldings(){
+  const h=await j(`/api/holdings?id=${CUR}&offset=${HD.off}&limit=${HD.lim}`);
+  const pg=Math.floor(h.off===undefined?HD.off/HD.lim:h.offset/h.limit)+1;
+  const np=Math.max(1,Math.ceil(h.total/h.limit));
+  // ★ 上下两套导航用 class 而不是 id —— 先前用 id="p*" 正则替换成 id="b*" 生成底部
+  //   一份，选择器却按 '#'+p+id.slice(1) 拼出 '#bpf'（真实 id 是 '#bf'），
+  //   底部按钮全都绑不上事件。class + querySelectorAll 没有这种拼接歧义。
+  const nav=`<div class="pg">
+     <button class="pf" ${pg<=1?'disabled':''}>« 首页</button>
+     <button class="pp" ${pg<=1?'disabled':''}>‹ 上一页</button>
+     <span>第 <input class="pi" value="${pg}"> / ${np} 页</span>
+     <button class="pn" ${pg>=np?'disabled':''}>下一页 ›</button>
+     <button class="pl" ${pg>=np?'disabled':''}>末页 »</button>
+     <span style="margin-left:10px">每页
+       <select class="ps">${[50,100,200].map(x=>
+         `<option ${x===h.limit?'selected':''}>${x}</option>`).join('')}</select> 条</span>
+     <span style="margin-left:10px">共 ${h.total.toLocaleString()} 条 /
+       ${h.n_days.toLocaleString()} 个交易日</span></div>`;
+  $('#p4').innerHTML=`<div class="note">逐日持仓快照，<b>按日期倒序</b>（最近的在前），
+     同日内按权重降序。份额是<b>后复权记账单位</b>，真实股数 = 份额 × 当日复权因子。
+     点列头排序会打散日期分块（同组行不再相邻）。</div>
+     ${nav}<div id="hdt"></div>${nav}`;
+  tbl($('#hdt'),h.rows,[
+    {k:'code',t:'股票',l:1,f:nmcode},{k:'weight',t:'权重',f:v=>pct(v,2)},
+    {k:'value',t:'市值',f:v=>v==null?'—':(+v).toFixed(0)},
+    {k:'shares',t:'份额(后复权)',f:v=>fmtN(v,1)},
+    {k:'last_price',t:'现价',f:v=>fmtN(v,3)},
+    {k:'entry_date',t:'建仓日',l:1},{k:'entry_price',t:'建仓价',f:v=>fmtN(v,3)},
+    {k:'unrealized_ret',t:'浮动收益',f:v=>pct(v,2),s:1},
+    {k:'unrealized_pnl',t:'浮动盈亏',f:v=>v==null?'—':(+v).toFixed(0),s:1},
+    {k:'div_gross',t:'累计分红',f:v=>fmtN(v,0)},
+  ],null,{group:'date',groupNote:rs=>{
+    const mv=rs.reduce((a,r)=>a+(r.value||0),0);
+    const w=rs.reduce((a,r)=>a+(r.weight||0),0);
+    return `${rs.length} 只 · 市值 ${mv.toLocaleString('en',{maximumFractionDigits:0})} · 仓位 ${(w*100).toFixed(1)}%`;}});
+  const go=o=>{HD.off=Math.max(0,Math.min(o,(np-1)*HD.lim));paneHoldings();};
+  const on=(cls,fn,ev)=>document.querySelectorAll('#p4 .'+cls)
+      .forEach(e=>e[ev||'onclick']=fn);
+  on('pf',()=>go(0)); on('pp',()=>go(HD.off-HD.lim));
+  on('pn',()=>go(HD.off+HD.lim)); on('pl',()=>go((np-1)*HD.lim));
+  on('ps',e=>{HD.lim=+e.target.value;HD.off=0;paneHoldings();},'onchange');
+  on('pi',e=>go((Math.max(1,+e.target.value)-1)*HD.lim),'onchange');
+}
+async function paneRejects(){
+  if(!DATA.rj) DATA.rj=await j('/api/rejects?id='+CUR);
+  const r=DATA.rj;
+  const S={buy:'买',sell:'卖',adjust:'调仓',dividend:'分红'};
+  $('#p5').innerHTML=`<div class="note"><b>失败必须留痕</b> ——
+     引擎不静默丢弃任何下单失败。共 ${r.total} 笔。</div>
+    <div class="cards">${Object.entries(r.by_reason).map(([k,v])=>card(k,v)).join('')}</div>
+    <h3 class="sec">明细</h3><div id="rjt"></div>`;
+  tbl($('#rjt'),r.rows,[{k:'date',t:'日期',l:1},{k:'code',t:'股票',l:1,f:nmcode},
+    {k:'side',t:'方向',l:1,f:v=>S[v]||v},{k:'reason',t:'原因',l:1}]);
+}
+async function paneCode(){
+  if(!DATA.code) DATA.code=await j('/api/code?id='+CUR);
+  $('#p6').innerHTML=`<div class="note">策略代码的<b>逐字节快照</b>（代码会改，结果不会自己解释自己）。
+    SHA256 ${DATA.run.meta.code_sha256}</div>
+    <pre>${DATA.code.text.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`;
+}
+async function paneLog(){
+  if(!DATA.log) DATA.log=await j('/api/log?id='+CUR);
+  $('#p7').innerHTML=`<pre>${(DATA.log.text||'（无日志）')
+    .replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</pre>`;
+}
+function paneMeta(){
+  const m=DATA.run.meta, fp=m.data_fingerprint||{};
+  const rows=[['run_id',m.run_id],['分组',m.group],['策略',m.strategy],
+    ['策略路径',m.strategy_path],['代码 SHA256',m.code_sha256],
+    ['区间',m.start+' ~ '+m.end],['实际首尾',m.first_day+' ~ '+m.last_day],
+    ['交易日',m.trading_days],['初始资金',(+m.cash).toLocaleString()],
+    ['策略参数',JSON.stringify(m.params||{})],
+    ['成本',JSON.stringify(m.cost||{})],
+    ['数据源',m.datalake],['数据指纹',fp.overall||'—'],
+    ...Object.entries(fp.parts||{}).map(([k,v])=>
+      ['　'+k,`${v.hash}  ${v.n_files} 文件 / ${(v.total_bytes/1048576).toFixed(1)} MB / 最新 ${v.newest_mtime}`]),
+    ['跑于',m.ran_at],['耗时',m.elapsed_sec+' s']];
+  $('#p8').innerHTML=`<div class="note"><b>代码哈希 + 数据指纹</b>是归因的第一个岔路口：
+     差异来自代码、数据，还是参数 —— 不该靠回忆。</div>
+    <div class="kv">${rows.map(([k,v])=>
+      `<div class="k">${k}</div><div class="v">${v==null?'—':v}</div>`).join('')}</div>`;
+}
+loadRuns();
+</script>

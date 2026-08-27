@@ -1,0 +1,17 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 回测归档 ----
+# runs/ 是【产物】不是源码：248M 且随每次回测持续增长，里面是 parquet 二进制。
+# 每份归档自包含（strategy.py 快照 + meta/stats + 日志 + parquet），
+# 需要时由 run.py 重跑即可重建。塞进 git 会让 clone/push 迅速不可用，
+# 且 Gitee 对仓库与单文件体积都有限制。
+# 要长期保存请用 rsync / 磁盘快照，那是备份的事，不是版本控制的事。
+runs/
+
+# ---- 杂项 ----
+.DS_Store
+*.log
