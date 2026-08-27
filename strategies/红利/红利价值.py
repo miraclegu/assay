@@ -22,6 +22,12 @@
 # 版本一句话简介 —— 看板在版本号右边展示它。
 # ★ 改动策略行为时【必须同步改这句】：版本 = 代码哈希，
 #   简介是人识别两个版本差异的唯一线索。
+# ★ 默认值必须与 JQ/红利/红利价值.txt 的配置块一致（曾错配 3 处）：
+#     TARGET_NUM=8 / DIV_TOP_PCT=0.10 / DIV_MIN=0.03 / BACKUP_NUM=5
+#     ENABLE_LIMIT_UP_EXIT=True / ENABLE_REENTRY=True
+#   我最初把炸板离场与再入场都设成关，导致对标虚高 3.17pp
+#   （25.10% vs JQ 20.54%，实际应为 21.93%）。选股在 2019 逐月比对是
+#   95.8% 相同的 —— 差距全在【行为开关】，不在选股。
 NOTE = '基本面四条（PE 5~50 / 扣非ROE / 营收同比 / 净利同比）→ 股息率 top10%；合格池常只 3~4 只，不宜单独用'
 
 from assay.api import *
@@ -159,10 +165,16 @@ def initialize(context):
     g.target_num = getattr(g, 'target_num', 8)
     g.div_min = getattr(g, 'div_min', 0.03)
     g.div_top_pct = getattr(g, 'div_top_pct', 0.10)
-    g.backup_num = getattr(g, 'backup_num', 10)
-    g.limit_up_exit = getattr(g, 'limit_up_exit', 0)  # 0/1 —— Run E / Run F
-    g.reentry = getattr(g, 'reentry', 0)  # 需 limit_up_exit=1 才有意义
+    g.backup_num = getattr(g, 'backup_num', 5)   # 原版 BACKUP_NUM = 5
+    g.limit_up_exit = getattr(g, 'limit_up_exit', 1)  # 原版 ENABLE_LIMIT_UP_EXIT = True
+    g.reentry = getattr(g, 'reentry', 1)  # 原版 ENABLE_REENTRY = True
     g.monthday = getattr(g, 'monthday', 1)  # 月内第几个交易日调仓
+    # 炸板离场的检查时点。原版 10:00，但引擎无分时线，盘中相位用【收盘价】
+    # 判定与成交 —— 等价于尾盘决策。实测炸板当日盘中是强负漂移
+    # （开盘→收盘 均值 -1.579% / 中位 -1.565% / 63% 收低，全样本对照 +0.112%），
+    # 所以按收盘价卖比按 10:00 价卖系统性地低约 1.5%/笔。
+    # '09:31' 用开盘价成交，最接近原版的 10:00。
+    g.exit_time = getattr(g, 'exit_time', '10:00')
     g.div_method = getattr(g, 'div_method', 'rolling365')
     g.yoy_mode = getattr(g, 'yoy_mode', 'single_q')  # single_q(=JQ原版) / single_q_parent / cumulative  # A-1/A-6: rolling365 / fiscal_year
     g.equal_weight = getattr(g, 'equal_weight', 0)  # 0=原版只分配新钱 / 1=等权再平衡
@@ -180,7 +192,7 @@ def initialize(context):
     run_daily(prepare, time='09:00')
     run_monthly(pick, monthday=g.monthday, time='09:01')
     run_monthly(trade, monthday=g.monthday, time='09:30')
-    run_daily(check_limit_up, time='10:00')
+    run_daily(check_limit_up, time=g.exit_time)
 
 
 def prepare(context):
@@ -263,7 +275,10 @@ def check_limit_up(context):
         d = cur.get(s)
         if d is None:
             continue
-        if not d.get('limit_up'):
+        # ★ 必须按相位取字段：开盘相位拿不到 limit_up（那是收盘派生量），
+        #   直接 d.get('limit_up') 会返回 None -> `not None` 为真 -> 把持仓全卖掉。
+        sealed = d.get('limit_up') if 'limit_up' in d else d.get('open_limit_up')
+        if not sealed:
             order_target_value(s, 0)
             g.blacklist.add(s)
             g.n_exit += 1
