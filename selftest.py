@@ -923,6 +923,44 @@ def t_data_staleness():
                d['n_stale'] + d['n_current'], n_before))
 
 
+@case('平均仓位是比空仓日更本质的检查项')
+def t_exposure():
+    """★ 空仓守卫（n_positions == 0）有盲区：目标 8 只只买到 3 只时
+      n_positions=3>0，守卫完全沉默，而仓位其实只有 ~37%。
+
+    实测红利价值 2005-2025：空仓日 9.0%，但仓位<80% 的日子 22.8% ——
+    中间那 13.8% 全是「有持仓但严重欠配」，此前完全不可见。
+    低仓位意味着收益被现金稀释，与满仓策略【不可直接比】。
+
+    ★ 两侧都测：满仓策略仓位应接近 100% 且无欠配日；
+      欠配策略必须被检出。只测一侧会漏（恒返回低仓位的实现也能通过）。
+    """
+    # ① 满仓：傻瓜基准 30 只等权，仓位应 >95%、无 <80% 的日子
+    m, eng = _run('strategies/红利/傻瓜基准.py', '2016-01-01', '2020-12-31', 1e6, **JQ)
+    assert m.get('exposure_avg') is not None, '缺 exposure_avg 指标'
+    assert m['exposure_avg'] > 95, '满仓策略平均仓位仅 %.1f%%' % m['exposure_avg']
+    assert m['exposure_lt80_pct'] < 1.0, \
+        '满仓策略却有 %.1f%% 的日子仓位<80%%' % m['exposure_lt80_pct']
+    assert m.get('exposure_yearly'), '缺逐年仓位'
+    assert all(v > 90 for v in m['exposure_yearly'].values()), \
+        '逐年仓位有异常低值: %s' % dict(m['exposure_yearly'])
+
+    # ② 欠配：红利价值 2005 起，池子长期给不满 -> 必须检出
+    m2, eng2 = _run('strategies/红利/红利价值.py', '2005-01-01', '2012-12-31', 1e6, **JQ)
+    assert m2['exposure_avg'] < 95, \
+        '欠配区间平均仓位却有 %.1f%%（用例样本失效？）' % m2['exposure_avg']
+    # 关键：仓位低于 80% 的日子必须【多于】空仓日 —— 这就是守卫的盲区
+    empty_pct = m2.get('empty_pct') or 0.0
+    assert m2['exposure_lt80_pct'] > empty_pct, \
+        ('欠配未被检出：仓位<80%% 占 %.1f%%，空仓占 %.1f%% —— '
+         '仓位指标应严格覆盖空仓' % (m2['exposure_lt80_pct'], empty_pct))
+
+    return ('满仓：平均仓位 %.1f%%、<80%% 日 %.1f%%、逐年 %d 年全 >90%%；'
+            '欠配：平均仓位 %.1f%%、<80%% 日 %.1f%% > 空仓 %.1f%%（盲区被覆盖）'
+            % (m['exposure_avg'], m['exposure_lt80_pct'], len(m['exposure_yearly']),
+               m2['exposure_avg'], m2['exposure_lt80_pct'], empty_pct))
+
+
 @case('股票名称按【当时】解析且源正确')
 def t_asof_name():
     """★ 名称必须取自 std/security_name（专用名称历史表），

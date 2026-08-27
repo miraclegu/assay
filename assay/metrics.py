@@ -134,6 +134,27 @@ def summarize(curve, starting_cash, bench=None, broker=None, bench_base=None, en
         m['empty_pct'] = (100.0 * engine.empty_days / len(engine.curve)
                           if engine.curve else 0.0)
         m['empty_span'] = engine.empty_span
+
+        # ★★ 仓位（positions_value / total_value）比「空仓日数」更本质：
+        #   空仓守卫只抓 n_positions == 0，抓不到【欠配】—— 目标 8 只只买到 3 只时
+        #   n_positions=3>0，守卫完全沉默，而仓位其实只有 ~37%。
+        #   实测红利价值：空仓日 8.1%，但仓位<50% 的日子有 11.6% ——
+        #   中间那 3.5% 就是守卫的盲区。
+        #   所以把仓位作为主检查项：低仓位 = 收益被现金稀释 = 指标不可直接比。
+        exp = [(r['positions_value'] / r['total_value']) if r['total_value'] else 0.0
+               for r in engine.daily]
+        if exp:
+            m['exposure_avg'] = 100.0 * sum(exp) / len(exp)
+            m['exposure_min'] = 100.0 * min(exp)
+            m['exposure_lt50_pct'] = 100.0 * sum(1 for x in exp if x < 0.5) / len(exp)
+            m['exposure_lt80_pct'] = 100.0 * sum(1 for x in exp if x < 0.8) / len(exp)
+            by = OrderedDict()
+            for r in engine.daily:
+                y = r['date'].year
+                e = (r['positions_value'] / r['total_value']) if r['total_value'] else 0.0
+                by.setdefault(y, []).append(e)
+            m['exposure_yearly'] = OrderedDict(
+                (y, round(100.0 * sum(v) / len(v), 1)) for y, v in by.items())
     return m
 
 
@@ -228,6 +249,15 @@ def report(curve, starting_cash, broker=None, bench=None, bench_code=None,
     #   SQL 返空集，策略连续空仓，而年化/夏普照常输出、看着完全合理。
     #   实测过一次：beta_daily 起点错设成 2013，红利低波 2005-2012 连续 8 年
     #   空仓（占 38% 时间），报告给出「年化 10.85%」，只有逐年拆表才发现。
+    if m.get('exposure_avg') is not None:
+        ea = m['exposure_avg']
+        lvl = '⚠⚠' if ea < 70 else ('⚠' if ea < 90 else ' ')
+        print('  %s 平均仓位   %11.1f%%   最低 %.1f%%   仓位<80%% 的日子 %.1f%%'
+              % (lvl, ea, m['exposure_min'], m['exposure_lt80_pct']))
+        if ea < 70:
+            print('     ↑ 平均仓位过低 —— 收益被现金稀释，**与满仓策略不可直接比**。')
+            print('       常见原因：目标池长期给不满（选股条件太严）、')
+            print('       或选股 SQL 依赖的表区间不覆盖回测起点。查 [PICK] 的池子规模。')
     if m.get('empty_days'):
         span = m.get('empty_span')
         print('  %s 空仓 %d 交易日（占 %.1f%%）  最长连续 %d 日%s'
