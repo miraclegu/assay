@@ -229,6 +229,12 @@ def api_runs(_q):
             'stale': _staleness(meta)[0],
             'stale_parts': ','.join(_staleness(meta)[1]),
             'params': meta.get('params') or {},
+            # ★ 成本口径必须带出来：本项目两次因为「拿滑点 0 的数字去比含滑点的
+            #   基准」得出错误结论（FROEC 与 v0b 各一次）。选中的规则并列展示时
+            #   必须能一眼看出口径是否一致，否则跨行对比又会是苹果比橘子。
+            'slippage': (meta.get('cost') or {}).get('slippage'),
+            'commission': (meta.get('cost') or {}).get('commission'),
+            'close_tax': (meta.get('cost') or {}).get('close_tax'),
             'mark': (marks.get(rid) or {}).get('mark') or '',
             'mark_note': (marks.get(rid) or {}).get('note') or '',
             'annual_return': st.get('annual_return'),

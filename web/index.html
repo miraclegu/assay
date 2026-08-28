@@ -167,6 +167,22 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 #pick tr{cursor:pointer}
 #pick tr:hover{background:rgba(242,199,68,.08)}
 #pick .mn{color:var(--dim)}
+/* 独立索引页：目录页顶部那条只列关键几列，这里是完整视图 */
+#pk{padding:4px 0}
+#pk h2{font-size:15px;margin:0 0 4px;color:#f2c744}
+#pk .pg{border:1px solid var(--bd);border-radius:6px;margin:14px 0;overflow:hidden}
+#pk .pgh{background:#1b2331;padding:7px 12px;font-size:12.5px;font-weight:600;
+         border-bottom:1px solid var(--bd)}
+#pk .card2{padding:11px 12px;border-bottom:1px solid #202836;cursor:pointer}
+#pk .card2:last-child{border-bottom:none}
+#pk .card2:hover{background:rgba(242,199,68,.06)}
+#pk .r1{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:5px}
+#pk .nm2{font-size:13px;font-weight:600}
+#pk .kv{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;margin:4px 0}
+#pk .kv b{font-size:12.5px}
+#pk .why{color:var(--warn);font-size:11.5px;margin-top:5px;line-height:1.5}
+#pk .cost{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+#pk .none{color:var(--dim);padding:40px 0;text-align:center}
 </style>
 
 <div id="app">
@@ -176,6 +192,7 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
     <div class="sp"></div>
     <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
     <button class="btn" id="expand">全部展开</button>
+    <button class="btn" id="gopicks" title="独立索引页：只看被标星的规则">★ 选中的规则</button>
   </div>
   <div id="cat"></div>
   <div id="vp"></div>
@@ -204,11 +221,13 @@ function route(){
   if(m){ openRun(decodeURIComponent(m[1])); return; }
   const v=/^#\/ver\/([0-9a-f]{6,64})$/.exec(location.hash||'');
   if(v){ openVersion(v[1]); return; }
+  if((location.hash||'')==='#/picks'){ showPicks(); return; }
   showCatalog();
 }
 window.onhashchange=route;
 $('#home').onclick=()=>{location.hash='';};
 $('#back').onclick=()=>{location.hash='';};
+$('#gopicks').onclick=()=>{location.hash='#/picks';};
 
 /* ============ 目录页 ============ */
 const OPEN=new Set();          // 展开状态：'g:小市值' / 's:小市值/v0b'
@@ -285,8 +304,17 @@ function runTable(rs){
 function buildTree(rs){
   const root={dirs:{}, files:{}};
   rs.forEach(r=>{
-    let parts=(r.strategy_path||'').split('/');
-    if(parts[0]==='strategies') parts=parts.slice(1);
+    let parts=(r.strategy_path||'').split('/').filter(Boolean);
+    if(parts[0]==='strategies'){
+      parts=parts.slice(1);
+    }else if(parts.length>1){
+      // ★ 仓库外的路径【压成一层】。诊断用的一次性脚本常放在 scratchpad，
+      //   strategy_path 会是逃逸出仓库的相对路径，例如
+      //   ../../../../private/tmp/claude-501/<...>/scratchpad/froec_oldsql.py
+      //   —— 8 段路径会铺出 8 层、每层只有一个子节点的空壳，把目录树撑坏。
+      //   完整路径仍挂在文件节点的 title 上，可审计。
+      parts=['_仓库外', parts[parts.length-1]];
+    }
     if(parts.length<1||!parts[0]) parts=['_未知路径', r.strategy+'.py'];
     const file=parts.pop();
     let node=root;
@@ -335,7 +363,7 @@ function renderNode(node,depth,keyPrefix,auto){
     h+=`<div class="nd d${depth} ${op?'op':''}" data-k="${k}"
           style="padding-left:${14+depth*20}px">
         <span class="ar">▶</span><span class="ic">📄</span>
-        <span class="nm">${f}</span>${stcnt(rs.filter(r=>r.mark).length)}
+        <span class="nm" title="${esc(rs[0].strategy_path||'')}">${f}</span>${stcnt(rs.filter(r=>r.mark).length)}
         <span class="sub">${vs.length} 个版本 · ${rs.length} 次回测</span>
         ${vs.length===1?`<span class="vnote">${esc(byv[vs[0]][0].note||'（未填简介）')}${
             byv[vs[0]][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
@@ -393,6 +421,72 @@ function renderCatalog(){
     e.onclick=ev=>{ev.stopPropagation();
       location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
   wireStars();
+}
+
+/* ============ 独立索引页：只看标星的规则 ============ */
+/* 目录页顶部那条 #pick 只列关键几列（保留，便于在树里就地看到）；
+   这里是完整视图：按分组/策略归拢，逐条给出参数、区间、本金、成本口径、
+   全部指标、备注与数据新鲜度。
+   ★ 成本口径必须显式列出：本项目两次因为「拿滑点 0 的数字去比含滑点的基准」
+     得出错误结论（FROEC 与 v0b 各一次）。并列展示时口径不同必须看得见，
+     否则跨行比较又是苹果比橘子。 */
+function showPicks(){
+  stopPoll();
+  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#filter').style.display='none'; $('#expand').style.display='none';
+  $('#back').style.display=''; $('#main').style.display='';
+  const ms=RUNS.filter(r=>r.mark);
+  if(!ms.length){
+    $('#main').innerHTML=`<div id="pk"><h2>★ 选中的规则</h2>
+      <div class="none">还没有标星的回测 —— 回目录页点任意回测行最左边的 ☆ 即可。</div></div>`;
+    return;
+  }
+  // 分组 -> 策略
+  const by={};
+  ms.forEach(r=>{ const g=r.group||'（无分组）';
+    (by[g]=by[g]||{})[r.strategy]=((by[g]||{})[r.strategy]||[]).concat([r]); });
+  const costTxt=r=>{
+    const sl=r.slippage==null?'?':(r.slippage===0?'0':(r.slippage*1e4).toFixed(1)+'‱');
+    const cm=r.commission==null?'?':(r.commission*1e4).toFixed(2)+'‱';
+    const tx=r.close_tax==='auto'?'印花税分段':('印花税 '+((+r.close_tax||0)*1e4).toFixed(1)+'‱');
+    return `滑点 ${sl} · 佣金 ${cm} · ${tx}`;
+  };
+  const nDiff=new Set(ms.map(r=>String(r.slippage))).size;
+  $('#main').innerHTML=`<div id="pk">
+    <h2>★ 选中的规则（${ms.length}）</h2>
+    <div class="note">★ 标在【单次回测】上 —— run 记录了策略 + 参数 + 区间 + 成本口径
+      + 数据指纹，才是完整的一条规则；同一策略换个参数就是另一条规则。
+      点卡片进入该次回测详情。${nDiff>1?
+      ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致，跨条比较年化前先看每条的成本行。</b>':''}</div>
+    ${Object.keys(by).sort().map(g=>`
+      <div class="pg"><div class="pgh">${esc(g)}</div>
+      ${Object.keys(by[g]).sort().map(st=>by[g][st].map(r=>`
+        <div class="card2" data-go="${r.run_id}">
+          <div class="r1">
+            <span class="nm2">${esc(st)}</span>
+            ${Object.entries(r.params||{}).map(([k,v])=>
+              `<span class="pill">${esc(k)}=${esc(String(v))}</span>`).join('')||
+              '<span class="pill">默认参数</span>'}
+            ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
+          </div>
+          <div class="kv">
+            <span>年化 <b class="${sign(r.annual_return)}">${pct(r.annual_return,2)}</b></span>
+            <span>回撤 <b class="neg">${pct(r.max_drawdown,2)}</b></span>
+            <span>夏普 <b>${fmtN(r.sharpe)}</b></span>
+            <span>超额年化 <b class="${sign(r.excess_annual)}">${pct(r.excess_annual,2)}</b></span>
+            <span>信息比率 <b>${fmtN(r.info_ratio)}</b></span>
+            <span>年换手 <b>${fmtN(r.turnover_per_year,1)}</b></span>
+            <span>交易 <b>${r.n_trades??'—'}</b></span>
+            <span>胜率 <b>${pct(r.win_rate,1)}</b></span>
+          </div>
+          <div class="cost">${r.start} ~ ${r.end} · 本金 ${(+r.cash).toLocaleString()}
+            · ${costTxt(r)} · <span class="mono">${esc(r.run_id)}</span></div>
+          ${r.mark_note?`<div class="why">${esc(r.mark_note)}</div>`:''}
+        </div>`).join('')).join('')}
+      </div>`).join('')}
+  </div>`;
+  document.querySelectorAll('#pk .card2[data-go]').forEach(e=>
+    e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
 }
 
 /* ============ 选中标记 ============ */

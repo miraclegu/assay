@@ -634,6 +634,14 @@ def t_ui():
             #   所以版本是独立一层；只有一个版本时跳过这层。
             assert pg.locator('.nd.d0').count() > 0, '目录页没有顶层节点'
             assert pg.locator('.nd.op').count() == 0, '节点默认应【全部收起】'
+            # ★ 目录树深度要有上界。诊断脚本放在 scratchpad 时 strategy_path 是
+            #   逃逸出仓库的相对路径（../../../../private/tmp/.../froec_oldsql.py），
+            #   若按目录逐层展开会铺出 8 层每层一个子节点的空壳。仓库内最深是
+            #   strategies/<组>/<文件> -> 目录层只有 1 层（d0），版本层 d1、
+            #   回测表在 d1/d2 内，所以 d5 及更深一定是路径没被压平。
+            deep = pg.locator('.nd.d5, .nd.d6, .nd.d7, .nd.d8').count()
+            assert deep == 0, ('目录树出现 %d 个 d5+ 深层节点 —— 仓库外路径没被'
+                               '压成一层？（见 buildTree 的 _仓库外 分支）' % deep)
             pg.locator('.nd.d0').first.click(); pg.wait_for_timeout(250)
             assert pg.locator('.nd.op').count() == 1, '点击文件夹未展开'
             # 逐层点到有回测表为止（深度不定，最多试 5 层）
@@ -1186,12 +1194,33 @@ def _():
                 after = pg.locator('#pick tr[data-go]').count()
                 assert after == before + 1, \
                     '打星后「选中的规则」没增加（%d -> %d）' % (before, after)
+
+                # --- 独立索引页 #/picks ---
+                # 目录页顶部那条只列关键几列；这一页是完整视图，且必须显式列出
+                # 【成本口径】—— 本项目两次因为拿滑点 0 的数字去比含滑点的基准
+                # 而得出错误结论（FROEC 与 v0b 各一次）。
+                assert pg.locator('#gopicks').count() == 1, '顶栏缺少「★ 选中的规则」入口'
+                pg.click('#gopicks'); pg.wait_for_timeout(600)
+                assert pg.url.endswith('#/picks'), '点入口没进 #/picks: %s' % pg.url
+                assert pg.locator('#pk').count() == 1, '索引页没渲染'
+                ncard = pg.locator('#pk .card2').count()
+                assert ncard == after, \
+                    '索引页卡片数 %d 与标星数 %d 不一致' % (ncard, after)
+                assert not pg.is_visible('#cat'), '进索引页后目录页应隐藏'
+                txt = pg.locator('#pk').inner_text()
+                assert '滑点' in txt, '索引页没有列出成本口径（滑点）'
+                # 点卡片进详情，再后退回索引页
+                pg.locator('#pk .card2').first.click(); pg.wait_for_timeout(700)
+                assert '#/run/' in pg.url, '点卡片没进回测详情: %s' % pg.url
+                pg.go_back(); pg.wait_for_timeout(600)
+                assert pg.url.endswith('#/picks'), '后退没回到索引页: %s' % pg.url
+
                 assert not errs, '页面报错: %s' % errs[:3]
                 br.close()
         finally:
             httpd.shutdown()
-        return ('服务端 5 项 + 浏览器 5 项通过；面板 %d 条选中规则，星标冒泡到顶层'
-                % npick)
+        return ('服务端 5 项 + 浏览器 11 项通过；%d 条选中规则，星标冒泡到顶层，'
+                '独立索引页 #/picks 正常' % npick)
     finally:
         if had:
             shutil.move(bak, sv.MARKS_FILE)
