@@ -54,9 +54,9 @@ def t_baseline():
     """基线数字：改动引擎后必须仍然复现，否则说明引入了行为变化。"""
     m, _ = _run('strategies/小市值/v0b.py', '2019-01-01', '2026-06-30', 1e6, **JQ)
     got = round(m['annual_return'] * 100, 2)
-    assert abs(got - 37.95) < 0.01, 'v0b 年化 %.2f%%，基线 37.95%%' % got
+    assert abs(got - 38.11) < 0.01, 'v0b 年化 %.2f%%，基线 38.11%%' % got
     mdd = round(m['max_drawdown'] * 100, 2)
-    assert abs(mdd - 52.47) < 0.01, 'v0b 回撤 %.2f%%，基线 52.47%%' % mdd
+    assert abs(mdd - 52.57) < 0.01, 'v0b 回撤 %.2f%%，基线 52.57%%' % mdd
     return 'v0b 年化 %.2f%% / 回撤 %.2f%%' % (got, mdd)
 
 
@@ -114,8 +114,8 @@ def t_froec_metrics():
                   bench_base=eng.bench_base)
     checks = [('基准收益', m['benchmark_return'] * 100, 4.76, 0.02),
               ('beta', m['beta'], 0.899, 0.02),
-              ('年化(回归基线)', m['annual_return'] * 100, 41.24, 0.02),
-              ('回撤(回归基线)', m['max_drawdown'] * 100, 47.64, 0.02)]
+              ('年化(回归基线)', m['annual_return'] * 100, 37.41, 0.02),
+              ('回撤(回归基线)', m['max_drawdown'] * 100, 47.38, 0.02)]
     bad = ['%s %.2f≠%.2f' % (n, g, w) for n, g, w, tol in checks if abs(g - w) > tol]
     assert not bad, '; '.join(bad)
     return '基准 %.2f%% / beta %.3f / 年化 %.2f%% / 回撤 %.2f%%' % (
@@ -997,6 +997,86 @@ def t_asof_name():
     assert got == want, '当时名称解析错: %s，应为 %s' % (got, want)
     return '%s 行名称与权威源一致；002711 改名轨迹 %s' % (
         format(total, ','), ' -> '.join(want))
+
+
+@case('候选宇宙不能用面板当日行')
+def _():
+    """面板是 K 线驱动的：停牌股当日无 K 线 -> 无行 -> 不进任何横截面统计。
+
+    这不是小数点问题：FROEC 对标聚宽长期差 +4.44pp，归因过程里我先怀疑过
+    盈亏比定义、持仓不满、14:00 成交价代理、候选池基数、流通股本 look-ahead
+    —— 全部被实测打掉。真正的成因是这一条：2015-12-31 面板 2542 行，
+    而权威在市股票 2811 只，缺的 267 只≈当日停牌 266 只。聚宽
+    get_all_securities() 含停牌股，它们参与【PB 半区 / ROE 十分位的切点计算】，
+    还能先占掉 [:10] 的名额再被 filter_paused_stock 删掉。
+    修正后 2015-12-31 选股 top15 从「同集合 11/15、同序 2/15」变成
+    【15/15 精确同序】，年化 41.02% -> 37.41%（聚宽 36.80%）。
+
+    教训：任何做横截面分位数/排名的策略，候选宇宙都必须来自权威在册表，
+    不能来自价格面板。分位切点对宇宙缺失【不是线性不敏感】的 —— 缺 9.5%
+    的样本会把 pb 半区切点、ROE 十分位边界一起推移。
+    """
+    import duckdb
+    root = '/Users/guhao/finacial/datalake'
+    con = duckdb.connect()
+    sd = '2015-12-31'
+    n_panel = con.execute(
+        "SELECT count(*) FROM read_parquet('%s/mart/panel_daily/panel_2015.parquet')"
+        " WHERE date = DATE '%s'" % (root, sd)).fetchone()[0]
+    n_univ = con.execute(
+        "SELECT count(*) FROM read_parquet('%s/std/security_universe.parquet')"
+        " WHERE sec_type='stock' AND list_date <= DATE '%s'"
+        "   AND (delist_date IS NULL OR delist_date > DATE '%s')" % (root, sd, sd)
+    ).fetchone()[0]
+    n_paused = con.execute(
+        "SELECT count(*) FROM read_parquet('%s/mart/paused_daily/*.parquet')"
+        " WHERE date = DATE '%s'" % (root, sd)).fetchone()[0]
+    gap = n_univ - n_panel
+    assert gap > 200, (
+        '面板与权威宇宙的差额只有 %d —— 若面板已含停牌股行，本用例的前提变了，'
+        '请改判并同步修正 froec.py 的 univ CTE' % gap)
+    assert abs(gap - n_paused) < 0.15 * n_paused, (
+        '缺额 %d 与当日停牌数 %d 差太多，说明缺的不只是停牌股，需重新归因'
+        % (gap, n_paused))
+    # froec.py 必须已经改用权威宇宙，且不再用单季 eps
+    import io as _io2
+    src = _io2.open('strategies/小市值/froec.py', encoding='utf-8').read()
+    assert 'security_universe' in src, 'froec.py 未使用权威宇宙，停牌股仍会缺席'
+    assert 'eps_q >' not in src and 'eps_q>' not in src, (
+        'froec.py 的过滤条件仍在用单季 eps_q（聚宽用累计 indicator.eps）')
+    assert 'e.eps > 0' in src, 'froec.py 未用 fin_indicator_q 的累计 eps 做过滤'
+    return ('面板 %d 行 vs 权威在市 %d 只，缺 %d ≈ 当日停牌 %d；'
+            'froec.py 已改用权威宇宙 + 累计 eps' % (n_panel, n_univ, gap, n_paused))
+
+
+@case('流通A股扣除 B/H 股')
+def _():
+    """share_trade_total 是「全部无限售流通股」，含 B/H 股；聚宽
+    circulating_market_cap 只算 A 股。321 个代码有 B/H，其中 16% 的行
+    B/H 字段为 NULL，必须前向结转 —— 直接 COALESCE(...,0) 会把这些行算大。
+
+    四个独立佐证（2015-12-31，与聚宽实测值比）：
+      600054 黄山旅游  含B 64.602亿 / 扣B 27.770亿 = 聚宽 27.770亿
+      000756 新华制药  含H 61.326亿 / 扣H 41.211亿 = 聚宽 41.211亿
+      002705 / 300317  无 B/H，扣不扣都等于聚宽
+    """
+    import duckdb
+    root = '/Users/guhao/finacial/datalake'
+    con = duckdb.connect()
+    want = {'600054.XSHG': 27.770, '000756.XSHE': 41.211,
+            '002705.XSHE': 22.871, '300317.XSHE': 41.258}
+    got = {}
+    for code, jqv in want.items():
+        r = con.execute(
+            "SELECT floatmv/1e8 FROM read_parquet('%s/mart/panel_daily/panel_2015.parquet')"
+            " WHERE jq_code='%s' AND date=DATE '2015-12-31'" % (root, code)).fetchone()
+        assert r and r[0], '%s 当日无 floatmv' % code
+        got[code] = r[0]
+        assert abs(r[0] - jqv) < 0.01, (
+            '%s 流通市值 %.3f 亿，聚宽 %.3f 亿 —— 差这么多通常是 B/H 股没扣，'
+            '或 B/H 字段 NULL 未前向结转' % (code, r[0], jqv))
+    return '4 只逐个吻合聚宽（含 1 只B股 1 只H股）: ' + ', '.join(
+        '%s %.3f亿' % (k.split('.')[0], v) for k, v in got.items())
 
 
 def main():

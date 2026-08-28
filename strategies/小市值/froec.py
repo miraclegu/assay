@@ -23,20 +23,71 @@ EXCL_IND = ('钢铁I', '煤炭I', '石油石化I', '采掘I', '银行I', '非银
 #   聚宽源码是 list(df.code)[:int(0.5*len(df.code))]，
 #   ntile 会把余数分给前桶(等价 ceil)，多取一只就会推移下游边界。
 SQL = """
-WITH q AS (
-  SELECT code, roe, row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
+WITH univ AS (
+  -- ★★ 候选宇宙必须是【权威在册股票】，不能用面板当日行。
+  --   面板是 K 线驱动的：停牌股当日无 K 线 -> 无行 -> 根本不进漏斗。
+  --   实测 2015-12-31：面板 2542 行 vs 权威在市 2811 只，缺 267 只，
+  --   而 paused_daily 当日停牌 266 只 —— 缺的就是停牌股。
+  --   聚宽 get_all_securities() 含停牌股，它们会参与 PB 半区与 ROE 十分位的
+  --   【切点计算】，还能先占掉 [:10] 的名额再被 filter_paused_stock 删掉。
+  --   漏掉它们的后果（2015-12-31 实测）：
+  --     L5 eps>0   1863 -> 2054  (JQ 2050)
+  --     L7 pb半区   931 -> 1027  (JQ 1025)
+  --     L10/L11    数量从对不上到【精确等于 101 / 94】
+  SELECT code FROM read_parquet('{root}/std/security_universe.parquet')
+  WHERE sec_type='stock' AND list_date <= DATE '{sd}'
+    AND (delist_date IS NULL OR delist_date > DATE '{sd}')
+    AND date_diff('day', list_date::DATE, DATE '{sd}') >= {listed}
+    AND code NOT LIKE '{kcb}'
+    AND hash(code || '{salt}') % 10000 >= {pert}
+), today AS (
+  SELECT jq_code, pb, floatmv, is_risk_warned, sw_l1_name
+  FROM {panel} WHERE date = DATE '{sd}'
+), miss AS (
+  -- 当日无 K 线（停牌）：只结转【价格派生量】(pb/floatmv)，与聚宽一致 ——
+  -- 停牌股的 valuation 按最后收盘价算。★ 基本面【不结转】：聚宽的
+  -- get_fundamentals 无论是否停牌都给当前最新报告，结转会拿到过期报告。
+  -- 实测 002379.XSHE@2015-12-31：结转基本面得 2015-06-30 的 eps=-0.0286
+  -- 被 eps>0 误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽选中了它）。
+  SELECT u.code AS jq_code, p.pb, p.floatmv, p.is_risk_warned, p.sw_l1_name
+  FROM (SELECT code, DATE '{sd}' AS d FROM univ
+        WHERE code NOT IN (SELECT jq_code FROM today)) u
+  ASOF LEFT JOIN (
+      SELECT jq_code, date, pb, floatmv, is_risk_warned, sw_l1_name
+      FROM {panel} WHERE date > DATE '{sd}' - INTERVAL 400 DAY
+  ) p ON p.jq_code = u.code AND p.date <= u.d
+), ind AS (
+  SELECT code, roe, report_date,
+         row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
   FROM read_parquet('{root}/std/fin_indicator_q.parquet')
   WHERE pub_date <= DATE '{sd}' AND roe IS NOT NULL
+), eps1 AS (
+  -- ★ eps 取 fin_indicator_q（聚宽 indicator.eps）按【决策日】as-of，
+  --   不从面板结转。面板的 eps_q 值与 indicator.eps 完全一致
+  --   （2015-12-31 实测 2512 只有行情票 100.00% 数值相同，名字带 _q 但不是单季），
+  --   所以对【有行情】的票用哪边都一样；差别只出在停牌股：
+  --   结转面板会拿到该股【最后交易日】那天的基本面，可能是过期报告。
+  --   实测 002379.XSHE@2015-12-31：结转得 2015-06-30 的 eps=-0.0286 被 eps>0
+  --   误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽正是选中了它）。
+  --   聚宽 get_fundamentals 无论是否停牌都返回当前最新报告 —— 基本面不结转。
+  SELECT code, eps FROM (
+    SELECT code, eps, row_number() OVER (PARTITION BY code
+             ORDER BY report_date DESC, pub_date DESC) rn
+    FROM read_parquet('{root}/std/fin_indicator_q.parquet')
+    WHERE pub_date <= DATE '{sd}' AND eps IS NOT NULL
+  ) WHERE rn = 1
 ), roec AS (
   SELECT code, 4*max(CASE WHEN rn=1 THEN roe END)
          - max(CASE WHEN rn=2 THEN roe END) - max(CASE WHEN rn=3 THEN roe END)
          - max(CASE WHEN rn=4 THEN roe END) - max(CASE WHEN rn=5 THEN roe END) AS increase
-  FROM q WHERE rn <= 5 GROUP BY 1 HAVING count(*) = 5
+  FROM ind WHERE rn <= 5 GROUP BY 1 HAVING count(*) = 5
 ), base AS (
-  SELECT jq_code, floatmv, pb, sw_l1_name FROM {panel}
-  WHERE date = DATE '{sd}' AND NOT is_risk_warned AND listed_days > {listed}
-    AND list_date IS NOT NULL AND symbol NOT LIKE 'sh68%'
-    AND eps_q > 0 AND pb > 0 AND floatmv > 0
+  SELECT r.* FROM (
+    SELECT * FROM today WHERE jq_code IN (SELECT code FROM univ)
+    UNION ALL SELECT * FROM miss WHERE {pin}
+  ) r JOIN eps1 e ON e.code = r.jq_code
+  WHERE NOT COALESCE(r.is_risk_warned, FALSE)
+    AND e.eps > 0 AND r.pb > 0 AND r.floatmv > 0
 ), pb_half AS (
   SELECT * FROM (SELECT *, row_number() OVER (ORDER BY pb ASC) rn,
                         count(*) OVER () AS n FROM base)
@@ -56,18 +107,81 @@ ORDER BY floatmv ASC LIMIT {cand}
 
 
 def initialize(context):
-    g.stock_num = 10
-    g.candidate_num = 10        # 原版 get_stock_list()[:10]：先截再过滤、不补位
-    g.listed_days = 250
-    g.limit_days = 20
+    g.stock_num = getattr(g, 'stock_num', 10)
+    # 原版 get_stock_list()[:10]：先截再过滤、不补位
+    g.candidate_num = getattr(g, 'candidate_num', 10)
+    g.listed_days = getattr(g, 'listed_days', 250)
+    g.limit_days = getattr(g, 'limit_days', 20)
+    g.weekday = getattr(g, 'weekday', 1)
+    # ---- 用于定位对标残差的两个开关（默认严格等于原版）----
+    # 本地 41.24% vs JQ 36.80%（2016-01-01~2026-08-07，本金 10 万），差 +4.44pp。
+    # 折算每笔约高 0.44%（967 笔 / 10 仓 ≈ 97 轮），量级像【成交价差异】
+    # 而非选股差异 —— 胜率 61.94% 与 JQ 61.9% 几乎精确吻合。
+    # 主要嫌疑：14:00 的炸板卖出。引擎无分时线，盘中相位用【收盘价】
+    # 判定与成交，而 JQ 用 14:00 的分钟线价格。
+    #   limit_up_exit  0 = 整条炸板规则关掉（量化这条规则值多少）
+    #   exit_time      '14:00' 收盘价代理（原实现）/ '09:30' 开盘价成交
+    #                  注意引擎相位边界是 t<='09:30' 才算 OPEN，'09:31' 已是 INTRADAY
+    g.limit_up_exit = getattr(g, 'limit_up_exit', 1)
+    g.exit_time = getattr(g, 'exit_time', '14:00')
+    # ---- 补位开关（单变量隔离「停牌股占名额」这一条）----
+    # 0 = 聚宽原版：get_stock_list()[:10] 先截断，再 filter_paused_stock，
+    #     停牌股占掉的名额【不补】—— 目标池可能只有 8、9 只。
+    # 1 = 补位：先剔停牌/涨跌停，再截到 stock_num，永远尽量填满 10 只。
+    #     池子要相应放宽（fill_pool），否则过滤完不够 10 只，等于没补。
+    # ★ 两种模式共用同一个候选宇宙和同一个 eps 口径，所以【分位切点完全相同】，
+    #   差异只来自"名额补不补"这一件事 —— 这是和旧版对比学不到的：
+    #   旧版同时改了宇宙和 eps，两版平均持仓其实一样（8.60 vs 8.67），
+    #   3.99pp 的差来自选股不同，不是补位。
+    g.fill_paused = getattr(g, 'fill_paused', 0)
+    g.fill_pool = getattr(g, 'fill_pool', 40)
+    # ---- 还原「面板缺停牌股」这个历史 bug（单变量）----
+    # 1 = 正确：候选宇宙含停牌股（聚宽 get_all_securities 的语义）
+    # 0 = 复现 bug：宇宙只取面板当日有 K 线的行，停牌股整体缺席。
+    #     ★ 这一条和 fill_paused 是【两个不同的变量】，不要混：
+    #       paused_in_pool=0 -> 停牌股不参与【分位切点计算】(PB 半区/ROE 十分位)
+    #                           2015-12-31 实测 L5 2050->1863、L7 1025->931，
+    #                           切点位移 -> 选到完全不同的票
+    #       fill_paused=1    -> 宇宙正确，只改「名额补不补」
+    #     旧版之所以年化偏高 3.99pp，主因是前者（切点位移），不是后者：
+    #     旧版与新版平均持仓几乎相同（8.67 vs 8.60）、持仓重合 97.7%。
+    g.paused_in_pool = getattr(g, 'paused_in_pool', 1)
+    # ---- 科创板过滤口径（另一个单变量）----
+    # 1 = 正确：只排 688*。聚宽原版 filter_kcb_stock 是 stock[0:3] != '688'，
+    #     【保留】689 开头的科创板 CDR。
+    # 0 = 复现旧实现：按 tdx symbol 'sh68%' 排除，把 689009.XSHG（九号公司，
+    #     全样本唯一的 689 代码）也一起排掉了。
+    #     一只票就能让 base 从 3434 变 3433 -> floor(0.5*n) 与 floor(0.1*n2)
+    #     两级边界同时位移 -> 边界票被换掉。实测 2024-09-06 就是这样把
+    #     603955.XSHG 挤出 roe_top 的。10.5 年复利放大成 1.67pp 年化差 ——
+    #     ★ 分位截断对宇宙大小【不是线性不敏感】，差一只票也会改变选股。
+    g.kcb_688_only = getattr(g, 'kcb_688_only', 1)
+    # ---- 刀刃敏感度探针（不是策略参数，是稳健性度量）----
+    # 从候选宇宙里【确定性地】剔掉万分之 pert 的票（salt 换一批）。
+    # 用途：分位截断 floor(0.5*n)/floor(0.1*n2) 会随宇宙大小推移边界，
+    # 若剔掉几只无关的票就能让年化动几个 pp，那么"两种宇宙定义谁更好"
+    # 这个问题本身就没有意义 —— 差异是边界位移，不是经济信号。
+    # 实测（2016-01-01~2026-08-07，10万，--jq-cost，13 组 salt，
+    #       每组从 4484 只宇宙里剔掉 3~10 只，占 0.07%~0.22%）：
+    #   基准(完整宇宙) 37.41%  <- 【14 个配置里最低的一个】
+    #   扰动后均值 40.14%，区间 37.81%~42.34%，极差 4.53pp
+    #   13/13 全为正，对称零假设下 p = 2^-13 = 0.00012
+    # 对照：剔 267 只停牌股(旧 bug) +3.61pp；689009 一只票 +1.67pp。
+    # 结论：剔掉【任何】一小撮票都会系统性抬高回测收益，旧 bug 的优势
+    #   落在同一区间内 —— 它不是选股逻辑的胜利，是分位截断的边界位移。
+    #   ★ 因此【不能用回测收益来选】"含不含停牌股"/"补不补位"。
+    #   ★ 也因此对标聚宽必须让宇宙【完全一致】：0.15% 的宇宙差异会被
+    #     放大成约 2.7pp 年化，远大于当前 +0.61pp 的残差。
+    g.pert = getattr(g, 'pert', 0)
+    g.pert_salt = getattr(g, 'pert_salt', 'a')
     g.hold_history = []
     g.high_limit = set()
 
     set_benchmark('000905.XSHG')      # 与聚宽原版一致：中证 500
 
     run_daily(prepare, time='09:05')
-    run_weekly(rebalance, weekday=1, time='09:30')
-    run_daily(check_limit_up, time='14:00')
+    run_weekly(rebalance, weekday=g.weekday, time='09:30')
+    run_daily(check_limit_up, time=g.exit_time)
 
 
 def prepare(context):
@@ -85,8 +199,13 @@ def rebalance(context):
     d = context.previous_date
     if d is None:
         return
+    # 补位模式要更宽的池子：过滤发生在截断【之前】，池子不够就补不满。
+    lim = g.fill_pool if g.fill_paused else g.candidate_num
     df = context.data.query(
-        SQL, sd=d, listed=g.listed_days, cand=g.candidate_num,
+        SQL, sd=d, listed=g.listed_days, cand=lim,
+        pin='TRUE' if g.paused_in_pool else 'FALSE',
+        kcb='688%' if g.kcb_688_only else '68%',
+        pert=g.pert, salt=g.pert_salt,
         excl=','.join("'%s'" % x for x in EXCL_IND))
     cand = df['jq_code'].tolist()
     if not cand:
@@ -121,7 +240,7 @@ def rebalance(context):
 
 
 def check_limit_up(context):
-    if not g.high_limit:
+    if not g.limit_up_exit or not g.high_limit:
         return
     codes = [c for c in g.high_limit if c in context.portfolio.positions]
     if not codes:
@@ -131,5 +250,10 @@ def check_limit_up(context):
     cur = context.current(codes)
     for code in codes:
         d = cur.get(code)
-        if d is not None and not d.get('limit_up'):
+        if d is None:
+            continue
+        # ★ 按相位取字段：OPEN 阶段没有 limit_up（那是收盘派生量），
+        #   直接取会得 None -> `not None` 为真 -> 把持仓全卖掉。
+        sealed = d.get('limit_up') if 'limit_up' in d else d.get('open_limit_up')
+        if not sealed:
             order_target_value(code, 0)
