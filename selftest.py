@@ -641,7 +641,15 @@ def t_ui():
                 nxt.last.click(); pg.wait_for_timeout(300)
             assert rows.count() > 0, '逐层展开后仍没有回测行'
             # 回测必须按【运行时间】倒序
-            ra = [rows.nth(i).locator('td').nth(12).inner_text()
+            # ★ 列下标【按表头文字算】，不写死数字 —— 表格加一列（如后来加的
+            #   ★ 选中标记列）就会把所有下标推移一位，写死数字会误断成
+            #   「未按时间倒序」，而实际读到的是胜率那一列。
+            tb = pg.locator('.runs:visible').first
+            ths = tb.locator('thead th')
+            ci = next((i for i in range(ths.count())
+                       if ths.nth(i).inner_text().strip() == '跑于'), None)
+            assert ci is not None, '回测表里找不到「跑于」列'
+            ra = [rows.nth(i).locator('td').nth(ci).inner_text()
                   for i in range(min(rows.count(), 6))]
             assert ra == sorted(ra, reverse=True), '回测未按运行时间倒序: %s' % ra
             rows.first.click(); pg.wait_for_timeout(1500)
@@ -1077,6 +1085,112 @@ def _():
             '或 B/H 字段 NULL 未前向结转' % (code, r[0], jqv))
     return '4 只逐个吻合聚宽（含 1 只B股 1 只H股）: ' + ', '.join(
         '%s %.3f亿' % (k.split('.')[0], v) for k, v in got.items())
+
+
+@case('选中标记：打星 / 冒泡 / 不误触发')
+def _():
+    """★ 打在【单次回测】上，因为 run 才记录了策略+参数+区间+成本+数据指纹，
+    构成一条完整的「规则」；策略文件或代码版本都不够 —— 同一版本换个参数
+    就是另一条规则（froec 的 kcb_688_only=0 与默认值是两条）。
+
+    三个容易错的点，都要真浏览器才测得出来：
+      1) 星标要【向上冒泡】到版本/文件/目录三层，否则折叠状态下看不见，
+         「打标记方便找」的目的就落空了。
+      2) 点星不能连带打开回测详情页 —— 行本身有 onclick，必须 stopPropagation。
+      3) 标记文件里会残留【已删除归档】的 run_id（清理归档不同步删标记），
+         /api/marks 必须过滤掉，否则前端渲染出点不开的空行。
+    ★ 用完恢复标记文件：测试不该改动用户真实的选中状态。
+    """
+    import json
+    import shutil
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    runs = sv.api_runs({})
+    if not runs:
+        return '跳过（归档为空）'
+
+    bak = sv.MARKS_FILE + '.selftest-bak'
+    had = os.path.isfile(sv.MARKS_FILE)
+    if had:
+        shutil.copy2(sv.MARKS_FILE, bak)
+    try:
+        # --- 服务端：非法输入必须拒掉，不能静默写进去 ---
+        rid = runs[0]['run_id']
+        assert sv.api_mark({}, {'run_id': '../../etc/passwd', 'mark': 'star'}).get('error'), \
+            '目录穿越的 run_id 未被拒绝'
+        assert sv.api_mark({}, {'run_id': rid, 'mark': '<script>'}).get('error'), \
+            '未知标记类型未被拒绝'
+        assert sv.api_mark({}, {'run_id': '99999999-000000-000000',
+                                'mark': 'star'}).get('error'), '不存在的 run_id 未被拒绝'
+        # 控制字符要被剥掉（备注直接渲染进页面）
+        r = sv.api_mark({}, {'run_id': rid, 'mark': 'star', 'note': 'a\x00\x07b'})
+        assert r.get('ok') and '\x00' not in r['note'] and '\x07' not in r['note'], \
+            '备注里的控制字符没被剥掉: %r' % r.get('note')
+        # 残留 run_id 要被 /api/marks 过滤
+        d = sv._load_marks()
+        d['20200101-000000-deadbe'] = {'mark': 'star', 'note': '已删归档', 'ts': ''}
+        sv._save_marks(d)
+        ids = {m['run_id'] for m in sv.api_marks({})}
+        assert '20200101-000000-deadbe' not in ids, '已删归档的残留标记未被过滤'
+        assert rid in ids, '刚打的标记没出现在 /api/marks'
+        d.pop('20200101-000000-deadbe'); sv._save_marks(d)
+
+        # --- 浏览器：渲染 + 冒泡 + 点击语义 ---
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return '服务端 5 项通过；浏览器部分跳过（无 playwright）'
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            with sync_playwright() as pw:
+                try:
+                    br = pw.chromium.launch()
+                except Exception as e:                      # noqa: BLE001
+                    return '服务端 5 项通过；浏览器不可用(%s)' % type(e).__name__
+                pg = br.new_page(viewport={'width': 1500, 'height': 900})
+                errs = []
+                pg.on('pageerror', lambda e: errs.append(str(e)))
+                pg.on('console', lambda m: errs.append('console: ' + m.text)
+                      if m.type == 'error' else None)
+                pg.on('dialog', lambda dl: dl.accept('selftest 备注'))
+                pg.goto('http://127.0.0.1:%d/' % port, wait_until='networkidle')
+                pg.wait_for_timeout(900)
+
+                assert pg.locator('#pick').count() == 1, '顶部「选中的规则」面板没渲染'
+                npick = pg.locator('#pick tr[data-go]').count()
+                assert npick >= 1, '「选中的规则」面板里没有行'
+                # 冒泡：至少有一个收起的顶层节点带 ★ 计数
+                assert pg.locator('.nd.d0 .stcnt').count() >= 1, \
+                    '星标没有冒泡到顶层目录节点（折叠时将看不见）'
+
+                # 用「全部展开」把所有回测露出来 —— 逐层点会停在某个只含
+                # 已打星行的子树上，导致找不到可点的目标（实测踩过）。
+                pg.click('#expand'); pg.wait_for_timeout(900)
+                st = pg.locator('.runs tbody tr:not(.marked) .st').first
+                assert st.count(), '找不到未打星的回测行'
+                before = pg.locator('#pick tr[data-go]').count()
+                st.click(); pg.wait_for_timeout(700)
+                # 点星不能跳转
+                assert not pg.url.rstrip('/').endswith('#/run') and '#/run/' not in pg.url, \
+                    '点击星标误触发了跳转到回测详情页（stopPropagation 失效）'
+                after = pg.locator('#pick tr[data-go]').count()
+                assert after == before + 1, \
+                    '打星后「选中的规则」没增加（%d -> %d）' % (before, after)
+                assert not errs, '页面报错: %s' % errs[:3]
+                br.close()
+        finally:
+            httpd.shutdown()
+        return ('服务端 5 项 + 浏览器 5 项通过；面板 %d 条选中规则，星标冒泡到顶层'
+                % npick)
+    finally:
+        if had:
+            shutil.move(bak, sv.MARKS_FILE)
+        elif os.path.isfile(sv.MARKS_FILE):
+            os.remove(sv.MARKS_FILE)
 
 
 def main():

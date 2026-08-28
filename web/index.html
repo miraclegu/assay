@@ -150,6 +150,23 @@ pre{background:var(--panel);border:1px solid var(--line);border-radius:7px;paddi
 #empty{padding:60px 0;text-align:center;color:var(--dim)}
 select,input[type=date]{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
   border-radius:5px;padding:4px 7px;font-size:12px}
+/* 选中标记：★ 打在【单次回测】上 —— run 才记录了策略+参数+区间+成本+数据指纹，
+   即完整的「规则」；策略文件或版本都不足以确定一条规则（同版本不同参数是不同规则）。 */
+.st{cursor:pointer;font-size:14px;line-height:1;user-select:none;color:#3b4657;
+    padding:0 2px;transition:color .12s}
+.st:hover{color:#c9a227}
+.st.on{color:#f2c744;text-shadow:0 0 6px rgba(242,199,68,.45)}
+tr.marked{background:rgba(242,199,68,.07)}
+tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid rgba(242,199,68,.25)}
+.stcnt{color:#f2c744;font-size:11px;margin-left:6px}
+#pick{border:1px solid rgba(242,199,68,.35);border-radius:6px;background:rgba(242,199,68,.05);
+      padding:10px 12px;margin:0 0 12px}
+#pick h3{margin:0 0 8px;font-size:12.5px;color:#f2c744;font-weight:600}
+#pick table{width:100%;border-collapse:collapse;font-size:11.5px}
+#pick td{padding:3px 8px 3px 0;vertical-align:top}
+#pick tr{cursor:pointer}
+#pick tr:hover{background:rgba(242,199,68,.08)}
+#pick .mn{color:var(--dim)}
 </style>
 
 <div id="app">
@@ -234,7 +251,7 @@ function agg(rs){                // 一组回测的汇总
           latest:rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1)[0]};
 }
 const RUNCOLS=[
-  ['run_id','run_id',1],['start','区间',1],['cash','初始资金'],['params','参数',1],
+  ['mark','★'],['run_id','run_id',1],['start','区间',1],['cash','初始资金'],['params','参数',1],
   ['annual_return','年化'],['max_drawdown','回撤'],['excess_annual','超额年化'],
   ['info_ratio','信息比率'],['sharpe','夏普'],['turnover_per_year','年换手'],
   ['n_trades','交易'],['win_rate','胜率'],['ran_at','跑于',1]];
@@ -243,7 +260,10 @@ function runTable(rs){
   rs=rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1);
   return `<div class="runs"><table><thead><tr>${RUNCOLS.map(([,t,l])=>
       `<th class="${l?'l':''}">${t}</th>`).join('')}</tr></thead><tbody>
-    ${rs.map(r=>`<tr data-id="${r.run_id}">
+    ${rs.map(r=>`<tr data-id="${r.run_id}" class="${r.mark?'marked':''}">
+      <td><span class="st ${r.mark?'on':''}" data-mk="${r.run_id}"
+        title="${r.mark?('已选中'+(r.mark_note?'：'+esc(r.mark_note):'')+'（点击取消）'):'标记为选中的规则'}"
+        >${r.mark?'★':'☆'}</span></td>
       <td class="l mono">${r.run_id}${r.stale?`<span class="stale" title="归档时的数据与当前不一致，变化部件：${esc(r.stale_parts)}">数据已变</span>`:''}</td>
       <td class="l">${r.start} ~ ${r.end}</td>
       <td>${(+r.cash).toLocaleString()}</td>
@@ -276,15 +296,19 @@ function buildTree(rs){
   return root;
 }
 function countTree(node){
-  let files=0,runs=0,strats=0,best=null;
+  // ★ marked 要向上冒泡：折叠状态下也得看得见这个目录里有没有选中的规则，
+  //   否则「打标记方便找」这个目的就落空了 —— 还得逐层展开才知道。
+  let files=0,runs=0,strats=0,best=null,marked=0;
   Object.values(node.dirs).forEach(d=>{const c=countTree(d);
-    files+=c.files; runs+=c.runs; strats+=c.strats;
+    files+=c.files; runs+=c.runs; strats+=c.strats; marked+=c.marked;
     if(c.best!=null&&(best==null||c.best>best)) best=c.best;});
   Object.values(node.files).forEach(rs=>{files++; runs+=rs.length;
     strats+=new Set(rs.map(r=>r.code_sha)).size;
-    rs.forEach(r=>{if(r.annual_return!=null&&(best==null||r.annual_return>best)) best=r.annual_return;});});
-  return {files,runs,strats,best};
+    rs.forEach(r=>{if(r.mark) marked++;
+      if(r.annual_return!=null&&(best==null||r.annual_return>best)) best=r.annual_return;});});
+  return {files,runs,strats,best,marked};
 }
+function stcnt(n){return n?`<span class="stcnt" title="含 ${n} 条选中的规则">★${n>1?'×'+n:''}</span>`:'';}
 function renderNode(node,depth,keyPrefix,auto){
   let h='';
   // 文件夹（可嵌套）
@@ -293,7 +317,7 @@ function renderNode(node,depth,keyPrefix,auto){
     h+=`<div class="nd d${depth} ${op?'op':''}" data-k="${k}"
           style="padding-left:${14+depth*20}px">
         <span class="ar">▶</span><span class="ic">📁</span>
-        <span class="nm">${d}</span>
+        <span class="nm">${d}</span>${stcnt(c.marked)}
         <span class="sub">${c.files} 个文件 · ${c.strats} 个策略 · ${c.runs} 次回测</span>
         <span class="sp"></span>
         <span class="sub">最佳年化 <b class="${sign(c.best)}">${pct(c.best,1)}</b></span></div>
@@ -311,7 +335,7 @@ function renderNode(node,depth,keyPrefix,auto){
     h+=`<div class="nd d${depth} ${op?'op':''}" data-k="${k}"
           style="padding-left:${14+depth*20}px">
         <span class="ar">▶</span><span class="ic">📄</span>
-        <span class="nm">${f}</span>
+        <span class="nm">${f}</span>${stcnt(rs.filter(r=>r.mark).length)}
         <span class="sub">${vs.length} 个版本 · ${rs.length} 次回测</span>
         ${vs.length===1?`<span class="vnote">${esc(byv[vs[0]][0].note||'（未填简介）')}${
             byv[vs[0]][0].note_src==='docstring'?'<span class="cmt" style="margin-left:6px">取自 docstring</span>':''}</span>
@@ -330,7 +354,7 @@ function renderNode(node,depth,keyPrefix,auto){
         h+=`<div class="nd d${depth+1} ${vop?'op':''}" data-k="${vk}"
               style="padding-left:${14+(depth+1)*20}px">
             <span class="ar">▶</span><span class="ic">⌗</span>
-            <span class="nm sha">${v}</span>
+            <span class="nm sha">${v}</span>${stcnt(byv[v].filter(r=>r.mark).length)}
             ${(()=>{const nb=new Set(byv[v].map(r=>r.code_sha)).size;
                 return nb>1?`<span class="pill" title="行为相同，仅注释/排版/简介不同">${nb} 份字节版本</span>`:'';})()}
             <span class="vnote">${esc(byv[v][0].note||'（未填简介）')}${
@@ -352,7 +376,7 @@ function renderCatalog(){
   if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
     (RUNS.length?'没有匹配的回测':'还没有归档 —— 先跑一次 <code>python3 run.py ...</code>')+'</div>';return;}
   const auto=!!q;            // 过滤时自动展开，否则默认全收起
-  $('#cat').innerHTML=fpBar()+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
+  $('#cat').innerHTML=fpBar()+pickBar()+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
     `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
       所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
       回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;
@@ -368,6 +392,58 @@ function renderCatalog(){
   document.querySelectorAll('.runs tbody tr').forEach(e=>
     e.onclick=ev=>{ev.stopPropagation();
       location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
+  wireStars();
+}
+
+/* ============ 选中标记 ============ */
+/* ★ 打在【单次回测】上：run 记录了策略 + 参数 + 区间 + 成本 + 数据指纹，
+   才构成一条完整的「规则」。策略文件或代码版本都不够 —— 同一版本换个
+   参数就是另一条规则（froec 的 kcb_688_only=0 与默认值就是两条）。 */
+function pickBar(){
+  const ms=RUNS.filter(r=>r.mark);
+  if(!ms.length) return '';
+  ms.sort((a,b)=>((a.group||'')+a.strategy).localeCompare((b.group||'')+b.strategy));
+  return `<div id="pick"><h3>★ 选中的规则（${ms.length}）</h3><table>${ms.map(r=>
+    `<tr data-go="${r.run_id}">
+       <td style="white-space:nowrap"><b>${esc(r.strategy)}</b></td>
+       <td>${Object.entries(r.params||{}).map(([k,v])=>
+            `<span class="pill">${esc(k)}=${esc(String(v))}</span>`).join('')||
+            '<span class="mn">默认参数</span>'}</td>
+       <td style="white-space:nowrap">年化 <b class="${sign(r.annual_return)}"
+            >${pct(r.annual_return,2)}</b></td>
+       <td style="white-space:nowrap">回撤 <span class="neg">${pct(r.max_drawdown,2)}</span></td>
+       <td style="white-space:nowrap">夏普 ${fmtN(r.sharpe)}</td>
+       <td class="mn">${r.start} ~ ${r.end}</td>
+       <td class="mn">${esc(r.mark_note||'')}</td>
+       ${r.stale?'<td><span class="stale">数据已变</span></td>':'<td></td>'}
+     </tr>`).join('')}</table>
+    <div class="note" style="margin:6px 0 0">★ 记的是 run，含参数与成本口径；
+      标 <b>数据已变</b> 的说明归档时的数据与当前面板不一致，数字不能直接引用。</div></div>`;
+}
+function wireStars(){
+  document.querySelectorAll('.st[data-mk]').forEach(e=>e.onclick=async ev=>{
+    ev.stopPropagation();                 // 否则会连带打开这次回测的详情页
+    const id=e.dataset.mk, r=RUNS.find(x=>x.run_id===id);
+    let body;
+    if(r&&r.mark){ body={run_id:id, mark:''}; }        // 已选中 -> 取消
+    else{
+      const note=prompt('为什么选中它？（可留空，会显示在顶部「选中的规则」里）',
+                        (r&&r.mark_note)||'');
+      if(note===null) return;                          // 取消对话框 = 不改动
+      body={run_id:id, mark:'star', note:note};
+    }
+    e.style.opacity='.4';
+    try{
+      const res=await fetch('/api/mark',{method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const o=await res.json();
+      if(o.error){ alert('打标记失败：'+o.error); e.style.opacity=''; return; }
+      await loadRuns0();                                // 重取，别只改本地状态
+      if(!location.hash) renderCatalog();
+    }catch(err){ alert('打标记失败：'+err); e.style.opacity=''; }
+  });
+  document.querySelectorAll('#pick tr[data-go]').forEach(e=>
+    e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
 }
 $('#filter').oninput=()=>{ if(!location.hash) renderCatalog(); };
 $('#expand').onclick=()=>{

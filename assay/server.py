@@ -55,6 +55,36 @@ def _scan():
     return idx
 
 
+# ★ 放【仓库根】而不是 runs/ 下：runs/ 是 gitignore 的二进制产物目录，
+#   而「选中了哪条规则、为什么」是**决策**，连同理由应该入版本控制。
+#   run_id 在别的机器上可能不存在（归档不入库）—— api_marks 会过滤掉
+#   找不到的，备注文字仍然保留，决策记录不丢。
+MARKS_FILE = os.path.join(os.path.dirname(HERE), 'picks.json')
+# 允许的标记类型。★ 白名单而非自由字符串：标记会进 HTML，也会进文件名无关的
+#   JSON key，收窄取值范围比事后转义可靠。
+MARK_KINDS = ('star',)
+MARK_NOTE_MAX = 200
+
+
+def _load_marks():
+    """run_id -> {'mark': ..., 'note': ..., 'ts': ...}。文件不存在或坏了都返回空。"""
+    try:
+        with open(MARKS_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
+def _save_marks(d):
+    """先写临时文件再 rename —— 半截文件会让整个面板的标记消失。"""
+    os.makedirs(os.path.dirname(MARKS_FILE), exist_ok=True)
+    tmp = MARKS_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(d, f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(tmp, MARKS_FILE)
+
+
 def _dir(run_id):
     """★ 只接受索引里存在的 run_id —— 这是唯一的路径来源，杜绝目录穿越。"""
     if not RUN_ID_RE.match(run_id or ''):
@@ -171,6 +201,7 @@ def _records(df, cols=None):
 def api_runs(_q):
     idx = _scan()
     shameta = _sha_meta()
+    marks = _load_marks()
     out = []
     for rid, d in idx.items():
         try:
@@ -198,6 +229,8 @@ def api_runs(_q):
             'stale': _staleness(meta)[0],
             'stale_parts': ','.join(_staleness(meta)[1]),
             'params': meta.get('params') or {},
+            'mark': (marks.get(rid) or {}).get('mark') or '',
+            'mark_note': (marks.get(rid) or {}).get('note') or '',
             'annual_return': st.get('annual_return'),
             'max_drawdown': st.get('max_drawdown'),
             'excess_annual': st.get('excess_annual'),
@@ -608,6 +641,52 @@ def _staleness(meta):
     return True, changed or ['(部件未记录)']
 
 
+def api_mark(_q, body):
+    """给某次回测打/清标记。★ 只接受索引里存在的 run_id（_dir 已防目录穿越）。"""
+    rid = (body or {}).get('run_id') or ''
+    if _dir(rid) is None:
+        return {'error': 'run_id 不存在: %s' % rid}
+    mark = (body.get('mark') or '').strip()
+    if mark and mark not in MARK_KINDS:
+        return {'error': '未知标记类型 %r（可用: %s）' % (mark, ', '.join(MARK_KINDS))}
+    note = (body.get('note') or '')
+    if not isinstance(note, str):
+        return {'error': 'note 必须是字符串'}
+    # 去掉控制字符再截断：备注会直接渲染进页面
+    note = ''.join(c for c in note if c >= ' ' or c == '\t')[:MARK_NOTE_MAX].strip()
+    with _lock:
+        d = _load_marks()
+        if mark:
+            d[rid] = {'mark': mark, 'note': note,
+                      'ts': datetime.now().isoformat(timespec='seconds')}
+        else:
+            d.pop(rid, None)          # 空 mark = 取消标记
+        _save_marks(d)
+    return {'ok': True, 'run_id': rid, 'mark': mark, 'note': note}
+
+
+def api_marks(_q):
+    """列出所有被标记的回测（含关键指标），供面板顶部「选中的规则」用。
+
+    ★ 标记文件里可能残留【已删除归档】的 run_id（清理归档时不会同步删标记），
+      所以这里要过滤掉找不到目录的，否则前端会渲染出点不开的空行。
+    """
+    marks = _load_marks()
+    if not marks:
+        return []
+    byid = {r['run_id']: r for r in api_runs({})}
+    out = []
+    for rid, m in marks.items():
+        r = byid.get(rid)
+        if r is None:
+            continue
+        out.append(dict(r, mark=m.get('mark') or '', mark_note=m.get('note') or '',
+                        mark_ts=m.get('ts') or ''))
+    out.sort(key=lambda x: (x.get('group') or '', x.get('strategy') or '',
+                            x.get('run_id') or ''))
+    return out
+
+
 def api_datafp(_q):
     cur = _current_fp()
     n_stale = n_ok = 0
@@ -637,6 +716,7 @@ ROUTES = {
     '/api/version': api_version,
     '/api/datafp': api_datafp,
     '/api/job': api_job,
+    '/api/marks': api_marks,
 }
 
 
@@ -657,7 +737,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):                       # noqa: N802
         u = urlparse(self.path)
-        if u.path != '/api/backtest':
+        POSTS = {'/api/backtest': api_backtest, '/api/mark': api_mark}
+        fn = POSTS.get(u.path)
+        if fn is None:
             return self._send(404, json.dumps({'error': 'no such endpoint'}))
         try:
             n = int(self.headers.get('Content-Length') or 0)
@@ -666,7 +748,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({'error': '请求体不是合法 JSON: %s' % e},
                                               ensure_ascii=False))
         try:
-            r = api_backtest({}, body)
+            r = fn({}, body)
         except Exception as e:                   # noqa: BLE001
             import traceback
             traceback.print_exc()
