@@ -71,21 +71,45 @@ JQ 该线版本谱（其区间约 7.3 年、基准年化 11.2%，**不可与 FRO
       按同一口径实际差 -2.84pp。selftest 的模块级 JQ 字典是 FROEC 的口径
       (FixedSlippage(0))，跑 v0b 必须改成 slippage=0.0015。
 
-逐步修复拆解（2016-01-01~2025-12-31，本金 100 万，聚宽 v0b 成本口径）：
-      基线(三个开关全 0，复现修复前)   32.56% / 回撤 52.62% / 夏普 1.08
-      ① 只修宇宙(含停牌股)            31.18% / 50.94% / 1.04   -1.38pp
-      ② 只修科创板(保留 689 CDR)      32.56% / 52.62% / 1.08    0.00pp
-      ③ 只修次新边界(>=375)           32.77% / 51.92% / 1.08   +0.21pp
-      ④ 全修（默认）                  30.95% / 52.62% / 1.04   -1.61pp
-   ⚠️ 上表是【定期报告护栏之前】的面板跑的。加护栏后全修口径为
-      32.68% / 回撤 52.26% / 夏普 1.08（+1.73pp）。四条修复的【单独贡献】
-      尚未在新面板上重测 —— 相对量级预计不变，但绝对值会整体上移。
-   ★ ② 对本策略【完全零影响】(数字一字不差)，而同样的修正在 FROEC 上值
-     -1.67pp —— 结构性区别：FROEC 有 floor() 分位截断，宇宙少一只票就推移
-     边界；v0b 是绝对 top-N 排序，池子外的票不影响结果。689009 流通市值
-     2.2~40.7 亿，永远进不了最小 15 只。
-   ★ ①+③ 相加是 -1.17pp 而全修是 -1.61pp，差 0.44pp 是交互项，不线性相加。
-   ★ 修复量级【期间依赖】：2016-2025 是 -1.61pp，2019-2026.06 只有 -0.20pp。
+逐步修复拆解（2016-01-01~2025-12-31，本金 100 万，聚宽 v0b 成本口径，
+              **定期报告护栏之后**的面板）：
+
+| 配置 | 年化 | 回撤 | 夏普 | 增量 |
+|---|---|---|---|---|
+| 全0 基线（四开关全复现旧行为） | 34.23% | 52.19% | 1.12 | — |
+| ① 只修宇宙（含停牌股） | 33.17% | 51.50% | 1.09 | **-1.06pp** |
+| ② 只修科创板（保留 689） | 34.23% | 52.19% | 1.12 | **+0.00pp** |
+| ③ 只修次新边界（>=375） | 33.84% | 52.28% | 1.11 | -0.39pp |
+| ④ 只修 eps 源 | 34.23% | 52.19% | 1.12 | **+0.00pp** |
+| ①+④（宇宙 + eps 源） | 33.69% | 51.02% | 1.11 | -0.54pp |
+| **全修（默认）** | **32.68%** | 52.26% | 1.08 | **-1.55pp** |
+
+★ ② 与 ④ 单独打开都【一字不差】= +0.00pp，原因不同：
+    ② 689009 流通市值 2.2~40.7 亿，永远进不了最小 15 只；而同样的修正在
+      FROEC 上值 -1.67pp —— 结构性区别：FROEC 有 floor() 分位截断，宇宙
+      少一只票就推移边界；v0b 是绝对 top-N，池外的票不影响结果。
+    ④ 面板 eps_q 与 indicator.eps 对【有行情】的票数值 100% 相同
+      （2015-12-31 实测 2512 只全同），所以 ① 关着时它没有作用面。
+★ ④ 的真实效果只在 ① 之后显现：①+④ 的 -0.54pp 比 ① 单独的 -1.06pp
+  高 **+0.52pp**。机制：停牌股的结转 eps 是【过期报告】
+  （002379.XSHE@2015-12-31 结转得 2015-06-30 的 -0.0286，而当日最新是
+  2015-09-30 的 +0.08），被 eps>0 误剔；改成按决策日 as-of 后它们回到池子里。
+  -> 【纠缠的开关必须两两测，单独测会得出"这条修复没用"的错误结论。】
+★ 可加性：①-1.06 + ②0.00 + ③-0.39 + ④0.00 = -1.45pp，全修 -1.55pp，
+  交互项仅 **-0.10pp**（定期报告护栏之前是 0.44pp）—— 护栏也让拆解变线性了，
+  合理：回退 bug 本身在制造虚假的名次错乱，会和每一条修复纠缠。
+★ ③ 次新边界在护栏前是 +0.21pp、护栏后是 -0.39pp（换向 0.6pp）——
+  边界类参数本就落在刀刃噪声里，不要按符号解读。
+
+逐年（全0 vs 全修）：
+    2016 -2.13  2017 -5.51  2018 +0.67  2019 +0.09  2020 -2.55
+    2021 -0.50  2022 -2.48  2023 -3.74  2024 +0.54  2025 +2.64  (pp)
+  均值 -1.30pp、标准差 2.42pp、n=10、**t = -1.69 不显著**，修复后更高 4/10。
+  差异散开而非集中于某年。
+
+★★ 修复的验收标准是【对标残差】而不是收益：残差 -2.84pp -> -0.82pp。
+   收益降 1.55pp 且统计上不显著，正是一个正确性修复该有的样子 ——
+   若某条"修复"大幅提高收益，反而该怀疑它是不是把 bug 修反了。
 
 ★ 成本口径：聚宽原版【自己设了滑点 0.0015】(PriceRelatedSlippage，双边)
   + 佣金万3 + 最低 5 元 + 印花税千一固定，type='stock'。
@@ -128,16 +152,16 @@ WITH univ AS (
     AND date_diff('day', list_date::DATE, DATE '{sd}') {lop} {listed}
     AND code NOT LIKE '{kcb}'
 ), today AS (
-  SELECT jq_code, floatmv, is_risk_warned
+  SELECT jq_code, floatmv, is_risk_warned, eps_q
   FROM {panel} WHERE date = DATE '{sd}'
 ), miss AS (
   -- 当日无 K 线（停牌）：只结转【价格派生量】(floatmv)，与聚宽一致 ——
   -- 停牌股的 valuation 按最后收盘价算。基本面走 eps1，不结转。
-  SELECT u.code AS jq_code, p.floatmv, p.is_risk_warned
+  SELECT u.code AS jq_code, p.floatmv, p.is_risk_warned, p.eps_q
   FROM (SELECT code, DATE '{sd}' AS d FROM univ
         WHERE code NOT IN (SELECT jq_code FROM today)) u
   ASOF LEFT JOIN (
-      SELECT jq_code, date, floatmv, is_risk_warned
+      SELECT jq_code, date, floatmv, is_risk_warned, eps_q
       FROM {panel} WHERE date > DATE '{sd}' - INTERVAL 400 DAY
   ) p ON p.jq_code = u.code AND p.date <= u.d
 ), eps1 AS (
@@ -151,9 +175,12 @@ WITH univ AS (
 SELECT r.jq_code FROM (
   SELECT * FROM today WHERE jq_code IN (SELECT code FROM univ)
   UNION ALL SELECT * FROM miss WHERE {pin}
-) r JOIN eps1 e ON e.code = r.jq_code
+) r LEFT JOIN eps1 e ON e.code = r.jq_code
 WHERE NOT COALESCE(r.is_risk_warned, FALSE)
-  AND e.eps > 0 AND r.floatmv > 0
+  -- eps_carry=1 复现旧行为：用面板 eps_q（停牌股是【结转】值，可能是过期报告）
+  -- eps_carry=0 修正后：用 fin_indicator_q 按决策日 as-of
+  AND (CASE WHEN {epsc} THEN r.eps_q ELSE e.eps END) > 0
+  AND r.floatmv > 0
 ORDER BY r.floatmv ASC LIMIT {cand}
 """
 
@@ -172,6 +199,11 @@ def initialize(context):
     g.paused_in_pool = getattr(g, 'paused_in_pool', 1)   # 宇宙含停牌股
     g.kcb_688_only = getattr(g, 'kcb_688_only', 1)       # 只排 688（保留 689 CDR）
     g.listed_ge = getattr(g, 'listed_ge', 1)             # >= 375 而非 > 375
+    # eps 源：0 = fin_indicator_q 按决策日 as-of（修正后）
+    #         1 = 面板 eps_q（复现旧行为；对有行情票两者数值 100% 相同，
+    #             差别只在停牌股 —— 结转会拿到该股最后交易日那天的过期报告）
+    #   ★ 所以本开关只在 paused_in_pool=1 时才可能有效果，单独打开预期 0.00pp。
+    g.eps_carry = getattr(g, 'eps_carry', 0)
     g.hold_history = []          # 最近 N 日持仓并集，配合「涨停过」构成黑名单
     g.high_limit = set()         # 昨收涨停的持仓：调仓不卖，14:00 再看是否打开
 
@@ -203,7 +235,8 @@ def rebalance(context):
         SQL, sd=d, listed=g.listed_days, cand=g.candidate_num,
         lop='>=' if g.listed_ge else '>',
         kcb='688%' if g.kcb_688_only else '68%',
-        pin='TRUE' if g.paused_in_pool else 'FALSE')
+        pin='TRUE' if g.paused_in_pool else 'FALSE',
+        epsc='TRUE' if g.eps_carry else 'FALSE')
     cand = df['jq_code'].tolist()
     if not cand:
         return
