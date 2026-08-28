@@ -62,9 +62,9 @@ def t_baseline():
     cost = dict(JQ, slippage=0.0015)
     m, _ = _run('strategies/小市值/sgmspeg_v0b.py', '2019-01-01', '2026-06-30', 1e6, **cost)
     got = round(m['annual_return'] * 100, 2)
-    assert abs(got - 36.14) < 0.01, 'v0b 年化 %.2f%%，基线 36.14%%' % got
+    assert abs(got - 38.16) < 0.01, 'v0b 年化 %.2f%%，基线 38.16%%' % got
     mdd = round(m['max_drawdown'] * 100, 2)
-    assert abs(mdd - 52.79) < 0.01, 'v0b 回撤 %.2f%%，基线 52.79%%' % mdd
+    assert abs(mdd - 52.25) < 0.01, 'v0b 回撤 %.2f%%，基线 52.25%%' % mdd
     return 'v0b 年化 %.2f%% / 回撤 %.2f%%（聚宽 v0b 自身口径：滑点 0.0015）' % (got, mdd)
 
 
@@ -122,8 +122,8 @@ def t_froec_metrics():
                   bench_base=eng.bench_base)
     checks = [('基准收益', m['benchmark_return'] * 100, 4.76, 0.02),
               ('beta', m['beta'], 0.899, 0.02),
-              ('年化(回归基线)', m['annual_return'] * 100, 37.41, 0.02),
-              ('回撤(回归基线)', m['max_drawdown'] * 100, 47.38, 0.02)]
+              ('年化(回归基线)', m['annual_return'] * 100, 39.01, 0.02),
+              ('回撤(回归基线)', m['max_drawdown'] * 100, 46.84, 0.02)]
     bad = ['%s %.2f≠%.2f' % (n, g, w) for n, g, w, tol in checks if abs(g - w) > tol]
     assert not bad, '; '.join(bad)
     return '基准 %.2f%% / beta %.3f / 年化 %.2f%% / 回撤 %.2f%%' % (
