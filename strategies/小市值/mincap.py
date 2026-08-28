@@ -49,6 +49,34 @@ eps>0 过滤、次新 375 天、科创板过滤、候选 15 截 10、20 日「�
    125 天的阈值变化摆动 8.2pp —— 与 FROEC 的刀刃效应同源：结果由「底部 10 只
    具体是哪几只」支配，任何单个数字都是一个 9pp 宽分布里的一次抽样。
 
+## 涨停规则（2016-01-01~2026-08-24，100 万，引擎默认成本，候选30）
+
+| 规则 | 年化 | 回撤 | 夏普 | 胜率 | 盈亏比 | 平均仓位 |
+|---|---|---|---|---|---|---|
+| off 无规则 | 15.68% | 46.56% | 0.63 | 61.16% | 1.40 | 94.7% |
+| **hold_exit 涨停留仓+炸板离场** | **21.19%** | **45.65%** | **0.78** | 60.80% | 1.54 | 92.8% |
+| sell 涨停即卖 | 16.30% | 44.89% | 0.65 | 61.04% | 1.42 | 92.7% |
+
+**两条规则方向相反，只有"涨停就留"有用**：hold_exit **+5.51pp**，
+而 sell（涨停即卖）只 +0.62pp，基本无效。
+hold_exit 的胜率略降（61.16→60.80）但盈亏比升（1.40→1.54）——
+典型的"少赢一点、赢得更大"，与"让涨停继续跑"的逻辑一致。
+
+逐年配对检验（★ 本项目少见的显著结果）：
+    2016 +9.80  2017 +0.76  2018 -2.93  2019 +6.75  2020 +6.73  2021 +16.06
+    2022 -0.00  2023 +13.25  2024 +9.21  2025 +7.38  2026 +0.55  (pp)
+  均值 +6.14pp、标准差 5.95pp、n=11、**t = 3.42 > 2.20 显著**，胜 9/11 年。
+
+⚠️ hold_exit 的数字是【被低估】的：炸板离场共 637 笔，那些日子平均仓位只有
+   **81.19%**（其它日 93.50%）—— 14:00 卖掉后要等到下周调仓才买回，中间现金
+   闲置，本策略没有再入场机制（红利指数增强的 reentry 就是补这个）。
+   加再入场应该还能再提升，尚未测。
+
+★ 实现上踩过一个坑并已修：hold_exit 起初让涨停持仓【不占名额】，于是
+  「留 2 只额外持仓 + 10 只目标各 1/10 = 要投 120%」自相矛盾。改成占名额后
+  数字几乎没变（21.31→21.19），说明当时观察到的仓位下降【不是】这个原因，
+  而是上面那条闲置现金 —— 名额一致性该修，但它不是成因。
+
 ## 与叠了机制的版本对照（同窗口、同成本）
 
 | 策略 | 年化 | 回撤 | 夏普 | 平均仓位 |
@@ -115,13 +143,63 @@ def initialize(context):
     # 'equal' = 每期把全部持仓拉回等权（教科书等权，换手更高）
     # 'fill'  = 只用现金补齐缺的那几只（聚宽原版做法，不动已有仓位）
     g.rebal_mode = getattr(g, 'rebal_mode', 'equal')
+    # ---- 涨停卖出规则（默认 off，基准保持"零机制"）----
+    #   'off'       不管涨停，调仓日该卖就卖
+    #   'hold_exit' v0b / FROEC 那套【两段式】：昨收涨停的持仓在调仓日
+    #               【不卖】（博弈继续涨），当日 exit_time 再看是否炸板 ——
+    #               打开了才卖，仍封住就继续持有。
+    #   'sell'      字面「涨停卖出」：持仓在 exit_time 涨停就卖，获利了结。
+    #   ★ 两者是【方向相反】的规则：hold_exit 是"涨停就留"，sell 是"涨停就跑"。
+    #     别混为一谈，也别指望它们的效果同向。
+    g.limit_up_rule = getattr(g, 'limit_up_rule', 'off')
+    g.exit_time = getattr(g, 'exit_time', '14:00')
+    g.high_limit = set()          # 昨收涨停的持仓（hold_exit 用）
 
     set_benchmark('000905.XSHG')      # 与同线其它策略一致：中证 500
 
+    if g.limit_up_rule != 'off':
+        run_daily(prepare, time='09:05')
     if g.freq == 'monthly':
         run_monthly(rebalance, monthday=g.day, time='09:30')
     else:
         run_weekly(rebalance, weekday=g.day, time='09:30')
+    if g.limit_up_rule != 'off':
+        run_daily(check_limit_up, time=g.exit_time)
+
+
+def prepare(context):
+    """盘前：找出昨收涨停的持仓（hold_exit 模式下调仓日不卖它们）。"""
+    g.high_limit = set()
+    held = list(context.portfolio.positions)
+    if held and context.previous_date:
+        bars = context.data.bars(context.previous_date, held)
+        g.high_limit = {c for c, b in bars.items() if b.limit_up}
+
+
+def check_limit_up(context):
+    """exit_time 的涨停处置。两种模式方向相反，见 initialize 的说明。"""
+    pos = list(context.portfolio.positions)
+    if not pos:
+        return
+    codes = ([c for c in g.high_limit if c in pos]
+             if g.limit_up_rule == 'hold_exit' else pos)
+    if not codes:
+        return
+    # 今天的状态走 context.current() —— 历史接口取不到今天（PIT 防火墙）。
+    cur = context.current(codes)
+    for code in codes:
+        d = cur.get(code)
+        if d is None:
+            continue
+        # ★ 按相位取字段：OPEN 阶段没有 limit_up（那是收盘派生量），直接取会得
+        #   None -> `not None` 为真 -> 把持仓全卖掉。exit_time 默认 14:00
+        #   属 INTRADAY，limit_up 可见。
+        sealed = d.get('limit_up') if 'limit_up' in d else d.get('open_limit_up')
+        if g.limit_up_rule == 'hold_exit':
+            if not sealed:            # 昨日涨停、今日炸板 -> 离场
+                order_target_value(code, 0)
+        elif sealed:                  # 'sell'：涨停即卖
+            order_target_value(code, 0)
 
 
 def rebalance(context):
@@ -136,11 +214,21 @@ def rebalance(context):
     # 否则多取的候选毫无作用（见 initialize 里的说明）。
     if g.candidate_num > g.stock_num:
         cand = context.tradable(cand, 'buy')
-    target = cand[:g.stock_num]
+
+    # ★ hold_exit 模式：昨收涨停的持仓【占用名额】。
+    #   若不占名额，就会出现「留 2 只额外持仓 + 10 只目标各 1/10 = 要投 120%」
+    #   的自相矛盾，撞现金不足、目标只能部分成交 —— 实测那样做平均仓位反而
+    #   从 94.7% 掉到 92.6%、仓位<80% 的日子从 0.0% 涨到 6.2%（本该更满仓的
+    #   规则却更空，就是在跟现金打架）。让它们占名额，仓位与权重都自洽。
+    keep = [c for c in (g.high_limit if g.limit_up_rule == 'hold_exit' else ())
+            if c in context.portfolio.positions]
+    room = max(0, g.stock_num - len(keep))
+    target = keep + [c for c in cand if c not in keep][:room]
     if not target:
         return
 
     # 先清仓不在目标里的 —— 卖出所得当日即可用于买入，所以顺序必须是先卖后买
+    # （涨停留仓的票已经并进 target，所以这里不用再单独放行）
     for code in list(context.portfolio.positions):
         if code not in target:
             order_target_value(code, 0)
