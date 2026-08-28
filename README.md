@@ -85,7 +85,7 @@ def rebalance(context):
 一键套用聚宽原版设定（滑点 0、佣金万 3、最低 5、印花税千一**固定**）：
 
 ```bash
-python3 run.py strategies/小市值/v0b.py --start 2019-01-01 --end 2026-06-30 \
+python3 run.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 \
     --cash 1000000 --jq-cost
 ```
 
@@ -447,11 +447,11 @@ order_target_percent(code, 0.1)    # 调到总权益的 10%；0 即清仓
 
 ```bash
 # 滑点敏感性
-python3 sweep.py strategies/小市值/v0b.py --start 2019-01-01 --end 2026-06-30 \
+python3 sweep.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 \
     --cash 1000000 --grid slippage=0,0.0015,0.003,0.005
 
 # 策略参数 × 成本参数（笛卡尔积），每个组合自动归档
-python3 sweep.py strategies/小市值/v0b.py --start 2019-01-01 --end 2026-06-30 \
+python3 sweep.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 \
     --cash 1000000 --jq-cost --grid stock_num=5,10,20 --grid candidate_num=15,30
 ```
 

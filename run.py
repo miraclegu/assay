@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """回测入口。跑完自动归档到 runs/<分组>/<策略>/<run_id>/。
 
-    python3 run.py strategies/小市值/v0b.py --start 2019-01-01 --end 2026-06-30 --cash 1000000
+    python3 run.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 --cash 1000000
     python3 run.py strategies/小市值/froec.py --start 2016-01-01 --end 2026-08-07 --cash 100000
 """
 import argparse

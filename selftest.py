@@ -60,7 +60,7 @@ def t_baseline():
       同口径下实际是 36.14% vs 38.98% = -2.84pp。口径必须跟着策略走。
     """
     cost = dict(JQ, slippage=0.0015)
-    m, _ = _run('strategies/小市值/v0b.py', '2019-01-01', '2026-06-30', 1e6, **cost)
+    m, _ = _run('strategies/小市值/sgmspeg_v0b.py', '2019-01-01', '2026-06-30', 1e6, **cost)
     got = round(m['annual_return'] * 100, 2)
     assert abs(got - 36.14) < 0.01, 'v0b 年化 %.2f%%，基线 36.14%%' % got
     mdd = round(m['max_drawdown'] * 100, 2)
@@ -138,7 +138,7 @@ def t_g_identity():
     会是另一个【永远为空】的对象。这个 bug 静默存在过，直到参数扫描要读 engine.g 才暴露。"""
     from assay import api
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
     eng.run()
     assert eng.g is api.g, 'engine.g 与 api.g 不是同一个对象'
     assert eng.ctx.g is api.g, 'context.g 与 api.g 不是同一个对象'
@@ -150,7 +150,7 @@ def t_g_identity():
 def t_param_typo():
     """静默无效会让扫描结论变成「这个参数没影响」——最危险的一类假结论。"""
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5,
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5,
                  cost=Cost(**JQ), params={'candidat_num': 20})
     try:
         eng.run()
@@ -162,9 +162,9 @@ def t_param_typo():
 
 @case('参数覆盖确实生效')
 def t_param_effective():
-    a, _ = _run('strategies/小市值/v0b.py', '2024-01-01', '2026-06-30', 5e5, **JQ)
+    a, _ = _run('strategies/小市值/sgmspeg_v0b.py', '2024-01-01', '2026-06-30', 5e5, **JQ)
     feed = PanelFeed('2024-01-01', '2026-06-30')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5,
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5,
                  cost=Cost(**JQ), params={'stock_num': 5})
     from assay.metrics import summarize
     b = summarize(eng.run(), 5e5)
@@ -203,7 +203,7 @@ def t_div_tiers():
     import datetime
     from assay.context import Lot
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5, cost=Cost())
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5, cost=Cost())
     b = eng.broker
     b.date = datetime.date(2024, 6, 30)
     got = []
@@ -245,7 +245,7 @@ def t_schedule_ordinal():
     feed = PanelFeed('2019-01-01', '2021-12-31')
     got = {}
     for w in (1, 3):
-        eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=1e6,
+        eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=1e6,
                      cost=Cost(**JQ), params={'weekday': w})
         got[w] = summarize(eng.run(), 1e6)['annual_return']
     assert abs(got[1] - got[3]) > 0.01, \
@@ -263,7 +263,7 @@ def t_div_cash():
     import datetime
     from assay.context import Lot, Position
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
     b = eng.broker
     code = '_TEST_'
     d0, d1 = feed.trading_days[0], feed.trading_days[1]
@@ -299,7 +299,7 @@ def t_volume_cap():
     for cash in (1e6, 5e7):
         row = []
         for vr in (0.0, 0.25):
-            eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=cash,
+            eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=cash,
                          cost=Cost(volume_ratio=vr, **JQ))
             m = summarize(eng.run(), cash, broker=eng.broker)
             row.append((m['annual_return'] * 100, eng.broker.n_vol_capped))
@@ -434,7 +434,7 @@ def t_frozen():
     assert len(eng.broker.frozen_now()) == 0, '期末不该有停牌持仓（实测 0）'
     # 2) 期末守卫：造一个当日无行情的持仓，frozen_now 必须报出来
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    e2 = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
+    e2 = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
     b = e2.broker
     d = feed.trading_days[5]
     b.pf.positions['_HALTED_'] = Position(
@@ -462,7 +462,7 @@ def t_limit_unreliable():
     """
     from assay.feed import Bar
     feed = PanelFeed('2024-01-01', '2024-03-31')
-    eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
+    eng = Engine(load('strategies/小市值/sgmspeg_v0b.py'), feed, cash=5e5, cost=Cost(**JQ))
     b = eng.broker
     b.date, b.phase = feed.trading_days[0], 'open'
     mk = lambda ok: Bar(open_hfq=10.0, close_hfq=10.0, open_raw=10.0, factor=1.0,
@@ -491,7 +491,7 @@ def t_sweep_parallel():
     out = {}
     for jobs in (1, 2):
         r = subprocess.run(
-            [sys.executable, 'sweep.py', 'strategies/小市值/v0b.py',
+            [sys.executable, 'sweep.py', 'strategies/小市值/sgmspeg_v0b.py',
              '--start', '2024-01-01', '--end', '2024-12-31', '--cash', '1000000',
              '--jq-cost', '--grid', 'stock_num=5,10', '--no-archive',
              '--jobs', str(jobs)],

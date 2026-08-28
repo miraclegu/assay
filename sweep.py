@@ -3,7 +3,7 @@
 """参数扫描与批量对比。
 
     # 滑点敏感性
-    python3 sweep.py strategies/小市值/v0b.py --start 2019-01-01 --end 2026-06-30 \
+    python3 sweep.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 \
         --cash 1000000 --grid slippage=0,0.0015,0.003
 
     # 策略参数 × 成本参数（笛卡尔积）
