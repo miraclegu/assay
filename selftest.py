@@ -51,13 +51,21 @@ def t_lookahead():
 
 @case('合法策略未被防火墙误伤')
 def t_baseline():
-    """基线数字：改动引擎后必须仍然复现，否则说明引入了行为变化。"""
-    m, _ = _run('strategies/小市值/v0b.py', '2019-01-01', '2026-06-30', 1e6, **JQ)
+    """基线数字：改动引擎后必须仍然复现，否则说明引入了行为变化。
+
+    ★ 成本口径用 v0b【自己】的：聚宽 SG-MS-PEG-HL-v0b 里写的是
+      PriceRelatedSlippage(0.0015)，不是 FROEC 那套 FixedSlippage(0)。
+      模块级的 JQ 字典是 FROEC 的口径（滑点 0），拿它跑 v0b 会得 38.11%，
+      再去和聚宽 v0b 实测 38.98% 比就成了苹果比橘子（看着只差 0.87pp）。
+      同口径下实际是 36.14% vs 38.98% = -2.84pp。口径必须跟着策略走。
+    """
+    cost = dict(JQ, slippage=0.0015)
+    m, _ = _run('strategies/小市值/v0b.py', '2019-01-01', '2026-06-30', 1e6, **cost)
     got = round(m['annual_return'] * 100, 2)
-    assert abs(got - 38.11) < 0.01, 'v0b 年化 %.2f%%，基线 38.11%%' % got
+    assert abs(got - 36.14) < 0.01, 'v0b 年化 %.2f%%，基线 36.14%%' % got
     mdd = round(m['max_drawdown'] * 100, 2)
-    assert abs(mdd - 52.57) < 0.01, 'v0b 回撤 %.2f%%，基线 52.57%%' % mdd
-    return 'v0b 年化 %.2f%% / 回撤 %.2f%%' % (got, mdd)
+    assert abs(mdd - 52.79) < 0.01, 'v0b 回撤 %.2f%%，基线 52.79%%' % mdd
+    return 'v0b 年化 %.2f%% / 回撤 %.2f%%（聚宽 v0b 自身口径：滑点 0.0015）' % (got, mdd)
 
 
 @case('印花税按 2023-08-28 分段')
@@ -230,17 +238,15 @@ def t_fingerprint():
 def t_schedule_ordinal():
     """曾是静默 bug：_due 收了 weekday/monthday 却从不使用，
     `run_weekly(f, weekday=3)` 会静默按周一执行。参数静默失效是最难发现的一类。"""
-    import io as _io
-    import os as _os
-    import tempfile
-    src = open('strategies/小市值/v0b.py', encoding='utf-8').read()
+    # ★ 原先靠 src.replace("weekday=1, time='09:30'", ...) 做字符串手术改源码。
+    #   后来 v0b 把它参数化成 weekday=g.weekday，那个字面量消失，替换变成
+    #   空操作 -> 两个变体完全一样 -> 用例如实报「参数静默失效」。
+    #   改走 params：策略参数化之后就不该再靠改源码来构造变体。
     feed = PanelFeed('2019-01-01', '2021-12-31')
     got = {}
     for w in (1, 3):
-        s2 = src.replace("weekday=1, time='09:30'", "weekday=%d, time='09:30'" % w)
-        t = _os.path.join(tempfile.mkdtemp(), 'v.py')
-        _io.open(t, 'w', encoding='utf-8').write(s2)
-        eng = Engine(load(t), feed, cash=1e6, cost=Cost(**JQ))
+        eng = Engine(load('strategies/小市值/v0b.py'), feed, cash=1e6,
+                     cost=Cost(**JQ), params={'weekday': w})
         got[w] = summarize(eng.run(), 1e6)['annual_return']
     assert abs(got[1] - got[3]) > 0.01, \
         'weekday=1 与 weekday=3 结果相同 —— 参数静默失效'
