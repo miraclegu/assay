@@ -91,18 +91,18 @@ WITH univ AS (
 ), pb_half AS (
   SELECT * FROM (SELECT *, row_number() OVER (ORDER BY pb ASC) rn,
                         count(*) OVER () AS n FROM base)
-  WHERE rn <= floor(0.5 * n)
+  WHERE rn <= {pbcut}
 ), roe_top AS (
   SELECT * FROM (
     SELECT b.jq_code, b.floatmv, b.sw_l1_name,
            row_number() OVER (ORDER BY r.increase DESC) rn2,
            count(*) OVER () AS n2
     FROM pb_half b JOIN roec r ON r.code = b.jq_code
-  ) WHERE rn2 <= floor(0.1 * n2)
+  ) WHERE rn2 <= {roecut}
 )
 SELECT jq_code FROM roe_top
 WHERE sw_l1_name IS NULL OR sw_l1_name NOT IN ({excl})
-ORDER BY floatmv ASC LIMIT {cand}
+ORDER BY floatmv ASC LIMIT {cand} OFFSET {skip}
 """
 
 
@@ -161,19 +161,43 @@ def initialize(context):
     # 用途：分位截断 floor(0.5*n)/floor(0.1*n2) 会随宇宙大小推移边界，
     # 若剔掉几只无关的票就能让年化动几个 pp，那么"两种宇宙定义谁更好"
     # 这个问题本身就没有意义 —— 差异是边界位移，不是经济信号。
-    # 实测（2016-01-01~2026-08-07，10万，--jq-cost，13 组 salt，
-    #       每组从 4484 只宇宙里剔掉 3~10 只，占 0.07%~0.22%）：
-    #   基准(完整宇宙) 37.41%  <- 【14 个配置里最低的一个】
-    #   扰动后均值 40.14%，区间 37.81%~42.34%，极差 4.53pp
-    #   13/13 全为正，对称零假设下 p = 2^-13 = 0.00012
-    # 对照：剔 267 只停牌股(旧 bug) +3.61pp；689009 一只票 +1.67pp。
-    # 结论：剔掉【任何】一小撮票都会系统性抬高回测收益，旧 bug 的优势
-    #   落在同一区间内 —— 它不是选股逻辑的胜利，是分位截断的边界位移。
-    #   ★ 因此【不能用回测收益来选】"含不含停牌股"/"补不补位"。
-    #   ★ 也因此对标聚宽必须让宇宙【完全一致】：0.15% 的宇宙差异会被
-    #     放大成约 2.7pp 年化，远大于当前 +0.61pp 的残差。
+    # 实测（2016-01-01~2026-08-07，10万，13 组 salt，每组从 4484 只宇宙里
+    #       剔掉 3~10 只，占 0.07%~0.22%）。★ 成本口径决定结论，必须写清楚：
+    #
+    #   【默认成本 滑点0.0015】基准 37.59%，扰动均值 37.87%，
+    #       区间 36.43%~39.43%，极差 3.00pp，为正 8/13，相对基准均值 +0.28pp
+    #       -> 对称噪声。刀刃效应存在（±3pp），但【没有系统性方向】。
+    #
+    #   【滑点0 即 --jq-cost】基准 37.41%，扰动均值 40.14%，
+    #       区间 37.81%~42.34%，极差 4.53pp，为正 13/13（p=2^-13）
+    #       -> 看着像"缩小宇宙系统性抬高收益"，那是【滑点0 的假象】，
+    #          加上真实滑点后符号立刻变混合。不要引用这一组数字下结论。
+    #
+    # 结论（按默认成本）：
+    #   ★ 配置之间的差距普遍小于 3.00pp 的扰动噪声，【不能用回测收益来选】
+    #     "含不含停牌股"/"补不补位"/"截断方式"。
+    #   ★ 对标聚宽必须让宇宙【完全一致】：0.15% 的宇宙差异就能动 3pp，
+    #     远大于当前 +0.61pp 的残差。
+    #   ★ 刀刃的根源不是 floor() 截断：固定池子(roe_fixed=130)极差 3.46pp、
+    #     标准差 0.87pp，比比例截断的 3.00/0.81 还略高，且收益掉 6.50pp；
+    #     加分散度(stock_num=15/20/30)收益掉 7~13pp、夏普也跌。
+    #     真正的根源是【收益极度集中在最小的几只】—— skip_n=5 就损失
+    #     13.72pp，所以任何让底部 5 只换人的扰动都有巨大杠杆。
     g.pert = getattr(g, 'pert', 0)
     g.pert_salt = getattr(g, 'pert_salt', 'a')
+    # ---- 硬比例截断 -> 固定池子大小（曾试图用它压刀刃，实测无效）----
+    # 0 = 原版比例截断 floor(0.5*n) / floor(0.1*n2)；>0 = 固定条数。
+    # 实测（默认成本，13 组 salt）：固定 130 只的扰动极差 3.46pp、标准差
+    # 0.87pp，比比例截断的 3.00pp / 0.81pp 还略高，且基准收益从 37.59%
+    # 掉到 31.09%。=> 刀刃的根源不是 floor() 截断，保留参数仅供复核。
+    # 历史池子规模参考：pb 半区 1025(2015)~1717(2024)，ROE 十分位 101~170。
+    g.pb_fixed = getattr(g, 'pb_fixed', 0)
+    g.roe_fixed = getattr(g, 'roe_fixed', 0)
+    # ---- 跳过最小的 k 只（检验「极端微盘更差」假设）----
+    # 扰动测试 13/13 全为正，混沌放大只能解释【量级】不能解释【方向】。
+    # 若极端微盘系统性更差，则任何剔除都会把持仓推向稍大的票 -> 系统性变好。
+    # skip_n>0 直接跳过市值最小的 k 只，取第 k+1 ~ k+10 只。
+    g.skip_n = getattr(g, 'skip_n', 0)
     g.hold_history = []
     g.high_limit = set()
 
@@ -205,7 +229,9 @@ def rebalance(context):
         SQL, sd=d, listed=g.listed_days, cand=lim,
         pin='TRUE' if g.paused_in_pool else 'FALSE',
         kcb='688%' if g.kcb_688_only else '68%',
-        pert=g.pert, salt=g.pert_salt,
+        pert=g.pert, salt=g.pert_salt, skip=g.skip_n,
+        pbcut=(str(int(g.pb_fixed)) if g.pb_fixed else 'floor(0.5 * n)'),
+        roecut=(str(int(g.roe_fixed)) if g.roe_fixed else 'floor(0.1 * n2)'),
         excl=','.join("'%s'" % x for x in EXCL_IND))
     cand = df['jq_code'].tolist()
     if not cand:
