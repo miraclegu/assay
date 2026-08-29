@@ -273,15 +273,30 @@ def initialize(context):
     g._bench_px = None
     g.pos_state = {}
     g.n_stop = 0
+    # ---- 买入腿延迟 g.buy_delay（'' = 关，与卖出同在 09:30）----
+    # 引擎里调仓的买卖【两条腿用同一相位的同一个参考价】（09:30 开盘价），
+    # 滑点对称施加，所以「先卖后买」的时间差在模型里是 0。
+    # 现实中卖完到买进有几十秒到几分钟，买价会漂。这个开关把买入腿推到
+    # 指定时刻（INTRADAY 相位 = 按当日【收盘价】成交），
+    # 即约 4 小时的延迟 —— 日线数据能表达的最极端情形，用作【上界】。
+    # ⚠️ 它衡量的是「延迟造成的价格漂移」，不是买卖价差；后者已在滑点里。
+    g.buy_delay = getattr(g, 'buy_delay', '')
+    g.pending = []
+    # 整个调仓（含卖出腿）改到什么时刻。用来把「两腿错位」和「整体延迟」拆开：
+    #   buy_delay 只推买入 -> 量的是【错位】
+    #   rebal_time 两腿一起推 -> 量的是【整体晚于开盘价】
+    g.rebal_time = getattr(g, 'rebal_time', '09:30')
     g.hold_history = []
     g.high_limit = set()
 
     set_benchmark('000905.XSHG')      # 与聚宽原版一致：中证 500
 
     run_daily(prepare, time='09:05')
-    run_weekly(rebalance, weekday=g.weekday, time='09:30')
+    run_weekly(rebalance, weekday=g.weekday, time=g.rebal_time)
     run_daily(check_limit_up, time=g.exit_time)
     run_daily(stop_check, time=g.stop_time)
+    if g.buy_delay:
+        run_weekly(rebalance_buy, weekday=g.weekday, time=g.buy_delay)
     run_daily(pf_check, time=g.stop_time)
 
 
@@ -334,12 +349,28 @@ def rebalance(context):
     #   聚宽原版：value = cash / (target_num - position_count)，
     #   其中 target_num = len(g.target_list) —— 20 日黑名单剔除后可能 < 10。
     #   写成 g.stock_num 会把钱多分一份，实测 2019-04-15 起持仓即分歧。
+    if g.buy_delay:
+        g.pending = target          # 买入腿推迟，见 rebalance_buy
+        return
+    _do_buy(context, target)
+
+
+def _do_buy(context, target):
     need = [c for c in target if c not in context.portfolio.positions]
     need = need[:max(0, len(target) - len(context.portfolio.positions))]
     if need:
         per = context.portfolio.cash / len(need)
         for code in need:
             order_target_value(code, per)
+
+
+def rebalance_buy(context):
+    """延迟的买入腿。目标池是【09:30 决策时】定下的，不重新选股 ——
+    只把成交推后，这样测出来的差异纯粹来自价格漂移。"""
+    if not g.buy_delay or not g.pending:
+        return
+    _do_buy(context, g.pending)
+    g.pending = []
 
 
 def check_limit_up(context):

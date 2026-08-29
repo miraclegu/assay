@@ -100,6 +100,12 @@ EXCL_IND = _base.EXCL_IND
 prepare = _base.prepare
 rebalance = _base.rebalance
 check_limit_up = _base.check_limit_up
+stop_check = _base.stop_check
+stop_filter = _base.stop_filter
+pf_check = _base.pf_check
+_bench_up = _base._bench_up
+_do_buy = _base._do_buy
+rebalance_buy = _base.rebalance_buy
 
 
 def initialize(context):
