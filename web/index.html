@@ -116,6 +116,17 @@ svg{display:block;width:100%;overflow:visible}
 .ax{fill:var(--dim);font-size:10px}
 #tip{position:fixed;pointer-events:none;background:#0b0e12ee;border:1px solid var(--line);
   border-radius:5px;padding:6px 9px;font-size:11.5px;display:none;z-index:99;white-space:pre}
+/* ---- 权益曲线区间条 ---- */
+.rgbar{display:flex;flex-wrap:wrap;align-items:center;gap:5px;font-size:11.5px;
+  color:var(--dim);margin:2px 0 4px}
+.rg{cursor:pointer;padding:3px 9px;border:1px solid var(--line);border-radius:5px;
+  background:var(--panel2);color:var(--fg)}
+.rg:hover{border-color:var(--dim)}
+.rg.on{background:var(--accent);border-color:var(--accent);color:#0f1216;font-weight:600}
+.rgbar .sp{width:8px}
+.rgbar input[type=date]{background:var(--panel2);border:1px solid var(--line);
+  border-radius:5px;color:var(--fg);font-size:11.5px;padding:2px 6px;
+  font-family:inherit;color-scheme:dark}
 /* ---- 年/月/日 热力下钻 ---- */
 /* 配色原则：底色只负责【方向 + 强度】，数字一律用中性前景色。
    曾经底色和数字同色相（红底红字 / 绿底绿字），叠上去几乎读不出来。
@@ -129,9 +140,9 @@ svg{display:block;width:100%;overflow:visible}
 .hc.on{outline-color:var(--accent)}
 .hc.na{cursor:default;opacity:.28}
 .hc.na:hover{outline-color:transparent}
-.hc .k{font-size:11px;color:#a8b3c0}
+.hc .k{font-size:11px;color:#d2dae4}
 .hc .v{font-size:17px;font-variant-numeric:tabular-nums;margin:1px 0;color:var(--fg)}
-.hc .n{font-size:10px;color:#a8b3c0}
+.hc .n{font-size:10px;color:#d2dae4}
 .crumb{display:flex;align-items:center;gap:8px;margin:2px 0 12px;font-size:12px}
 .crumb a{color:var(--accent);cursor:pointer;text-decoration:none}
 .crumb span{color:var(--dim)}
@@ -146,7 +157,7 @@ svg{display:block;width:100%;overflow:visible}
   outline:2px solid transparent;outline-offset:-2px}
 .cd:hover{outline-color:var(--dim)}
 .cd.on{outline-color:var(--accent)}
-.cd .d{color:#a8b3c0;font-size:10px}
+.cd .d{color:#d2dae4;font-size:10px}
 .cd .v{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--fg)}
 .cd.off{opacity:.3;cursor:default;background:repeating-linear-gradient(135deg,
   transparent 0 5px,var(--line) 5px 6px)}
@@ -251,8 +262,23 @@ const pct=(v,d=2)=>v==null?'—':(v*100).toFixed(d)+'%';
 const sign=v=>v==null?'':(v>0?'pos':(v<0?'neg':''));
 let RUNS=[], CUR=null, DATA={}, HD={off:0,lim:100};
 
-async function j(u){const r=await fetch(u);const o=await r.json();
-  if(o&&o.error) throw new Error(o.error); return o;}
+/* 直接 r.json() 会把服务端的纯文本错误（404 的 "not found"）变成
+   "Unexpected token 'o'…" 这种看不懂的解析报错 —— 而真实原因往往是
+   【服务端还是旧进程、没有这个新接口】。这里先看状态码再解析，把话说清楚。 */
+async function j(u){
+  const r=await fetch(u);
+  const txt=await r.text();
+  if(!r.ok){
+    const path=(u.split('?')[0]);
+    throw new Error(r.status===404
+      ? `接口 ${path} 不存在（服务端可能是旧进程，重启 serve.py 再试）`
+      : `${path} 返回 HTTP ${r.status}：${txt.slice(0,120)}`);
+  }
+  let o; try{ o=JSON.parse(txt); }
+  catch(e){ throw new Error(`${u.split('?')[0]} 返回的不是 JSON：${txt.slice(0,120)}`); }
+  if(o&&o.error) throw new Error(o.error);
+  return o;
+}
 
 /* ============ 路由：用 location.hash，让浏览器前进/后退天然可用 ============ */
 function route(){
@@ -767,6 +793,7 @@ function renderVersionRuns(){
 async function openRun(id, initTab){
   CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100};
   MSEL=null; DSEL=null; YOPEN=null;   // 下钻状态跟着回测走，不跨回测残留
+  EQR={a:null,b:null};
                               // ★ YPAGE 由 route() 先设好，这里不能清
   stopPoll();
   $('#vp').innerHTML=''; $('#vp').style.display='none';
@@ -908,22 +935,74 @@ function lineChart(el,series,opt){
   svg.onmouseleave=()=>{$('#tip').style.display='none';};
 }
 let EQLOG=true;
+let EQR={a:null,b:null};      // 权益曲线的显示区间（null = 全程）
+
 function paneEquity(){
   const e=DATA.eq, s=DATA.run.stats;
-  // 回撤序列
-  let peak=0; const dd=e.equity.map(v=>{peak=Math.max(peak,v);return v/peak-1;});
-  const ser=[{n:'策略',v:e.equity,c:'#5b9cf0',w:1.8}];
-  if(e.benchmark) ser.push({n:'基准 '+(e.benchmark_code||''),v:e.benchmark,c:'#8b97a6',w:1.3});
-  $('#p1').innerHTML=`<div class="chart" id="c1"></div>
-    <div class="note">纵轴为净值倍数（起点 1x）。${EQLOG?'当前<b>对数坐标</b> —— 累计收益达 '+pct(s.total_return,0)+' 时线性坐标会让前几年完全看不见。':'当前线性坐标。'}
-      基准在图上按<b>回测首日</b>归一，而统计卡里的基准收益按<b>首日前一交易日</b>收盘为基点（与聚宽一致），两者口径不同。</div>
+  const D=e.dates;
+  // ★ 区间【重新归一】：截一段不是把全程曲线切开看，而是以区间首日为 1x
+  //   重算。否则 2024 那种年份会显示成 "从 18x 到 19x"，读不出当年涨跌。
+  //   回撤同理 —— 峰值只在区间内累计，不带入区间之前的历史高点。
+  let i0=0,i1=D.length-1;
+  if(EQR.a){ while(i0<D.length-1 && D[i0]<EQR.a) i0++; }
+  if(EQR.b){ while(i1>0 && D[i1]>EQR.b) i1--; }
+  if(i1<i0){ i0=0; i1=D.length-1; EQR={a:null,b:null}; }
+  // ★ 基点取【区间前一交易日】收盘，与收益明细里的年/月收益同口径
+  //   （用区间内首日做基点会漏掉首日那根，2024 会显示 +6.52% 而不是 +8.68%）。
+  //   锚点那天也画进曲线，所以起点正好落在 1x 上。
+  const j0=i0>0?i0-1:i0;
+  const cut=v=>v==null?null:v.slice(j0,i1+1);
+  const dates=cut(D);
+  const base=e.equity[j0];
+  const eq=cut(e.equity).map(v=>v/base);
+  let peak=0; const dd=eq.map(v=>{peak=Math.max(peak,v);return v/peak-1;});
+  const ser=[{n:'策略',v:eq,c:'#5b9cf0',w:1.8}];
+  if(e.benchmark){
+    const bb=cut(e.benchmark), b0=bb.find(v=>v!=null);
+    if(b0) ser.push({n:'基准 '+(e.benchmark_code||''),
+                     v:bb.map(v=>v==null?null:v/b0),c:'#8b97a6',w:1.3});
+  }
+  const full=(i0===0&&i1===D.length-1);
+  const ret=eq[eq.length-1]-1, mdd=Math.min(...dd);
+  const yrs=[...new Set(D.map(d=>d.slice(0,4)))].sort();
+  const btn=(t,a,b,on)=>`<span class="rg ${on?'on':''}" data-a="${a||''}" data-b="${b||''}">${t}</span>`;
+  const last=D[D.length-1], shift=n=>{const d=new Date(last);
+    d.setFullYear(d.getFullYear()-n); return d.toISOString().slice(0,10);};
+  $('#p1').innerHTML=`
+    <div class="rgbar">区间
+      ${btn('全部','','',full)}
+      ${btn('近1年',shift(1),'',!full&&EQR.a===shift(1))}
+      ${btn('近3年',shift(3),'',!full&&EQR.a===shift(3))}
+      ${btn('近5年',shift(5),'',!full&&EQR.a===shift(5))}
+      <span class="sp"></span>
+      ${yrs.map(y=>btn(y,y+'-01-01',y+'-12-31',
+          EQR.a===y+'-01-01'&&EQR.b===y+'-12-31')).join('')}
+      <span class="sp"></span>
+      <input type="date" id="ra" value="${EQR.a||D[0]}">
+      <span style="color:var(--dim)">~</span>
+      <input type="date" id="rb" value="${EQR.b||last}">
+      <span class="rg" id="rgo">应用</span>
+    </div>
+    <div class="note">显示 <b>${D[i0]} ~ ${D[i1]}</b>（${i1-i0+1} 交易日）：
+      区间收益 <b class="${sign(ret)}">${_sn(ret,2)}%</b>，
+      区间最大回撤 <b class="neg">${pct(-mdd,2)}</b>。
+      ★ 截取区间会<b>重新归一</b>（基点 = ${j0<i0?'区间前一交易日 '+D[j0]:'首日'} 收盘 = 1x），
+      回撤峰值也只在区间内累计 —— 不是把全程曲线切开看。
+      与「收益明细」里的年/月收益<b>同口径</b>。</div>
+    <div class="chart" id="c1"></div>
+    <div class="note">纵轴为净值倍数（区间起点 1x）。${EQLOG?'当前<b>对数坐标</b>。':'当前线性坐标。'}
+      基准按区间首日归一；统计卡里的基准收益以<b>回测首日前一交易日</b>收盘为基点
+      （与聚宽一致），两者口径不同。</div>
     <div class="chart" id="c2"></div>`;
-  lineChart($('#c1'),ser,{dates:e.dates,log:EQLOG,title:'净值曲线',h:360,
+  lineChart($('#c1'),ser,{dates,log:EQLOG,title:'净值曲线',h:360,
     ctl:`<div class="ctl"><span class="${EQLOG?'on':''}" id="lg">对数</span><span class="${EQLOG?'':'on'}" id="ln">线性</span></div>`});
   $('#lg').onclick=()=>{EQLOG=true;paneEquity();};
   $('#ln').onclick=()=>{EQLOG=false;paneEquity();};
   lineChart($('#c2'),[{n:'回撤',v:dd.map(v=>v+1),c:'#e05b5b',w:1.4}],
-    {dates:e.dates,title:'回撤（水下图）',h:190,pctAxis:true});
+    {dates,title:'回撤（水下图）',h:190,pctAxis:true});
+  $('#p1').querySelectorAll('.rg[data-a]').forEach(b=>b.onclick=()=>{
+    EQR={a:b.dataset.a||null,b:b.dataset.b||null}; paneEquity();});
+  $('#rgo').onclick=()=>{EQR={a:$('#ra').value||null,b:$('#rb').value||null}; paneEquity();};
 }
 
 /* ============ 收益明细：年热力 → 年详情页（月热力）→ 月内日热力 ============ */
@@ -962,13 +1041,18 @@ function _mstat(){
   return {mv,yv,dr,dd,nd,idx:Object.fromEntries(e.dates.map((d,i)=>[d,i]))};
 }
 
-/* 底色：低饱和 + 透明度封顶 0.50。深色底上叠这个强度，白字始终读得清；
-   原来用 rgba(240,91,91,.85) 那种高饱和高透明度，字压上去就糊了。 */
+/* 底色标定（两次都翻过车，把结论写在这里）：
+     · 第一版 rgba(240,91,91,.85) + 红字 -> 对比度 1.28:1，字溶进背景
+     · 第二版矫枉过正，alpha 封顶 0.50 又太淡，弱格子几乎没颜色
+   现在：**底色压暗但不降浓度**（168,44,44 / 24,116,82），alpha 0.15~0.88，
+   强度走 sqrt 让中段更早出色。字保持中性亮色，实测对比度：
+     最弱格 12.6:1、中段 7.5~8.6:1、最强格 6.2:1(红) / 5.2:1(绿)
+   —— 全部 >= WCAG AA 4.5，多数 >= AAA 7。 */
 const _hcol=(v,k)=>{
   if(v==null) return 'transparent';
   const t=Math.min(1,Math.abs(v)*(k||3));
-  const a=(0.07+t*0.43).toFixed(3);
-  return v>0?`rgba(158,48,48,${a})`:`rgba(22,106,76,${a})`;
+  const a=(0.15+Math.sqrt(t)*0.73).toFixed(3);
+  return v>0?`rgba(168,44,44,${a})`:`rgba(24,116,82,${a})`;
 };
 /* 强度弱的格子底色近乎透明，方向全靠这个 +/- 号 —— 不能省 */
 const _sn=(v,d)=>v==null?'—':(v>0?'+':'')+(v*100).toFixed(d);

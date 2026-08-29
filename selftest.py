@@ -688,6 +688,33 @@ def t_ui():
             # ★ 全部由 /api/equity 的 dates+equity 现算，【不依赖新表】。
             #   这里对着曲线逐项校，防止前端口径悄悄漂掉；并校年详情页是
             #   独立路由（浏览器后退必须能用）。
+            # ---- 权益曲线：区间选择，且口径必须与收益明细的年收益一致 ----
+            # 曾用「区间内首日」当基点，2024 会显示 +6.52% 而热力图是 +8.68%
+            # —— 差的就是首日那根。基点必须取【区间前一交易日】收盘。
+            names0 = pg.locator('#tabs div').all_inner_texts()
+            pg.locator('#tabs div').nth(names0.index('权益曲线')).click()
+            pg.wait_for_timeout(500)
+            rgs = pg.locator('#p1 .rg').all_inner_texts()
+            assert '全部' in rgs and '近1年' in rgs, '区间条缺预设按钮: %s' % rgs
+            ytest = [x for x in rgs if x.isdigit() and len(x) == 4]
+            assert len(ytest) >= 2, '区间条没列出年份'
+            yb = ytest[len(ytest) // 2]
+            pg.locator('#p1 .rg', has_text=re.compile('^%s$' % yb)).first.click()
+            pg.wait_for_timeout(600)
+            nt = ' '.join(pg.locator('#p1 .note').first.inner_text().split())
+            m2 = re.search(r'区间收益\s*([+-][\d.]+)%', nt)
+            assert m2, '区间说明里没有区间收益: %s' % nt[:80]
+            eq_ret = float(m2.group(1))
+            # 用曲线自己算一遍该年收益（基点 = 前一交易日）
+            eqj0 = pg.evaluate('({d:DATA.eq.dates, e:DATA.eq.equity})')
+            ii = [k for k, d in enumerate(eqj0['d']) if d[:4] == yb]
+            want = (eqj0['e'][ii[-1]] / eqj0['e'][ii[0] - 1] - 1) * 100
+            assert abs(eq_ret - want) < 0.02, \
+                '%s 区间收益 %.2f%% != 曲线算的 %.2f%%（基点取错？）' % (yb, eq_ret, want)
+            rng = '区间条 %d 档，%s 区间收益 %+.2f%% 与曲线一致' % (len(rgs), yb, eq_ret)
+            pg.locator('#p1 .rg', has_text=re.compile('^全部$')).first.click()
+            pg.wait_for_timeout(400)
+
             base_hash = pg.evaluate('location.hash')   # 形如 #/run/<id>
             names = pg.locator('#tabs div').all_inner_texts()
             pg.locator('#tabs div').nth(names.index('收益明细')).click()
@@ -771,8 +798,8 @@ def t_ui():
             pg.wait_for_timeout(400)
             drill = ('年热力 %d 格(%s 收益/回撤/交易日对齐曲线，对比度 %.1f:1)；'
                      '%s 年详情独立路由；%s 日历 %d 格(交易 %d/非交易 %d)；'
-                     '%s 当日明细 持仓 %d 只'
-                     % (yc.count(), ys[0], cr, yr, mk, cal_days, real, cal_off, dsel, nh))
+                     '%s 当日明细 持仓 %d 只；%s'
+                     % (yc.count(), ys[0], cr, yr, mk, cal_days, real, cal_off, dsel, nh, rng))
 
             pg.click('#back'); pg.wait_for_timeout(400)
             assert pg.is_visible('#cat'), '返回目录失败'
