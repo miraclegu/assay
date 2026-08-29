@@ -241,6 +241,30 @@ def initialize(context):
     #             差别只在停牌股 —— 结转会拿到该股最后交易日那天的过期报告）
     #   ★ 所以本开关只在 paused_in_pool=1 时才可能有效果，单独打开预期 0.00pp。
     g.eps_carry = getattr(g, 'eps_carry', 0)
+    # ---- 固定止损（g.stop_loss）----
+    # 0 = 关（默认，保真）；0.15 = 持仓相对建仓价回撤到 -15% 就清仓。
+    # ★ 价格两端同为【后复权】：Position.entry_price 与 close_hfq 都是 hfq，
+    #   除权除息不会造成假触发，衡量的是【含息总收益】。
+    # ★ 判定时点 g.stop_time（默认 14:00，INTRADAY 相位），成交价按本项目
+    #   约定用收盘价代理 —— 与炸板离场同一套约定，不引入新的价格假设。
+    # ⚠️ 这是【日频】止损不是盘中触发，两个方向都偏离真实：
+    #     · 日内穿到 -18% 又拉回收盘 -12% 的，本实现【不触发】（真实会）
+    #     · 跳空低开的按当日收盘价成交，实际止损点可能远低于名义位
+    #   所以结果应读作「日线级别止损的效果」，不是「精确止损位的效果」。
+    # 🔴 实测结论：**这四条标星策略上止损无效，默认保持 0（关）**。
+    #   -15/-20/-25 三档 × 4 条策略的完整结果、逐年回撤归因、配对 t 检验见
+    #   strategies/固定止损-四条标星策略实测.md。三句话版本：
+    #     1) 收益非单调（-15/-25 常胜 -20），四档极差 < 已知扰动噪声带 3.00pp
+    #     2) 全周期回撤那 -7pp 里 2024 一次事件占 77%；剔掉 2024 后效应塌到
+    #        ±0.5pp、|t|<0.8；"回撤更小的年份"计数与掷硬币无异（3~6 / 11）
+    #     3) 代价却是确定的：换手 +7~19%、胜率 -1.1~3.7pp
+    #   保留参数是为了将来能复测，不是推荐启用。
+    g.stop_loss = getattr(g, 'stop_loss', 0.0)
+    g.stop_time = getattr(g, 'stop_time', '14:00')
+    # 止损后 N 个交易日内不再买回（0 = 不禁，下次调仓即可原价重入）
+    g.stop_ban = getattr(g, 'stop_ban', 0)
+    g.stop_banned = {}
+    g.n_stop = 0
     g.hold_history = []          # 最近 N 日持仓并集，配合「涨停过」构成黑名单
     g.high_limit = set()         # 昨收涨停的持仓：调仓不卖，14:00 再看是否打开
 
@@ -249,6 +273,7 @@ def initialize(context):
     run_daily(prepare, time='09:05')
     run_weekly(rebalance, weekday=g.weekday, time='09:30')
     run_daily(check_limit_up, time=g.exit_time)
+    run_daily(stop_check, time=g.stop_time)
 
 
 def prepare(context):
@@ -282,7 +307,7 @@ def rebalance(context):
     # 旧引擎在 select 内部就 [:10]，再剔黑名单 -> 名额被丢掉、下一名不补位；
     # 聚宽是先过滤再截断 -> 涨停/黑名单的候选会被下一名替换。
     # 实测这一处顺序差异让两个引擎从 2019-04-15 起持仓分歧。
-    cand = context.tradable(cand, 'buy')
+    cand = stop_filter(context, context.tradable(cand, 'buy'))
 
     # 20 日黑名单：最近 20 日持有过 且 最近 20 日涨停过 -> 不再买入
     if g.hold_history:
@@ -330,3 +355,42 @@ def check_limit_up(context):
         sealed = dd.get('limit_up') if 'limit_up' in dd else dd.get('open_limit_up')
         if not sealed:
             order_target_value(code, 0)
+
+
+# ============================ 固定止损 ============================
+def stop_check(context):
+    """任一持仓相对建仓价跌破 -g.stop_loss 即清仓。
+
+    停牌（当日无 K 线）取不到价 -> 跳过；卖不掉，也就无所谓触发。
+    涨停封板的即使触发也会被 broker 的可成交判定挡下，这里不特判。
+    ★ 注册在 check_limit_up 之后：engine 按时间字符串**稳定**排序，
+      同一时刻的任务保持注册顺序 —— 先炸板离场，再判止损。
+    """
+    if not g.stop_loss:
+        return
+    codes = list(context.portfolio.positions)
+    if not codes:
+        return
+    cur = context.current(codes)
+    for code in codes:
+        d = cur.get(code)
+        if d is None:
+            continue
+        # 按相位取字段：OPEN 阶段没有 close_hfq（那是收盘派生量）。
+        px = d.get('close_hfq') if 'close_hfq' in d else d.get('open_hfq')
+        cost = context.portfolio.positions[code].entry_price
+        if not px or not cost:
+            continue
+        if px / cost - 1.0 <= -g.stop_loss:
+            order_target_value(code, 0)
+            g.n_stop += 1
+            if g.stop_ban:
+                g.stop_banned[code] = context.current_date
+
+
+def stop_filter(context, codes):
+    """止损冷静期：g.stop_ban 个交易日内不把刚止损掉的票买回来。"""
+    if not g.stop_ban or not g.stop_banned:
+        return codes
+    cut = context.data.nth_prev_day(context.current_date, g.stop_ban)
+    return [c for c in codes if g.stop_banned.get(c, cut) <= cut]
