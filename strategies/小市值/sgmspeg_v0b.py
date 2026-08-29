@@ -295,6 +295,25 @@ def initialize(context):
     #    再由 broker 夹进当日真实 [low, high]，策略无法凭空造价。
     #    一字跌停仍然卖不掉（无对手盘），会记成拒单。
     g.stop_intraday = getattr(g, 'stop_intraday', 0)
+    # ---- 组合级止损 g.pf_stop（0 = 关）----
+    # 个股止损防的是【离散风险】。持仓同向的策略（红利：10~15 只票一起阴跌）
+    # 没有单只跌得够快去打掉个股止损 —— 实测红利各档回撤差全在
+    # -0.33 ~ +0.04pp，工具与风险不匹配。组合级止损直接盯【总权益回撤】。
+    # 🔴 两条必须写对，否则会静默变成"一次性永久空仓"：
+    #   1) 清仓后权益变常数，**自身曲线不能再给复位信号** ——
+    #      恢复条件只能来自外部（冷静期 + 基准指数均线）。
+    #   2) 恢复时**必须把峰值重置为当前权益**，否则"回撤仍 <= -X"当天就再触发。
+    # ★ 基准序列只取【前一交易日及更早】，不碰当天（PIT）。
+    g.pf_stop = getattr(g, 'pf_stop', 0.0)     # 峰值回撤阈值，如 0.10
+    g.pf_wait = getattr(g, 'pf_wait', 20)      # 触发后至少空仓 N 个交易日
+    g.pf_ma = getattr(g, 'pf_ma', 0)           # 基准需重回 N 日均线上方（0=不要求）
+    g.pf_cut = getattr(g, 'pf_cut', 1.0)       # 削减比例，1.0=全清、0.5=砍一半
+    g.pf_bench = getattr(g, 'pf_bench', '000905.XSHG')
+    g.pf_halt = False
+    g.pf_wait_left = 0
+    g.pf_peak = 0.0
+    g.n_pf_stop = 0
+    g._bench_px = None
     g.pos_state = {}
     g.n_stop = 0
     g.hold_history = []          # 最近 N 日持仓并集，配合「涨停过」构成黑名单
@@ -306,6 +325,7 @@ def initialize(context):
     run_weekly(rebalance, weekday=g.weekday, time='09:30')
     run_daily(check_limit_up, time=g.exit_time)
     run_daily(stop_check, time=g.stop_time)
+    run_daily(pf_check, time=g.stop_time)
 
 
 def prepare(context):
@@ -323,7 +343,7 @@ def prepare(context):
 
 def rebalance(context):
     d = context.previous_date
-    if d is None:
+    if d is None or g.pf_halt:
         return
     df = context.data.query(
         SQL, sd=d, listed=g.listed_days, cand=g.candidate_num,
@@ -492,3 +512,43 @@ def stop_filter(context, codes):
         return codes
     cut = context.data.nth_prev_day(context.current_date, g.stop_ban)
     return [c for c in codes if g.stop_banned.get(c, cut) <= cut]
+
+
+# ======================== 组合级止损 ========================
+def _bench_up(context, n):
+    """基准指数收盘是否站上 N 日均线。只用前一交易日及更早的数据（PIT）。"""
+    if g._bench_px is None:
+        g._bench_px = context.data.benchmark(g.pf_bench)[0]
+    d = context.previous_date
+    if d is None:
+        return True
+    px = [v for k, v in sorted(g._bench_px.items()) if k <= d]
+    if len(px) < n:
+        return True                    # 历史不够，不拿它当拦阻条件
+    return px[-1] >= sum(px[-n:]) / n
+
+
+def pf_check(context):
+    """总权益从峰值回撤到 -g.pf_stop 就削仓；冷静期 + 基准转强后恢复。"""
+    if not g.pf_stop:
+        return
+    tv = context.portfolio.total_value
+    if g.pf_halt:
+        if g.pf_wait_left > 0:
+            g.pf_wait_left -= 1
+            return
+        if g.pf_ma and not _bench_up(context, g.pf_ma):
+            return
+        g.pf_halt = False
+        g.pf_peak = tv                 # ★ 复位峰值，否则当天立刻再触发
+        return
+    if tv > g.pf_peak:
+        g.pf_peak = tv
+    if g.pf_peak <= 0 or tv / g.pf_peak - 1.0 > -g.pf_stop:
+        return
+    keep = 1.0 - g.pf_cut
+    for code in list(context.portfolio.positions):
+        order_target_value(code, context.portfolio.positions[code].value * keep)
+    g.pf_halt = True
+    g.pf_wait_left = g.pf_wait
+    g.n_pf_stop += 1
