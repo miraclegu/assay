@@ -112,6 +112,47 @@ v3d 也跑输（27.79）。这与聚宽在 2019-2026 窗口的结论（v3d 48.27
 差 17 倍的原始增长率直接加权，实际由「利润总额增长率」的极端值支配（名义占 10%
 的营收因子实际只贡献 1.4% 离散度）；换成分位秩后名义权重才等于实际权重。
 
+### ⑤ 三路之间的权重失衡：确认存在，但【修了没用】
+
+原版并集后按【绝对流通市值】升序取 10 —— 名义 5/5/5 等权是假的：候选市值
+系统性更小的那一路会支配组合。实测 51 个调仓日、510 个仓位：
+
+| 路 | 实际贡献 | 名义 | 候选市值中位 |
+|---|---|---|---|
+| SG | 36.6% | 33.3% | 16.54 亿 |
+| **MS** | **43.6%** | 33.3% | **15.01 亿**（最小） |
+| **PEG** | **19.8%** | 33.3% | **19.12 亿**（最大） |
+
+贡献占比与候选市值中位【完全对应】—— MS 是 PEG 的 2.2 倍。机制确凿。
+
+两种修法，2016-01-01~2026-08-20 / 默认成本：
+
+| 混合方式 | 年化 | 回撤 | 夏普 | 持仓市值中位 |
+|---|---|---|---|---|
+| `union` 原版 + MS归一化 | **30.53%** | **40.03%** | **1.08** | 17.05 亿 |
+| `rank` 路内秩轮转 + MS归一化 | 28.93% | 40.88% | 1.05 | 17.05 亿 |
+| `score` 三因子混合 top10 | **−5.61%** | 75.13% | — | — |
+| `score` 三因子混合 top15 | **−10.92%** | 83.79% | — | **74.12 亿** |
+| `score` 三因子混合 top30 | 0.02% | 53.84% | 0.14 | — |
+
+🔴 **两个反直觉但机制清楚的结论：**
+
+**1. 拉平三路份额（rank）反而略差**（−1.60pp，回撤 +0.85pp）。
+   因为失衡偏袒的 MS 路恰恰是候选市值最小的那一路，而小市值本身就是这条线的
+   alpha 来源 —— 拉平份额等于【稀释了最小市值端的暴露】。
+   **失衡是真的，但它偏向了有效的方向。**
+
+**2. 真·三因子混合（score）灾难性失败**：持仓市值中位从 17.05 亿变成
+   **74.12 亿（4.3 倍）**，已经不是小市值策略了。
+   原因：score 模式先按三因子总分取前 N，再从这 N 只里取市值最小的 10 只。
+   而【因子分与市值无关】，所以选出的是全市场因子最好的票、不是小市值票。
+
+★ **这重新定义了这条策略线是什么**：三路因子不是"三个可以加权混合的 alpha
+  源"，而是三个【过滤器】；真正的选择器是【每路内部按流通市值升序取最小】。
+  把并集+市值排序换成因子总分排序，等于把选择器换掉，alpha 随之消失。
+  => 归一化只应该做在【路内因子之间】（MS 路那四个，实测 +2.74pp 有效），
+     不应该做在【路与路之间】。
+
 ### ④ 多参数扫描（全部 ms_norm=1，2016-2026.08，默认成本）
 
 | 配置 | 年化 | 回撤 | 夏普 | 仓位<80% |
@@ -226,23 +267,63 @@ peg_t AS (SELECT jq_code, floatmv,
             count(*) OVER () n FROM peg_1 WHERE tvol IS NOT NULL),
 peg AS (SELECT jq_code, floatmv FROM peg_t WHERE rn <= floor(0.5 * n)),
 -- ---------------- 三路各取 slice（eps>0 在此才生效），并集 ----------------
-pick AS (
-  SELECT jq_code, floatmv FROM (
+pick0 AS (
+  SELECT jq_code, floatmv, k, 1 AS rt FROM (
       SELECT s.jq_code, s.floatmv, row_number() OVER (ORDER BY s.floatmv ASC, s.jq_code) k
       FROM sg s JOIN eps1 e ON e.code = s.jq_code AND e.eps > 0
   ) WHERE k <= {ssg}
-  UNION
-  SELECT jq_code, floatmv FROM (
+  UNION ALL
+  SELECT jq_code, floatmv, k, 2 FROM (
       SELECT m.jq_code, m.floatmv, row_number() OVER (ORDER BY m.floatmv ASC, m.jq_code) k
       FROM ms m JOIN eps1 e ON e.code = m.jq_code AND e.eps > 0
   ) WHERE k <= {sms}
-  UNION
-  SELECT jq_code, floatmv FROM (
+  UNION ALL
+  SELECT jq_code, floatmv, k, 3 FROM (
       SELECT g.jq_code, g.floatmv, row_number() OVER (ORDER BY g.floatmv ASC, g.jq_code) k
       FROM peg g JOIN eps1 e ON e.code = g.jq_code AND e.eps > 0
   ) WHERE k <= {speg}
+),
+-- 同一只票可能被多路选中：取它在各路里【最靠前】的秩，并记住来自哪一路
+pick AS (SELECT jq_code, min(floatmv) floatmv, min(k) k, min(rt) rt
+         FROM pick0 GROUP BY jq_code),
+-- ---------------- 三因子混合打分（mix_mode='score' 用）----------------
+-- 把三路信号各自转横截面 percent_rank 再等权相加。要求三个信号都非空，
+-- 所以池子比并集小 —— 这是"真·三因子混合"的代价，不是 bug。
+sc AS (
+  SELECT jq_code, floatmv,
+         (percent_rank() OVER (ORDER BY sg_approx)
+        + percent_rank() OVER (ORDER BY ms_score)
+        + percent_rank() OVER (ORDER BY -peg)) / 3.0 AS mix
+  FROM (SELECT p.jq_code, p.floatmv, p.sg_approx, p.peg,
+               CASE WHEN {msnorm}
+                    THEN 0.10*percent_rank() OVER (ORDER BY p.g_rev)
+                       + 0.35*percent_rank() OVER (ORDER BY p.g_tp)
+                       + 0.15*percent_rank() OVER (ORDER BY p.g_np)
+                       + 0.40*percent_rank() OVER (ORDER BY p.eg_approx)
+                    ELSE 0.10*p.g_rev + 0.35*p.g_tp + 0.15*p.g_np + 0.40*p.eg_approx
+               END AS ms_score
+        FROM pool p JOIN eps1 e ON e.code = p.jq_code AND e.eps > 0
+        WHERE p.sg_approx IS NOT NULL AND p.g_rev IS NOT NULL AND p.g_tp IS NOT NULL
+          AND p.g_np IS NOT NULL AND p.eg_approx IS NOT NULL
+          AND p.peg IS NOT NULL AND p.peg > 0 AND p.tvol IS NOT NULL)
+),
+sc_top AS (SELECT jq_code, floatmv FROM (
+    SELECT *, row_number() OVER (ORDER BY mix DESC, jq_code) rn FROM sc)
+    WHERE rn <= {sctop})
+SELECT jq_code FROM (
+  -- 'union' 原版：并集后按【绝对市值】升序 —— 候选市值系统性更小的那一路会
+  --   支配组合。实测 51 个调仓日 510 个仓位：MS 43.6% / SG 36.6% / PEG 19.8%，
+  --   与三路候选市值中位（15.01 / 16.54 / 19.12 亿）完全对应。名义 5/5/5 是假的。
+  -- 'rank'  轮转：按【路内市值秩】升序 —— 先各路第 1 名、再各路第 2 名…
+  --   三路在最终组合里的份额被拉平，这是对上述失衡的直接修复。
+  -- 'score' 真·三因子混合：三路信号各转 percent_rank 等权相加，按总分取前
+  --   {sctop} 只，再按市值升序。不再是并集。
+  SELECT jq_code, floatmv, k, rt FROM pick WHERE '{mix}' <> 'score'
+  UNION ALL
+  SELECT jq_code, floatmv, 0, 0 FROM sc_top WHERE '{mix}' = 'score'
 )
-SELECT jq_code FROM pick ORDER BY floatmv ASC, jq_code
+ORDER BY CASE WHEN '{mix}' = 'rank' THEN k ELSE 0 END,
+         floatmv ASC, jq_code
 """
 
 
@@ -258,6 +339,12 @@ def initialize(context):
     g.slice_ms = getattr(g, 'slice_ms', 5)
     g.slice_peg = getattr(g, 'slice_peg', 5)
     g.ms_norm = getattr(g, 'ms_norm', 0)
+    # 三路混合方式 —— 修「并集后按绝对市值排序」造成的路间权重失衡
+    #   'union' 原版（默认，用于对标）
+    #   'rank'  按路内市值秩轮转，拉平三路份额
+    #   'score' 三路信号各转 percent_rank 等权相加，按总分选
+    g.mix_mode = getattr(g, 'mix_mode', 'union')
+    g.score_top = getattr(g, 'score_top', 15)
     g.hold_history = []
     g.high_limit = set()
 
@@ -286,7 +373,8 @@ def rebalance(context):
     df = context.data.query(
         SQL, sd=d, listed=g.listed_days,
         ssg=g.slice_sg, sms=g.slice_ms, speg=g.slice_peg,
-        msnorm='TRUE' if g.ms_norm else 'FALSE')
+        msnorm='TRUE' if g.ms_norm else 'FALSE',
+        mix=g.mix_mode, sctop=g.score_top)
     cand = df['jq_code'].tolist()
     if not cand:
         return
