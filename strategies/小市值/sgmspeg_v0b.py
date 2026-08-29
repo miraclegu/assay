@@ -287,6 +287,14 @@ def initialize(context):
     # ★ 全部用后复权价：H/L/C 与 ATR 同口径，除权除息不会造成假触发。
     g.chand_k = getattr(g, 'chand_k', 0.0)
     g.chand_n = getattr(g, 'chand_n', 22)
+    # ---- 盘中触发 g.stop_intraday（0 = 日频，默认）----
+    # 0：14:00 用【当日收盘价】判定与成交（引擎无分时线时的默认约定）。
+    #    日内穿到 -40% 又拉回收盘 -30% 的【不触发】；跳空低开的按收盘价成交。
+    # 1：用【当日最低价】判定 —— low <= 建仓价×(1-stop) 即认为止损单被打掉。
+    #    成交价 = 跳空低开(open <= 止损价)则取 open，否则取止损价；
+    #    再由 broker 夹进当日真实 [low, high]，策略无法凭空造价。
+    #    一字跌停仍然卖不掉（无对手盘），会记成拒单。
+    g.stop_intraday = getattr(g, 'stop_intraday', 0)
     g.pos_state = {}
     g.n_stop = 0
     g.hold_history = []          # 最近 N 日持仓并集，配合「涨停过」构成黑名单
@@ -442,13 +450,38 @@ def stop_check(context):
                 s['trs'] = s['trs'][-g.chand_n:]
 
         cost = pos[code].entry_price
-        hit = (g.stop_loss and cost and px / cost - 1.0 <= -g.stop_loss)
+        fill = None                      # None = 日频，按相位价成交
+        hit = False
+        if g.stop_loss and cost:
+            if g.stop_intraday:
+                # ★ 盘中模式用【最低价】判定：只要当日探到止损位，单子就被打掉了。
+                trig = cost * (1.0 - g.stop_loss)
+                if lo is not None and lo <= trig:
+                    hit = True
+                    op = d.get('open_hfq')
+                    # 跳空低开 -> 开盘即成交（拿不到止损价）；否则按止损价成交。
+                    fill = op if (op is not None and op <= trig) else trig
+            elif px / cost - 1.0 <= -g.stop_loss:
+                hit = True
         if not hit and g.trail_stop and s['peak']:
-            hit = px / s['peak'] - 1.0 <= -g.trail_stop
+            if g.stop_intraday:
+                trig = s['peak'] * (1.0 - g.trail_stop)
+                if lo is not None and lo <= trig:
+                    hit = True
+                    op = d.get('open_hfq')
+                    fill = op if (op is not None and op <= trig) else trig
+            elif px / s['peak'] - 1.0 <= -g.trail_stop:
+                hit = True
         if not hit and g.chand_k and s['trs']:
-            hit = px < max(s['highs']) - g.chand_k * (sum(s['trs']) / len(s['trs']))
+            lvl = max(s['highs']) - g.chand_k * (sum(s['trs']) / len(s['trs']))
+            if g.stop_intraday and lo is not None and lo <= lvl:
+                hit = True
+                op = d.get('open_hfq')
+                fill = op if (op is not None and op <= lvl) else lvl
+            elif not g.stop_intraday and px < lvl:
+                hit = True
         if hit:
-            order_target_value(code, 0)
+            order_stop_sell(code, fill)
             g.n_stop += 1
             if g.stop_ban:
                 g.stop_banned[code] = context.current_date

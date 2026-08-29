@@ -319,6 +319,39 @@ class Broker:
             return self._reject(code, 'sell', '减仓量不足一手')
         return self._fill_sell(code, px, shares=lots100 * 100 / fac, reason=reason)
 
+    def order_stop_sell(self, code, price=None):
+        """止损专用清仓出口。与普通卖出的两点不同：
+
+        1) **成交价可以指定**，但必须落在当日实际 [low_hfq, high_hfq] 区间内 ——
+           区间外的价格当天根本没成交过，允许它等于让策略凭空造出成交。
+           传 None 则退回常规逻辑（按相位取开盘/收盘价），即【日频止损】。
+        2) **一字跌停才算无对手盘**。常规 sell 用「收盘跌停」拦单，对止损单
+           不合适：只要当日 high > low，说明盘中在更高价位成交过，
+           挂在那之上的止损单是打得掉的。一字板（high == low）才真卖不掉。
+
+        reason 一律记 'stop'，与调仓卖出、炸板离场区分开 ——
+        之前用 reason=='intraday' 的笔数差当触发次数是错的，
+        那个口径把炸板离场也算了进去（2022 年出现 -1 就是这么来的）。
+        """
+        b = self.bars.get(code)
+        if b is None or not b.close_hfq:
+            return self._reject(code, 'sell', '停牌/无行情')
+        p = self.pf.positions.get(code)
+        if p is None or p.sellable(self.date) <= 0:
+            return self._reject(code, 'sell', 'T+1，当日买入不可卖')
+        if price is None:
+            ok, why, px = self.can_trade(code, 'sell')
+            if not ok:
+                return self._reject(code, 'sell', why)
+            return self._fill_sell(code, px, shares=p.sellable(self.date), reason='stop')
+        lo, hi = b.low_hfq, b.high_hfq
+        if lo is None or hi is None:
+            return self._reject(code, 'sell', '无高低价')
+        if b.limit_ok is not False and b.limit_down and hi <= lo:
+            return self._reject(code, 'sell', '一字跌停，无对手盘')
+        px = min(max(price, lo), hi)          # 夹到当日真实成交区间
+        return self._fill_sell(code, px, shares=p.sellable(self.date), reason='stop')
+
     def _fill_sell(self, code, price, shares=None, slip=True, reason='rebalance'):
         """★ 唯一的卖出成交出口。清仓与减仓走同一条路。
 

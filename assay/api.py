@@ -12,7 +12,7 @@ from .context import G
 
 __all__ = ['g', 'run_daily', 'run_weekly', 'run_monthly', 'set_benchmark',
            'set_slippage', 'set_order_cost', 'set_dividend_tax', 'set_volume_ratio',
-           'order_target_value', 'order_target_percent', 'log']
+           'order_target_value', 'order_target_percent', 'order_stop_sell', 'log']
 
 g = G()
 _E = None          # 当前 Engine
@@ -109,6 +109,12 @@ def set_dividend_tax(on=True):
 def order_target_value(code, value):
     """调到目标市值。加减仓由 broker 内置处理（FIFO 分批），策略不必关心。"""
     return _need().broker.order_target_value(code, value)
+
+
+def order_stop_sell(code, price=None):
+    """止损清仓。price 为盘中触发价（会被夹到当日真实 [low, high] 内）；
+    None = 日频模式，按相位价成交。成交记 reason='stop'。"""
+    return _need().broker.order_stop_sell(code, price)
 
 
 def order_target_percent(code, pct):
