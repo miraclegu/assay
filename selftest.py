@@ -683,48 +683,61 @@ def t_ui():
                 r(Math.round(H.top-T.top));}));}""")
             assert abs(gap) <= 2, '滚动后表头距容器顶 %dpx，应贴顶（sticky top 写错？）' % gap
 
-            # ---- 收益明细：年 / 月 / 日 三层下钻 ----
+            # ---- 收益明细：年热力 → 年详情页 → 月内日热力 ----
             # ★ 全部由 /api/equity 的 dates+equity 现算，【不依赖新表】。
-            #   这里对着 equity.parquet 逐项校，防止前端口径悄悄漂掉。
+            #   这里对着曲线逐项校，防止前端口径悄悄漂掉；并校年详情页是
+            #   独立路由（浏览器后退必须能用）。
+            base_hash = pg.evaluate('location.hash')   # 形如 #/run/<id>
             names = pg.locator('#tabs div').all_inner_texts()
             pg.locator('#tabs div').nth(names.index('收益明细')).click()
             pg.wait_for_timeout(500)
-            ny = pg.locator('#ybody .yrow').count()
-            assert ny >= 2, '年度行只有 %d 行' % ny
             eqj = pg.evaluate('({d:DATA.eq.dates, e:DATA.eq.equity})')
-            import collections
+            import collections, calendar as _cal
             byy = collections.OrderedDict()
             for d, v in zip(eqj['d'], eqj['e']):
                 byy.setdefault(d[:4], []).append(v)
-            y0 = list(byy)[0]
-            txt = pg.locator('#ybody .yrow').first.inner_text().split('\t')
-            v0 = byy[y0]
-            want_r = v0[-1] / v0[0] - 1
-            pk = v0[0]; want_dd = 0.0
-            for v in v0:
-                pk = max(pk, v); want_dd = max(want_dd, 1 - v / pk)
-            assert txt[0] == y0, '首行年份 %s != %s' % (txt[0], y0)
-            assert abs(float(txt[1].rstrip('%')) - want_r * 100) < 0.02, \
-                '年收益 %s vs 应为 %.2f%%' % (txt[1], want_r * 100)
-            assert abs(float(txt[2].rstrip('%')) - want_dd * 100) < 0.02, \
-                '年内回撤 %s vs 应为 %.2f%%' % (txt[2], want_dd * 100)
-            assert int(txt[3]) == len(v0), '交易日数 %s != %d' % (txt[3], len(v0))
-            # 点开一个月 -> 日历；非交易日必须留白（斜纹），交易日数要对得上
-            nm = pg.locator('#ybody .mcell').count()
-            assert nm >= 1, '展开年没有月份格'
-            pg.locator('#ybody .mcell').first.click(); pg.wait_for_timeout(400)
+            ys = list(byy)
+            yc = pg.locator('#p2 .hm.y .hc')
+            assert yc.count() == len(ys), '年热力 %d 格 != %d 年' % (yc.count(), len(ys))
+            def _dd(vals):
+                pk = 0.0; mx = 0.0
+                for v in vals:
+                    pk = max(pk, v)
+                    if pk: mx = max(mx, 1 - v / pk)
+                return mx
+            t0 = yc.first.inner_text().split('\n')
+            v0 = byy[ys[0]]
+            assert t0[0] == ys[0], '首格年份 %s != %s' % (t0[0], ys[0])
+            assert abs(float(t0[1].rstrip('%')) - (v0[-1] / v0[0] - 1) * 100) < 0.06, \
+                '年收益 %s vs %.2f%%' % (t0[1], (v0[-1] / v0[0] - 1) * 100)
+            assert ('%d 日' % len(v0)) in t0[2], '交易日数不符: %s vs %d' % (t0[2], len(v0))
+            assert abs(float(t0[2].split('回撤 ')[1].split('%')[0]) - _dd(v0) * 100) < 0.06, \
+                '年内回撤 %s vs %.2f%%' % (t0[2], _dd(v0) * 100)
+            # 点年 -> 独立路由的年详情页
+            yc.nth(1).click(); pg.wait_for_timeout(600)
+            yr = ys[1]
+            assert pg.evaluate('location.hash').endswith('/y/' + yr), \
+                '年详情没有独立 hash: %s' % pg.evaluate('location.hash')
+            assert pg.locator('#p2 .hm.m .hc').count() == 12, '月热力不是 12 格'
+            # 点月 -> 日热力；日历格数=当月天数，交易日数=曲线里的实际条数
+            pg.locator('#p2 .hm.m .hc[data-m]').first.click(); pg.wait_for_timeout(500)
             mk = pg.evaluate('MSEL')
+            nd = _cal.monthrange(int(mk[:4]), int(mk[5:7]))[1]
             cal_days = pg.locator('#cal .cd:not(.pad)').count()
             cal_off = pg.locator('#cal .cd.off').count()
-            import calendar as _cal
-            yy, mm = int(mk[:4]), int(mk[5:7])
-            ndays = _cal.monthrange(yy, mm)[1]
             real = sum(1 for d in eqj['d'] if d[:7] == mk)
-            assert cal_days == ndays, '日历格 %d != 当月天数 %d' % (cal_days, ndays)
+            assert cal_days == nd, '日历格 %d != 当月天数 %d' % (cal_days, nd)
             assert cal_days - cal_off == real, \
                 '日历交易日 %d != 曲线里的 %d' % (cal_days - cal_off, real)
-            drill = '%s 年收益/回撤/交易日 3 项对齐 equity.parquet；%s 日历 %d 格 (交易 %d/非交易 %d)' \
-                    % (y0, mk, cal_days, real, cal_off)
+            # 浏览器后退必须回到上一年详情页（而不是直接掉出详情）
+            pg.go_back(); pg.wait_for_timeout(600)
+            h = pg.evaluate('location.hash')
+            assert h == base_hash or '/y/' in h, '后退没回到收益明细：%s' % h
+            pg.locator('#tabs div').nth(names.index('收益明细')).click()
+            pg.wait_for_timeout(400)
+            drill = ('年热力 %d 格(%s 收益/回撤/交易日对齐曲线)；%s 年详情独立路由；'
+                     '%s 日历 %d 格(交易 %d/非交易 %d)'
+                     % (yc.count(), ys[0], yr, mk, cal_days, real, cal_off))
 
             pg.click('#back'); pg.wait_for_timeout(400)
             assert pg.is_visible('#cat'), '返回目录失败'
