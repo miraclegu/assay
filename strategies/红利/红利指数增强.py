@@ -148,15 +148,45 @@ WITH div AS ({div}
          row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
   FROM read_parquet('{root}/std/fin_indicator_q.parquet')
   WHERE pub_date <= DATE '{t1}'
-), fund AS (
-  SELECT p.jq_code, p.totalmv FROM {panel} p
+), fund0 AS (
+  -- PE 带保持绝对值：它是【有效性】过滤（剔负 PE 与泡沫），不是排序因子
+  SELECT p.jq_code, p.totalmv, i.inc_return, i.inc_rev, i.inc_np FROM {panel} p
   JOIN ind i ON i.code = p.jq_code AND i.rn = 1
   WHERE p.date = DATE '{t1}' AND {uni}
     AND p.pe_ttm BETWEEN {pe_lo} AND {pe_hi}
-    -- ★ std 层比率存【小数】，所以阈值 ÷100（原版是百分数 between 5 and 100）
-    AND i.inc_return BETWEEN {roe_lo} AND {roe_hi}
-    AND i.inc_rev BETWEEN {rev_lo} AND {rev_hi}
-    AND i.inc_np BETWEEN {np_lo} AND {np_hi}
+), fund AS (
+  -- b_mode='abs' 原版：绝对阈值。
+  --   ★ std 层比率存【小数】，所以阈值 ÷100（原版是百分数 between 5 and 100）
+  --   实测问题：inc_return 中位数只有约 1%，>=5% 这个阈值本身就相当于取前 10%。
+  --   四条过滤把池子从约 2000 压到 55 只，再取股息率 top10% 只剩 5 只 ——
+  --   而 num_b=5，所以 B 袖选择率 83%（A 袖 3.3%），num_b 近乎死参数。
+  -- b_mode='pct' 变体：三条质量/成长条件改成【横截面分位】，各取前 b_*_pct。
+  --   PE 带不动（见上）。分位在 PE 过滤【之后】的池内计算。
+  --
+  -- 🔴 实测结论：分位版【确实修好了供给问题，但收益更差】——
+  --   （2016-01-01~2026-08-20，100 万，默认成本，div_method=fiscal_year）
+  --     abs 原版    21.34% / 回撤 17.95% / 夏普 1.37   B池中位 6  选择率 71.7%
+  --     pct 前30%   17.76% / 21.27% / 1.14            B池中位 12 选择率 40.0%
+  --     pct 前20/40/50%  13.76 / 16.43 / 14.23%（全部落后，且非单调）
+  --     pct30 + num_b=8/12  15.14 / 15.71%（放大 B 份额只会更差）
+  --   => 绝对阈值在【质量类因子】上是特性不是缺陷：inc_return >= 5% 强制的是
+  --      「绝对盈利水平下限」，而分位版只看相对排名 —— 全市场盈利普遍恶化时，
+  --      分位版照样放进前 30%（可能只有 1% 的 ROE），绝对版则正确地把池子收紧。
+  --      【池子在坏年份变小是过滤器在工作，不是失灵。】
+  --   ★ 我最初把「池子规模随市场漂移」当成毛病去修，方向就错了。
+  --      供给端指标（池子大小、选择率）改善 ≠ 策略改善 —— 这两件事要分开看。
+  SELECT jq_code, totalmv FROM (
+    SELECT *,
+           percent_rank() OVER (ORDER BY inc_return) pr_roe,
+           percent_rank() OVER (ORDER BY inc_rev)    pr_rev,
+           percent_rank() OVER (ORDER BY inc_np)     pr_np
+    FROM fund0
+  ) WHERE CASE WHEN '{bmode}' = 'pct'
+               THEN pr_roe >= 1 - {broe} AND pr_rev >= 1 - {brev} AND pr_np >= 1 - {bnp}
+               ELSE inc_return BETWEEN {roe_lo} AND {roe_hi}
+                    AND inc_rev BETWEEN {rev_lo} AND {rev_hi}
+                    AND inc_np BETWEEN {np_lo} AND {np_hi}
+          END
 ), base AS (
   SELECT f.jq_code, d.amt / f.totalmv AS dy,
          row_number() OVER (ORDER BY d.amt / f.totalmv DESC) AS rk,
@@ -215,6 +245,14 @@ def initialize(context):
     g.rev_hi = getattr(g, 'rev_hi', 1.00)
     g.np_lo = getattr(g, 'np_lo', 0.10)
     g.np_hi = getattr(g, 'np_hi', 1.00)
+    # B 袖阈值口径：'abs' 绝对阈值（原版，用于对标）/ 'pct' 横截面分位
+    #   分位版保留各条件的【相对严格度】而不锁死绝对水平，池子规模不随
+    #   全市场盈利水平漂移。三条各取前 b_*_pct（默认 0.30，三条独立叠加后
+    #   池子规模与原版量级相当）。
+    g.b_mode = getattr(g, 'b_mode', 'abs')
+    g.b_roe_pct = getattr(g, 'b_roe_pct', 0.30)
+    g.b_rev_pct = getattr(g, 'b_rev_pct', 0.30)
+    g.b_np_pct = getattr(g, 'b_np_pct', 0.30)
     # ---- B-1 的三种口径（g.b1_mode）----
     # JQ「修复与优化记录.md §216」把这 8 个阈值标为 🔴 最大过拟合源，并给了修法：
     #   · 删所有上界：三个 100 完全相同（复制粘贴痕迹），扣非ROE>100% 近乎不存在
@@ -276,7 +314,8 @@ def pick(context):
     sql_b = SQL_B.replace('{div}', div_cte)
     kw = dict(t1=d, uni=UNIVERSE, dmin=g.div_min, dtop=g.div_top_pct,
               pe_lo=g.pe_lo, pe_hi=g.pe_hi, roe_lo=g.roe_lo, roe_hi=g.roe_hi,
-              rev_lo=g.rev_lo, rev_hi=g.rev_hi, np_lo=g.np_lo, np_hi=g.np_hi)
+              rev_lo=g.rev_lo, rev_hi=g.rev_hi, np_lo=g.np_lo, np_hi=g.np_hi,
+              bmode=g.b_mode, broe=g.b_roe_pct, brev=g.b_rev_pct, bnp=g.b_np_pct)
     a = context.data.query(sql_a, bw=g.beta_win, bpct=g.beta_pct, **kw)['jq_code'].tolist()
     b = context.data.query(sql_b, **kw)['jq_code'].tolist()
     la, lb = a[:g.num_a], b[:g.num_b]
