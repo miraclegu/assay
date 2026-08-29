@@ -6,6 +6,7 @@
 
 每一条都对应一个曾经真实发生过的失真，不是凑数的用例。
 """
+import argparse
 import os
 import re
 import sys
@@ -24,9 +25,18 @@ JQ = dict(slippage=0.0, commission=0.0003, min_commission=5.0, close_tax=0.001)
 CASES = []
 
 
-def case(name):
+def case(name, tag='fast'):
+    """tag 决定用例进哪一层，依据是【实测耗时】不是感觉：
+
+      fast (22 个, 约 18s)  日常改代码跑这个
+      slow (7 个,  约 189s) 跑长区间回测的，占全量 80% 的时间
+      web  (3 个,  约 30s)  需要浏览器
+
+    新增用例默认 fast；如果它要跑多年回测或起浏览器，记得显式标 tag，
+    否则 --fast 会慢慢退化回全量。
+    """
     def deco(fn):
-        CASES.append((name, fn))
+        CASES.append((name, fn, tag))
         return fn
     return deco
 
@@ -50,7 +60,7 @@ def t_lookahead():
     raise AssertionError('未来函数没被拦住 —— 防火墙失效')
 
 
-@case('合法策略未被防火墙误伤')
+@case('合法策略未被防火墙误伤', tag='slow')
 def t_baseline():
     """基线数字：改动引擎后必须仍然复现，否则说明引入了行为变化。
 
@@ -113,7 +123,7 @@ def t_bench_base():
     return '基准收益 %.2f%% (聚宽 4.76%%)' % (got * 100)
 
 
-@case('FROEC 全指标对标聚宽')
+@case('FROEC 全指标对标聚宽', tag='slow')
 def t_froec_metrics():
     """聚宽实测(交易记录表头)：年化 36.80 / 回撤 47.24 / 基准 4.76 /
     beta 0.899 / alpha 0.360 / 胜率 0.619 / 超额回撤 44.54"""
@@ -161,7 +171,7 @@ def t_param_typo():
     raise AssertionError('拼错的参数名没被拦住')
 
 
-@case('参数覆盖确实生效')
+@case('参数覆盖确实生效', tag='slow')
 def t_param_effective():
     a, _ = _run('strategies/小市值/sgmspeg_v0b.py', '2024-01-01', '2026-06-30', 5e5, **JQ)
     feed = PanelFeed('2024-01-01', '2026-06-30')
@@ -235,7 +245,7 @@ def t_fingerprint():
         a['parts']['std']['n_files'], a['parts']['index']['n_files'])
 
 
-@case('run_weekly/monthly 的序号参数真的生效')
+@case('run_weekly/monthly 的序号参数真的生效', tag='slow')
 def t_schedule_ordinal():
     """曾是静默 bug：_due 收了 weekday/monthday 却从不使用，
     `run_weekly(f, weekday=3)` 会静默按周一执行。参数静默失效是最难发现的一类。"""
@@ -289,7 +299,7 @@ def t_div_cash():
         got_cash, real_before, p.shares)
 
 
-@case('成交量约束在大资金下真的收紧')
+@case('成交量约束在大资金下真的收紧', tag='slow')
 def t_volume_cap():
     """★ 没有它，回测会在【所有资金规模】上都报 35~38%，等于宣称策略可无限扩容。
     曾用「委托占成交额中位 0.02~0.44%、P90 1.15%」判断「永不触发」而未实现 ——
@@ -416,7 +426,7 @@ def t_deterministic():
             % (dups['fin_quarterly'], dups['fin_indicator_q'], miss_pct, ttm_null))
 
 
-@case('停牌挂账可见 + 期末守卫')
+@case('停牌挂账可见 + 期末守卫', tag='slow')
 def t_frozen():
     """停牌持仓按最后已知价挂账。**不加折价** —— 实测复牌日收益中位只有
     −3%~−5%（11-30天甚至 +0.14%），而且那笔损失在复牌当天本来就会计入，
@@ -482,7 +492,7 @@ def t_limit_unreliable():
     return 'limit_ok=true 拦住 / false 放行；历史上同时成立的行 %d 个（故当前无影响）' % n_bad
 
 
-@case('并行扫描结果与串行逐位相同')
+@case('并行扫描结果与串行逐位相同', tag='slow')
 def t_sweep_parallel():
     """并行化唯一必须保证的不变量：结果与串行一致，且网格顺序不乱。
     api 的模块级状态是每进程一份，所以子进程互不污染；
@@ -596,7 +606,7 @@ def t_server():
     return '8 个端点契约通过（持仓分页/倒序/越界收敛）；5 类非法 run_id 全部 404'
 
 
-@case('网页看板真实渲染（playwright）')
+@case('网页看板真实渲染（playwright）', tag='web')
 def t_ui():
     """★ JS 语法检查过不代表能渲染 —— 运行时错误在终端里看不到。
     用真实浏览器跑一遍：目录树、展开、点进详情、九个页签、返回、浏览器后退，
@@ -813,7 +823,7 @@ def t_ui():
             '0 JS 错误，表头 gap %dpx；下钻: %s' % (gap, drill))
 
 
-@case('版本页：简介/源码/参数表单/触发回测')
+@case('版本页：简介/源码/参数表单/触发回测', tag='web')
 def t_version_page():
     """版本（代码哈希）这一层要能看代码、看可填参数、按参数直接回测。
 
@@ -1245,7 +1255,7 @@ def _():
         '%s %.3f亿' % (k.split('.')[0], v) for k, v in got.items())
 
 
-@case('选中标记：打星 / 冒泡 / 不误触发')
+@case('选中标记：打星 / 冒泡 / 不误触发', tag='web')
 def _():
     """★ 打在【单次回测】上，因为 run 才记录了策略+参数+区间+成本+数据指纹，
     构成一条完整的「规则」；策略文件或代码版本都不够 —— 同一版本换个参数
@@ -1373,18 +1383,53 @@ def _():
 
 
 def main():
+    import time as _t
+    ap = argparse.ArgumentParser(description='assay 自检')
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument('--fast', action='store_true', help='只跑 fast 层（约 18s，无浏览器）')
+    g.add_argument('--slow', action='store_true', help='只跑 slow 层（长区间回测）')
+    g.add_argument('--web', action='store_true', help='只跑 web 层（需要浏览器）')
+    g.add_argument('--all', action='store_true', help='全部（默认）')
+    ap.add_argument('-k', default=None, help='按用例名关键字过滤（可与分层叠加）')
+    ap.add_argument('--list', action='store_true', help='只列用例与分层，不执行')
+    a = ap.parse_args()
+    want = ({'fast'} if a.fast else {'slow'} if a.slow else
+            {'web'} if a.web else {'fast', 'slow', 'web'})
+    sel = [(n_, f_, t_) for n_, f_, t_ in CASES
+           if t_ in want and (not a.k or a.k in n_)]
+    if a.list:
+        for t_ in ('fast', 'slow', 'web'):
+            names = [n_ for n_, _, tt in CASES if tt == t_]
+            print('%-5s %2d 个: %s' % (t_, len(names), '、'.join(names)))
+        return
+    if not sel:
+        print('没有匹配的用例'); sys.exit(1)
+    print('层 %s%s —— %d/%d 个用例\n'
+          % ('+'.join(sorted(want)), (' 关键字 %r' % a.k) if a.k else '',
+             len(sel), len(CASES)))
     ok = fail = 0
-    for name, fn in CASES:
+    times = []
+    for name, fn, _tag in sel:
+        t0 = _t.time()
         try:
             msg = fn()
-            print('  ✓ %-28s %s' % (name, msg or ''))
+            dt = _t.time() - t0
+            times.append((dt, name))
+            print('  ✓ %-28s %6.1fs  %s' % (name, dt, msg or ''))
             ok += 1
         except Exception as e:                              # noqa: BLE001
-            print('  ✗ %-28s %s: %s' % (name, type(e).__name__, e))
+            dt = _t.time() - t0
+            times.append((dt, name))
+            print('  ✗ %-28s %6.1fs  %s: %s' % (name, dt, type(e).__name__, e))
             if os.environ.get('SELFTEST_TRACE'):
                 traceback.print_exc()
             fail += 1
-    print('\n%d 通过 / %d 失败' % (ok, fail))
+    print('\n%d 通过 / %d 失败   总耗时 %.1fs（共 %d 个用例，本次跑 %d 个）'
+          % (ok, fail, sum(d for d, _ in times), len(CASES), len(sel)))
+    if os.environ.get('SELFTEST_TIMING'):
+        print('\n耗时排序:')
+        for d, n in sorted(times, reverse=True):
+            print('  %6.1fs  %s' % (d, n))
     sys.exit(1 if fail else 0)
 
 
