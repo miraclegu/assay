@@ -117,6 +117,9 @@ svg{display:block;width:100%;overflow:visible}
 #tip{position:fixed;pointer-events:none;background:#0b0e12ee;border:1px solid var(--line);
   border-radius:5px;padding:6px 9px;font-size:11.5px;display:none;z-index:99;white-space:pre}
 /* ---- 年/月/日 热力下钻 ---- */
+/* 配色原则：底色只负责【方向 + 强度】，数字一律用中性前景色。
+   曾经底色和数字同色相（红底红字 / 绿底绿字），叠上去几乎读不出来。
+   方向改由数字前面的 +/- 号承担，弱格子（底色近乎透明）也能一眼看出正负。 */
 .hm{display:grid;gap:6px;margin-top:4px}
 .hm.y{grid-template-columns:repeat(auto-fill,minmax(112px,1fr))}
 .hm.m{grid-template-columns:repeat(auto-fill,minmax(96px,1fr))}
@@ -126,23 +129,32 @@ svg{display:block;width:100%;overflow:visible}
 .hc.on{outline-color:var(--accent)}
 .hc.na{cursor:default;opacity:.28}
 .hc.na:hover{outline-color:transparent}
-.hc .k{font-size:11px;color:var(--dim)}
-.hc .v{font-size:17px;font-variant-numeric:tabular-nums;margin:1px 0 1px}
-.hc .n{font-size:10px;color:var(--dim)}
+.hc .k{font-size:11px;color:#a8b3c0}
+.hc .v{font-size:17px;font-variant-numeric:tabular-nums;margin:1px 0;color:var(--fg)}
+.hc .n{font-size:10px;color:#a8b3c0}
 .crumb{display:flex;align-items:center;gap:8px;margin:2px 0 12px;font-size:12px}
 .crumb a{color:var(--accent);cursor:pointer;text-decoration:none}
 .crumb span{color:var(--dim)}
+.lgd{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);margin-top:8px}
+.lgd i{width:22px;height:11px;border-radius:2px;display:inline-block;border:1px solid var(--line)}
 #cal{margin-top:14px}
 .calg{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;
   background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:10px}
 .calg .wd{color:var(--dim);font-size:11px;text-align:center;padding:2px 0}
 .cd{border:1px solid var(--line);border-radius:5px;min-height:46px;padding:4px 5px;
-  font-size:11px;line-height:1.35}
-.cd .d{color:var(--dim);font-size:10px}
-.cd .v{font-size:12.5px;font-variant-numeric:tabular-nums}
-.cd.off{opacity:.32;background:repeating-linear-gradient(135deg,
+  font-size:11px;line-height:1.35;cursor:pointer;
+  outline:2px solid transparent;outline-offset:-2px}
+.cd:hover{outline-color:var(--dim)}
+.cd.on{outline-color:var(--accent)}
+.cd .d{color:#a8b3c0;font-size:10px}
+.cd .v{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--fg)}
+.cd.off{opacity:.3;cursor:default;background:repeating-linear-gradient(135deg,
   transparent 0 5px,var(--line) 5px 6px)}
-.cd.pad{border:0;background:none}
+.cd.off:hover{outline-color:transparent}
+.cd.pad{border:0;background:none;cursor:default}
+.cd.pad:hover{outline-color:transparent}
+#day{margin-top:14px}
+#day .tw{max-height:none}
 /* ---- 表 ---- */
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{padding:5px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -254,7 +266,7 @@ function route(){
   }
   const m=/^#\/run\/(.+)$/.exec(location.hash||'');
   if(m){
-    const id=decodeURIComponent(m[1]); YPAGE=null; MSEL=null;
+    const id=decodeURIComponent(m[1]); YPAGE=null; MSEL=null; DSEL=null;
     if(warm(id)){ tab(2); } else { openRun(id); }
     return;
   }
@@ -754,7 +766,7 @@ function renderVersionRuns(){
 /* ============ 详情页 ============ */
 async function openRun(id, initTab){
   CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100};
-  MSEL=null; YOPEN=null;      // 下钻状态跟着回测走，不跨回测残留
+  MSEL=null; DSEL=null; YOPEN=null;   // 下钻状态跟着回测走，不跨回测残留
                               // ★ YPAGE 由 route() 先设好，这里不能清
   stopPoll();
   $('#vp').innerHTML=''; $('#vp').style.display='none';
@@ -922,6 +934,7 @@ function paneEquity(){
      · 年收益 = 该年首末权益比；年内/月内最大回撤在各自的日线上重算 */
 let YPAGE=null;                      // 年详情页的年份，null = 年度总览
 let MSEL=null;                       // 年详情页里展开的月份 'YYYY-MM'
+let DSEL=null;                       // 日历里选中的那一天 'YYYY-MM-DD'
 let YOPEN=null;                      // 兼容旧状态位（openRun 会重置）
 
 function _mstat(){
@@ -949,9 +962,16 @@ function _mstat(){
   return {mv,yv,dr,dd,nd,idx:Object.fromEntries(e.dates.map((d,i)=>[d,i]))};
 }
 
-const _hcol=(v,k)=>v==null?'transparent':
-  (v>0?`rgba(240,91,91,${Math.min(.85,.15+Math.abs(v)*(k||3))})`
-      :`rgba(47,184,122,${Math.min(.85,.15+Math.abs(v)*(k||3))})`);
+/* 底色：低饱和 + 透明度封顶 0.50。深色底上叠这个强度，白字始终读得清；
+   原来用 rgba(240,91,91,.85) 那种高饱和高透明度，字压上去就糊了。 */
+const _hcol=(v,k)=>{
+  if(v==null) return 'transparent';
+  const t=Math.min(1,Math.abs(v)*(k||3));
+  const a=(0.07+t*0.43).toFixed(3);
+  return v>0?`rgba(158,48,48,${a})`:`rgba(22,106,76,${a})`;
+};
+/* 强度弱的格子底色近乎透明，方向全靠这个 +/- 号 —— 不能省 */
+const _sn=(v,d)=>v==null?'—':(v>0?'+':'')+(v*100).toFixed(d);
 const _yhash=y=>'#/run/'+encodeURIComponent(CUR)+'/y/'+y;
 
 function paneMonthly(){ YPAGE?paneYear():paneYears(); }
@@ -960,13 +980,14 @@ function paneMonthly(){ YPAGE?paneYear():paneYears(); }
 function paneYears(){
   const S=_mstat();
   const ys=[...new Set(DATA.eq.dates.map(d=>d.slice(0,4)))].sort();
-  $('#p2').innerHTML=`<div class="note">按年看「哪一年崩的」。红涨绿跌，深浅表示幅度。
-     点年份进入该年详情，可继续下钻到月、到日。</div>
+  $('#p2').innerHTML=`<div class="note">按年看「哪一年崩的」。点年份进入该年详情，
+     可继续下钻到月、到日。</div>
    <div class="hm y">${ys.map(y=>{const v=S.yv[y];
      return `<div class="hc" data-y="${y}" style="background:${_hcol(v)}">
        <div class="k">${y}</div>
-       <div class="v ${sign(v)}">${v==null?'—':(v*100).toFixed(1)+'%'}</div>
-       <div class="n">回撤 ${pct(S.dd(y),1)} · ${S.nd[y]} 日</div></div>`;}).join('')}</div>`;
+       <div class="v">${_sn(v,1)}%</div>
+       <div class="n">回撤 ${pct(S.dd(y),1)} · ${S.nd[y]} 日</div></div>`;}).join('')}</div>
+   ${_legend()}`;
   $('#p2').querySelectorAll('.hc').forEach(c=>c.onclick=()=>{location.hash=_yhash(c.dataset.y);});
 }
 
@@ -1000,15 +1021,16 @@ function paneYear(){
        <div class="v">—</div><div class="n">无数据</div></div>`;
      return `<div class="hc ${MSEL===k?'on':''}" data-m="${k}" style="background:${_hcol(v)}">
        <div class="k">${i+1} 月</div>
-       <div class="v ${sign(v)}">${(v*100).toFixed(1)}%</div>
+       <div class="v">${_sn(v,1)}%</div>
        <div class="n">回撤 ${pct(S.dd(k),1)} · ${S.nd[k]} 日</div></div>`;}).join('')}</div>
-   <div id="cal"></div>`;
+   ${_legend()}
+   <div id="cal"></div><div id="day"></div>`;
   $('#c_all').onclick=()=>{location.hash='#/run/'+encodeURIComponent(CUR);};
   const pv=$('#c_prev'), nx=$('#c_next');
-  if(pv) pv.onclick=()=>{MSEL=null;location.hash=_yhash(ys[at-1]);};
-  if(nx) nx.onclick=()=>{MSEL=null;location.hash=_yhash(ys[at+1]);};
+  if(pv) pv.onclick=()=>{MSEL=null;DSEL=null;location.hash=_yhash(ys[at-1]);};
+  if(nx) nx.onclick=()=>{MSEL=null;DSEL=null;location.hash=_yhash(ys[at+1]);};
   $('#p2').querySelectorAll('.hc[data-m]').forEach(c=>c.onclick=()=>{
-    MSEL=(MSEL===c.dataset.m)?null:c.dataset.m; paneYear();});
+    MSEL=(MSEL===c.dataset.m)?null:c.dataset.m; DSEL=null; paneYear();});
   drawCal(S);
 }
 
@@ -1031,11 +1053,13 @@ function drawCal(S){
     const v=S.dr[ds];
     if(v!=null){ if(best==null||v>best[1])best=[ds,v]; if(worst==null||v<worst[1])worst=[ds,v]; }
     const pos=e.cash_pct?(1-e.cash_pct[i]):null;
-    cells+=`<div class="cd" style="background:${_hcol(v,12)}"
+    cells+=`<div class="cd ${DSEL===ds?'on':''}" data-d="${ds}"
+      style="background:${_hcol(v,12)}"
       title="${ds}  ${v==null?'首日无前值':'日收益 '+pct(v,2)}
-仓位 ${pos==null?'—':pct(pos,1)}   持仓 ${e.n_positions?e.n_positions[i]:'—'} 只">
+仓位 ${pos==null?'—':pct(pos,1)}   持仓 ${e.n_positions?e.n_positions[i]:'—'} 只
+点击看当日持仓与买卖">
       <div class="d">${d}</div>
-      <div class="v ${sign(v)}">${v==null?'—':(v*100).toFixed(2)}</div></div>`;
+      <div class="v">${_sn(v,2)}</div></div>`;
   }
   box.innerHTML=`<h3 class="sec">${Y} 年 ${M} 月 · 日热力
      <span style="float:right;font-weight:400">交易日 ${ntd} 天 / 非交易日 ${nt} 天
@@ -1044,6 +1068,75 @@ function drawCal(S){
      </span></h3>
    <div class="calg">${['一','二','三','四','五','六','日']
      .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`;
+  box.querySelectorAll('.cd[data-d]').forEach(c=>c.onclick=()=>{
+    DSEL=(DSEL===c.dataset.d)?null:c.dataset.d;
+    box.querySelectorAll('.cd').forEach(x=>x.classList.toggle('on',x.dataset.d===DSEL));
+    drawDay(S);});
+  drawDay(S);
+}
+
+function _legend(){
+  const mk=v=>`<i style="background:${_hcol(v)}"></i>`;
+  return `<div class="lgd">跌 ${[-.25,-.12,-.05,-.01].map(mk).join('')}
+    <i style="background:transparent"></i>${[.01,.05,.12,.25].map(mk).join('')} 涨
+    <span style="margin-left:10px">底色只表示方向与强度，正负看数字前的 +/- 号</span></div>`;
+}
+
+/* ---- 第四层：某一天的持仓 / 买卖（读 /api/day，只用现有归档）---- */
+async function drawDay(S){
+  const box=$('#day'); if(!box) return;
+  if(!DSEL){box.innerHTML='';return;}
+  const d=DSEL, e=DATA.eq, i=S.idx[d];
+  box.innerHTML='<div class="note">加载中…</div>';
+  let o; try{ o=await j('/api/day?id='+encodeURIComponent(CUR)+'&d='+d); }
+  catch(err){ box.innerHTML=`<div class="note">加载失败：${err.message}</div>`; return; }
+  if(DSEL!==d) return;                 // 点得快时后到的响应不要覆盖当前选择
+  const pos=e.cash_pct?(1-e.cash_pct[i]):null;
+  const nm=r=>`${r.code}${r.name?' '+r.name:''}`;
+  const money=v=>v==null?'—':(+v).toLocaleString('en',{maximumFractionDigits:0});
+  const px=v=>v==null?'—':(+v).toFixed(3);
+  box.innerHTML=`<h3 class="sec">${d} · 当日明细</h3>
+    <div class="cards">
+      ${card('当日收益',_sn(S.dr[d],2)+'%',sign(S.dr[d]))}
+      ${card('权益',money(e.equity[i]*(DATA.run.stats.cash||1)))}
+      ${card('仓位',pct(pos,1))}
+      ${card('持仓',o.holdings.length+' 只')}
+      ${card('当日买入',o.buys.length+' 笔')}
+      ${card('当日卖出',o.sells.length+' 笔')}
+    </div>
+    <div id="d_sell"></div><div id="d_buy"></div><div id="d_hold"></div>`;
+  tbl($('#d_sell'),o.sells,[
+    {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
+    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'entry_date',t:'建仓日'},
+    {k:'entry_price',t:'建仓价',f:px},
+    {k:'exit_price',t:'卖出价',f:px},
+    {k:'ret',t:'收益率',s:1,f:v=>_sn(v,2)+'%'},
+    {k:'pnl',t:'盈亏',s:1,f:v=>money(v)},
+    {k:'fee',t:'费用',f:v=>money(v)},
+    {k:'reason',t:'原因',l:1,f:v=>({rebalance:'调仓',intraday:'盘中规则',
+        stop:'止损',delist:'退市清算'}[v]||v)},
+  ],'当日卖出 '+o.sells.length+' 笔'+(o.sells.length?'':'（无）'));
+  tbl($('#d_buy'),o.buys,[
+    {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
+    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'entry_price',t:'建仓价',f:px},
+    {k:'gross_amount',t:'成交金额',f:v=>money(v)},
+    {k:'exit_date',t:'后来平仓于'},
+    {k:'ret',t:'该笔最终',s:1,f:v=>_sn(v,2)+'%'},
+  ],'当日买入 '+o.buys.length+' 笔'+(o.buys.length?
+      '　（后两列是这笔【整笔】的最终结果，不是当日收益）':'（无）'));
+  tbl($('#d_hold'),o.holdings,[
+    {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
+    {k:'weight',t:'权重',f:v=>pct(v,1)},
+    {k:'value',t:'市值',f:v=>money(v)},
+    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'entry_date',t:'建仓日'},
+    {k:'entry_price',t:'建仓价',f:px},
+    {k:'last_price',t:'现价',f:px},
+    {k:'unrealized_ret',t:'浮盈',s:1,f:v=>_sn(v,2)+'%'},
+    {k:'unrealized_pnl',t:'浮盈额',s:1,f:v=>money(v)},
+  ],'收盘持仓 '+o.holdings.length+' 只');
 }
 
 /* ============ 通用表格（可排序） ============ */

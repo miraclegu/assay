@@ -325,6 +325,36 @@ def api_holdings(q):
             'n_days': int(df['date'].nunique()), 'rows': rows}
 
 
+def api_day(q):
+    """某一天的持仓快照 + 当日买卖。**只读现有归档，不新增表**：
+      持仓 <- holdings.parquet 的当日快照（它本来就是日频的）
+      买入 <- trades.parquet 里 entry_date == 当日的那些笔
+      卖出 <- trades.parquet 里 exit_date == 当日的那些笔（带 ret/pnl/reason）
+    名称按【当日】解析：同一只票改过名，看哪天就显示哪天的名字。
+    """
+    rid = q.get('id')
+    d = (q.get('d') or '')[:10]
+    if not d:
+        return None
+    out = {'date': d, 'holdings': [], 'buys': [], 'sells': []}
+    hd = _read(rid, 'holdings')
+    if hd is not None and not hd.empty:
+        sub = hd[hd['date'].astype(str).str[:10] == d]
+        out['holdings'] = _records(sub.sort_values('weight', ascending=False))
+    tr = _read(rid, 'trades')
+    if tr is not None and not tr.empty:
+        b = tr[tr['entry_date'].astype(str).str[:10] == d]
+        sl = tr[tr['exit_date'].astype(str).str[:10] == d]
+        out['buys'] = _records(b.sort_values('gross_amount', ascending=False))
+        out['sells'] = _records(sl.sort_values('pnl'))
+    root = _dl_root(rid)
+    if root:
+        _resolve_names(out['holdings'], root, 'date')
+        _resolve_names(out['buys'], root, 'entry_date')
+        _resolve_names(out['sells'], root, 'exit_date')
+    return out
+
+
 def api_rejects(q):
     df = _read(q.get('id'), 'rejects')
     if df is None:
@@ -716,6 +746,7 @@ ROUTES = {
     '/api/equity': api_equity,
     '/api/trades': api_trades,
     '/api/holdings': api_holdings,
+    '/api/day': api_day,
     '/api/rejects': api_rejects,
     '/api/code': lambda q: api_text(q, 'strategy.py'),
     '/api/log': lambda q: api_text(q, 'run.log'),

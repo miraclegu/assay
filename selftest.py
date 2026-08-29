@@ -7,6 +7,7 @@
 每一条都对应一个曾经真实发生过的失真，不是凑数的用例。
 """
 import os
+import re
 import sys
 import traceback
 
@@ -697,6 +698,32 @@ def t_ui():
             for d, v in zip(eqj['d'], eqj['e']):
                 byy.setdefault(d[:4], []).append(v)
             ys = list(byy)
+            # ★ 热力格必须【底色 vs 数字】有足够对比 —— 曾经底色和数字同色相
+            #   （红底红字），实测对比度只有 1.28:1，等于看不见。
+            #   这里量最强的那个格子，要求 >= 4.5:1（WCAG AA）。
+            def _lin(c):
+                c = c / 255.0
+                return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            def _lum(v):
+                r, g, b = [_lin(x) for x in v]
+                return 0.2126 * r + 0.7152 * g + 0.0722 * b
+            def _rgb(css, under=(23, 27, 33)):
+                n = [float(x) for x in re.findall(r'[\d.]+', css)]
+                r, g, b = n[:3]; a = n[3] if len(n) > 3 else 1.0
+                return tuple((r, g, b)[i] * a + under[i] * (1 - a) for i in range(3))
+            st = pg.evaluate("""()=>{let best=null;
+              document.querySelectorAll('#p2 .hm.y .hc').forEach(e=>{
+                const s=getComputedStyle(e), v=e.querySelector('.v');
+                const m=(s.backgroundColor.match(/[\\d.]+/g)||['0','0','0','1']);
+                const a=parseFloat(m[3]===undefined?1:m[3]);
+                if(!best||a>best.a) best={a,bg:s.backgroundColor,
+                                          fg:getComputedStyle(v).color};});
+              return best;}""")
+            lb, lf = _lum(_rgb(st['bg'])), _lum(_rgb(st['fg']))
+            cr = (max(lb, lf) + .05) / (min(lb, lf) + .05)
+            assert cr >= 4.5, '热力格对比度只有 %.2f:1（底 %s / 字 %s），红底红字回来了？' \
+                              % (cr, st['bg'], st['fg'])
+
             yc = pg.locator('#p2 .hm.y .hc')
             assert yc.count() == len(ys), '年热力 %d 格 != %d 年' % (yc.count(), len(ys))
             def _dd(vals):
@@ -729,15 +756,23 @@ def t_ui():
             assert cal_days == nd, '日历格 %d != 当月天数 %d' % (cal_days, nd)
             assert cal_days - cal_off == real, \
                 '日历交易日 %d != 曲线里的 %d' % (cal_days - cal_off, real)
+            # 点某一天 -> 当日持仓/买卖（读 /api/day，仍是现有归档）
+            cd0 = pg.locator('#cal .cd[data-d]').first
+            cd0.scroll_into_view_if_needed(); cd0.click(); pg.wait_for_timeout(1200)
+            dsel = pg.evaluate('DSEL')
+            nh = pg.locator('#d_hold tbody tr').count()
+            assert pg.locator('#day .cards .card').count() == 6, '当日概要卡不是 6 张'
+            assert nh >= 0 and pg.locator('#d_hold .note').count() == 1, '当日持仓表没渲染'
             # 浏览器后退必须回到上一年详情页（而不是直接掉出详情）
             pg.go_back(); pg.wait_for_timeout(600)
             h = pg.evaluate('location.hash')
             assert h == base_hash or '/y/' in h, '后退没回到收益明细：%s' % h
             pg.locator('#tabs div').nth(names.index('收益明细')).click()
             pg.wait_for_timeout(400)
-            drill = ('年热力 %d 格(%s 收益/回撤/交易日对齐曲线)；%s 年详情独立路由；'
-                     '%s 日历 %d 格(交易 %d/非交易 %d)'
-                     % (yc.count(), ys[0], yr, mk, cal_days, real, cal_off))
+            drill = ('年热力 %d 格(%s 收益/回撤/交易日对齐曲线，对比度 %.1f:1)；'
+                     '%s 年详情独立路由；%s 日历 %d 格(交易 %d/非交易 %d)；'
+                     '%s 当日明细 持仓 %d 只'
+                     % (yc.count(), ys[0], cr, yr, mk, cal_days, real, cal_off, dsel, nh))
 
             pg.click('#back'); pg.wait_for_timeout(400)
             assert pg.is_visible('#cat'), '返回目录失败'
