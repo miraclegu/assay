@@ -116,6 +116,23 @@ svg{display:block;width:100%;overflow:visible}
 .ax{fill:var(--dim);font-size:10px}
 #tip{position:fixed;pointer-events:none;background:#0b0e12ee;border:1px solid var(--line);
   border-radius:5px;padding:6px 9px;font-size:11.5px;display:none;z-index:99;white-space:pre}
+/* ---- 年/月/日 三层下钻 ---- */
+.yrow{cursor:pointer} .yrow:hover td{background:var(--panel2)}
+.yrow td.l b:before{content:'\25B8 ';color:var(--dim);font-size:10px}
+.yrow.op td.l b:before{content:'\25BE '}
+.mcell{cursor:pointer} .mcell:hover{outline:1px solid var(--dim);outline-offset:-1px}
+.mcell.on{outline:2px solid var(--accent);outline-offset:-2px}
+#cal{margin-top:12px}
+.calg{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;
+  background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:10px}
+.calg .wd{color:var(--dim);font-size:11px;text-align:center;padding:2px 0}
+.cd{border:1px solid var(--line);border-radius:5px;min-height:46px;padding:4px 5px;
+  font-size:11px;line-height:1.35}
+.cd .d{color:var(--dim);font-size:10px}
+.cd .v{font-size:12.5px;font-variant-numeric:tabular-nums}
+.cd.off{opacity:.32;background:repeating-linear-gradient(135deg,
+  transparent 0 5px,var(--line) 5px 6px)}
+.cd.pad{border:0;background:none}
 /* ---- 表 ---- */
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{padding:5px 9px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -710,6 +727,7 @@ function renderVersionRuns(){
 /* ============ 详情页 ============ */
 async function openRun(id){
   CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100};
+  MSEL=null; YOPEN=null;      // 下钻状态跟着回测走，不跨回测残留
   stopPoll();
   $('#vp').innerHTML=''; $('#vp').style.display='none';
   $('#cat').style.display='none'; $('#main').style.display='';
@@ -735,7 +753,7 @@ async function openRun(id){
        数据 ${((m.data_fingerprint||{}).overall||'—').slice(0,8)} ·
        跑于 ${m.ran_at} (${m.elapsed_sec}s)</span></div>
      <div id="tabs">
-       ${['概览','权益曲线','月度收益','交易记录','持仓','拒单','策略代码','日志','元信息']
+       ${['概览','权益曲线','收益明细','交易记录','持仓','拒单','策略代码','日志','元信息']
          .map((t,i)=>`<div data-i="${i}" class="${i?'':'on'}">${t}</div>`).join('')}
      </div>
    </div>
@@ -867,28 +885,121 @@ function paneEquity(){
     {dates:e.dates,title:'回撤（水下图）',h:190,pctAxis:true});
 }
 
-/* ============ 月度收益热力 ============ */
-function paneMonthly(){
-  const e=DATA.eq, by={};
+/* ============ 年 / 月 / 日 三层下钻 ============ */
+/* 数据全部来自 /api/equity 的 dates + equity ——【不需要新表】：
+     · dates 本身就是交易日历，不在里面的日期即非交易日（日历格子打斜纹）
+     · 日收益 = equity[i]/equity[i-1]-1，首日无前值故记 —
+     · 月收益基点 = 上月最后一个交易日的权益（首月退化为自身首日，与原实现一致）
+     · 年收益 = 该年各月连乘；年内最大回撤在该年的日线上重算 */
+let MSEL=null;                       // 当前展开的月份 'YYYY-MM'
+let YOPEN=null;                      // 当前展开的年份 'YYYY'
+
+function _mstat(){
+  const e=DATA.eq, by={}, dr={}, byY={};
   let prev=null;
-  e.dates.forEach((d,i)=>{const k=d.slice(0,7);
+  e.dates.forEach((d,i)=>{
+    const k=d.slice(0,7), y=d.slice(0,4);
     if(!(k in by)) by[k]=[prev==null?e.equity[i]:prev,e.equity[i]];
-    by[k][1]=e.equity[i]; prev=e.equity[i];});
-  const ys=[...new Set(Object.keys(by).map(k=>k.slice(0,4)))].sort();
+    by[k][1]=e.equity[i];
+    if(!(y in byY)) byY[y]=[prev==null?e.equity[i]:prev,e.equity[i]];
+    byY[y][1]=e.equity[i];
+    dr[d]=prev==null?null:(prev?e.equity[i]/prev-1:null);
+    prev=e.equity[i];
+  });
   const mv={}; Object.entries(by).forEach(([k,[a,b]])=>{mv[k]=a?b/a-1:null;});
-  const col=v=>v==null?'transparent':
-    (v>0?`rgba(240,91,91,${Math.min(.85,.15+Math.abs(v)*3)})`
-        :`rgba(47,184,122,${Math.min(.85,.15+Math.abs(v)*3)})`);
-  $('#p2').innerHTML=`<div class="note">看「哪一年哪个月崩的」比看一个总回撤有用得多。红涨绿跌，深浅表示幅度。</div>
-   <div class="tw"><table><thead><tr><th class="l">年</th>
-   ${[...Array(12)].map((_,i)=>`<th>${i+1}月</th>`).join('')}<th>全年</th></tr></thead><tbody>
-   ${ys.map(y=>{let acc=1,any=false;
-     const tds=[...Array(12)].map((_,i)=>{const v=mv[y+'-'+String(i+1).padStart(2,'0')];
-       if(v!=null){acc*=1+v;any=true;}
-       return `<td style="background:${col(v)}">${v==null?'':(v*100).toFixed(1)}</td>`;}).join('');
-     return `<tr><td class="l"><b>${y}</b></td>${tds}
-       <td class="${any?sign(acc-1):''}"><b>${any?((acc-1)*100).toFixed(1):''}</b></td></tr>`;}).join('')}
-   </tbody></table></div>`;
+  const yv={}; Object.entries(byY).forEach(([k,[a,b]])=>{yv[k]=a?b/a-1:null;});
+  // 年内最大回撤：在该年自己的日线上重算（不是全程回撤的切片）
+  const ydd={}, ynd={};
+  e.dates.forEach((d,i)=>{const y=d.slice(0,4);
+    if(!(y in ydd)){ydd[y]=0;ynd[y]=0;ydd[y+'_pk']=e.equity[i];}
+    ynd[y]++;
+    if(e.equity[i]>ydd[y+'_pk']) ydd[y+'_pk']=e.equity[i];
+    const p=ydd[y+'_pk']; if(p) ydd[y]=Math.max(ydd[y],1-e.equity[i]/p);});
+  return {mv,yv,dr,ydd,ynd,idx:Object.fromEntries(e.dates.map((d,i)=>[d,i]))};
+}
+
+const _hcol=(v,k)=>v==null?'transparent':
+  (v>0?`rgba(240,91,91,${Math.min(.85,.15+Math.abs(v)*(k||3))})`
+      :`rgba(47,184,122,${Math.min(.85,.15+Math.abs(v)*(k||3))})`);
+
+function paneMonthly(){
+  const S=_mstat();
+  const ys=[...new Set(DATA.eq.dates.map(d=>d.slice(0,4)))].sort();
+  if(YOPEN==null) YOPEN=ys[ys.length-1];
+  $('#p2').innerHTML=`<div class="note">三层下钻：年 → 月 → 日。点年份行展开该年 12 个月，
+    点月份格看当月日历（斜纹格 = 非交易日）。红涨绿跌，深浅表示幅度。</div>
+   <div class="tw"><table><thead><tr><th class="l">年</th><th>年收益</th>
+     <th>年内最大回撤</th><th>交易日</th><th class="l"></th></tr></thead>
+   <tbody id="ybody"></tbody></table></div>
+   <div id="cal"></div>`;
+  drawYears(S,ys);
+}
+
+function drawYears(S,ys){
+  let out='';
+  ys.forEach(y=>{
+    const op=(YOPEN===y);
+    out+=`<tr class="yrow ${op?'op':''}" data-y="${y}">
+      <td class="l"><b>${y}</b></td>
+      <td class="${sign(S.yv[y])}">${pct(S.yv[y],2)}</td>
+      <td class="neg">${pct(S.ydd[y],2)}</td>
+      <td>${S.ynd[y]}</td><td class="l"></td></tr>`;
+    if(op){
+      const tds=[...Array(12)].map((_,i)=>{
+        const k=y+'-'+String(i+1).padStart(2,'0'), v=S.mv[k];
+        if(v==null) return `<td style="opacity:.3">${i+1}月</td>`;
+        return `<td class="mcell ${MSEL===k?'on':''}" data-m="${k}"
+          style="background:${_hcol(v)}">${i+1}月<br><b>${(v*100).toFixed(1)}</b></td>`;
+      }).join('');
+      out+=`<tr><td colspan="5" style="padding:0">
+        <table style="width:100%"><tbody><tr>${tds}</tr>
+        </tbody></table></td></tr>`;
+    }
+  });
+  $('#ybody').innerHTML=out;
+  $('#ybody').querySelectorAll('.yrow').forEach(r=>r.onclick=()=>{
+    const y=r.dataset.y;
+    YOPEN=(YOPEN===y)?null:y;
+    if(MSEL && (YOPEN==null || MSEL.slice(0,4)!==YOPEN)){MSEL=null;$('#cal').innerHTML='';}
+    drawYears(S,ys);});
+  $('#ybody').querySelectorAll('.mcell').forEach(c=>c.onclick=ev=>{
+    ev.stopPropagation();
+    MSEL=(MSEL===c.dataset.m)?null:c.dataset.m;
+    drawYears(S,ys); drawCal(S);});
+  drawCal(S);
+}
+
+function drawCal(S){
+  const box=$('#cal'); if(!box) return;
+  if(!MSEL){box.innerHTML='';return;}
+  const [Y,M]=MSEL.split('-').map(Number);
+  const first=new Date(Date.UTC(Y,M-1,1)), ndays=new Date(Date.UTC(Y,M,0)).getUTCDate();
+  const lead=(first.getUTCDay()+6)%7;          // 周一为第一列
+  const e=DATA.eq;
+  let cells='';
+  for(let i=0;i<lead;i++) cells+='<div class="cd pad"></div>';
+  let nt=0,ntd=0,best=null,worst=null;
+  for(let d=1;d<=ndays;d++){
+    const ds=`${Y}-${String(M).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const i=S.idx[ds];
+    if(i===undefined){cells+=`<div class="cd off"><div class="d">${d}</div></div>`;nt++;continue;}
+    ntd++;
+    const v=S.dr[ds];
+    if(v!=null){ if(best==null||v>best[1])best=[ds,v]; if(worst==null||v<worst[1])worst=[ds,v]; }
+    const pos=e.cash_pct?(1-e.cash_pct[i]):null;
+    cells+=`<div class="cd" style="background:${_hcol(v,12)}"
+      title="${ds}  ${v==null?'首日无前值':'日收益 '+pct(v,2)}
+仓位 ${pos==null?'—':pct(pos,1)}   持仓 ${e.n_positions?e.n_positions[i]:'—'} 只">
+      <div class="d">${d}</div>
+      <div class="v ${sign(v)}">${v==null?'—':(v*100).toFixed(2)}</div></div>`;
+  }
+  box.innerHTML=`<h3 class="sec">${Y} 年 ${M} 月 · 日收益
+     <span style="float:right;font-weight:400">交易日 ${ntd} 天 / 非交易日 ${nt} 天
+     ${best?`　最好 ${best[0].slice(8)}日 <span class="pos">${pct(best[1],2)}</span>`:''}
+     ${worst?`　最差 ${worst[0].slice(8)}日 <span class="neg">${pct(worst[1],2)}</span>`:''}
+     </span></h3>
+   <div class="calg">${['一','二','三','四','五','六','日']
+     .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`;
 }
 
 /* ============ 通用表格（可排序） ============ */

@@ -683,6 +683,49 @@ def t_ui():
                 r(Math.round(H.top-T.top));}));}""")
             assert abs(gap) <= 2, '滚动后表头距容器顶 %dpx，应贴顶（sticky top 写错？）' % gap
 
+            # ---- 收益明细：年 / 月 / 日 三层下钻 ----
+            # ★ 全部由 /api/equity 的 dates+equity 现算，【不依赖新表】。
+            #   这里对着 equity.parquet 逐项校，防止前端口径悄悄漂掉。
+            names = pg.locator('#tabs div').all_inner_texts()
+            pg.locator('#tabs div').nth(names.index('收益明细')).click()
+            pg.wait_for_timeout(500)
+            ny = pg.locator('#ybody .yrow').count()
+            assert ny >= 2, '年度行只有 %d 行' % ny
+            eqj = pg.evaluate('({d:DATA.eq.dates, e:DATA.eq.equity})')
+            import collections
+            byy = collections.OrderedDict()
+            for d, v in zip(eqj['d'], eqj['e']):
+                byy.setdefault(d[:4], []).append(v)
+            y0 = list(byy)[0]
+            txt = pg.locator('#ybody .yrow').first.inner_text().split('\t')
+            v0 = byy[y0]
+            want_r = v0[-1] / v0[0] - 1
+            pk = v0[0]; want_dd = 0.0
+            for v in v0:
+                pk = max(pk, v); want_dd = max(want_dd, 1 - v / pk)
+            assert txt[0] == y0, '首行年份 %s != %s' % (txt[0], y0)
+            assert abs(float(txt[1].rstrip('%')) - want_r * 100) < 0.02, \
+                '年收益 %s vs 应为 %.2f%%' % (txt[1], want_r * 100)
+            assert abs(float(txt[2].rstrip('%')) - want_dd * 100) < 0.02, \
+                '年内回撤 %s vs 应为 %.2f%%' % (txt[2], want_dd * 100)
+            assert int(txt[3]) == len(v0), '交易日数 %s != %d' % (txt[3], len(v0))
+            # 点开一个月 -> 日历；非交易日必须留白（斜纹），交易日数要对得上
+            nm = pg.locator('#ybody .mcell').count()
+            assert nm >= 1, '展开年没有月份格'
+            pg.locator('#ybody .mcell').first.click(); pg.wait_for_timeout(400)
+            mk = pg.evaluate('MSEL')
+            cal_days = pg.locator('#cal .cd:not(.pad)').count()
+            cal_off = pg.locator('#cal .cd.off').count()
+            import calendar as _cal
+            yy, mm = int(mk[:4]), int(mk[5:7])
+            ndays = _cal.monthrange(yy, mm)[1]
+            real = sum(1 for d in eqj['d'] if d[:7] == mk)
+            assert cal_days == ndays, '日历格 %d != 当月天数 %d' % (cal_days, ndays)
+            assert cal_days - cal_off == real, \
+                '日历交易日 %d != 曲线里的 %d' % (cal_days - cal_off, real)
+            drill = '%s 年收益/回撤/交易日 3 项对齐 equity.parquet；%s 日历 %d 格 (交易 %d/非交易 %d)' \
+                    % (y0, mk, cal_days, real, cal_off)
+
             pg.click('#back'); pg.wait_for_timeout(400)
             assert pg.is_visible('#cat'), '返回目录失败'
             pg.go_back(); pg.wait_for_timeout(900)
@@ -692,7 +735,7 @@ def t_ui():
     finally:
         httpd.shutdown()
     return ('目录树(任意深度/默认收起/按运行时间倒序)/详情/9 页签/返回/后退 全通，'
-            '0 JS 错误，表头 gap %dpx' % gap)
+            '0 JS 错误，表头 gap %dpx；下钻: %s' % (gap, drill))
 
 
 @case('版本页：简介/源码/参数表单/触发回测')
