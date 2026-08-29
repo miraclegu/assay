@@ -61,8 +61,15 @@ class Cost:
 
     def __init__(self, slippage=0.0015, commission=0.00025, min_commission=5.0,
                  close_tax='auto', open_tax=0.0, dividend_tax=True,
-                 volume_ratio=0.25, locked=()):
+                 volume_ratio=0.25, buy_slippage=0.0, locked=()):
         self.slippage = slippage          # 双边，买 +s/2 卖 -s/2
+        # ★ 买入侧【额外】单边滑点，叠加在 slippage/2 之上（默认 0）。
+        #   用途：调仓是「先卖后买」，买入腿必然晚于卖出腿几十秒到几分钟，
+        #   那段时间价格会漂。引擎没有分时线（INTRADAY 相位是拿收盘价代理），
+        #   没法用「9:31 成交」来表达，只能把这段漂移折成买入侧多付的滑点。
+        #   它同时进成交价【和】lot 的 entry_price —— 所以成交记录里的
+        #   收益率也会体现，不像 open_tax 那样只是笔外的费用。
+        self.buy_slippage = buy_slippage
         self.commission = commission
         self.min_commission = min_commission
         self.close_tax = close_tax        # 'auto' = 按日期分段
@@ -83,15 +90,19 @@ class Cost:
         st = ('按日期分段(≤2023-08-27 %.4f / ≥2023-08-28 %.4f)'
               % (STAMP_BEFORE, STAMP_AFTER)) if self.close_tax == 'auto' \
              else '%.5f' % self.close_tax
-        return ('滑点 %.4f 双边 | 佣金 %.5f 最低 %.0f 元 | 印花税 %s | '
+        return ('滑点 %.4f 双边%s | 佣金 %.5f 最低 %.0f 元 | 印花税 %s | '
                 '买入印花税 %.5f | 红利税 %s | 成交量上限 %s'
-                % (self.slippage, self.commission, self.min_commission, st,
+                % (self.slippage,
+                   ('（买入额外 +%.4f 单边）' % self.buy_slippage)
+                   if self.buy_slippage else '',
+                   self.commission, self.min_commission, st,
                    self.open_tax, '计' if self.dividend_tax else '不计',
                    ('当日成交额 %.0f%%' % (self.volume_ratio * 100))
                    if self.volume_ratio else '不限'))
 
     def to_dict(self):
-        return {'slippage': self.slippage, 'commission': self.commission,
+        return {'slippage': self.slippage, 'buy_slippage': self.buy_slippage,
+                'commission': self.commission,
                 'min_commission': self.min_commission,
                 'close_tax': self.close_tax, 'open_tax': self.open_tax,
                 'dividend_tax': self.dividend_tax,
@@ -452,7 +463,7 @@ class Broker:
         # ★ 整手约束是对【真实股数】的，不是对后复权记账单位。
         #   套在后复权价上等价于要求后复权价 < value/100，
         #   老股票(因子 20~30、后复权价上百元)会被整只静默跳过。
-        raw_eff = raw * (1 + self.cost.slippage / 2)
+        raw_eff = raw * (1 + self.cost.slippage / 2 + self.cost.buy_slippage)
         # ★ 成交量约束：单笔最多吃掉当日成交额的 volume_ratio。
         #   聚宽 order_volume_ratio 默认 0.25。没有它，资金容量分析全是假的。
         want = value
@@ -478,7 +489,8 @@ class Broker:
         self.fee_paid += fee
         shares = lots * 100 / b.factor          # 换算回后复权记账单位
         lot = Lot(shares=shares, entry_date=self.date,
-                  entry_price=px * (1 + self.cost.slippage / 2))
+                  entry_price=px * (1 + self.cost.slippage / 2
+                                    + self.cost.buy_slippage))
         p = self.pf.positions.get(code)
         if p is None:
             self.pf.positions[code] = Position(

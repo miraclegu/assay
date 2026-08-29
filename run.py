@@ -79,7 +79,8 @@ def _build_cost(a):
         # 聚宽原版：set_slippage(FixedSlippage(0)) + 万三 + 最低5 + 印花税千一固定
         kw.update(slippage=0.0, commission=0.0003, min_commission=5.0, close_tax=0.001)
         locked += ['slippage', 'commission', 'min_commission', 'close_tax']
-    for cli, field in (('slippage', 'slippage'), ('commission', 'commission'),
+    for cli, field in (('slippage', 'slippage'), ('buy_slippage', 'buy_slippage'),
+                       ('commission', 'commission'),
                        ('min_commission', 'min_commission'), ('open_tax', 'open_tax'),
                        ('volume_ratio', 'volume_ratio')):
         v = getattr(a, cli)
@@ -107,6 +108,9 @@ def main():
                     help='初始资金，默认 50 万')
     ap.add_argument('--slippage', type=float, default=None,
                     help='双边滑点，默认 0.0015（买 +x/2、卖 -x/2）')
+    ap.add_argument('--buy-slippage', type=float, default=None,
+                    help='买入侧【额外】单边滑点，叠加在 slippage/2 之上，默认 0。'
+                         '用来表达「先卖后买」时买入腿晚几十秒到几分钟的价格漂移')
     ap.add_argument('--commission', type=float, default=None,
                     help='佣金比例，默认 0.00025（万 2.5）')
     ap.add_argument('--min-commission', type=float, default=None,
