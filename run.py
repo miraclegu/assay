@@ -128,6 +128,8 @@ def main():
     ap.add_argument('--jq-cost', action='store_true',
                     help='一键套用聚宽原版设定（滑点 0、佣金万 3、印花税千一固定），对标用')
     ap.add_argument('--datalake', default=None)
+    ap.add_argument('--runs', default=None,
+                    help='归档目录，默认 ASSAY_RUNS 环境变量或 <repo>/runs')
     ap.add_argument('--group', default=None,
                     help='覆盖分组（默认由策略文件在 strategies/ 下的路径推导）')
     ap.add_argument('--no-dividend-tax', action='store_true',
@@ -145,6 +147,7 @@ def main():
     sys.stdout = tee
     t0 = time.time()
     try:
+        registry.set_runs(a.runs)
         feed = PanelFeed(a.start, a.end, root=a.datalake)
         cost = _build_cost(a)
         eng = Engine(load(a.strategy), feed, cash=a.cash, cost=cost,
@@ -207,7 +210,12 @@ def main():
         elapsed = time.time() - t0
         if not a.no_archive:
             d, rid = registry.save(a.strategy, group, eng, stats, a, tee.buf.getvalue(), elapsed)
-            print('已归档 %s' % os.path.relpath(d, os.path.dirname(os.path.abspath(__file__))))
+            # 归档目录可能在仓库外（ASSAY_RUNS / --runs），此时 relpath 会退化成
+            # 一长串 ../../..，还不如直接给绝对路径。
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _shown = (os.path.relpath(d, _here)
+                      if os.path.abspath(d).startswith(_here + os.sep) else d)
+            print('已归档 %s' % _shown)
             print('  run_id = %s   查询: python3 runs.py show %s' % (rid, rid))
     finally:
         sys.stdout = tee.stream

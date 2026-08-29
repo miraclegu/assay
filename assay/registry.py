@@ -38,8 +38,32 @@ import duckdb
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RUNS = os.path.join(ROOT, 'runs')
 STRAT_DIR = os.path.join(ROOT, 'strategies')
+
+
+def _default_runs():
+    """归档目录：ASSAY_RUNS 环境变量 > 代码目录下的 runs/。
+
+    归档是【产出数据】，生命周期和代码完全不同（886M / 615 次且持续增长）。
+    路径可配置之后，它就能放到别的盘、被多个 checkout 共用、独立备份与清理。
+    """
+    return os.path.abspath(os.path.expanduser(
+        os.environ.get('ASSAY_RUNS') or os.path.join(ROOT, 'runs')))
+
+
+RUNS = _default_runs()
+
+
+def set_runs(path=None):
+    """CLI 覆盖归档目录，返回最终生效的路径。
+
+    ★ 必须重绑【模块级】RUNS —— server.py 等按 `registry.RUNS` 取值，
+      只改局部变量不会传播出去。这类错误是静默的：归档写到 A、面板读 B，
+      两边都不报错，只是看不到新记录。
+    """
+    global RUNS
+    RUNS = os.path.abspath(os.path.expanduser(path)) if path else _default_runs()
+    return RUNS
 
 
 def derive_group(strategy_path):

@@ -137,17 +137,27 @@ def cmd_trades(a):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    # --runs 做成 parent parser：argparse 的顶层可选参数必须出现在子命令【之前】，
+    # 而 `runs.py list --runs X` 才是自然写法。挂到每个子命令上，两种位置都认。
+    common = argparse.ArgumentParser(add_help=False)
+    # ★ default 必须是 SUPPRESS 不能是 None：parents 会让【子 parser 也带这个参数】，
+    #   而子 parser 解析时会用自己的 default 覆盖顶层已经解析出的值 ——
+    #   `runs.py --runs X list` 会静默退回默认目录。SUPPRESS 表示"没给就不写进
+    #   namespace"，两个位置才不会互相覆盖。
+    common.add_argument('--runs', default=argparse.SUPPRESS,
+                        help='归档目录，默认 ASSAY_RUNS 或 <repo>/runs')
+    ap = argparse.ArgumentParser(parents=[common])
     sub = ap.add_subparsers(dest='cmd', required=True)
-    p = sub.add_parser('list'); p.add_argument('--group'); p.add_argument('--strategy')
+    p = sub.add_parser('list', parents=[common]); p.add_argument('--group'); p.add_argument('--strategy')
     p.add_argument('--limit', type=int, default=50); p.set_defaults(f=cmd_list)
-    p = sub.add_parser('show'); p.add_argument('run_id'); p.set_defaults(f=cmd_show)
-    p = sub.add_parser('diff'); p.add_argument('a'); p.add_argument('b'); p.set_defaults(f=cmd_diff)
-    p = sub.add_parser('holdings'); p.add_argument('run_id'); p.add_argument('--date')
+    p = sub.add_parser('show', parents=[common]); p.add_argument('run_id'); p.set_defaults(f=cmd_show)
+    p = sub.add_parser('diff', parents=[common]); p.add_argument('a'); p.add_argument('b'); p.set_defaults(f=cmd_diff)
+    p = sub.add_parser('holdings', parents=[common]); p.add_argument('run_id'); p.add_argument('--date')
     p.set_defaults(f=cmd_holdings)
-    p = sub.add_parser('trades'); p.add_argument('run_id'); p.add_argument('--top', type=int, default=10)
+    p = sub.add_parser('trades', parents=[common]); p.add_argument('run_id'); p.add_argument('--top', type=int, default=10)
     p.set_defaults(f=cmd_trades)
     a = ap.parse_args()
+    registry.set_runs(getattr(a, 'runs', None))
     a.f(a)
 
 

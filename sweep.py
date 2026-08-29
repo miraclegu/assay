@@ -122,6 +122,7 @@ def main():
     ap.add_argument('--benchmark', default=None)
     ap.add_argument('--jq-cost', action='store_true')
     ap.add_argument('--datalake', default=None)
+    ap.add_argument('--runs', default=None)
     ap.add_argument('--group', default=None)
     ap.add_argument('--jobs', type=int, default=1,
                     help='并行进程数，默认 1（串行）。组合数少于 jobs 时并行无收益')
@@ -141,6 +142,7 @@ def main():
     t0 = time.time()
     feed = PanelFeed(a.start, a.end, root=a.datalake)
     print('数据就绪 %d 个交易日 (%.1fs)' % (len(feed.trading_days), time.time() - t0))
+    registry.set_runs(a.runs)
     group = a.group or registry.derive_group(a.strategy)
     mod = load(a.strategy)
 
