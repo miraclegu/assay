@@ -253,17 +253,41 @@ def initialize(context):
     #   所以结果应读作「日线级别止损的效果」，不是「精确止损位的效果」。
     # 🔴 实测结论：**这四条标星策略上止损无效，默认保持 0（关）**。
     #   -15/-20/-25 三档 × 4 条策略的完整结果、逐年回撤归因、配对 t 检验见
-    #   strategies/固定止损-四条标星策略实测.md。三句话版本：
+    #   strategies/止损方案实测-固定_移动_吊灯.md。三句话版本：
     #     1) 收益非单调（-15/-25 常胜 -20），四档极差 < 已知扰动噪声带 3.00pp
     #     2) 全周期回撤那 -7pp 里 2024 一次事件占 77%；剔掉 2024 后效应塌到
     #        ±0.5pp、|t|<0.8；"回撤更小的年份"计数与掷硬币无异（3~6 / 11）
     #     3) 代价却是确定的：换手 +7~19%、胜率 -1.1~3.7pp
     #   保留参数是为了将来能复测，不是推荐启用。
+    # 🔴 移动止损（trail_stop）实测同样【中性偏负】：12 格里 9 格收益为负、
+    #   3 格显著负、0 格显著正；且形状是"越松越接近 off"的单调逼近而非倒 U
+    #   —— 不存在最优移动止损位。唯一亮点 froec 移动25% 在其孪生策略
+    #   froec_traded 上符号翻转（+2.53pp vs -2.36pp），是噪声指纹。
+    # 🔴 吊灯止损（chand_k）是【显著有害】，性质与前两套不同：16/16 格收益
+    #   为负、14 格 |t|>2.2；夏普 15 低/1 平/0 高（符号检验 p≈3e-5）。
+    #   机制：ATR 阈值在小市值日波动下天天触发（持有 33 天 -> 3.8~18.6 天），
+    #   离场后现金闲置到下次调仓，平均仓位崩到 28~85%；且 13/16 格的实际
+    #   回撤【高于】按仓位朴素折算的预期 —— 同样是少拿仓位，它比无脑减半仓更差。
+    #   详见 strategies/止损方案实测-固定_移动_吊灯.md
     g.stop_loss = getattr(g, 'stop_loss', 0.0)
     g.stop_time = getattr(g, 'stop_time', '14:00')
     # 止损后 N 个交易日内不再买回（0 = 不禁，下次调仓即可原价重入）
     g.stop_ban = getattr(g, 'stop_ban', 0)
     g.stop_banned = {}
+    # ---- 移动止损 g.trail_stop（0 = 关）----
+    # 从【持有期内最高收盘价】回撤 x 即清仓。与固定止损的区别：锚点会往上抬，
+    # 所以它保护的是浮盈，固定止损保护的是本金。两者可同时开（任一触发即卖）。
+    g.trail_stop = getattr(g, 'trail_stop', 0.0)
+    # ---- 吊灯止损 g.chand_k（0 = 关）----
+    # Chandelier Exit：close < HH(n) - k * ATR(n) 即清仓。n=22/k=3 是原始设定。
+    # ★ ATR 用【真实波幅】TR = max(H-L, |H-PC|, |L-PC|) 的简单均值（不是 Wilder
+    #   平滑）—— 窗口只有 22 根时两者差别很小，简单均值可精确复算、便于核对。
+    # ★ 建仓时用 context.data.bar_range 取【入场前】n 根 K 线来起窗口，
+    #   否则吊灯在建仓后头十几天完全不设防（那等于只测了"持有满 22 天的票"）。
+    # ★ 全部用后复权价：H/L/C 与 ATR 同口径，除权除息不会造成假触发。
+    g.chand_k = getattr(g, 'chand_k', 0.0)
+    g.chand_n = getattr(g, 'chand_n', 22)
+    g.pos_state = {}
     g.n_stop = 0
     g.hold_history = []          # 最近 N 日持仓并集，配合「涨停过」构成黑名单
     g.high_limit = set()         # 昨收涨停的持仓：调仓不卖，14:00 再看是否打开
@@ -359,34 +383,75 @@ def check_limit_up(context):
 
 # ============================ 固定止损 ============================
 def stop_check(context):
-    """任一持仓相对建仓价跌破 -g.stop_loss 即清仓。
+    """三套离场规则合一：固定止损 / 移动止损 / 吊灯止损，任一触发即清仓。
 
     停牌（当日无 K 线）取不到价 -> 跳过；卖不掉，也就无所谓触发。
     涨停封板的即使触发也会被 broker 的可成交判定挡下，这里不特判。
     ★ 注册在 check_limit_up 之后：engine 按时间字符串**稳定**排序，
       同一时刻的任务保持注册顺序 —— 先炸板离场，再判止损。
     """
-    if not g.stop_loss:
+    if not (g.stop_loss or g.trail_stop or g.chand_k):
         return
-    codes = list(context.portfolio.positions)
+    pos = context.portfolio.positions
+    st = g.pos_state
+    # 状态作废重来的两种情形：已清仓 / 建仓日变了（卖出后又买回，峰值要重置）。
+    for c in list(st):
+        if c not in pos or st[c]['entry'] != pos[c].entry_date:
+            del st[c]
+    codes = list(pos)
     if not codes:
         return
+    # 新建仓的票：用【入场前】n 根 K 线把吊灯窗口先喂满（PIT 安全，取到昨天为止）。
+    fresh = [c for c in codes if c not in st]
+    seed = {}
+    if fresh and g.chand_k and context.previous_date:
+        seed = context.data.bar_range(
+            fresh, context.data.nth_prev_day(context.current_date, g.chand_n),
+            context.previous_date)
+    for code in fresh:
+        s = st[code] = {'entry': pos[code].entry_date,
+                        'peak': pos[code].entry_price,
+                        'highs': [], 'trs': [], 'pc': None}
+        for _d, h, l, cl in seed.get(code, [])[-g.chand_n:]:
+            if h is None or l is None:
+                continue
+            s['trs'].append(h - l if s['pc'] is None
+                            else max(h - l, abs(h - s['pc']), abs(l - s['pc'])))
+            s['highs'].append(h)
+            s['pc'] = cl
+
     cur = context.current(codes)
     for code in codes:
         d = cur.get(code)
         if d is None:
             continue
-        # 按相位取字段：OPEN 阶段没有 close_hfq（那是收盘派生量）。
+        # 按相位取字段：OPEN 阶段没有 close/high/low（都是收盘派生量）。
         px = d.get('close_hfq') if 'close_hfq' in d else d.get('open_hfq')
-        cost = context.portfolio.positions[code].entry_price
-        if not px or not cost:
+        if not px:
             continue
-        if px / cost - 1.0 <= -g.stop_loss:
+        s = st[code]
+        s['peak'] = max(s['peak'], px)
+        hi, lo = d.get('high_hfq'), d.get('low_hfq')
+        if hi is not None and lo is not None:
+            s['trs'].append(hi - lo if s['pc'] is None
+                            else max(hi - lo, abs(hi - s['pc']), abs(lo - s['pc'])))
+            s['highs'].append(hi)
+            s['pc'] = px
+            if len(s['highs']) > g.chand_n:
+                s['highs'] = s['highs'][-g.chand_n:]
+                s['trs'] = s['trs'][-g.chand_n:]
+
+        cost = pos[code].entry_price
+        hit = (g.stop_loss and cost and px / cost - 1.0 <= -g.stop_loss)
+        if not hit and g.trail_stop and s['peak']:
+            hit = px / s['peak'] - 1.0 <= -g.trail_stop
+        if not hit and g.chand_k and s['trs']:
+            hit = px < max(s['highs']) - g.chand_k * (sum(s['trs']) / len(s['trs']))
+        if hit:
             order_target_value(code, 0)
             g.n_stop += 1
             if g.stop_ban:
                 g.stop_banned[code] = context.current_date
-
 
 def stop_filter(context, codes):
     """止损冷静期：g.stop_ban 个交易日内不把刚止损掉的票买回来。"""

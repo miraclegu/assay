@@ -467,7 +467,8 @@ def t_limit_unreliable():
     b.date, b.phase = feed.trading_days[0], 'open'
     mk = lambda ok: Bar(open_hfq=10.0, close_hfq=10.0, open_raw=10.0, factor=1.0,
                         open_limit_up=True, open_limit_down=False, limit_up=True,
-                        limit_down=False, sealed=True, amount=1e8, limit_ok=ok)
+                        limit_down=False, sealed=True, amount=1e8, limit_ok=ok,
+                        high_hfq=10.0, low_hfq=10.0)
     b.bars = {'_T_': mk(True)}
     ok1, why1, _ = b.can_trade('_T_', 'buy')
     b.bars = {'_T_': mk(False)}

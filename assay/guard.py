@@ -142,6 +142,11 @@ class GuardedFeed:
         self._check_date(date, 'bars(%s)' % date)
         return self._f.bars(date, codes)
 
+    def bar_range(self, codes, start, end):
+        """历史区间 bar（含 high/low）。end 同样受 PIT 防火墙约束。"""
+        self._check_date(end, 'bar_range(end=%s)' % end)
+        return self._f.bar_range(codes, start, end)
+
     # ---------- 今天：只给该阶段已知的字段 ----------
     def current(self, codes):
         """对应聚宽 get_current_data()。返回 {code: dict}，
@@ -156,6 +161,7 @@ class GuardedFeed:
                  'open_limit_up': b.open_limit_up, 'open_limit_down': b.open_limit_down}
             if full:
                 d.update(close_hfq=b.close_hfq, limit_up=b.limit_up,
-                         limit_down=b.limit_down, sealed=b.sealed)
+                         limit_down=b.limit_down, sealed=b.sealed,
+                         high_hfq=b.high_hfq, low_hfq=b.low_hfq)
             out[c] = d
         return out

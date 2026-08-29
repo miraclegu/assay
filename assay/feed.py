@@ -24,7 +24,8 @@ import duckdb
 # 撮合与风控需要的字段。策略要别的列走 query()/panel()，不必挤在这里。
 Bar = namedtuple('Bar', 'open_hfq close_hfq open_raw factor '
                         'open_limit_up open_limit_down limit_up limit_down sealed '
-                        'amount limit_ok')
+                        'amount limit_ok '
+                        'high_hfq low_hfq')
 
 _BAR_COLS = """
     round(open * hfq_factor, 4)      AS open_hfq,
@@ -45,7 +46,12 @@ _BAR_COLS = """
     -- 这些日子的真实规则是「主板 IPO 首日 +44%/-36%」「科创创业前 5 日无限制」
     -- 「退市整理期首日无限制」，而面板按常规 10%/20% 算，必然算错。
     -- ★ 引擎必须尊重这个标记：拿一个已知算错的涨跌停去拦交易，比不拦更糟。
-    limit_rule_ok                    AS limit_ok
+    limit_rule_ok                    AS limit_ok,
+    -- 盘中最高/最低（后复权）。移动止损要 peak，吊灯止损要 ATR 的真实波幅。
+    -- ★ 与 close_hfq 同属【收盘后】才知道的量，guard.current() 里只在
+    --   INTRADAY/CLOSE 相位放出，开盘相位取不到（那是未来信息）。
+    round(high * hfq_factor, 4)      AS high_hfq,
+    round(low  * hfq_factor, 4)      AS low_hfq
 """
 
 
@@ -195,6 +201,25 @@ class PanelFeed:
             "SELECT code, %s FROM bars WHERE date = DATE '%s' AND code IN ('%s')"
             % (','.join(Bar._fields), date, q)).fetchall()
         return {r[0]: Bar(*r[1:]) for r in rows}
+
+    def bar_range(self, codes, start, end):
+        """[start, end] 区间的 (date, high_hfq, low_hfq, close_hfq) 序列。
+
+        吊灯止损建仓时要用【入场前】的 N 根 K 线来起 ATR 与 HH ——
+        只用持有期内的数据会让吊灯在建仓后头十几天完全不设防。
+        bars 是内存物化表且按 date 排序，区间取数很便宜。
+        """
+        if not codes:
+            return {}
+        q = "','".join(codes)
+        rows = self.con.execute(
+            "SELECT code, date, high_hfq, low_hfq, close_hfq FROM bars "
+            "WHERE date >= DATE '%s' AND date <= DATE '%s' AND code IN ('%s') "
+            "ORDER BY code, date" % (start, end, q)).fetchall()
+        out = {}
+        for c, d, h, l, cl in rows:
+            out.setdefault(c, []).append((d, h, l, cl))
+        return out
 
     # ---------- 策略用数据接口 ----------
     def query(self, sql, **kw):
