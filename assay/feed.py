@@ -55,6 +55,30 @@ _BAR_COLS = """
 """
 
 
+# ---------- datalake 表目录 ----------
+# ★ 这是【全项目唯一】写着 std/ 下文件名的地方。策略在 SQL 里用 {t_xxx} 占位，
+#   不拼路径 —— datalake 改文件名 / 改目录只需要动这张表。
+#
+#   为什么是占位符而不是「返回 DataFrame 的取数方法」：这些表在策略里是
+#   【嵌在 SQL 里跟面板做 JOIN 的】（如 JOIN {t_beta} b ON b.code=...），
+#   换成 Python 方法会把一条 SQL 拆成多次取数 + 手工合并，既慢又容易错。
+#   占位符保持 SQL 组合能力不变，只把「文件名叫什么」这条知识收回来。
+_STD_TABLES = {
+    't_universe':  'security_universe',
+    't_indicator': 'fin_indicator_q',
+    't_quarterly': 'fin_quarterly',
+    't_dividend':  'dividend',
+    't_beta':      'beta_daily',
+    't_jqfactor':  'jqfactor_q',
+}
+
+
+def std_tables(root):
+    """{t_xxx: read_parquet(...)}，供 SQL format 展开。"""
+    return {k: "read_parquet('%s/std/%s.parquet')" % (root, v)
+            for k, v in _STD_TABLES.items()}
+
+
 class PanelFeed:
     """datalake 的 mart/panel_daily 适配器。"""
 
@@ -223,8 +247,10 @@ class PanelFeed:
 
     # ---------- 策略用数据接口 ----------
     def query(self, sql, **kw):
-        """对 datalake 直接跑 SQL。`{panel}` / `{root}` 会被替换。"""
-        return self.con.execute(sql.format(panel=self.panel, root=self.root, **kw)).df()
+        """对 datalake 直接跑 SQL。`{panel}` / `{root}` / `{t_*}` 会被替换。"""
+        f = dict(panel=self.panel, root=self.root, **std_tables(self.root))
+        f.update(kw)          # 调用方传的同名键优先
+        return self.con.execute(sql.format(**f)).df()
 
     def panel_at(self, date, cols='*', where='1=1', order=None, limit=None):
         sql = "SELECT %s FROM %s WHERE date = DATE '%s' AND (%s)" % (cols, self.panel, date, where)

@@ -121,9 +121,12 @@ class GuardedFeed:
 
     # ---------- 策略数据接口 ----------
     def query(self, sql, **kw):
-        self._scan_sql(sql.format(panel='', root='', **{k: v for k, v in kw.items()}))
-        return self._f.con.execute(
-            sql.format(panel=self._panel_expr(), root=self._f.root, **kw)).df()
+        from .feed import std_tables
+        t = std_tables(self._f.root)
+        scan = dict(panel='', root='', **t); scan.update(kw)
+        self._scan_sql(sql.format(**scan))
+        f = dict(panel=self._panel_expr(), root=self._f.root, **t); f.update(kw)
+        return self._f.con.execute(sql.format(**f)).df()
 
     def panel_at(self, date, cols='*', where='1=1', order=None, limit=None):
         self._check_date(date, 'panel_at(%s)' % date)

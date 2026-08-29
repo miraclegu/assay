@@ -1182,12 +1182,19 @@ def _():
     # froec.py 必须已经改用权威宇宙，且不再用单季 eps
     import io as _io2
     src = _io2.open('strategies/小市值/froec.py', encoding='utf-8').read()
-    assert 'security_universe' in src, 'froec.py 未使用权威宇宙，停牌股仍会缺席'
+    # ★ 校验【契约】不校验拼写：策略侧只写占位符 {t_universe}，
+    #   「它指向哪个文件」这条知识在 feed._STD_TABLES 里。
+    #   两头都查，任一端改错都能逮住（以前只 grep 'security_universe'，
+    #   策略改成占位符后就误报了）。
+    from assay.feed import std_tables as _stdt
+    assert '{t_universe}' in src, 'froec.py 未使用权威宇宙占位符，停牌股仍会缺席'
+    assert 'security_universe' in _stdt('/x')['t_universe'], (
+        'feed 的表目录里 t_universe 不再指向 security_universe')
     assert 'eps_q >' not in src and 'eps_q>' not in src, (
         'froec.py 的过滤条件仍在用单季 eps_q（聚宽用累计 indicator.eps）')
     assert 'e.eps > 0' in src, 'froec.py 未用 fin_indicator_q 的累计 eps 做过滤'
     return ('面板 %d 行 vs 权威在市 %d 只，缺 %d ≈ 当日停牌 %d；'
-            'froec.py 已改用权威宇宙 + 累计 eps' % (n_panel, n_univ, gap, n_paused))
+            'froec.py 用 {t_universe} 占位符 + 累计 eps' % (n_panel, n_univ, gap, n_paused))
 
 
 @case('流通A股扣除 B/H 股')

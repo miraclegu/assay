@@ -96,7 +96,7 @@ from assay.api import *          # noqa: F401,F403
 
 SQL = """
 WITH univ AS (
-  SELECT code FROM read_parquet('{root}/std/security_universe.parquet')
+  SELECT code FROM {t_universe}
   WHERE sec_type='stock' AND list_date <= DATE '{sd}'
     AND (delist_date IS NULL OR delist_date > DATE '{sd}')
     AND date_diff('day', list_date::DATE, DATE '{sd}') >= {listed}

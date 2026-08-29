@@ -70,7 +70,7 @@ UNIVERSE = ("NOT is_risk_warned AND listed_days >= 250 AND list_date IS NOT NULL
 # Sleeve A：高股息 -> 低 beta
 DIV_ROLLING365 = """
   SELECT code, sum(bonus_amount_rmb) * 1e4 AS amt
-  FROM read_parquet('{root}/std/dividend.parquet')
+  FROM {t_dividend}
   WHERE a_registration_date >= DATE '{t1}' - INTERVAL 365 DAY
     AND a_registration_date <= DATE '{t1}' AND bonus_amount_rmb > 0
   GROUP BY 1
@@ -94,7 +94,7 @@ DIV_FISCAL_YEAR = """
                         WHEN '董事会预案'   THEN 1
                         ELSE 0 END DESC,
                       board_plan_pub_date DESC) AS r
-    FROM read_parquet('{root}/std/dividend.parquet')
+    FROM {t_dividend}
     WHERE board_plan_pub_date <= DATE '{t1}'
       AND board_plan_pub_date >= DATE '{t1}' - INTERVAL 800 DAY
       AND bonus_cancel_pub_date IS NULL
@@ -128,7 +128,7 @@ WITH div AS ({div}
          row_number() OVER (ORDER BY b.beta_{bw} ASC) AS rk,
          count(*) OVER ()                            AS bn
   FROM hi h
-  JOIN read_parquet('{root}/std/beta_daily.parquet') b
+  JOIN {t_beta} b
     ON b.code = h.jq_code AND b.date = DATE '{t1}'
   WHERE b.beta_{bw} IS NOT NULL
 )
@@ -146,7 +146,7 @@ WITH div AS ({div}
   SELECT code, inc_return, inc_total_revenue_year_on_year AS inc_rev,
          inc_net_profit_year_on_year AS inc_np,
          row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
-  FROM read_parquet('{root}/std/fin_indicator_q.parquet')
+  FROM {t_indicator}
   WHERE pub_date <= DATE '{t1}'
 ), fund0 AS (
   -- PE 带保持绝对值：它是【有效性】过滤（剔负 PE 与泡沫），不是排序因子
@@ -385,7 +385,7 @@ def pick(context):
     if d is None:
         return
     div_cte = DIV_FISCAL_YEAR if g.div_method == 'fiscal_year' else DIV_ROLLING365
-    # ★ 用字面 replace 而不是 format 注入 CTE：CTE 里还有 {root}/{t1}，
+    # ★ 用字面 replace 而不是 format 注入 CTE：CTE 里还有 {t_dividend}/{t1}，
     #   必须留给 query() 在同一次 substitute 里解析（format 只走一遍）。
     sql_a = SQL_A.replace('{div}', div_cte)
     sql_b = SQL_B.replace('{div}', div_cte)

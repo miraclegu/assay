@@ -183,7 +183,7 @@ from assay.api import *          # noqa: F401,F403
 # 按市值【升序】选股时 0 永远排第一，实测它从 2016 年起 2056 个交易日霸占首位。
 SQL = """
 WITH univ AS (
-  SELECT code FROM read_parquet('{root}/std/security_universe.parquet')
+  SELECT code FROM {t_universe}
   WHERE sec_type='stock' AND list_date <= DATE '{sd}'
     AND (delist_date IS NULL OR delist_date > DATE '{sd}')
     AND date_diff('day', list_date::DATE, DATE '{sd}') {lop} {listed}
@@ -205,7 +205,7 @@ WITH univ AS (
   SELECT code, eps FROM (
     SELECT code, eps, row_number() OVER (PARTITION BY code
              ORDER BY report_date DESC, pub_date DESC) rn
-    FROM read_parquet('{root}/std/fin_indicator_q.parquet')
+    FROM {t_indicator}
     WHERE pub_date <= DATE '{sd}' AND eps IS NOT NULL
   ) WHERE rn = 1
 )

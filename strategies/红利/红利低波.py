@@ -37,7 +37,7 @@ UNIVERSE = ("NOT is_risk_warned AND listed_days >= 250 AND list_date IS NOT NULL
 
 DIV_ROLLING365 = """
   SELECT code, sum(bonus_amount_rmb) * 1e4 AS amt
-  FROM read_parquet('{root}/std/dividend.parquet')
+  FROM {t_dividend}
   WHERE a_registration_date >= DATE '{t1}' - INTERVAL 365 DAY
     AND a_registration_date <= DATE '{t1}' AND bonus_amount_rmb > 0
   GROUP BY 1
@@ -61,7 +61,7 @@ DIV_FISCAL_YEAR = """
                         WHEN '董事会预案'   THEN 1
                         ELSE 0 END DESC,
                       board_plan_pub_date DESC) AS r
-    FROM read_parquet('{root}/std/dividend.parquet')
+    FROM {t_dividend}
     WHERE board_plan_pub_date <= DATE '{t1}'
       AND board_plan_pub_date >= DATE '{t1}' - INTERVAL 800 DAY
       AND bonus_cancel_pub_date IS NULL
@@ -93,7 +93,7 @@ WITH div AS (
   WHERE rk <= greatest(1, floor({dtop} * n)) AND dy > {dmin}
 )
 SELECT h.jq_code, h.dy, b.beta_{bw} AS beta
-FROM hi h JOIN read_parquet('{root}/std/beta_daily.parquet') b
+FROM hi h JOIN {t_beta} b
   ON b.code = h.jq_code AND b.date = DATE '{t1}'
 WHERE b.beta_{bw} IS NOT NULL
 ORDER BY beta ASC

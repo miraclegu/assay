@@ -38,7 +38,7 @@ UNIVERSE = ("NOT is_risk_warned AND listed_days >= 250 AND list_date IS NOT NULL
 
 DIV_ROLLING365 = """
   SELECT code, sum(bonus_amount_rmb) * 1e4 AS amt
-  FROM read_parquet('{root}/std/dividend.parquet')
+  FROM {t_dividend}
   WHERE a_registration_date >= DATE '{t1}' - INTERVAL 365 DAY
     AND a_registration_date <= DATE '{t1}' AND bonus_amount_rmb > 0
   GROUP BY 1
@@ -62,7 +62,7 @@ DIV_FISCAL_YEAR = """
                         WHEN '董事会预案'   THEN 1
                         ELSE 0 END DESC,
                       board_plan_pub_date DESC) AS r
-    FROM read_parquet('{root}/std/dividend.parquet')
+    FROM {t_dividend}
     WHERE board_plan_pub_date <= DATE '{t1}'
       AND board_plan_pub_date >= DATE '{t1}' - INTERVAL 800 DAY
       AND bonus_cancel_pub_date IS NULL
@@ -94,7 +94,7 @@ IND_SINGLE_Q = """
   SELECT code, inc_return, inc_total_revenue_year_on_year AS inc_rev,
          inc_net_profit_year_on_year AS inc_np,
          row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
-  FROM read_parquet('{root}/std/fin_indicator_q.parquet')
+  FROM {t_indicator}
   WHERE pub_date <= DATE '{t1}'
 """
 
@@ -104,7 +104,7 @@ IND_SINGLE_Q_PARENT = """
   SELECT code, inc_return, inc_total_revenue_year_on_year AS inc_rev,
          inc_net_profit_to_shareholders_year_on_year AS inc_np,
          row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn
-  FROM read_parquet('{root}/std/fin_indicator_q.parquet')
+  FROM {t_indicator}
   WHERE pub_date <= DATE '{t1}'
 """
 
@@ -116,13 +116,13 @@ IND_CUMULATIVE = """
     SELECT c.code, c.report_date,
            CASE WHEN p.rev_cum > 0 THEN c.rev_cum / p.rev_cum - 1 END AS inc_rev,
            CASE WHEN p.np_cum  > 0 THEN c.np_cum  / p.np_cum  - 1 END AS inc_np
-    FROM read_parquet('{root}/std/fin_quarterly.parquet') c
-    JOIN read_parquet('{root}/std/fin_quarterly.parquet') p
+    FROM {t_quarterly} c
+    JOIN {t_quarterly} p
       ON p.code = c.code AND p.report_date = c.report_date - INTERVAL 1 YEAR
      AND p.pub_date <= DATE '{t1}'
     WHERE c.pub_date <= DATE '{t1}'
   ) y
-  JOIN read_parquet('{root}/std/fin_indicator_q.parquet') i
+  JOIN {t_indicator} i
     ON i.code = y.code AND i.report_date = y.report_date
    AND i.pub_date <= DATE '{t1}'
 """
