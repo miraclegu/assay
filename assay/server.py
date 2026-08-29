@@ -535,11 +535,28 @@ def api_version(q):
     cur_params = info['params']
     if cur and cur != info['code_sha256']:
         cur_params = _parse_params(open(p, encoding='utf-8').read())
+    # 只读模式直接反映在 runnable 上 —— 前端已有「置灰按钮 + 显示原因」的通路，
+    # 复用它，不另造一套提示。
+    if not ALLOW_BACKTEST:
+        why = '服务以【只读模式】启动，网页触发回测已关闭。'\
+              '需要的话用 python3 serve.py --allow-backtest，'\
+              '或直接用命令行 python3 run.py <策略>'
+        return dict(info, runnable=False, same_version=(cur == info['code_sha256']),
+                    current_sha256=cur, current_params=cur_params,
+                    not_runnable_why=why, readonly=True)
     return dict(info, runnable=bool(cur), same_version=(cur == info['code_sha256']),
-                current_sha256=cur, current_params=cur_params, not_runnable_why=why)
+                current_sha256=cur, current_params=cur_params,
+                not_runnable_why=why, readonly=False)
 
 
 # ---------------- 触发回测 ----------------
+# ★ 默认【关闭】。看板本身是纯读的（读归档文件 + 原子写 picks.json），
+#   随时重启无代价；而 /api/backtest 会拉起 subprocess 跑回测，
+#   一旦开着，重启服务就等于打断正在跑的任务。把「读」和「会起进程的写」
+#   分开之后，日常看板可以随便重启（比如加了新接口之后）。
+#   要用网页触发回测：python3 serve.py --allow-backtest
+ALLOW_BACKTEST = False
+
 # 这个端点会起子进程跑回测。三条约束：
 #   1) 服务只监听 127.0.0.1（见 serve()）
 #   2) 参数名必须在该版本解析出的参数表里；参数值走白名单正则
@@ -578,7 +595,14 @@ def _run_job(job_id, cmd, cwd):
 
 
 def api_backtest(q, body):
-    """POST /api/backtest —— 用指定版本 + 指定参数跑一次回测。"""
+    """POST /api/backtest —— 用指定版本 + 指定参数跑一次回测。
+
+    只读模式下直接拒绝：前端会置灰按钮，但接口不能只靠前端把关。
+    """
+    if not ALLOW_BACKTEST:
+        return {'error': '服务以只读模式启动，网页触发回测已关闭。'
+                         '用 python3 serve.py --allow-backtest 开启，'
+                         '或直接用命令行 python3 run.py <策略>'}
     sha = (body.get('sha') or '').strip().lower()
     info = _version_info(sha)
     if info is None:
@@ -820,8 +844,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, open(p, 'rb').read(), ctype)
 
 
-def serve(host='127.0.0.1', port=8770):
+def serve(host='127.0.0.1', port=8770, allow_backtest=False):
+    global ALLOW_BACKTEST
+    ALLOW_BACKTEST = bool(allow_backtest)
     n = len(_scan())
     print('assay 归档查看服务  http://%s:%d   (%d 次回测)' % (host, port, n))
-    print('Ctrl-C 退出')
+    print('模式：%s' % ('可触发回测（--allow-backtest）'
+                      if ALLOW_BACKTEST else '只读（网页触发回测已关闭）'))
+    # flush：重定向到文件时 stdout 是块缓冲，SIGTERM 不会刷新，
+    # 启动横幅会看着像根本没打印。
+    print('Ctrl-C 退出', flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

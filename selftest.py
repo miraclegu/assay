@@ -829,6 +829,12 @@ def t_version_page():
     from http.server import ThreadingHTTPServer
     from assay import server as sv
     sv._scan()
+    # ★ 服务默认只读，网页触发回测是关的。本用例要测的就是「触发回测」
+    #   这条链路，所以显式打开；关键是下面那两条「非法参数被挡住」的断言 ——
+    #   只读模式下 api_backtest 本来就返回 error，不打开的话它们会
+    #   【因为错误的原因通过】，比失败更危险。
+    _prev_ab = sv.ALLOW_BACKTEST
+    sv.ALLOW_BACKTEST = True
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -889,14 +895,26 @@ def t_version_page():
                                      {sorted(eng)[0]: '1; rm -rf /'}})
             assert 'error' in r, '危险参数值没被挡住'
 
+            # 只读模式（默认）必须挡住触发回测，且不能只靠前端置灰
+            sv.ALLOW_BACKTEST = False
+            r = sv.api_backtest({}, {'sha': sha, 'params': {}})
+            assert 'error' in r and '只读' in r['error'], \
+                '只读模式没挡住 /api/backtest: %s' % r
+            v_ro = sv.api_version({'sha': sha})
+            assert v_ro['readonly'] and not v_ro['runnable'], \
+                '只读模式下 api_version 仍报 runnable'
+            sv.ALLOW_BACKTEST = True
+
             pg.click('#back'); pg.wait_for_timeout(500)
             assert pg.is_visible('#cat'), '返回目录失败'
             br.close()
             assert not errs, 'JS 报错 %d 处: %s' % (len(errs), errs[:2])
     finally:
         httpd.shutdown()
+        sv.ALLOW_BACKTEST = _prev_ab
     return ('简介 %d 条/旧统计已移除/源码 %d 字符/参数 %d 个与引擎一致/'
-            '非法参数名与危险值均被拦' % (n_note, min(lens), n_param))
+            '非法参数名与危险值均被拦/只读模式拦住触发回测'
+            % (n_note, min(lens), n_param))
 
 
 @case('版本身份：改注释不算新版本，改行为才算')
