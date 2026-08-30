@@ -11,6 +11,11 @@
 #   只有【每股分红 + 除权日】这一项，接口名与字段语义我没核对过。
 #   凭印象写出来的最可能结果是「看着能跑、数字悄悄是错的」，所以先探。
 #
+# [已确认 2026-08-30] C.get_divid_factors(code) 可用，只接受 1~2 个参数。
+#   返回 {毫秒时间戳: [7个数]}；key = 除权日【北京时间 00:00】
+#   （用 utcfromtimestamp 会差一天）；[0] = 每股税前现金分红（元/股），
+#   与本地 bonus_ratio_rmb/10 逐条吻合 11/11；[3][4] = 配股比例/配股价；[6] = 复权因子。
+#
 # 下面的 EXPECT 是本地 std/dividend.parquet 的实际值（每 10 股派息，税前 RMB），
 # 探针会拿 QMT 返回的值去对，对上了才算这条路通。
 #==============================================================================
@@ -96,7 +101,9 @@ def _try_fin(C, field, codes):
     except Exception as e:
         print('   异常 %s: %s' % (type(e).__name__, str(e)[:90]))
         return
-    if r is None or (hasattr(r, 'empty') and r.empty) or not r:
+    # [!] 不要用 `not r` —— r 可能是 pandas Panel/DataFrame，会抛
+    #     "The truth value of ... is ambiguous"，把整个探针打断（实测就是这样）。
+    if r is None:
         print('   空')
         return
     print('   类型 %s' % type(r).__name__)
