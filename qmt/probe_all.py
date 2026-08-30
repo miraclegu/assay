@@ -82,8 +82,11 @@ _done = [False]
 def init(C):
     print('>>>>>> 探针已加载 <<<<<<  参考日 %s' % REF_DATE)
     print('完整版 QMT：策略只走 ContextInfo，前 5 节即是；后 6 节走 xtdata，')
-    print('只影响「批量导出数据」，连不上不影响策略移植（已套 %d 秒超时）。'
+    print('只影响「批量导出数据」，连不上不影响策略移植。')
+    print('所有接口调用（含 ContextInfo）均已套 %d 秒超时，不会静默卡死。'
           % XTDATA_TIMEOUT)
+    print('[!] QMT 正在补充数据时不要跑本探针 —— 即使不卡，探到的也是')
+    print('    半完成状态的数据，一部分有值一部分 NaN，会误判。等补完再跑。')
 
 
 def handlebar(C):
@@ -129,20 +132,29 @@ def _wrap(s, n):
 _XT = [None, None]      # [已连上的 xtdata, 上次连接失败的异常]
 QMT_PORT = 58610
 QMT_IPS = ('127.0.0.1',)          # 只试本机。局域网 IP 连不通时会长时间阻塞
-XTDATA_TIMEOUT = 8                # 单次 xtdata 调用的上限（秒）
+XTDATA_TIMEOUT = 6                # 单次调用上限（秒）
+STALL_MAX = 4                     # 连续超时几次后熔断
+_STALL = [0]
 
 
 def _call_timeout(fn, sec=None):
     """给可能阻塞的调用套超时。
 
-    [!] QMT 的 print 是【缓冲】的：策略线程一旦阻塞在网络调用上，
-        之前打印的内容也刷不出来 —— 表现就是「点回测什么日志都没有」。
-        实测就是这么卡住的（xtdata.connect 连不上时会长时间等）。
-        所以凡是碰网络的调用一律套超时，宁可这一节报超时，
-        也不能让整个探针看起来像死了。
+    [!] QMT 的 print 是【缓冲】的：策略线程一旦阻塞，之前打印的内容也刷不出来
+        —— 表现就是「点回测什么日志都没有」。实测被 xtdata.connect 卡过一次。
+
+    [!] ContextInfo 的调用【同样要套】：QMT 客户端在补充数据时，
+        C.get_financial_data / C.get_stock_list_in_sector 都可能阻塞等数据。
+        一开始只套了 xtdata 是漏的 —— 而 F2 恰好排第一节，一卡又是全无输出。
     """
     import threading
     sec = XTDATA_TIMEOUT if sec is None else sec
+    # ★ 熔断：连续超时 STALL_MAX 次后直接放弃，不再逐个等。
+    #   没有熔断时，「QMT 正在补数据」这种场景下 44 个调用点各等 8 秒 = 352 秒，
+    #   人会以为又卡死了。
+    if _STALL[0] >= STALL_MAX:
+        raise RuntimeError('接口持续阻塞，已熔断（QMT 是不是正在补充数据？'
+                           '补完再跑本探针）')
     box = {}
 
     def _run():
@@ -156,7 +168,10 @@ def _call_timeout(fn, sec=None):
     t.start()
     t.join(sec)
     if t.is_alive():
-        raise RuntimeError('超时 %ds（多半在等网络，QMT 数据接口没开？）' % sec)
+        _STALL[0] += 1
+        raise RuntimeError('超时 %ds（第 %d 次；连续 %d 次就熔断）'
+                           % (sec, _STALL[0], STALL_MAX))
+    _STALL[0] = 0                      # 有一次成功就复位
     if 'e' in box:
         raise box['e']
     return box.get('r')
@@ -352,7 +367,7 @@ def s5_sector_bruteforce(C):
 
 def _sec(C, name, expect):
     try:
-        lst = C.get_stock_list_in_sector(name) or []
+        lst = _call_timeout(lambda: C.get_stock_list_in_sector(name)) or []
     except Exception as e:
         print('   %-22s 异常 %s' % (name, str(e)[:45]))
         return
@@ -398,7 +413,8 @@ def f2_fields(C):
               'ASHAREFINANCIALINDICATOR.net_profit_after_ded_nr_lp',
               'ASHAREFINANCIALINDICATOR.deducted_profit'):
         try:
-            r = C.get_financial_data([f], [CODE], '20240101', '20241231')
+            r = _call_timeout(lambda: C.get_financial_data(
+                [f], [CODE], '20240101', '20241231'))
             print('   %-52s -> %-10s %s' % (f, type(r).__name__, _peek(r)))
         except Exception as e:
             print('   %-52s 异常 %s' % (f, str(e)[:50]))
@@ -417,7 +433,7 @@ def f3_signature(C):
             ('不传日期', lambda: C.get_financial_data([F], [CODE])),
     ):
         try:
-            r = fn()
+            r = _call_timeout(fn)
             print('   %-22s -> %-10s %s' % (name, type(r).__name__, _peek(r)))
         except Exception as e:
             print('   %-22s -> %s: %s' % (name, type(e).__name__, str(e)[:60]))
@@ -430,7 +446,8 @@ def f4_panel_values(C):
             'CAPITALSTRUCTURE.total_capital',
             'CAPITALSTRUCTURE.circulating_capital']
     try:
-        r = C.get_financial_data(flds, CODES, '20240101', '20241231')
+        r = _call_timeout(lambda: C.get_financial_data(
+            flds, CODES, '20240101', '20241231'))
     except Exception as e:
         print('   异常 %s' % str(e)[:90]); return
     print('   类型 %s   %s' % (type(r).__name__, _peek(r)))
