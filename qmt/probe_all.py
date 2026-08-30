@@ -1,326 +1,338 @@
 #coding:gbk
 #==============================================================================
-# 探针（总）：把五条 QMT 策略需要的【全部未核对项】一次问完
+# QMT 接口探针 —— 唯一的一个，不要再新建
 #==============================================================================
-# 跑法：QMT -> 新建 Python 策略 -> 粘贴 -> 周期【1d】-> 区间含 2025-06-30
-#       -> 运行 -> 把整段日志贴回。只在第一根 bar 跑一次。
+# 工作方式：
+#   已确认的写进 CONFIRMED，只打印结论、【不再调接口】；
+#   未确定的放 OPEN，每跑一轮把确认下来的从 OPEN 挪进 CONFIRMED。
+#   文件会随着核对推进自然变短，而且随时能看到「已知什么、还差什么」的全貌。
 #
-# 设计原则（前两轮探针的教训）：
-#   1) 每一节都独立 try/except —— v1 探针在最后一个候选上抛异常，
-#      把整轮结果打断了一半。这轮任何一节炸掉都不影响其余。
-#   2) 不用 `not r` 判空 —— r 可能是 pandas Panel/DataFrame，会抛
-#      "The truth value of ... is ambiguous"。一律先看类型。
-#   3) 凡是本地有标准答案的，直接嵌进来自判对错，不靠人肉比对。
+# 跑法：QMT -> 新建 Python 策略 -> 粘贴 -> 周期 1d -> 区间含 2025-06-30 -> 贴回日志
 #
-# 已确认、不再验（探针 v1 结论）：
-#   C.get_divid_factors(code)  只接受 1~2 个参数
-#   -> {毫秒时间戳: [7个数]}；key = 除权日【北京时间 00:00】
-#      （utcfromtimestamp 会差一天）；[0] = 每股税前现金分红（元/股），
-#      与本地 bonus_ratio_rmb/10 逐条吻合 11/11；[3][4] = 配股比例/配股价；
-#      [6] = 复权因子
+# 三条纪律（前几轮踩出来的）：
+#   1) 每节独立 try/except —— 曾经一节抛异常把整轮结果打断了一半
+#   2) 不用 `not r` 判空 —— 返回可能是 pandas Panel，会抛
+#      "The truth value of a Panel is ambiguous"
+#   3) 凡本地有标准答案的一律嵌进来自判，不靠人肉比对
 #==============================================================================
-import datetime as dt
 
-REF_DATE = '20250630'          # 参考日：下面所有标准答案都取自这一天
+REF_DATE = '20250630'
+CODE  = '601398.SH'
+CODES = ['601398.SH', '601088.SH']
 
-# ---- 本地标准答案（取自 datalake，用来判 QMT 返回的口径对不对）----
+# ---------------------------------------------------------------- 已确认
+# 格式: 项目 -> (确认日期, 结论)
+CONFIRMED = [
+    ('行情 get_market_data_ex', '2026-08-30',
+     "字段 open/close/high/low/volume/amount/preClose 全有；dividend_type='front' 可用。"
+     '601398 与 601088 的 OHLC+成交额与本地【逐项精确吻合】。可放心用。'),
+    ('合约详情 C.get_instrumentdetail(code)', '2026-08-30',
+     '可用，返回 dict。OpenDate=上市日(5/5 对)、InstrumentName=名称、'
+     'FloatVolume/FloatVolumn=流通股本(两种拼写都有)、PreClose、IsTrading、InstrumentStatus。'),
+    ('分红 C.get_divid_factors(code)', '2026-08-30',
+     '只接受 1~2 个参数(传 start/end 报 TypeError)。返回 {毫秒时间戳: [7个数]}；'
+     'key=除权日【北京时间00:00】(用 utcfromtimestamp 会差一天)；'
+     '[0]=每股税前现金分红(元/股)，与本地 bonus_ratio_rmb/10 【11/11 精确吻合】；'
+     '[3][4]=配股比例/配股价；[6]=复权因子。'),
+    ('指数日线', '2026-08-30',
+     "000300.SH 可取(399300.SZ 返回空)。-> beta 对沪深300 自己回归即可，不需要外部数据。"),
+    ('账户 get_trade_detail_data', '2026-08-30',
+     "模块级可调；空账号 '' 也能读到 ACCOUNT 1 条(回测用默认账户)，"
+     'm_dBalance/m_dAvailable/m_dAssetBalance 等字段齐全。POSITION 空仓时 0 条。'
+     'passorder 全局可见。'),
+    ('全A股票池', '2026-08-30',
+     "C.get_stock_list_in_sector('沪深A股') -> 5216 只(本地同日在市 5152，量级对)；"
+     "'沪深京A股' 5555；'沪深300' 300。'A股'/'全部A股' 等名字为 0。"),
+    ('[!] 涨跌停价不能用 UpStopPrice/DownStopPrice', '2026-08-30',
+     '它们是【实时值不是历史值】：探针跑于 2026-08-30 而参考日 2025-06-30，'
+     '601398 返回 8.60/7.04 而实际 8.25/6.75；300750 返回 447.60 而实际 301.19。'
+     '必须自己按 preClose×(1±涨跌幅) 算 —— 移植里 _limit_price 本来就是这么做的。'),
+    ('[!] C.get_sector_list 不存在', '2026-08-30',
+     "报 '_PyContext' object has no attribute。但本仓库 QMT/data/st_status.py 用的是"
+     ' xtdata.get_sector_list()，说明它在 xtdata 模块上有 —— 见下面 S1。'),
+]
+
+# 本地标准答案（2025-06-30）
 REF = {
-    'a_share_count': 5152,     # 该日在市 A 股只数
-    'st_count': 175,           # 该日风险警示只数
-    'listed': {                # 上市日
-        '601398.SH': '20061027', '601088.SH': '20071009',
-        '000651.SZ': '19961118', '300750.SZ': '20180611',
-        '688981.SH': '20200716',
-    },
-    'industry': {              # 申万一级（判板块命名用）
-        '000651.SZ': '家用电器', '300750.SZ': '电气设备',
-        '601088.SH': '煤炭', '601398.SH': '银行', '688981.SH': '电子',
-    },
-    'limit': {                 # 该日涨停价 / 跌停价 / 涨跌幅
-        '601398.SH': (8.25, 6.75, 0.10),
-        '000651.SZ': (49.74, 40.70, 0.10),
-        '300750.SZ': (301.19, 200.79, 0.20),
-    },
-    'bar': {                   # 该日 不复权 OHLC + 成交额(亿)
-        '601398.SH': (7.48, 7.589, 7.61, 7.42, 23.080),
-        '601088.SH': (39.93, 40.541, 40.71, 39.89, 11.815),
-    },
-    'mv': {                    # 总市值(亿) / 流通市值(亿) / PE(TTM)
-        '601398.SH': (27051.2, 20463.6, 7.465),
-        '601088.SH': (8054.7, 6685.5, 14.716),
-    },
-    'beta252': {'601398.SH': 0.2043, '601088.SH': 0.3877, '300750.SZ': 1.5895},
-    'fin': {                   # report_date -> (扣非ROE, 营收同比, 净利同比, 扣非净利/亿)
-        '601398.SH': {'20241231': (0.0246, 0.0187, 0.0135, 966.60)},
-        '601088.SH': {'20241231': (0.0338, -0.0677, 0.1322, 140.91)},
-        '600028.SH': {'20241231': (0.0050, -0.0461, -0.1861, 40.90)},
-    },
+    'st_count': 175,
+    'st_head': ['000004.SZ', '000070.SZ', '000430.SZ', '000488.SZ', '000504.SZ'],
+    'industry_n': {'电子': 599, '电气设备': 453, '家用电器': 132, '银行': 42, '煤炭': 38},
+    'industry_of': {'601398.SH': '银行', '601088.SH': '煤炭',
+                    '000651.SZ': '家用电器', '300750.SZ': '电气设备'},
+    'fin_601398_2024': {'归母净资产_亿': 34946.0, '归母净利_亿': 3658.6,
+                        '总股本_亿股': 3564.1, '流通股本_亿股': 2696.1},
 }
 
-CODES = ['601398.SH', '601088.SH', '000651.SZ', '300750.SZ', '688981.SH']
 _done = [False]
 
 
 def init(C):
-    print('[探针总] 等第一根 bar；参考日 %s' % REF_DATE)
+    print('[探针] 等第一根 bar；参考日 %s' % REF_DATE)
 
 
 def handlebar(C):
     if _done[0]:
         return
     _done[0] = True
-    for name, fn in (
-            ('A 板块/股票池', _a_sectors),
-            ('B 合约详情（上市日/名称/涨跌停）', _b_detail),
-            ('C 行情 get_market_data_ex', _c_market),
-            ('D 财务 get_financial_data', _d_fin),
-            ('E 扣非净利 与 增长率', _e_deducted),
-            ('F 市值/PE 能不能凑出来', _f_valuation),
-            ('G beta 对沪深300', _g_beta),
-            ('H 账户/持仓/下单接口', _h_trade),
-    ):
+    print('=' * 78)
+    print('已确认 %d 项（只打印结论，不再调接口）' % len(CONFIRMED))
+    print('=' * 78)
+    for name, when, concl in CONFIRMED:
+        print('  v %s   [%s]' % (name, when))
+        for ln in _wrap(concl, 72):
+            print('      ' + ln)
+    for name, fn in OPEN:
         print('')
         print('=' * 78)
-        print('[%s]' % name)
+        print('[待确认] %s' % name)
         print('=' * 78)
         try:
             fn(C)
         except Exception as e:
             import traceback
-            print('   !! 本节异常 %s: %s' % (type(e).__name__, str(e)[:120]))
-            for ln in traceback.format_exc().splitlines()[-4:]:
+            print('   !! %s: %s' % (type(e).__name__, str(e)[:120]))
+            for ln in traceback.format_exc().splitlines()[-3:]:
                 print('      ' + ln)
     print('')
     print('=' * 78)
-    print('[探针总] 完了。把整段贴回。')
+    print('[探针] 完。把整段贴回 —— 确认下来的会被挪进 CONFIRMED，不再重跑。')
     print('=' * 78)
 
 
-# ------------------------------------------------------------------ A
-def _a_sectors(C):
-    print('-- A1 全 A 股池：本地该日在市 %d 只，看哪个板块名能取到接近的数量'
-          % REF['a_share_count'])
-    for sec in ('沪深A股', '沪深京A股', 'A股', '沪深Ａ股', '全部A股', '沪深300'):
-        try:
-            lst = C.get_stock_list_in_sector(sec) or []
-            print('   %-10s -> %5d 只  %s' % (sec, len(lst), lst[:3]))
-        except Exception as e:
-            print('   %-10s -> 异常 %s' % (sec, str(e)[:50]))
-    print('-- A2 ST 板块：本地该日 %d 只' % REF['st_count'])
-    for sec in ('ST板块', 'ST', '风险警示', '*ST', 'ST股票'):
-        try:
-            lst = C.get_stock_list_in_sector(sec) or []
-            print('   %-10s -> %5d 只  %s' % (sec, len(lst), lst[:3]))
-        except Exception as e:
-            print('   %-10s -> 异常 %s' % (sec, str(e)[:50]))
-    print('-- A3 行业板块命名（本地是申万一级，如 %s）'
-          % list(REF['industry'].values())[:3])
-    for sec in ('银行', '煤炭', '家用电器', '申万一级行业', '证监会行业'):
-        try:
-            lst = C.get_stock_list_in_sector(sec) or []
-            hit = [c for c in lst if c in REF['industry']]
-            print('   %-14s -> %5d 只   命中参考票 %s' % (sec, len(lst), hit))
-        except Exception as e:
-            print('   %-14s -> 异常 %s' % (sec, str(e)[:50]))
-    print('-- A4 板块清单前 40 个（看命名风格）')
-    for fn in ('get_sector_list', 'get_stock_list_in_sector'):
-        try:
-            r = getattr(C, fn)()
-            print('   C.%s() -> %s' % (fn, str(r)[:400]))
-            break
-        except Exception as e:
-            print('   C.%s() -> %s' % (fn, str(e)[:60]))
+def _wrap(s, n):
+    out, cur = [], ''
+    for ch in s:
+        cur += ch
+        if len(cur) >= n:
+            out.append(cur); cur = ''
+    if cur:
+        out.append(cur)
+    return out
 
 
-# ------------------------------------------------------------------ B
-def _b_detail(C):
-    print('-- B1 接口名：get_instrumentdetail vs get_instrument_detail')
-    got = None
-    for fn in ('get_instrumentdetail', 'get_instrument_detail'):
-        try:
-            d = getattr(C, fn)('601398.SH')
-            print('   C.%s 可用，返回 %s' % (fn, type(d).__name__))
-            print('      键: %s' % (sorted(d)[:30] if isinstance(d, dict) else str(d)[:200]))
-            got = fn
-            break
-        except Exception as e:
-            print('   C.%s -> %s: %s' % (fn, type(e).__name__, str(e)[:60]))
-    if not got:
-        print('   两个都不行，试模块级')
-        try:
-            d = get_instrumentdetail('601398.SH')          # noqa: F821
-            print('   模块级 get_instrumentdetail 可用: %s' % (sorted(d)[:30],))
-            got = 'MOD'
-        except Exception as e:
-            print('   模块级也不行: %s' % str(e)[:60])
-    if not got:
-        return
-    print('-- B2 上市日 / 名称 / 涨跌停价 对账')
-    for c in CODES:
-        try:
-            d = getattr(C, got)(c) if got != 'MOD' else get_instrumentdetail(c)  # noqa: F821
-        except Exception as e:
-            print('   %-11s 异常 %s' % (c, str(e)[:50]))
-            continue
-        if not isinstance(d, dict):
-            print('   %-11s 返回不是 dict: %s' % (c, str(d)[:80]))
-            continue
-        ld = d.get('OpenDate') or d.get('ListedDate') or d.get('list_date')
-        nm = d.get('InstrumentName') or d.get('name')
-        up = d.get('UpStopPrice') or d.get('up_stop_price')
-        dn = d.get('DownStopPrice') or d.get('down_stop_price')
-        want_ld = REF['listed'].get(c)
-        ok = 'v' if (want_ld and str(ld).replace('-', '')[:8] == want_ld) else '?'
-        print('   %-11s 上市=%-10s(本地%s)%s  名称=%-8s 涨停=%s 跌停=%s'
-              % (c, ld, want_ld, ok, nm, up, dn))
-    print('   本地该日涨跌停参考: %s' % REF['limit'])
+def _xt():
+    import xtquant.xtdata as xtdata
+    return xtdata
 
 
-# ------------------------------------------------------------------ C
-def _c_market(C):
-    print('-- C1 字段可得性（不复权），对账本地该日 OHLC+成交额(亿)')
-    flds = ['open', 'close', 'high', 'low', 'volume', 'amount', 'preClose']
+def _peek(r):
+    """挑【非 NaN 的值】出来 —— 只看结构会漏掉「结构对但全空」。"""
     try:
-        r = C.get_market_data_ex(flds, ['601398.SH', '601088.SH'], period='1d',
-                                 end_time=REF_DATE, count=1,
-                                 dividend_type='none', fill_data=False)
+        import numpy as np
+        if r is None:
+            return 'None'
+        if hasattr(r, 'values'):
+            v = np.asarray(r.values, dtype='float64').ravel()
+            ok = v[~np.isnan(v)]
+            return ('非空 %d 个，样例 %s' % (len(ok), ok[:4])) if len(ok) else '全 NaN'
+        if isinstance(r, dict):
+            return 'dict 键 %s' % list(r)[:3]
+        return str(r)[:80]
     except Exception as e:
-        print('   异常 %s: %s' % (type(e).__name__, str(e)[:90]))
-        return
-    print('   返回类型 %s' % type(r).__name__)
-    for c in ('601398.SH', '601088.SH'):
-        df = r.get(c) if isinstance(r, dict) else None
-        if df is None:
-            print('   %s -> 无' % c)
-            continue
-        try:
-            print('   %s 列: %s' % (c, list(df.columns)))
-            row = df.iloc[-1]
-            o, cl, h, l, amt = REF['bar'][c]
-            print('      QMT  o=%s c=%s h=%s l=%s amount=%s'
-                  % (row.get('open'), row.get('close'), row.get('high'),
-                     row.get('low'), row.get('amount')))
-            print('      本地 o=%s c=%s h=%s l=%s amount=%.3f亿' % (o, cl, h, l, amt))
-        except Exception as e:
-            print('      取值失败 %s；原样 %s' % (str(e)[:50], str(df)[:200]))
-    print('-- C2 前复权是否可用（止损要靠它做同基准比较）')
+        return '看不了(%s)' % str(e)[:40]
+
+
+# ================================ 待确认 S：板块 ==============================
+def s0_xtdata(C):
+    print('   ContextInfo 上没有 get_sector_list，但 xtdata 模块上应该有。')
     try:
-        r2 = C.get_market_data_ex(['close', 'low'], ['601398.SH'], period='1d',
-                                  end_time=REF_DATE, count=3,
-                                  dividend_type='front', fill_data=False)
-        df = r2.get('601398.SH')
-        print('   front 3 根: %s' % str(df)[:250])
+        x = _xt()
+        print('   import xtquant.xtdata 成功')
+        for fn in ('get_sector_list', 'get_stock_list_in_sector', 'download_sector_data',
+                   'get_financial_data', 'download_financial_data', 'get_instrument_detail'):
+            print('   xtdata.%-26s %s' % (fn, '有' if hasattr(x, fn) else '无'))
     except Exception as e:
-        print('   异常 %s' % str(e)[:80])
+        print('   import 失败 %s: %s' % (type(e).__name__, str(e)[:90]))
+        print('   -> 策略环境里没有 xtquant 的话，ST 与行业只能走「按名称判断」兜底')
 
 
-# ------------------------------------------------------------------ D
-def _d_fin(C):
-    print('-- D1 froec 已在用的 4 个字段能不能取到')
+def s1_sector_names(C):
+    print('   把真实板块名【全部列出来】，不再一个个猜')
+    try:
+        x = _xt()
+    except Exception:
+        print('   跳过（xtdata 不可用）'); return
+    try:
+        x.download_sector_data(); print('   download_sector_data() 已调用')
+    except Exception as e:
+        print('   download_sector_data 异常: %s' % str(e)[:70])
+    secs = x.get_sector_list() or []
+    print('   板块总数 %d' % len(secs))
+    print('   含 ST 的      : %s' % ([s for s in secs if 'ST' in str(s).upper()][:20] or '（无）'))
+    print('   含风险/警示/退 : %s' % [s for s in secs if any(k in str(s) for k in ('风险', '警示', '退'))][:20])
+    print('   含「申万」     : %s' % [s for s in secs if '申万' in str(s)][:30])
+    print('   与本地行业名重合: %s' % [s for s in secs if s in REF['industry_n']][:20])
+    print('   -- 前 120 个（看命名风格）--')
+    for i in range(0, min(len(secs), 120), 6):
+        print('      %s' % secs[i:i + 6])
+
+
+def s2_st(C):
+    print('   本地 %s 当日 ST %d 只，前几只 %s' % (REF_DATE, REF['st_count'], REF['st_head']))
+    try:
+        x = _xt()
+    except Exception:
+        print('   跳过'); return
+    secs = x.get_sector_list() or []
+    cands = [s for s in secs if 'ST' in str(s).upper()] or \
+            [s for s in secs if any(k in str(s) for k in ('风险', '警示'))]
+    if not cands:
+        print('   无 ST 板块 -> 只能走名称兜底（InstrumentName 含 ST）'); return
+    for s in cands[:5]:
+        try:
+            lst = x.get_stock_list_in_sector(s) or []
+            print('   %-16s -> %4d 只   命中本地前几只: %s'
+                  % (s, len(lst), [c for c in lst if c in REF['st_head']]))
+        except Exception as e:
+            print('   %-16s -> 异常 %s' % (s, str(e)[:50]))
+
+
+def s3_industry(C):
+    print('   本地各行业只数: %s' % REF['industry_n'])
+    print('   本地归属: %s' % REF['industry_of'])
+    try:
+        x = _xt()
+    except Exception:
+        print('   跳过'); return
+    secs = x.get_sector_list() or []
+    cands = [s for s in secs if '申万' in str(s)][:12]
+    cands += [s for s in secs if s in REF['industry_n']]
+    if not cands:
+        cands = [s for s in secs if any(k in str(s) for k in ('银行', '煤炭', '家用电器'))][:12]
+    if not cands:
+        print('   没找到行业板块 -> froec 的 11 个行业黑名单在 QMT 上【无法实现】'); return
+    for s in cands[:12]:
+        try:
+            lst = x.get_stock_list_in_sector(s) or []
+            print('   %-22s -> %4d 只   命中参考票: %s'
+                  % (s, len(lst), [c for c in lst if c in REF['industry_of']]))
+        except Exception as e:
+            print('   %-22s -> 异常 %s' % (s, str(e)[:50]))
+
+
+def s4_timetag(C):
+    print('   [!] 板块成分随时间变，回测必须取【时点】成分。')
+    print('       若不支持 real_timetag，拿今天的 ST 名单过滤 2016 年历史 = 未来函数。')
+    try:
+        x = _xt()
+    except Exception:
+        print('   跳过'); return
+    secs = x.get_sector_list() or []
+    s = ([t for t in secs if 'ST' in str(t).upper()] or ['沪深A股'])[0]
+    print('   用板块 %r 试三种时间参数写法：' % s)
+    for arg in (REF_DATE, int(REF_DATE), REF_DATE + '000000'):
+        try:
+            lst = x.get_stock_list_in_sector(s, arg) or []
+            print('   传 %-16r -> %d 只' % (arg, len(lst)))
+        except Exception as e:
+            print('   传 %-16r -> %s: %s' % (arg, type(e).__name__, str(e)[:60]))
+
+
+# ================================ 待确认 F：财务 ==============================
+def f1_downloaded(C):
+    print('   [!] froec 三条全靠财务算 PB 与单季 ROE，这是当前唯一硬阻塞。')
+    print('   本地参考 601398 2024年报: %s' % REF['fin_601398_2024'])
+    try:
+        x = _xt()
+    except Exception:
+        print('   xtdata 不可用，跳过下载检查'); return
+    try:
+        x.download_financial_data([CODE], ['Balance', 'Income', 'CapitalStructure'])
+        print('   download_financial_data 调用成功 —— 之前很可能就是【没下载】')
+    except Exception as e:
+        print('   download 异常 %s: %s' % (type(e).__name__, str(e)[:100]))
+    try:
+        r = x.get_financial_data([CODE], ['Balance', 'Income'], '20240101', '20241231')
+        print('   xtdata.get_financial_data -> %s' % type(r).__name__)
+        print('   %s' % str(r)[:700])
+    except Exception as e:
+        print('   xtdata.get_financial_data 异常 %s: %s' % (type(e).__name__, str(e)[:100]))
+
+
+def f2_fields(C):
+    print('   换表名/字段写法，看有没有哪个能出值')
+    for f in ('ASHAREBALANCESHEET.tot_shrhldr_eqy_excl_min_int',
+              'Balance.tot_shrhldr_eqy_excl_min_int',
+              'BALANCESHEET.tot_shrhldr_eqy_excl_min_int',
+              'ASHAREINCOME.net_profit_excl_min_int_inc',
+              'Income.net_profit_excl_min_int_inc',
+              'CAPITALSTRUCTURE.total_capital',
+              'CapitalStructure.total_capital',
+              'ASHARECAPITALIZATION.tot_shr',
+              'PERSHAREINDEX.s_fa_eps_basic',
+              # 红利要的扣非净利
+              'ASHAREFINANCIALINDICATOR.net_profit_after_ded_nr_lp',
+              'ASHAREFINANCIALINDICATOR.deducted_profit'):
+        try:
+            r = C.get_financial_data([f], [CODE], '20240101', '20241231')
+            print('   %-52s -> %-10s %s' % (f, type(r).__name__, _peek(r)))
+        except Exception as e:
+            print('   %-52s 异常 %s' % (f, str(e)[:50]))
+
+
+def f3_signature(C):
+    F = 'ASHAREINCOME.net_profit_excl_min_int_inc'
+    for name, fn in (
+            ('单股票一整年', lambda: C.get_financial_data([F], [CODE], '20240101', '20241231')),
+            ('三年跨度', lambda: C.get_financial_data([F], [CODE], '20220101', '20241231')),
+            ('report_type=report', lambda: C.get_financial_data(
+                [F], [CODE], '20240101', '20241231', report_type='report')),
+            ('report_type=announce', lambda: C.get_financial_data(
+                [F], [CODE], '20240101', '20241231', report_type='announce')),
+            ('日期带横杠', lambda: C.get_financial_data([F], [CODE], '2024-01-01', '2024-12-31')),
+            ('不传日期', lambda: C.get_financial_data([F], [CODE])),
+    ):
+        try:
+            r = fn()
+            print('   %-22s -> %-10s %s' % (name, type(r).__name__, _peek(r)))
+        except Exception as e:
+            print('   %-22s -> %s: %s' % (name, type(e).__name__, str(e)[:60]))
+
+
+def f4_panel_values(C):
+    print('   上一轮只打了 Panel 结构没打值 —— 这次把值挖出来')
     flds = ['ASHAREBALANCESHEET.tot_shrhldr_eqy_excl_min_int',
             'ASHAREINCOME.net_profit_excl_min_int_inc',
             'CAPITALSTRUCTURE.total_capital',
             'CAPITALSTRUCTURE.circulating_capital']
-    for f in flds:
-        _fin_one(C, f, ['601398.SH'])
-    print('-- D2 一次多字段多股票的返回结构（froec 就是这么调的）')
     try:
-        r = C.get_financial_data(flds, ['601398.SH', '601088.SH'],
-                                 '20231231', '20241231')
-        print('   类型 %s' % type(r).__name__)
-        if isinstance(r, dict):
-            print('   键: %s' % list(r)[:5])
-            k = list(r)[0]
-            print('   r[%s] 类型 %s' % (k, type(r[k]).__name__))
-            print('   %s' % str(r[k])[:500])
-        else:
-            print('   %s' % str(r)[:500])
+        r = C.get_financial_data(flds, CODES, '20240101', '20241231')
     except Exception as e:
-        print('   异常 %s: %s' % (type(e).__name__, str(e)[:100]))
-
-
-def _fin_one(C, field, codes):
+        print('   异常 %s' % str(e)[:90]); return
+    print('   类型 %s   %s' % (type(r).__name__, _peek(r)))
+    for attr in ('items', 'major_axis', 'minor_axis'):
+        if hasattr(r, attr):
+            ax = list(getattr(r, attr))
+            print('   %-11s %d 个: %s ... %s' % (attr, len(ax), ax[:3], ax[-2:]))
     try:
-        r = C.get_financial_data([field], codes, '20241231', '20241231')
-        if r is None:
-            print('   %-52s -> None' % field)
-            return
-        print('   %-52s -> %s  %s' % (field, type(r).__name__, str(r)[:150]))
+        if hasattr(r, 'items'):
+            it = list(r.items)[0]
+            print('   r[%s] 尾 5 行:' % it)
+            print('%s' % str(r[it].tail(5)))
     except Exception as e:
-        print('   %-52s -> %s: %s' % (field, type(e).__name__, str(e)[:60]))
+        print('   取值失败 %s' % str(e)[:70])
 
 
-# ------------------------------------------------------------------ E
-def _e_deducted(C):
-    print('-- E1 扣非净利润：红利 B 袖的 inc_return 要它。候选逐个试')
-    print('   本地参考(2024年报, 亿元): %s'
-          % dict((c, v['20241231'][3]) for c, v in REF['fin'].items()))
-    for f in ('ASHAREFINANCIALINDICATOR.net_profit_after_ded_nr_lp',
-              'ASHAREFINANCIALINDICATOR.deducted_profit',
-              'ASHAREINCOME.net_profit_after_ded_nr_lp',
-              'PERSHAREINDEX.net_profit_after_ded_nr_lp',
-              'ASHAREFINANCIALINDICATOR.s_fa_deductedprofit'):
-        _fin_one(C, f, ['601398.SH', '601088.SH', '600028.SH'])
-    print('-- E2 增长率：QMT 直接给，还是要自己取相邻年度算')
-    print('   本地参考(2024年报): 营收同比/净利同比 %s'
-          % dict((c, (v['20241231'][1], v['20241231'][2])) for c, v in REF['fin'].items()))
-    for f in ('ASHAREFINANCIALINDICATOR.yoy_or',
-              'ASHAREFINANCIALINDICATOR.yoynetprofit',
-              'ASHAREFINANCIALINDICATOR.yoyop',
-              'ASHAREINCOME.tot_oper_rev'):
-        _fin_one(C, f, ['601398.SH'])
+def f5_fallback(C):
+    print('   万一财务始终取不到，三条策略各自的处境：')
+    print('   · froec / froec_traded / froec_traded_stop35')
+    print('       要 PB(净资产) + 单季ROE -> 【无法实现】，只能等财务数据')
+    print('   · sgmspeg_v0b')
+    print('       只要 流通市值 + 累计EPS>0。流通股本已确认可从 FloatVolume 取；')
+    print('       若 EPS 也取不到，换近似就是【另一条策略】，不能再声称与本地一致')
+    print('   · 红利指数增强')
+    print('       股息率(已通) + beta(已通) + PE/ROE/增长率(要财务) -> 同样等财务')
 
 
-# ------------------------------------------------------------------ F
-def _f_valuation(C):
-    print('-- F 市值/PE：QMT 有没有现成的，没有就用 close*总股本 自己凑')
-    print('   本地该日 总市值(亿)/流通市值(亿)/PE(TTM): %s' % REF['mv'])
-    for f in ('ASHAREEODDERIVATIVEINDICATOR.s_val_mv',
-              'ASHAREEODDERIVATIVEINDICATOR.s_dq_mv',
-              'ASHAREEODDERIVATIVEINDICATOR.s_val_pe_ttm',
-              'PERSHAREINDEX.s_val_pe_ttm'):
-        _fin_one(C, f, ['601398.SH'])
-    print('   （取不到也不要紧：close × CAPITALSTRUCTURE.total_capital 即总市值，')
-    print('     PE = 总市值 / TTM 归母净利，froec 移植里已经在这么算）')
-
-
-# ------------------------------------------------------------------ G
-def _g_beta(C):
-    print('-- G beta 不需要外部数据，只要能取到指数日线就能自己回归')
-    print('   本地该日 beta_252: %s' % REF['beta252'])
-    for idx in ('000300.SH', '399300.SZ'):
-        try:
-            r = C.get_market_data_ex(['close'], [idx], period='1d',
-                                     end_time=REF_DATE, count=5,
-                                     dividend_type='none', fill_data=False)
-            df = r.get(idx)
-            print('   %s -> %s' % (idx, str(df)[:200] if df is not None else '无'))
-        except Exception as e:
-            print('   %s -> 异常 %s' % (idx, str(e)[:60]))
-
-
-# ------------------------------------------------------------------ H
-def _h_trade(C):
-    print('-- H1 平台注入的全局 account 在不在（信号执行器截图里它是空的）')
-    print('   globals().get("account") = %r' % globals().get('account'))
-    print('-- H2 get_trade_detail_data 能不能调、返回什么')
-    acct = globals().get('account') or ''
-    for typ in ('ACCOUNT', 'POSITION'):
-        for caller in ('模块级', 'C.'):
-            try:
-                f = get_trade_detail_data if caller == '模块级' else C.get_trade_detail_data  # noqa: F821
-                r = f(acct, 'STOCK', typ)
-                n = len(r) if r is not None else 0
-                print('   %s get_trade_detail_data(%r,STOCK,%s) -> %d 条' % (caller, acct, typ, n))
-                if n:
-                    o = r[0]
-                    ks = [k for k in dir(o) if k.startswith('m_')]
-                    print('      对象字段: %s' % ks[:25])
-                break
-            except Exception as e:
-                print('   %s %s -> %s: %s' % (caller, typ, type(e).__name__, str(e)[:60]))
-    print('-- H3 passorder 在不在（只看有没有，不下单）')
-    print('   passorder 可见: %s' % ('passorder' in globals()))
-    print('   [!] froec 移植用的是 passorder(23=买/24=卖, 1101=按股数, acct, code,')
-    print('       prtype, -1, volume, C)，prtype=5 取最新价。若你的版本签名不同，')
-    print('       改移植文件里 open_position / close_position 两处即可。')
+OPEN = [
+    ('S0 xtdata 能不能 import', s0_xtdata),
+    ('S1 真实板块名清单', s1_sector_names),
+    ('S2 ST 板块对账', s2_st),
+    ('S3 行业板块对账', s3_industry),
+    ('S4 历史时点成分 real_timetag', s4_timetag),
+    ('F1 财务数据下没下载', f1_downloaded),
+    ('F2 表名/字段名', f2_fields),
+    ('F3 调用签名', f3_signature),
+    ('F4 Panel 里到底有没有值', f4_panel_values),
+    ('F5 退路', f5_fallback),
+]

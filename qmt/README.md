@@ -118,7 +118,8 @@ GBK 表示不了 `⚠ ✔ ✅` 等符号，用 `[!] v [OK]` 代替。
 
 **卡住**：`get_financial_data` **返回全 NaN** —— froec / froec_traded /
 froec_traded_stop35 三条全靠它算 PB 与单季 ROE。最可能是 QMT 客户端
-**没下载财务数据**（行情与财务是分开的两块）。`qmt/probe_round2.py` 十节一次问完：板块真实名单（S0-S4）+ 财务三种可能（F1-F5）。
+**没下载财务数据**（行情与财务是分开的两块）。`qmt/probe_all.py`（**唯一的探针，不新建**）。已确认的 8 项写在它的 `CONFIRMED` 里
+只打印不重跑；待确认的 10 节在 `OPEN` 里。每轮把确认下来的挪过去即可。
 
 **需绕开**：ST 板块与行业板块名全部取不到（用 `InstrumentName` 含 ST 兜底；
 行业黑名单暂时失效，是实质差异）；`UpStopPrice/DownStopPrice` 是**实时值不是
