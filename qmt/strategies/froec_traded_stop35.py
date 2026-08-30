@@ -699,7 +699,9 @@ def _fin_matrix(C, stocks, ref_date):
             and _days_between(g.fin_cache_date, ref_date) < FIN_REFRESH_DAYS):
         return g.fin_cache.reindex([s for s in stocks if s in g.fin_cache.index])
 
-    start = _shift_days(ref_date, -800)
+    # 需要 5 个【已公告】的季报。按季末+法定截止日算，最坏要回看约 2.5 年：
+    #   5 期 = 15 个月，再加最长 4 个月的公告滞后，再留一季冗余。
+    start = _shift_days(ref_date, -900)
     rows = {}
     for batch in _chunks(stocks, FIN_BATCH):
         raw = _call_fin(C, [FIELD_EQUITY, FIELD_NETPROF], batch, start, ref_date)
@@ -862,24 +864,86 @@ def _normalize_fin(raw, stocks, fields):
     return result
 
 
+def _quarter_ends(start, end):
+    """[start, end] 之间的所有季末 YYYYMMDD。"""
+    out = []
+    for y in range(start // 10000, end // 10000 + 1):
+        for md in (331, 630, 930, 1231):
+            r = y * 10000 + md
+            if start <= r <= end:
+                out.append(r)
+    return out
+
+
 def _attach_report_cols(df):
-    """补齐 report(报告期) / anndate(公告日) 两列，均为 int YYYYMMDD。"""
+    """把【按交易日前向填充】的财务序列还原成【按报告期】的表。
+
+    [!] 这里曾经错得很隐蔽，值得写清楚：
+
+        QMT 的 get_financial_data 返回的 index 是【交易日】不是报告期，
+        而且它在【报告期当天】就切到该期的值。实测 601398：
+            20241225~20241230  净利 2690.3 亿（2024Q3，公告日 2024-10-31）
+            20241231           净利 3658.6 亿（2024 年报，公告日 2025-03-29）
+        也就是说 2024-12-31 那天就能看到 88 天后才公告的年报 ——
+        标准未来函数。数值本身是对的（两个数都与本地精确吻合），
+        错的是【时间对齐】。
+
+        原实现直接 `report = index`，把交易日当报告期。加上 _quarter_of
+        只看月份∈{3,6,9,12}，于是 20240315 这种日子也被当成 Q1 报告，
+        再配上「累计值相减求单季」—— 产出的不是空值而是【静默的垃圾】。
+
+    正确做法（本函数）：
+      1. 按季末枚举报告期 R
+      2. 报告期 R 的值 = index 中【第一个 >= R 的交易日】上的值
+         （季末常是周末，比如 2024-03-31 是周日，所以不能直接查 R）
+      3. 公告日取不到时用法定披露截止日兜底（Q1/年报 4-30、中报 8-31、
+         三季报 10-31），由调用方按 anndate <= ref_date 过滤
+    """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None
     df = df.copy()
     df.columns = [_short(c) for c in df.columns]
 
+    # 若 QMT 直接给了报告期/公告日列，优先用它们（不同版本可能有）
     if 'm_timetag' in df.columns:
         df['report'] = df['m_timetag'].map(_to_yyyymmdd)
-    else:
-        df['report'] = [_to_yyyymmdd(i) for i in df.index]
+        if 'm_anndate' in df.columns:
+            df['anndate'] = df['m_anndate'].map(_to_yyyymmdd)
+            df.loc[df['anndate'] <= 0, 'anndate'] = df['report'].map(_deadline_anndate)
+        else:
+            df['anndate'] = df['report'].map(_deadline_anndate)
+        return df
 
-    if 'm_anndate' in df.columns:
-        df['anndate'] = df['m_anndate'].map(_to_yyyymmdd)
-        df.loc[df['anndate'] <= 0, 'anndate'] = df['report'].map(_deadline_anndate)
-    else:
-        df['anndate'] = df['report'].map(_deadline_anndate)
-    return df
+    # 常规形态：index 是交易日 -> 按季末重建
+    idx = sorted(_to_yyyymmdd(i) for i in df.index)
+    idx = [i for i in idx if i > 0]
+    if not idx:
+        return None
+    pos = {}
+    for k, i in enumerate(sorted(df.index, key=lambda x: _to_yyyymmdd(x))):
+        pos[idx[k]] = i
+    # [!] 季末到了不等于财报发了。若某期未发布，前向填充的值仍是上一期的 ——
+    #     无条件为每个季末建一行，会造出【幽灵报告期】（比如 2025Q1 还没发，
+    #     却记成「2025Q1 净利 = 2024年报的 3658.6 亿」），后面按累计值相减求
+    #     单季就会得到 0 或负数，静默错。
+    #     判据：值在该季末【发生跳变】才算真有新报告。
+    cols = [c for c in df.columns if c not in ('report', 'anndate')]
+    rows, prev = [], None
+    for rep in _quarter_ends(idx[0], idx[-1]):
+        later = [i for i in idx if i >= rep]
+        if not later:
+            continue
+        row = df.loc[pos[later[0]]].to_dict()
+        sig = tuple(row.get(c) for c in cols)
+        if prev is not None and sig == prev:
+            continue                       # 值没变 -> 该期未发布，跳过
+        prev = sig
+        row['report'] = rep
+        row['anndate'] = _deadline_anndate(rep)
+        rows.append(row)
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
 
 
 def _match_col(df, field):
@@ -1107,7 +1171,10 @@ def _resolve_st_sector(C):
     if g.st_sector is not None:
         return g.st_sector or None
     all_sectors = _sector_list(C)
-    for cand in ('ST板块', '风险警示', 'ST', '风险警示板块'):
+    # [已实测 2026-08-31] 十个候选里只有 '沪深风险警示' 有成分（206 只），
+    # ST板块/ST/风险警示/*ST/ST股票/沪深ST/两市ST/ST及*ST 全部 0 只。
+    # 把它放第一位，其余留作不同版本的兜底。
+    for cand in ('沪深风险警示', 'ST板块', '风险警示', 'ST', '风险警示板块'):
         if not all_sectors or cand in all_sectors:
             if _sector_members(C, cand, ''):        # 空时点 = 取最新成分，仅用于探测板块名
                 g.st_sector = cand
