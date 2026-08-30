@@ -74,7 +74,9 @@ _done = [False]
 
 
 def init(C):
-    print('[探针] 等第一根 bar；参考日 %s' % REF_DATE)
+    print('>>>>>> 探针已加载 <<<<<<  参考日 %s' % REF_DATE)
+    print('若下面没有后续输出，说明卡在某个网络调用上 —— 本版已给所有')
+    print('xtdata 调用套了 %d 秒超时，且把不碰网络的几节排在前面。' % XTDATA_TIMEOUT)
 
 
 def handlebar(C):
@@ -117,9 +119,40 @@ def _wrap(s, n):
     return out
 
 
-_XT = [None]
+_XT = [None, None]      # [已连上的 xtdata, 上次连接失败的异常]
 QMT_PORT = 58610
-QMT_IPS = ('127.0.0.1', '192.168.0.103')
+QMT_IPS = ('127.0.0.1',)          # 只试本机。局域网 IP 连不通时会长时间阻塞
+XTDATA_TIMEOUT = 8                # 单次 xtdata 调用的上限（秒）
+
+
+def _call_timeout(fn, sec=None):
+    """给可能阻塞的调用套超时。
+
+    [!] QMT 的 print 是【缓冲】的：策略线程一旦阻塞在网络调用上，
+        之前打印的内容也刷不出来 —— 表现就是「点回测什么日志都没有」。
+        实测就是这么卡住的（xtdata.connect 连不上时会长时间等）。
+        所以凡是碰网络的调用一律套超时，宁可这一节报超时，
+        也不能让整个探针看起来像死了。
+    """
+    import threading
+    sec = XTDATA_TIMEOUT if sec is None else sec
+    box = {}
+
+    def _run():
+        try:
+            box['r'] = fn()
+        except Exception as e:                      # noqa: BLE001
+            box['e'] = e
+
+    t = threading.Thread(target=_run)
+    t.daemon = True
+    t.start()
+    t.join(sec)
+    if t.is_alive():
+        raise RuntimeError('超时 %ds（多半在等网络，QMT 数据接口没开？）' % sec)
+    if 'e' in box:
+        raise box['e']
+    return box.get('r')
 
 
 def _xt():
@@ -131,24 +164,31 @@ def _xt():
     """
     if _XT[0] is not None:
         return _XT[0]
+    # ★ 失败也要缓存：不然 S1~S4、F1 每节都重试 3 次 × 8s 超时，
+    #   一轮下来上百秒，看着又像卡死了（实测 104s）。
+    if _XT[1] is not None:
+        raise _XT[1]
     import xtquant.xtdata as xtdata
     last = None
     for ip in QMT_IPS:
         try:
-            c = xtdata.connect(ip=ip, port=QMT_PORT, remember_if_success=True)
+            c = _call_timeout(lambda: xtdata.connect(
+                ip=ip, port=QMT_PORT, remember_if_success=True))
             if c is not None:
                 _XT[0] = xtdata
                 return xtdata
         except Exception as e:
             last = e
-    try:                                  # 无参形态（有的版本自己找）
-        xtdata.connect()
+    try:
+        _call_timeout(lambda: xtdata.connect())
         _XT[0] = xtdata
         return xtdata
     except Exception as e:
         last = e
-    raise RuntimeError('xtdata 连接失败（端口 %d，试过 %s）：%s'
+    err = RuntimeError('xtdata 连接失败（端口 %d，试过 %s）：%s'
                        % (QMT_PORT, QMT_IPS, str(last)[:90]))
+    _XT[1] = err
+    raise err
 
 
 def _peek(r):
@@ -181,7 +221,7 @@ def s0_connect(C):
             ('connect() 无参', lambda: xtdata.connect()),
     ):
         try:
-            c = fn()
+            c = _call_timeout(fn)
             ok = None
             try:
                 ok = c.is_connected()
@@ -205,7 +245,8 @@ def s1_sector_names(C):
     except Exception:
         print('   跳过（xtdata 不可用）'); return
     try:
-        x.download_sector_data(); print('   download_sector_data() 已调用')
+        _call_timeout(lambda: x.download_sector_data())
+        print('   download_sector_data() 已调用')
     except Exception as e:
         print('   download_sector_data 异常: %s' % str(e)[:70])
     secs = x.get_sector_list() or []
@@ -289,7 +330,8 @@ def f1_downloaded(C):
     except Exception:
         print('   xtdata 不可用，跳过下载检查'); return
     try:
-        x.download_financial_data([CODE], ['Balance', 'Income', 'CapitalStructure'])
+        _call_timeout(lambda: x.download_financial_data(
+            [CODE], ['Balance', 'Income', 'CapitalStructure']), 20)
         print('   download_financial_data 调用成功 —— 之前很可能就是【没下载】')
     except Exception as e:
         print('   download 异常 %s: %s' % (type(e).__name__, str(e)[:100]))
@@ -376,15 +418,20 @@ def f5_fallback(C):
     print('       股息率(已通) + beta(已通) + PE/ROE/增长率(要财务) -> 同样等财务')
 
 
+# [!] 顺序有讲究：【不碰网络】的先跑。
+#     上一轮把 xtdata 连接放第一节，结果它一阻塞，后面 F1~F5 全没跑到，
+#     而且缓冲的日志也刷不出来 —— 表现成「点回测什么都没输出」。
+#     F2~F5 走 ContextInfo，不需要 xtdata 连接，是 froec 三条能否落地的关键，
+#     必须优先拿到。
 OPEN = [
-    ('S0b xtdata 连接（上一轮就卡在这）', s0_connect),
-    ('S1 真实板块名清单', s1_sector_names),
-    ('S2 ST 板块对账', s2_st),
-    ('S3 行业板块对账', s3_industry),
-    ('S4 历史时点成分 real_timetag', s4_timetag),
-    ('F1 财务数据下没下载', f1_downloaded),
-    ('F2 表名/字段名', f2_fields),
-    ('F3 调用签名', f3_signature),
-    ('F4 Panel 里到底有没有值', f4_panel_values),
-    ('F5 退路', f5_fallback),
+    ('F2 表名/字段名（ContextInfo，不碰网络）', f2_fields),
+    ('F3 调用签名（ContextInfo）', f3_signature),
+    ('F4 Panel 里到底有没有值（ContextInfo）', f4_panel_values),
+    ('F5 退路（本地判断）', f5_fallback),
+    ('S0b xtdata 连接（带 %ds 超时）' % XTDATA_TIMEOUT, s0_connect),
+    ('S1 真实板块名清单（需 xtdata）', s1_sector_names),
+    ('S2 ST 板块对账（需 xtdata）', s2_st),
+    ('S3 行业板块对账（需 xtdata）', s3_industry),
+    ('S4 历史时点成分（需 xtdata）', s4_timetag),
+    ('F1 财务数据下没下载（需 xtdata）', f1_downloaded),
 ]
