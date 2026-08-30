@@ -1,55 +1,75 @@
 # QMT 策略
 
 本地研究（assay）→ 实盘执行（迅投 QMT）的对接层。**放在仓库内**，因为它们
-和本地策略是一一对应的：本地改了、标星换了，这里必须跟着改，放在仓库外
-迟早失联。
+和本地策略一一对应：本地改了、标星换了，这里必须跟着改，放仓库外迟早失联。
 
-| 文件 | 形态 | 对应本地 |
-|---|---|---|
-| `froec.py` | 整条移植 | `strategies/小市值/froec.py` / `froec_traded.py`（3 个 profile）|
-| `signal_executor.py` | 只执行本地信号 | `export_signal.py` 导出的 CSV（红利 / sgmspeg_v0b）|
+```
+qmt/
+  strategies/     <- 粘进 QMT 的就是这些，一个标星配置一个文件
+  _tpl/           <- 模板（唯一的逻辑来源）
+  gen.py          <- 由模板 + PROFILES 生成 strategies/
+  check.py        <- 编码 / 编译 / 与本地策略的关联 / 与模板同步
+```
+
+## 五个文件对应五个标星配置
+
+| QMT 文件 | 形态 | 本地策略 | 归档 run_id | 年化/回撤/夏普 |
+|---|---|---|---|---|
+| `froec.py` | 整条移植 | `小市值/froec.py`（`kcb_688_only=0`）| `20260828-205911-486094` | 36.38 / 46.84 / 1.21 |
+| `froec_traded.py` | 整条移植 | `小市值/froec_traded.py` | `20260828-205938-4926f5` | 39.50 / 47.10 / 1.28 |
+| `froec_traded_stop35.py` | 整条移植 | 同上 + `stop_loss=0.35, stop_intraday=1` | `20260829-170945-4926f5` | **40.87 / 38.54 / 1.33** |
+| `hongli_index_plus.py` | 信号执行 | `红利/红利指数增强.py`（`div_method=fiscal_year`）| `20260828-210010-adcde3` | 20.07 / 17.95 / 1.30 |
+| `sgmspeg_v0b.py` | 信号执行 | `小市值/sgmspeg_v0b.py` | `20260828-205350-a76665` | 32.68 / 52.26 / 1.08 |
+
+**一个配置一个文件，粘进 QMT 就能跑，不用手改任何开关。**
+（早先是一个文件加开关，那样「默认参数 = 回测参数」只对其中一个成立，其余全靠人记。）
 
 ## 为什么分两种形态
 
 **froec 线整条移植**：因子简单（PB 分位 + 单季 ROE 改善 + 流通市值），
 QMT 的 `get_financial_data` 够用，能自包含。
 
-**红利 / sgmspeg_v0b 走信号导出**：红利要分红历史 + 252 日 beta 回归，
+**红利 / sgmspeg_v0b 走信号执行**：红利要分红历史 + 252 日 beta 回归，
 v0b 要 jqfactor 近似（Barra 式 5 年回归斜率）。把这些搬到 QMT，等于用一套
 没核对过的字段名和 as-of 语义重造因子链 —— 而本仓库的全部结论都建立在
 已验证的「双键 as-of（pub_date + change_date）」口径上。重造一遍最可能的
-结果是**看着能跑、数字悄悄是错的**。所以选股留在本地，QMT 只做执行：
+结果是**看着能跑、数字悄悄是错的**。所以选股留本地，QMT 只下单：
 
 ```bash
 python3 export_signal.py strategies/红利/红利指数增强.py \
-    --param div_method=fiscal_year --cash 1000000 -o signal.csv
-# 把 signal.csv 拷到 Windows，改 signal_executor.py 的 SIGNAL_PATH
+    --param div_method=fiscal_year --cash 1000000 -o signal_hongli.csv
 ```
 
-信号带 `asof`，执行器超过 `MAX_STALE_DAYS` 天就**拒绝交易**——忘了重跑导出
-时，拿着旧名单继续调仓比不交易糟得多。
+导出的 CSV 带 `asof`，执行器超过 `MAX_STALE_DAYS` 天就**拒绝交易**——
+忘了重跑导出时，拿着旧名单继续调仓比不交易糟得多。
 
-## 关联是可校验的，不是注释
+## 不要手工改 strategies/ 下的文件
 
-每个文件顶部有 `LOCAL_PORT` 声明。`python3 qmt/check.py` 会核对：
+它们由 `gen.py` 生成。QMT 里一个策略粘一个文件、不能 import 共享模块，
+所以 froec 那三份必然是三份 1200 行拷贝 —— 手工维护三份，改一处漏两处
+只是时间问题。这里把重复变成**生成 + 校验**：
 
-- 声明的本地策略文件存在
-- 声明的 `run_id` 在归档里，且归档记的策略名、参数与声明一致
-- 声明的基线指标（年化/回撤/夏普）与 `stats.json` 吻合（容差 0.015）
-- **QMT 侧常量等于默认 profile 声明的值** —— 即「默认参数 = 回测参数」
+- 改**逻辑** → 改 `_tpl/`，然后 `python3 qmt/gen.py`
+- 改**参数/新增配置** → 改 `gen.py` 的 `PROFILES`，然后重跑 gen
+- 校验 → `python3 qmt/check.py`
 
-任一条不成立就报错退出 1。selftest 里也跑这条。
+## check.py 验什么
 
-## 编码
+1. **与模板逐字节同步**（手工改过会被抓住）
+2. **按各自声明的编码解码再编译** —— QMT 要 GBK。曾有文件磁盘上是 UTF-8
+   却声明 `#coding:gbk`，粘进 QMT 直接 SyntaxError，而在 Mac 上打开一切正常
+3. **`LOCAL_PORT` 声明的关联成立**：本地策略在不在、run_id 在不在归档、
+   归档记的策略名与参数是否与声明一致、基线指标与 `stats.json` 是否吻合
+4. **QMT 侧常量 == 该 profile 声明的值** —— 即「默认参数 = 回测参数」为真
 
-QMT 内置编辑器要 **GBK**，文件头 `#coding:gbk`，磁盘字节也必须真是 GBK。
-`check.py` 按各文件声明的编码解码再编译 —— 曾经有文件磁盘上是 UTF-8 却
-声明 gbk，粘进 QMT 直接 SyntaxError，而在 Mac 上打开一切正常，肉眼看不出来。
+任一条不成立就退出 1。selftest 里也跑这条（fast 层）。
 
-⚠️ 编辑这些文件时注意：GBK 表示不了 `⚠ ✔ ✅` 等符号，用 `[!] v [OK]` 代替。
+## 编辑注意
+
+GBK 表示不了 `⚠ ✔ ✅` 等符号，用 `[!] v [OK]` 代替。
 
 ## 上线前仍需在你的 QMT 版本上核对
 
-不同 QMT 版本接口有差异，至少确认这几处：`get_stock_list_in_sector` 的板块名、
-`get_financial_data` 的字段名（`froec.py` 参数区那 4 行）、`passorder` 与
+不同版本接口有差异，至少确认：`get_stock_list_in_sector` 的板块名、
+`get_financial_data` 的字段名（模板参数区那 4 行）、`passorder` 与
 `get_trade_detail_data` 的签名。

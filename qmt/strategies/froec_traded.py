@@ -22,33 +22,26 @@ import pandas as pd
 
 #============================== 与本地策略的关联 ==============================
 # [!] 这不是注释，是【可校验的声明】：python3 qmt/check.py 会拿它去核对
-#     本地策略文件在不在、run_id 在不在归档里、参数对不对得上、
-#     基线指标和归档里的 stats.json 是否一致。
-#     本地策略改了、标星换了、参数漂了 —— 检查会直接红，不会静默失联。
+#     本地策略在不在、run_id 在不在归档、参数对不对得上、
+#     基线指标与 stats.json 是否一致、以及本文件是否与模板逐字节同步。
+#
+# 本文件 = FROEC-TRADED（宇宙 = 决策日实际有成交的票）
+# 本地   : strategies/小市值/froec_traded.py
+# 归档   : 20260828-205938-4926f5   年化 39.50% / 回撤 47.10% / 夏普 1.28
+# 参数   : （全默认）
+#
+# [!] 本文件由 qmt/gen.py 从 qmt/_tpl/froec.py 生成，**不要手工改**。
+#     要改逻辑改模板，要改参数改 gen.py 的 PROFILES，然后重跑 gen。
 LOCAL_PORT = {
-    'kind': 'port',                       # port = 整条策略移植；executor = 只执行本地信号
-    'default': 'froec_traded_s35',
+    'kind': 'port',
+    'generated_from': '_tpl/froec.py',
     'profiles': {
-        'froec_kcb0': {
-            'strategy': 'strategies/小市值/froec.py',
-            'run_id': '20260828-205911-486094',
-            'local': {'kcb_688_only': 0},
-            'qmt': {'TRADED_UNIVERSE': False, 'STOP_LOSS': 0.0},
-            'metrics': {'annual': 36.38, 'max_drawdown': 46.84, 'sharpe': 1.21},
-        },
         'froec_traded': {
             'strategy': 'strategies/小市值/froec_traded.py',
             'run_id': '20260828-205938-4926f5',
             'local': {},
-            'qmt': {'TRADED_UNIVERSE': True, 'STOP_LOSS': 0.0},
-            'metrics': {'annual': 39.50, 'max_drawdown': 47.10, 'sharpe': 1.28},
-        },
-        'froec_traded_s35': {
-            'strategy': 'strategies/小市值/froec_traded.py',
-            'run_id': '20260829-170945-4926f5',
-            'local': {'stop_loss': 0.35, 'stop_intraday': 1},
-            'qmt': {'TRADED_UNIVERSE': True, 'STOP_LOSS': 0.35, 'STOP_INTRADAY': True},
-            'metrics': {'annual': 40.87, 'max_drawdown': 38.54, 'sharpe': 1.33},
+            'metrics': {'annual': 39.5, 'max_drawdown': 47.1, 'sharpe': 1.28},
+            'qmt': {'TRADED_UNIVERSE': True, 'STOP_LOSS': 0.0, 'STOP_INTRADAY': True},
         },
     },
 }
@@ -91,9 +84,9 @@ MIN_LOT          = 100     # 最小交易单位
 # [!] 止损的采纳依据是「保费≈0 + 赔付方向一致」，不是「它更赚钱」：
 #   逐年独立口径下保费 -0.00pp（8/11 年差额精确为 0），赔付是 2024 回撤 -6.16pp。
 #   赔付证据 n=1（样本内只有 2024-02 一次尾部事件）。别指望它提高收益。
-TRADED_UNIVERSE = True     # 候选宇宙 = 决策日【实际有成交】的股票（assay: paused_in_pool=0）
-STOP_LOSS       = 0.35     # 固定止损：相对建仓价回撤到 -35% 清仓；0 = 关
-STOP_INTRADAY   = True     # True=当日最低价判定(盘中触发) / False=收盘价判定(日频)
+TRADED_UNIVERSE = True  # 候选宇宙 = 决策日【实际有成交】的股票（assay: paused_in_pool=0）
+STOP_LOSS       = 0.0  # 固定止损：相对建仓价回撤到 -35% 清仓；0 = 关
+STOP_INTRADAY   = True  # True=当日最低价判定(盘中触发) / False=收盘价判定(日频)
 
 VERBOSE          = True    # 打印每日复盘信息
 VERIFY_FIELDS    = True    # init 时打印一次财务字段自检结果（首次接入务必看）

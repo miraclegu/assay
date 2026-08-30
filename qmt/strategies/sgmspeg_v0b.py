@@ -22,19 +22,24 @@ import datetime as dt
 import os
 
 #============================== 与本地策略的关联 ==============================
-# [!] 可校验声明，见 qmt/check.py。
-# kind='executor'：本文件不含选股逻辑，只执行 export_signal.py 导出的目标持仓。
-# 下面列的是【打算用它来跑】的本地标星策略 —— 每条都要能在归档里找到。
+# [!] 这不是注释，是【可校验的声明】：python3 qmt/check.py 会拿它去核对
+#     本地策略在不在、run_id 在不在归档、参数对不对得上、
+#     基线指标与 stats.json 是否一致、以及本文件是否与模板逐字节同步。
+#
+# 本文件 = SG-MS-PEG-HL v0b（信号执行：选股在本地，QMT 只下单）
+# 本地   : strategies/小市值/sgmspeg_v0b.py
+# 归档   : 20260828-205350-a76665   年化 32.68% / 回撤 52.26% / 夏普 1.08
+# 参数   : （全默认）
+#
+# 用前先在本地导出信号：
+#   python3 export_signal.py strategies/小市值/sgmspeg_v0b.py --cash 1000000 -o signal_v0b.csv
+#
+# [!] 本文件由 qmt/gen.py 从 qmt/_tpl/signal_executor.py 生成，**不要手工改**。
+#     要改逻辑改模板，要改参数改 gen.py 的 PROFILES，然后重跑 gen。
 LOCAL_PORT = {
     'kind': 'executor',
-    'exporter': 'export_signal.py',
+    'generated_from': '_tpl/signal_executor.py',
     'profiles': {
-        'hongli_fiscal_year': {
-            'strategy': 'strategies/红利/红利指数增强.py',
-            'run_id': '20260828-210010-adcde3',
-            'local': {'div_method': 'fiscal_year'},
-            'metrics': {'annual': 20.07, 'max_drawdown': 17.95, 'sharpe': 1.30},
-        },
         'sgmspeg_v0b': {
             'strategy': 'strategies/小市值/sgmspeg_v0b.py',
             'run_id': '20260828-205350-a76665',
@@ -42,9 +47,10 @@ LOCAL_PORT = {
             'metrics': {'annual': 32.68, 'max_drawdown': 52.26, 'sharpe': 1.08},
         },
     },
+    'exporter': 'export_signal.py',
 }
 
-SIGNAL_PATH = r'D:\work\finacial\signal.csv'   # <- 改成你的路径
+SIGNAL_PATH = r'D:\work\finacial\signal_v0b.csv'  # <- 改成你的路径
 ACCOUNT      = ''            # 留空则用平台注入的全局 account
 ACCOUNT_TYPE = 'STOCK'
 

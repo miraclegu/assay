@@ -1269,9 +1269,13 @@ def t_qmt():
                        capture_output=True, text=True,
                        cwd=os.path.dirname(os.path.abspath(__file__)))
     assert r.returncode == 0, 'qmt/check.py 失败:\n%s' % (r.stdout + r.stderr)[-600:]
-    ok = [l for l in r.stdout.splitlines() if l.strip().startswith('v ')]
+    # check.py 的输出分两段：先是 gen --check 的同步校验，再是逐文件关联校验。
+    # 只数带「关联」二字的行，否则会把同步那 5 行也算进来（一度报成 10 个文件）。
+    ok = [l for l in r.stdout.splitlines() if '关联' in l and l.strip().startswith('v ')]
     n = sum(int(x) for l in ok for x in re.findall(r'关联 (\d+) 个', l))
-    return '%d 个 QMT 文件编译通过，%d 个 profile 与归档核对一致' % (len(ok), n)
+    syn = [l for l in r.stdout.splitlines() if '<- _tpl/' in l]
+    return ('%d 个 QMT 策略文件：与模板同步 %d 个、编译通过、%d 个 profile 与归档一致'
+            % (len(ok), len(syn), n))
 
 
 @case('选中标记：打星 / 冒泡 / 不误触发', tag='web')

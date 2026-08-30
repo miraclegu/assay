@@ -29,6 +29,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+STRAT = os.path.join(HERE, 'strategies')
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
@@ -114,9 +115,11 @@ def check_file(path):
                             % (name, k, want, got if got is not None else float('nan')))
 
     if lp.get('kind') == 'port':
-        dft = lp.get('default')
-        if dft not in profiles:
-            errs.append('default=%r 不在 profiles 里' % dft)
+        # 一个文件一个 profile：QMT 侧常量必须等于它，
+        # 这就是「粘进去就能跑、不用手改开关」的保证。
+        dft = list(profiles)[0] if profiles else None
+        if dft is None:
+            errs.append('没有 profile')
         else:
             for k, v in (profiles[dft].get('qmt') or {}).items():
                 if k not in consts:
@@ -132,8 +135,15 @@ def check_file(path):
 
 
 def main():
-    files = sorted(glob.glob(os.path.join(HERE, '*.py')))
-    files = [f for f in files if os.path.basename(f) != 'check.py']
+    # ★ 先验「磁盘上的策略文件是否与模板同步」—— 这些文件是 gen.py 生成的，
+    #   手工改会在下次 gen 时被无声覆盖，所以必须先拦住。
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(HERE, 'gen.py'), '--check'],
+                       capture_output=True, text=True)
+    sys.stdout.write(r.stdout)
+    sync_bad = r.returncode != 0
+
+    files = sorted(glob.glob(os.path.join(STRAT, '*.py')))
     bad = 0
     for p in files:
         rel, enc, errs, n = check_file(p)
@@ -144,8 +154,9 @@ def main():
                 print('      - %s' % e)
         else:
             print('  v %-24s [%s]  关联 %d 个 profile 全部核对通过' % (rel, enc, n))
-    print('\n%d 个文件，%d 个有问题' % (len(files), bad))
-    sys.exit(1 if bad else 0)
+    print('\n%d 个文件，%d 个有问题%s'
+          % (len(files), bad, '；另有与模板不同步' if sync_bad else ''))
+    sys.exit(1 if (bad or sync_bad) else 0)
 
 
 if __name__ == '__main__':
