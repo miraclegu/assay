@@ -1255,6 +1255,25 @@ def _():
         '%s %.3f亿' % (k.split('.')[0], v) for k, v in got.items())
 
 
+@case('QMT 策略：编码 / 编译 / 与本地策略的关联')
+def t_qmt():
+    """QMT 侧文件必须能在 QMT 里编译，且与本地策略的对应关系可核对。
+
+    关联写成注释是留不住的：本地策略一改、标星一换，注释还在那儿，
+    人却不会去改它。所以 LOCAL_PORT 是断言 —— 核对 run_id 在不在归档、
+    参数对不对得上、基线指标与 stats.json 是否吻合、QMT 侧常量是不是
+    等于默认 profile（即「默认参数 = 回测参数」）。
+    """
+    import subprocess
+    r = subprocess.run([sys.executable, 'qmt/check.py'],
+                       capture_output=True, text=True,
+                       cwd=os.path.dirname(os.path.abspath(__file__)))
+    assert r.returncode == 0, 'qmt/check.py 失败:\n%s' % (r.stdout + r.stderr)[-600:]
+    ok = [l for l in r.stdout.splitlines() if l.strip().startswith('v ')]
+    n = sum(int(x) for l in ok for x in re.findall(r'关联 (\d+) 个', l))
+    return '%d 个 QMT 文件编译通过，%d 个 profile 与归档核对一致' % (len(ok), n)
+
+
 @case('选中标记：打星 / 冒泡 / 不误触发', tag='web')
 def _():
     """★ 打在【单次回测】上，因为 run 才记录了策略+参数+区间+成本+数据指纹，

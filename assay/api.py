@@ -12,6 +12,7 @@ from .context import G
 
 __all__ = ['g', 'run_daily', 'run_weekly', 'run_monthly', 'set_benchmark',
            'set_slippage', 'set_order_cost', 'set_dividend_tax', 'set_volume_ratio',
+           'run_every',
            'order_target_value', 'order_target_percent', 'order_stop_sell', 'log']
 
 g = G()
@@ -52,6 +53,17 @@ def run_weekly(func, weekday=1, time='09:30'):
     """本周的第 weekday 个【交易日】。负数从周末数起（-1 = 本周最后一个交易日）。
     与聚宽同义：遇到假期自动顺延，不是「固定星期几」。"""
     _need().schedule(func, time, freq='w', weekday=weekday)
+
+
+def run_every(func, ndays=5, offset=0, time='09:30'):
+    """每 ndays 个【交易日】跑一次，与自然周无关。
+
+    与 run_weekly 的区别：run_weekly 锚在自然周上，遇到假期短周
+    间隔会在 1~13 个交易日之间跳；run_every 的间隔恒定，代价是
+    星期几会随假期一路漂移。
+    offset 是相位（0..ndays-1），决定从第几个交易日起算。
+    """
+    _need().schedule(func, time, freq='n', every=ndays, offset=offset)
 
 
 def run_monthly(func, monthday=1, time='09:30'):

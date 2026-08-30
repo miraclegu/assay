@@ -72,8 +72,9 @@ class Engine:
         self.bench_code = code
         self._bench_px, self.bench_base = self.feed.benchmark(code)
 
-    def schedule(self, func, time, freq='d', weekday=1, monthday=1):
-        self._tasks.append((time, freq, func, weekday, monthday))
+    def schedule(self, func, time, freq='d', weekday=1, monthday=1,
+                 every=5, offset=0):
+        self._tasks.append((time, freq, func, weekday, monthday, every, offset))
 
     # ---------- 该不该在这一天跑 ----------
     def _build_ordinals(self):
@@ -96,9 +97,14 @@ class Engine:
                 for j, d in enumerate(grp):
                     store[d] = (j + 1, j - n)      # (正序号, 负序号: -1 是最后一个)
 
-    def _due(self, i, d, freq, weekday, monthday):
+    def _due(self, i, d, freq, weekday, monthday, every=5, offset=0):
         if freq == 'd':
             return True
+        if freq == 'n':
+            # 每 every 个【交易日】一次，与自然周无关。
+            # 和 run_weekly 的区别：间隔恒定，但星期几会随假期漂移。
+            # offset 决定相位（0..every-1），换相位就是换一条独立路径。
+            return i >= offset and (i - offset) % every == 0
         if freq == 'w':
             pos, neg = self._wk_ord.get(d, (0, 0))
             return weekday == pos or weekday == neg
@@ -146,8 +152,8 @@ class Engine:
                 self.ctx.current_date = d
                 self.ctx.previous_date = self.feed.prev_trading_day(d)
                 self.broker.start_day(d)
-                for t, freq, func, wd, md in self._tasks:
-                    if not self._due(i, d, freq, wd, md):
+                for t, freq, func, wd, md, ev, off in self._tasks:
+                    if not self._due(i, d, freq, wd, md, ev, off):
                         continue
                     ph = _phase(t)
                     self.broker.phase = ph

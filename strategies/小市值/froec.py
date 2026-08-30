@@ -286,17 +286,31 @@ def initialize(context):
     #   buy_delay 只推买入 -> 量的是【错位】
     #   rebal_time 两腿一起推 -> 量的是【整体晚于开盘价】
     g.rebal_time = getattr(g, 'rebal_time', '09:30')
+    # ---- 固定交易日间隔调仓 g.rebal_every（0 = 关，用 run_weekly）----
+    # run_weekly 锚在自然周上，假期短周会让间隔在 1~13 个交易日之间跳
+    # （实测：weekday=1 有 15 次间隔 <=2 天，weekday=5 有 74 周整周不触发）。
+    # 本开关改成【每 N 个交易日】一次，间隔恒定，代价是星期几会随假期漂移。
+    # rebal_phase 是相位 0..N-1，换相位 = 换一条独立路径，正好用来量噪声。
+    g.rebal_every = getattr(g, 'rebal_every', 0)
+    g.rebal_phase = getattr(g, 'rebal_phase', 0)
     g.hold_history = []
     g.high_limit = set()
 
     set_benchmark('000905.XSHG')      # 与聚宽原版一致：中证 500
 
     run_daily(prepare, time='09:05')
-    run_weekly(rebalance, weekday=g.weekday, time=g.rebal_time)
+    if g.rebal_every:
+        run_every(rebalance, ndays=g.rebal_every, offset=g.rebal_phase, time=g.rebal_time)
+    else:
+        run_weekly(rebalance, weekday=g.weekday, time=g.rebal_time)
     run_daily(check_limit_up, time=g.exit_time)
     run_daily(stop_check, time=g.stop_time)
     if g.buy_delay:
-        run_weekly(rebalance_buy, weekday=g.weekday, time=g.buy_delay)
+        if g.rebal_every:
+            run_every(rebalance_buy, ndays=g.rebal_every, offset=g.rebal_phase,
+                      time=g.buy_delay)
+        else:
+            run_weekly(rebalance_buy, weekday=g.weekday, time=g.buy_delay)
     run_daily(pf_check, time=g.stop_time)
 
 
