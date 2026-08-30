@@ -48,8 +48,15 @@ CONFIRMED = [
      '601398 返回 8.60/7.04 而实际 8.25/6.75；300750 返回 447.60 而实际 301.19。'
      '必须自己按 preClose×(1±涨跌幅) 算 —— 移植里 _limit_price 本来就是这么做的。'),
     ('[!] C.get_sector_list 不存在', '2026-08-30',
-     "报 '_PyContext' object has no attribute。但本仓库 QMT/data/st_status.py 用的是"
-     ' xtdata.get_sector_list()，说明它在 xtdata 模块上有 —— 见下面 S1。'),
+     "报 '_PyContext' object has no attribute。板块清单只能走 xtdata 模块。"),
+    ('xtquant 可 import，六个函数都在', '2026-08-30',
+     'get_sector_list / get_stock_list_in_sector / download_sector_data / '
+     'get_financial_data / download_financial_data / get_instrument_detail 全部存在。'),
+    ('[!] 但直接调 xtdata 会报「无法连接行情服务」', '2026-08-30',
+     'xtdata.py line 134 get_client() 抛 Exception。原因是【没有先 connect】—— '
+     '本仓库 QMT/data/connection.py 用的是 xtdata.connect(ip, port=58610)。'
+     '所以调任何 xtdata 函数前必须先连接；若连接本身失败，需在 QMT 客户端'
+     '「设置-接口配置」里开启该端口。见下面 S0b。'),
 ]
 
 # 本地标准答案（2025-06-30）
@@ -110,9 +117,38 @@ def _wrap(s, n):
     return out
 
 
+_XT = [None]
+QMT_PORT = 58610
+QMT_IPS = ('127.0.0.1', '192.168.0.103')
+
+
 def _xt():
+    """拿到【已连接】的 xtdata。
+
+    [!] 直接 import 完就调函数会报「无法连接行情服务」——
+        xtdata 是个客户端，必须先 connect 到 QMT 的数据服务端口。
+        本仓库 QMT/data/connection.py 就是这么做的，我第一版探针漏了这步。
+    """
+    if _XT[0] is not None:
+        return _XT[0]
     import xtquant.xtdata as xtdata
-    return xtdata
+    last = None
+    for ip in QMT_IPS:
+        try:
+            c = xtdata.connect(ip=ip, port=QMT_PORT, remember_if_success=True)
+            if c is not None:
+                _XT[0] = xtdata
+                return xtdata
+        except Exception as e:
+            last = e
+    try:                                  # 无参形态（有的版本自己找）
+        xtdata.connect()
+        _XT[0] = xtdata
+        return xtdata
+    except Exception as e:
+        last = e
+    raise RuntimeError('xtdata 连接失败（端口 %d，试过 %s）：%s'
+                       % (QMT_PORT, QMT_IPS, str(last)[:90]))
 
 
 def _peek(r):
@@ -133,17 +169,33 @@ def _peek(r):
 
 
 # ================================ 待确认 S：板块 ==============================
-def s0_xtdata(C):
-    print('   ContextInfo 上没有 get_sector_list，但 xtdata 模块上应该有。')
-    try:
-        x = _xt()
-        print('   import xtquant.xtdata 成功')
-        for fn in ('get_sector_list', 'get_stock_list_in_sector', 'download_sector_data',
-                   'get_financial_data', 'download_financial_data', 'get_instrument_detail'):
-            print('   xtdata.%-26s %s' % (fn, '有' if hasattr(x, fn) else '无'))
-    except Exception as e:
-        print('   import 失败 %s: %s' % (type(e).__name__, str(e)[:90]))
-        print('   -> 策略环境里没有 xtquant 的话，ST 与行业只能走「按名称判断」兜底')
+def s0_connect(C):
+    print('   上一轮：import 成功但一调就报「无法连接行情服务」—— 漏了 connect。')
+    print('   逐个试连接方式，看哪个能通（端口 %d）：' % QMT_PORT)
+    import xtquant.xtdata as xtdata
+    for name, fn in (
+            ("connect(ip='127.0.0.1', port=%d)" % QMT_PORT,
+             lambda: xtdata.connect(ip='127.0.0.1', port=QMT_PORT, remember_if_success=True)),
+            ("connect(ip='192.168.0.103', port=%d)" % QMT_PORT,
+             lambda: xtdata.connect(ip='192.168.0.103', port=QMT_PORT, remember_if_success=True)),
+            ('connect() 无参', lambda: xtdata.connect()),
+    ):
+        try:
+            c = fn()
+            ok = None
+            try:
+                ok = c.is_connected()
+            except Exception:
+                pass
+            print('   %-42s -> %s  is_connected=%s' % (name, type(c).__name__, ok))
+        except Exception as e:
+            print('   %-42s -> %s: %s' % (name, type(e).__name__, str(e)[:60]))
+    print('   连不上时的排查顺序：')
+    print('     1) QMT 客户端「设置 - 接口配置」里开启端口 %d' % QMT_PORT)
+    print('     2) 确认 QMT 已登录且行情已连接（右下角状态）')
+    print('     3) 防火墙放行该端口')
+    print('   [!] 若始终连不上，ST 与行业过滤只能走 InstrumentName 名称兜底，')
+    print('       行业黑名单则【无法实现】—— 这是相对本地回测的实质差异。')
 
 
 def s1_sector_names(C):
@@ -325,7 +377,7 @@ def f5_fallback(C):
 
 
 OPEN = [
-    ('S0 xtdata 能不能 import', s0_xtdata),
+    ('S0b xtdata 连接（上一轮就卡在这）', s0_connect),
     ('S1 真实板块名清单', s1_sector_names),
     ('S2 ST 板块对账', s2_st),
     ('S3 行业板块对账', s3_industry),

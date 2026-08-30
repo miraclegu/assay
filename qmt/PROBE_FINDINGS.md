@@ -42,6 +42,34 @@ froec 在用的四个字段（`tot_shrhldr_eqy_excl_min_int` / `net_profit_excl_
 最可能的原因：**QMT 客户端未下载财务数据**（行情是单独一块，回测能跑不代表财务有）。
 见 `qmt/probe_fin.py` —— 它专门区分「没下载 / 字段名不对 / 调用方式不对」。
 
+### 1.5 🔴 xtdata 调用前必须先 `connect()`
+
+`import xtquant.xtdata` **成功**，六个函数（`get_sector_list` /
+`get_stock_list_in_sector` / `download_sector_data` / `get_financial_data` /
+`download_financial_data` / `get_instrument_detail`）**全部存在**。
+
+但直接调用一律抛：
+
+```
+File "D:\国金证券QMT交易端\bin.x64\lib\site-packages\xtquant\xtdata.py", line 134, in get_client
+    raise Exception("无法连接行情服务!")
+```
+
+**原因是漏了 connect** —— xtdata 是个客户端，必须先连到 QMT 的数据服务端口
+（默认 58610）。本仓库 `QMT/data/connection.py` 本来就是这么做的：
+`xtdata.connect(ip, port=58610, remember_if_success=True)`，候选 IP
+`127.0.0.1` / `192.168.0.103`。探针第一版漏了这步。
+
+**S1~S4 四节全被这一个根因挡住**，不是板块名的问题。
+
+连不上时的排查顺序：
+1. QMT 客户端「设置 - 接口配置」开启端口 58610
+2. 确认 QMT 已登录、行情已连接
+3. 防火墙放行
+
+⚠️ 若始终连不上：ST 只能走 `InstrumentName` 名称兜底，
+**行业黑名单则无法实现** —— 这是相对本地回测的实质差异。
+
 ### 2. ST 板块名全部取不到
 
 `ST板块` / `ST` / `风险警示` / `*ST` / `ST股票` 全返回 0 只。
