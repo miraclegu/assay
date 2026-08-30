@@ -52,6 +52,12 @@ CONFIRMED = [
     ('xtquant 可 import，六个函数都在', '2026-08-30',
      'get_sector_list / get_stock_list_in_sector / download_sector_data / '
      'get_financial_data / download_financial_data / get_instrument_detail 全部存在。'),
+    ('[环境] 用的是完整版 QMT 交易端，不是 miniQMT', '2026-08-31',
+     '所以【策略移植一律走 ContextInfo】—— 行情/合约详情/分红/账户/沪深A股池 '
+     '都已确认可用。xtdata 那套 connect(127.0.0.1:58610) 是 miniQMT/极简模式的形态，'
+     '它只影响「批量导出数据给 datalake 用」，不影响策略能不能跑。'
+     '所以下面 S 系列即使全挂，froec/v0b/红利 的移植也不受阻 —— '
+     '真正卡住的只有 C.get_financial_data 返回 NaN 这一条。'),
     ('[!] 但直接调 xtdata 会报「无法连接行情服务」', '2026-08-30',
      'xtdata.py line 134 get_client() 抛 Exception。原因是【没有先 connect】—— '
      '本仓库 QMT/data/connection.py 用的是 xtdata.connect(ip, port=58610)。'
@@ -75,8 +81,9 @@ _done = [False]
 
 def init(C):
     print('>>>>>> 探针已加载 <<<<<<  参考日 %s' % REF_DATE)
-    print('若下面没有后续输出，说明卡在某个网络调用上 —— 本版已给所有')
-    print('xtdata 调用套了 %d 秒超时，且把不碰网络的几节排在前面。' % XTDATA_TIMEOUT)
+    print('完整版 QMT：策略只走 ContextInfo，前 5 节即是；后 6 节走 xtdata，')
+    print('只影响「批量导出数据」，连不上不影响策略移植（已套 %d 秒超时）。'
+          % XTDATA_TIMEOUT)
 
 
 def handlebar(C):
@@ -321,6 +328,39 @@ def s4_timetag(C):
             print('   传 %-16r -> %s: %s' % (arg, type(e).__name__, str(e)[:60]))
 
 
+def s5_sector_bruteforce(C):
+    """只用 ContextInfo 试板块名 —— 完整版 QMT 里这是唯一能用的枚举通道。
+
+    C.get_stock_list_in_sector 已确认可用（'沪深A股' 返回 5216 只），
+    但 C.get_sector_list 不存在，所以【列不出】板块清单，只能一个个试。
+    这一节不碰网络，不会卡。
+    """
+    print('   本地参考：ST %d 只；银行42 / 煤炭38 / 家用电器132 / 电子599 / 电气设备453'
+          % REF['st_count'])
+    print('   -- ST 相关 --')
+    for name in ('ST板块', 'ST', '风险警示', '风险警示板块', '*ST', 'ST股票',
+                 '沪深ST', '沪深风险警示', '两市ST', 'ST及*ST'):
+        _sec(C, name, REF['st_head'])
+    print('   -- 行业（多种命名风格）--')
+    for name in ('银行', 'SW银行', '申万银行', '申万一级-银行', '申万一级行业-银行',
+                 '行业-银行', '银行I', '银行(申万)', 'SW一级-银行',
+                 '证监会行业-金融业', '金融业'):
+        _sec(C, name, ['601398.SH'])
+    print('   -- 若以上全 0：请在 QMT 界面的板块树里看一眼「申万一级行业」下的')
+    print('      实际名字（比如是不是带前缀/后缀），告诉我即可，比继续猜快得多。')
+
+
+def _sec(C, name, expect):
+    try:
+        lst = C.get_stock_list_in_sector(name) or []
+    except Exception as e:
+        print('   %-22s 异常 %s' % (name, str(e)[:45]))
+        return
+    hit = [c for c in lst if c in expect]
+    flag = '  <== 命中!' if (lst and hit) else ('  (有票但没命中参考)' if lst else '')
+    print('   %-22s -> %5d 只%s' % (name, len(lst), flag))
+
+
 # ================================ 待确认 F：财务 ==============================
 def f1_downloaded(C):
     print('   [!] froec 三条全靠财务算 PB 与单季 ROE，这是当前唯一硬阻塞。')
@@ -423,13 +463,20 @@ def f5_fallback(C):
 #     而且缓冲的日志也刷不出来 —— 表现成「点回测什么都没输出」。
 #     F2~F5 走 ContextInfo，不需要 xtdata 连接，是 froec 三条能否落地的关键，
 #     必须优先拿到。
+# [!] 顺序：ContextInfo 的全排前面（完整版 QMT 里策略只走这条路，且不碰网络）。
+#     xtdata 的排后面 —— 它【只影响批量导出数据】，不影响策略移植；
+#     且连不上时会阻塞，而 QMT 的 print 是缓冲的，一阻塞连之前的日志都刷不出来
+#     （上一轮就是这么表现成「点回测什么都没输出」的）。
 OPEN = [
-    ('F2 表名/字段名（ContextInfo，不碰网络）', f2_fields),
-    ('F3 调用签名（ContextInfo）', f3_signature),
-    ('F4 Panel 里到底有没有值（ContextInfo）', f4_panel_values),
-    ('F5 退路（本地判断）', f5_fallback),
-    ('S0b xtdata 连接（带 %ds 超时）' % XTDATA_TIMEOUT, s0_connect),
-    ('S1 真实板块名清单（需 xtdata）', s1_sector_names),
+    # ---- ContextInfo：策略移植真正依赖的 ----
+    ('F2 财务字段（ContextInfo）★ 唯一卡住策略的一条', f2_fields),
+    ('F3 财务调用签名（ContextInfo）', f3_signature),
+    ('F4 财务 Panel 里到底有没有值（ContextInfo）', f4_panel_values),
+    ('S5 板块名暴力试（ContextInfo，唯一能用的枚举通道）', s5_sector_bruteforce),
+    ('F5 退路（本地判断，不调接口）', f5_fallback),
+    # ---- xtdata：只影响「批量导出数据给 datalake」，不影响策略 ----
+    ('S0b xtdata 连接（只影响导出，带 %ds 超时）' % XTDATA_TIMEOUT, s0_connect),
+    ('S1 板块名清单（需 xtdata）', s1_sector_names),
     ('S2 ST 板块对账（需 xtdata）', s2_st),
     ('S3 行业板块对账（需 xtdata）', s3_industry),
     ('S4 历史时点成分（需 xtdata）', s4_timetag),

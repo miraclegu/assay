@@ -14,6 +14,21 @@
 （之前一轮一个脚本：probe_dividend / probe_hongli_fields / probe_fin /
 probe_round2 —— 结果就是每轮都要重问一遍已经确认过的东西。）
 
+## 运行环境：完整版 QMT 交易端（**不是 miniQMT**）
+
+这决定了两条路要分开看：
+
+| 用途 | 走哪条 | 现状 |
+|---|---|---|
+| **策略移植**（五条标星） | `ContextInfo` | 行情 / 合约详情 / 分红 / 账户 / 沪深A股池 **已确认可用** |
+| **批量导出数据**（给 datalake） | `xtdata` + 58610 端口 | 是 miniQMT/极简模式的形态，**与策略移植无关** |
+
+**所以 xtdata 连不上不阻塞任何一条策略。** 真正卡住的只有一条：
+`C.get_financial_data` 返回全 NaN。
+
+探针的 OPEN 也按这个重排了：ContextInfo 的五节在前（不碰网络、不会卡），
+xtdata 的六节在后并标注「只影响导出」。
+
 ## ✅ 确认可用
 
 | 接口 | 结论 |
