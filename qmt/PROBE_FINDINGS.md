@@ -60,6 +60,26 @@ froec 在用的四个字段（`tot_shrhldr_eqy_excl_min_int` / `net_profit_excl_
 **绝对不能用它做历史涨跌停判断**，必须自己按 `preClose × (1 ± 涨跌幅)` 算
 （移植里 `_limit_price` 本来就是这么做的，正确，不用改）。
 
-## 待确认
+## 待确认 —— `qmt/probe_round2.py`（十节）
 
-见 `qmt/probe_fin.py`：财务数据到底是没下载、字段名不对、还是调用方式不对。
+**关键线索**：本仓库 `QMT/data/st_status.py` 用的是 `xtdata.get_sector_list()`，
+而探针里 `C.get_sector_list()` 报 `'_PyContext' object has no attribute` ——
+说明这个函数**在 xtdata 模块上有、在 ContextInfo 上没有**。
+所以 ST 与行业板块返回 0 很可能只是**名字猜错了**，而不是没有。
+第二轮先把真实板块名**全部列出来**，不再猜。
+
+| 节 | 问什么 |
+|---|---|
+| S0 | 策略环境里能不能 `import xtquant.xtdata` |
+| S1 | `xtdata.get_sector_list()` 真实板块名全量（含 ST / 申万 / 行业） |
+| S2 | ST 板块对账（本地同日 175 只，含 000004/000070/000430...） |
+| S3 | 行业板块对账（本地 银行42 / 煤炭38 / 家用电器132 / 电子599 / 电气设备453） |
+| S4 | `get_stock_list_in_sector(name, real_timetag)` 取**历史时点**成分 |
+| F1 | 财务数据下没下载（直接调 `download_financial_data` 试） |
+| F2 | 表名/字段名（9 个变体） |
+| F3 | 调用签名（report_type / 日期格式 / 不传日期） |
+| F4 | Panel 里到底有没有值（上一轮只打了结构没打值） |
+| F5 | 退路：财务始终取不到时各策略的处境 |
+
+⚠️ S4 那条很要紧：**板块成分随时间变，回测必须取时点成分而不是最新成分**。
+若 `real_timetag` 不支持，用最新 ST 名单去过滤 2016 年的历史就是未来函数。
