@@ -15,3 +15,4 @@ runs/
 # ---- 杂项 ----
 .DS_Store
 *.log
+signal*.csv

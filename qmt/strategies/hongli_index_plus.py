@@ -73,13 +73,30 @@ def init(C):
     g.acct = ACCOUNT or globals().get('account', '')
     g.acct_type = ACCOUNT_TYPE
     g.last_asof = None
-    print('[init] 信号执行器  account=%s  signal=%s' % (g.acct, SIGNAL_PATH))
+    g.said = set()               # 同一条提示只打一次（回测里会走几千根 bar）
+    print('[init] 信号执行器  account=%s  signal=%s' % (g.acct or '(空)', SIGNAL_PATH))
+    if not g.acct:
+        print('[!] 账号为空 —— 平台没注入全局 account，读持仓/读资金都会失败，')
+        print('    因而【不会下任何单】。把本文件顶部的 ACCOUNT 改成你的资金账号。')
+    print('[!] 本文件是【信号执行器】，只在实盘/模拟盘用。')
+    print('    回测模式下它会拒绝交易 —— 信号是「今天该拿什么」，')
+    print('    拿它去回放历史就是标准的未来函数（见 handlebar 的 asof 守卫）。')
+
+
+def _once(key, msg):
+    """同一条提示只打一次。回测/实盘每根 bar 都会走到这里，
+    不去重的话日志会被同一句话刷满几千行（实测就是这样）。"""
+    if key not in g.said:
+        g.said.add(key)
+        print(msg)
 
 
 def _read_signal():
     """返回 (asof, {qmt_code: weight})；读不到就返回 (None, {})。"""
     if not os.path.exists(SIGNAL_PATH):
-        print('[!] 信号文件不存在: %s' % SIGNAL_PATH)
+        _once('nofile', '[!] 信号文件不存在: %s\n'
+                        '    先在本地跑 export_signal.py 生成，再拷到这个路径。'
+              % SIGNAL_PATH)
         return None, {}
     asof, w = None, {}
     try:
@@ -93,6 +110,16 @@ def _read_signal():
         print('[!] 信号文件解析失败: %s' % e)
         return None, {}
     return asof, w
+
+
+def _days_ahead(asof, today):
+    """信号日期比当前 bar 新多少天（>0 就是未来信号）。"""
+    try:
+        a = dt.datetime.strptime(str(asof)[:10].replace('-', ''), '%Y%m%d').date()
+        t = dt.datetime.strptime(str(today)[:8], '%Y%m%d').date()
+    except Exception:
+        return 0
+    return (a - t).days
 
 
 def _stale(asof, today):
@@ -150,8 +177,18 @@ def handlebar(C):
     asof, target = _read_signal()
     if not target:
         return
+    ahead = _days_ahead(asof, today)
+    if ahead > 0:
+        # ★ 信号比当前 bar 还新 = 拿未来的持仓名单去交易历史，标准未来函数。
+        #   回测模式下必然命中这一条，所以回测里本策略【什么都不做】——
+        #   这是对的：信号执行器只在实盘/模拟盘有意义。
+        _once('ahead', '[!] 信号 asof=%s 比当前 bar %s 还新 %d 天，拒绝交易。\n'
+                       '    回测模式下这是预期行为（用未来名单回放历史 = 未来函数）；\n'
+                       '    实盘请确认系统日期与信号日期。'
+              % (asof, today, ahead))
+        return
     if _stale(asof, today):
-        print('[!] 信号 asof=%s 距今超过 %d 天，本日不交易（请重跑 export_signal.py）'
+        _once('stale', '[!] 信号 asof=%s 距今超过 %d 天，不交易（请重跑 export_signal.py）'
               % (asof, MAX_STALE_DAYS))
         return
     if asof != g.last_asof:
@@ -160,6 +197,7 @@ def handlebar(C):
 
     total = _total_asset(C)
     if total <= 0:
+        _once('nocash', '[!] 读到的总资产为 0 —— 账号未配置或未连接交易端，不下单。')
         return
     pos = _positions(C)
 
