@@ -108,6 +108,23 @@ python3 export_signal.py strategies/红利/红利指数增强.py \
 
 GBK 表示不了 `⚠ ✔ ✅` 等符号，用 `[!] v [OK]` 代替。
 
+## 🔴 当前状态：froec 三条被财务数据卡住
+
+探针实测结论见 **`qmt/PROBE_FINDINGS.md`**。摘要：
+
+**可用**：`get_market_data_ex`（OHLCV+amount+preClose，与本地逐项吻合）、
+`get_instrumentdetail`（上市日 5/5 对、名称、流通股本）、`get_divid_factors`
+（分红 11/11 吻合）、`000300.SH` 指数、`get_trade_detail_data`（空账号也能读）。
+
+**卡住**：`get_financial_data` **返回全 NaN** —— froec / froec_traded /
+froec_traded_stop35 三条全靠它算 PB 与单季 ROE。最可能是 QMT 客户端
+**没下载财务数据**（行情与财务是分开的两块）。`qmt/probe_fin.py` 专门区分
+「没下载 / 字段名不对 / 调用方式不对」三种可能。
+
+**需绕开**：ST 板块与行业板块名全部取不到（用 `InstrumentName` 含 ST 兜底；
+行业黑名单暂时失效，是实质差异）；`UpStopPrice/DownStopPrice` 是**实时值不是
+历史值**，必须自己按 `preClose × (1±涨跌幅)` 算。
+
 ## 上线前仍需在你的 QMT 版本上核对
 
 不同版本接口有差异，至少确认：`get_stock_list_in_sector` 的板块名、
