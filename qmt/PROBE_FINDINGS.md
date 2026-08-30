@@ -21,13 +21,19 @@ probe_round2 —— 结果就是每轮都要重问一遍已经确认过的东西
 | 用途 | 走哪条 | 现状 |
 |---|---|---|
 | **策略移植**（五条标星） | `ContextInfo` | 行情 / 合约详情 / 分红 / 账户 / 沪深A股池 **已确认可用** |
-| **批量导出数据**（给 datalake） | `xtdata` + 58610 端口 | 是 miniQMT/极简模式的形态，**与策略移植无关** |
+| 批量导出数据（给 datalake） | `xtdata` + 58610 端口 | 与策略移植无关，**已从探针移除** |
 
-**所以 xtdata 连不上不阻塞任何一条策略。** 真正卡住的只有一条：
-`C.get_financial_data` 返回全 NaN。
+### `xtdata` 不是 miniQMT 专有
 
-探针的 OPEN 也按这个重排了：ContextInfo 的五节在前（不碰网络、不会卡），
-xtdata 的六节在后并标注「只影响导出」。
+报错路径 `D:\国金证券QMT交易端\bin.x64\lib\site-packages\xtquant\xtdata.py`
+就在**完整版 QMT 目录里** —— `xtquant` 随 QMT 一起装，`import` 成功，六个函数都在。
+报的是**连接错误不是导入错误**：`xtdata` 是独立客户端，要连数据服务端口 58610，
+且调用前必须先 `xtdata.connect(ip, port)`。完整版里该接口默认不一定开。
+
+**但策略移植用不到它。** 探针已移除全部 xtdata 相关节，现在只剩 5 节、全走
+`ContextInfo`，最坏情况（接口全阻塞）24 秒跑完。
+
+**真正卡住的只有一条**：`C.get_financial_data` 返回全 NaN。
 
 ## ✅ 确认可用
 

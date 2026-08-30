@@ -58,11 +58,14 @@ CONFIRMED = [
      '它只影响「批量导出数据给 datalake 用」，不影响策略能不能跑。'
      '所以下面 S 系列即使全挂，froec/v0b/红利 的移植也不受阻 —— '
      '真正卡住的只有 C.get_financial_data 返回 NaN 这一条。'),
-    ('[!] 但直接调 xtdata 会报「无法连接行情服务」', '2026-08-30',
-     'xtdata.py line 134 get_client() 抛 Exception。原因是【没有先 connect】—— '
-     '本仓库 QMT/data/connection.py 用的是 xtdata.connect(ip, port=58610)。'
-     '所以调任何 xtdata 函数前必须先连接；若连接本身失败，需在 QMT 客户端'
-     '「设置-接口配置」里开启该端口。见下面 S0b。'),
+    ('[!] xtdata 不是 miniQMT 专有，但策略用不上', '2026-08-31',
+     '报错路径 D:\\国金证券QMT交易端\\bin.x64\\lib\\site-packages\\xtquant\\xtdata.py '
+     '就在【完整版 QMT】目录里 —— xtquant 是随 QMT 一起装的，import 也成功，'
+     '六个函数都在。报的是【连接错误不是导入错误】：xtdata 是独立客户端，'
+     '要连 QMT 数据服务端口(58610)，完整版里该接口默认不一定开。'
+     '（且调用前必须先 xtdata.connect(ip, port=58610)，直接调会抛 get_client 异常。）'
+     '★ 策略移植只走 ContextInfo，用不到它；xtdata 只在「批量导出数据给 datalake」'
+     '时才需要 —— 那是另一件事，本探针已不再测它。'),
 ]
 
 # 本地标准答案（2025-06-30）
@@ -81,10 +84,9 @@ _done = [False]
 
 def init(C):
     print('>>>>>> 探针已加载 <<<<<<  参考日 %s' % REF_DATE)
-    print('完整版 QMT：策略只走 ContextInfo，前 5 节即是；后 6 节走 xtdata，')
-    print('只影响「批量导出数据」，连不上不影响策略移植。')
+    print('完整版 QMT：本探针只走 ContextInfo（策略就是这么跑的），共 5 节。')
     print('所有接口调用（含 ContextInfo）均已套 %d 秒超时，不会静默卡死。'
-          % XTDATA_TIMEOUT)
+          % CALL_TIMEOUT)
     print('[!] QMT 正在补充数据时不要跑本探针 —— 即使不卡，探到的也是')
     print('    半完成状态的数据，一部分有值一部分 NaN，会误判。等补完再跑。')
 
@@ -129,10 +131,7 @@ def _wrap(s, n):
     return out
 
 
-_XT = [None, None]      # [已连上的 xtdata, 上次连接失败的异常]
-QMT_PORT = 58610
-QMT_IPS = ('127.0.0.1',)          # 只试本机。局域网 IP 连不通时会长时间阻塞
-XTDATA_TIMEOUT = 6                # 单次调用上限（秒）
+CALL_TIMEOUT = 6                  # 单次接口调用上限（秒），ContextInfo 也套
 STALL_MAX = 4                     # 连续超时几次后熔断
 _STALL = [0]
 
@@ -148,7 +147,7 @@ def _call_timeout(fn, sec=None):
         一开始只套了 xtdata 是漏的 —— 而 F2 恰好排第一节，一卡又是全无输出。
     """
     import threading
-    sec = XTDATA_TIMEOUT if sec is None else sec
+    sec = CALL_TIMEOUT if sec is None else sec
     # ★ 熔断：连续超时 STALL_MAX 次后直接放弃，不再逐个等。
     #   没有熔断时，「QMT 正在补数据」这种场景下 44 个调用点各等 8 秒 = 352 秒，
     #   人会以为又卡死了。
@@ -177,41 +176,6 @@ def _call_timeout(fn, sec=None):
     return box.get('r')
 
 
-def _xt():
-    """拿到【已连接】的 xtdata。
-
-    [!] 直接 import 完就调函数会报「无法连接行情服务」——
-        xtdata 是个客户端，必须先 connect 到 QMT 的数据服务端口。
-        本仓库 QMT/data/connection.py 就是这么做的，我第一版探针漏了这步。
-    """
-    if _XT[0] is not None:
-        return _XT[0]
-    # ★ 失败也要缓存：不然 S1~S4、F1 每节都重试 3 次 × 8s 超时，
-    #   一轮下来上百秒，看着又像卡死了（实测 104s）。
-    if _XT[1] is not None:
-        raise _XT[1]
-    import xtquant.xtdata as xtdata
-    last = None
-    for ip in QMT_IPS:
-        try:
-            c = _call_timeout(lambda: xtdata.connect(
-                ip=ip, port=QMT_PORT, remember_if_success=True))
-            if c is not None:
-                _XT[0] = xtdata
-                return xtdata
-        except Exception as e:
-            last = e
-    try:
-        _call_timeout(lambda: xtdata.connect())
-        _XT[0] = xtdata
-        return xtdata
-    except Exception as e:
-        last = e
-    err = RuntimeError('xtdata 连接失败（端口 %d，试过 %s）：%s'
-                       % (QMT_PORT, QMT_IPS, str(last)[:90]))
-    _XT[1] = err
-    raise err
-
 
 def _peek(r):
     """挑【非 NaN 的值】出来 —— 只看结构会漏掉「结构对但全空」。"""
@@ -231,116 +195,9 @@ def _peek(r):
 
 
 # ================================ 待确认 S：板块 ==============================
-def s0_connect(C):
-    print('   上一轮：import 成功但一调就报「无法连接行情服务」—— 漏了 connect。')
-    print('   逐个试连接方式，看哪个能通（端口 %d）：' % QMT_PORT)
-    import xtquant.xtdata as xtdata
-    for name, fn in (
-            ("connect(ip='127.0.0.1', port=%d)" % QMT_PORT,
-             lambda: xtdata.connect(ip='127.0.0.1', port=QMT_PORT, remember_if_success=True)),
-            ("connect(ip='192.168.0.103', port=%d)" % QMT_PORT,
-             lambda: xtdata.connect(ip='192.168.0.103', port=QMT_PORT, remember_if_success=True)),
-            ('connect() 无参', lambda: xtdata.connect()),
-    ):
-        try:
-            c = _call_timeout(fn)
-            ok = None
-            try:
-                ok = c.is_connected()
-            except Exception:
-                pass
-            print('   %-42s -> %s  is_connected=%s' % (name, type(c).__name__, ok))
-        except Exception as e:
-            print('   %-42s -> %s: %s' % (name, type(e).__name__, str(e)[:60]))
-    print('   连不上时的排查顺序：')
-    print('     1) QMT 客户端「设置 - 接口配置」里开启端口 %d' % QMT_PORT)
-    print('     2) 确认 QMT 已登录且行情已连接（右下角状态）')
-    print('     3) 防火墙放行该端口')
-    print('   [!] 若始终连不上，ST 与行业过滤只能走 InstrumentName 名称兜底，')
-    print('       行业黑名单则【无法实现】—— 这是相对本地回测的实质差异。')
 
 
-def s1_sector_names(C):
-    print('   把真实板块名【全部列出来】，不再一个个猜')
-    try:
-        x = _xt()
-    except Exception:
-        print('   跳过（xtdata 不可用）'); return
-    try:
-        _call_timeout(lambda: x.download_sector_data())
-        print('   download_sector_data() 已调用')
-    except Exception as e:
-        print('   download_sector_data 异常: %s' % str(e)[:70])
-    secs = x.get_sector_list() or []
-    print('   板块总数 %d' % len(secs))
-    print('   含 ST 的      : %s' % ([s for s in secs if 'ST' in str(s).upper()][:20] or '（无）'))
-    print('   含风险/警示/退 : %s' % [s for s in secs if any(k in str(s) for k in ('风险', '警示', '退'))][:20])
-    print('   含「申万」     : %s' % [s for s in secs if '申万' in str(s)][:30])
-    print('   与本地行业名重合: %s' % [s for s in secs if s in REF['industry_n']][:20])
-    print('   -- 前 120 个（看命名风格）--')
-    for i in range(0, min(len(secs), 120), 6):
-        print('      %s' % secs[i:i + 6])
 
-
-def s2_st(C):
-    print('   本地 %s 当日 ST %d 只，前几只 %s' % (REF_DATE, REF['st_count'], REF['st_head']))
-    try:
-        x = _xt()
-    except Exception:
-        print('   跳过'); return
-    secs = x.get_sector_list() or []
-    cands = [s for s in secs if 'ST' in str(s).upper()] or \
-            [s for s in secs if any(k in str(s) for k in ('风险', '警示'))]
-    if not cands:
-        print('   无 ST 板块 -> 只能走名称兜底（InstrumentName 含 ST）'); return
-    for s in cands[:5]:
-        try:
-            lst = x.get_stock_list_in_sector(s) or []
-            print('   %-16s -> %4d 只   命中本地前几只: %s'
-                  % (s, len(lst), [c for c in lst if c in REF['st_head']]))
-        except Exception as e:
-            print('   %-16s -> 异常 %s' % (s, str(e)[:50]))
-
-
-def s3_industry(C):
-    print('   本地各行业只数: %s' % REF['industry_n'])
-    print('   本地归属: %s' % REF['industry_of'])
-    try:
-        x = _xt()
-    except Exception:
-        print('   跳过'); return
-    secs = x.get_sector_list() or []
-    cands = [s for s in secs if '申万' in str(s)][:12]
-    cands += [s for s in secs if s in REF['industry_n']]
-    if not cands:
-        cands = [s for s in secs if any(k in str(s) for k in ('银行', '煤炭', '家用电器'))][:12]
-    if not cands:
-        print('   没找到行业板块 -> froec 的 11 个行业黑名单在 QMT 上【无法实现】'); return
-    for s in cands[:12]:
-        try:
-            lst = x.get_stock_list_in_sector(s) or []
-            print('   %-22s -> %4d 只   命中参考票: %s'
-                  % (s, len(lst), [c for c in lst if c in REF['industry_of']]))
-        except Exception as e:
-            print('   %-22s -> 异常 %s' % (s, str(e)[:50]))
-
-
-def s4_timetag(C):
-    print('   [!] 板块成分随时间变，回测必须取【时点】成分。')
-    print('       若不支持 real_timetag，拿今天的 ST 名单过滤 2016 年历史 = 未来函数。')
-    try:
-        x = _xt()
-    except Exception:
-        print('   跳过'); return
-    secs = x.get_sector_list() or []
-    s = ([t for t in secs if 'ST' in str(t).upper()] or ['沪深A股'])[0]
-    print('   用板块 %r 试三种时间参数写法：' % s)
-    for arg in (REF_DATE, int(REF_DATE), REF_DATE + '000000'):
-        try:
-            lst = x.get_stock_list_in_sector(s, arg) or []
-            print('   传 %-16r -> %d 只' % (arg, len(lst)))
-        except Exception as e:
-            print('   传 %-16r -> %s: %s' % (arg, type(e).__name__, str(e)[:60]))
 
 
 def s5_sector_bruteforce(C):
@@ -377,26 +234,6 @@ def _sec(C, name, expect):
 
 
 # ================================ 待确认 F：财务 ==============================
-def f1_downloaded(C):
-    print('   [!] froec 三条全靠财务算 PB 与单季 ROE，这是当前唯一硬阻塞。')
-    print('   本地参考 601398 2024年报: %s' % REF['fin_601398_2024'])
-    try:
-        x = _xt()
-    except Exception:
-        print('   xtdata 不可用，跳过下载检查'); return
-    try:
-        _call_timeout(lambda: x.download_financial_data(
-            [CODE], ['Balance', 'Income', 'CapitalStructure']), 20)
-        print('   download_financial_data 调用成功 —— 之前很可能就是【没下载】')
-    except Exception as e:
-        print('   download 异常 %s: %s' % (type(e).__name__, str(e)[:100]))
-    try:
-        r = x.get_financial_data([CODE], ['Balance', 'Income'], '20240101', '20241231')
-        print('   xtdata.get_financial_data -> %s' % type(r).__name__)
-        print('   %s' % str(r)[:700])
-    except Exception as e:
-        print('   xtdata.get_financial_data 异常 %s: %s' % (type(e).__name__, str(e)[:100]))
-
 
 def f2_fields(C):
     print('   换表名/字段写法，看有没有哪个能出值')
@@ -476,26 +313,13 @@ def f5_fallback(C):
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
-#     上一轮把 xtdata 连接放第一节，结果它一阻塞，后面 F1~F5 全没跑到，
-#     而且缓冲的日志也刷不出来 —— 表现成「点回测什么都没输出」。
-#     F2~F5 走 ContextInfo，不需要 xtdata 连接，是 froec 三条能否落地的关键，
-#     必须优先拿到。
-# [!] 顺序：ContextInfo 的全排前面（完整版 QMT 里策略只走这条路，且不碰网络）。
-#     xtdata 的排后面 —— 它【只影响批量导出数据】，不影响策略移植；
-#     且连不上时会阻塞，而 QMT 的 print 是缓冲的，一阻塞连之前的日志都刷不出来
-#     （上一轮就是这么表现成「点回测什么都没输出」的）。
+# 本探针只走 ContextInfo —— 完整版 QMT 里策略就是这么跑的。
+# xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
+# 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    # ---- ContextInfo：策略移植真正依赖的 ----
-    ('F2 财务字段（ContextInfo）★ 唯一卡住策略的一条', f2_fields),
-    ('F3 财务调用签名（ContextInfo）', f3_signature),
-    ('F4 财务 Panel 里到底有没有值（ContextInfo）', f4_panel_values),
-    ('S5 板块名暴力试（ContextInfo，唯一能用的枚举通道）', s5_sector_bruteforce),
+    ('F2 财务字段  ★ 唯一卡住策略的一条', f2_fields),
+    ('F3 财务调用签名', f3_signature),
+    ('F4 财务 Panel 里到底有没有值', f4_panel_values),
+    ('S5 板块名暴力试（唯一能用的枚举通道）', s5_sector_bruteforce),
     ('F5 退路（本地判断，不调接口）', f5_fallback),
-    # ---- xtdata：只影响「批量导出数据给 datalake」，不影响策略 ----
-    ('S0b xtdata 连接（只影响导出，带 %ds 超时）' % XTDATA_TIMEOUT, s0_connect),
-    ('S1 板块名清单（需 xtdata）', s1_sector_names),
-    ('S2 ST 板块对账（需 xtdata）', s2_st),
-    ('S3 行业板块对账（需 xtdata）', s3_industry),
-    ('S4 历史时点成分（需 xtdata）', s4_timetag),
-    ('F1 财务数据下没下载（需 xtdata）', f1_downloaded),
 ]
