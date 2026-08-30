@@ -18,22 +18,35 @@ qmt/
 | `froec.py` | 整条移植 | `小市值/froec.py`（`kcb_688_only=0`）| `20260828-205911-486094` | 36.38 / 46.84 / 1.21 |
 | `froec_traded.py` | 整条移植 | `小市值/froec_traded.py` | `20260828-205938-4926f5` | 39.50 / 47.10 / 1.28 |
 | `froec_traded_stop35.py` | 整条移植 | 同上 + `stop_loss=0.35, stop_intraday=1` | `20260829-170945-4926f5` | **40.87 / 38.54 / 1.33** |
-| `hongli_index_plus.py` | 信号执行 | `红利/红利指数增强.py`（`div_method=fiscal_year`）| `20260828-210010-adcde3` | 20.07 / 17.95 / 1.30 |
-| `sgmspeg_v0b.py` | 信号执行 | `小市值/sgmspeg_v0b.py` | `20260828-205350-a76665` | 32.68 / 52.26 / 1.08 |
+| `sgmspeg_v0b.py` | 整条移植 | `小市值/sgmspeg_v0b.py` | `20260828-205350-a76665` | 32.68 / 52.26 / 1.08 |
+| `hongli_index_plus.py` | 信号执行（暂时）| `红利/红利指数增强.py`（`div_method=fiscal_year`）| `20260828-210010-adcde3` | 20.07 / 17.95 / 1.30 |
 
 **一个配置一个文件，粘进 QMT 就能跑，不用手改任何开关。**
 （早先是一个文件加开关，那样「默认参数 = 回测参数」只对其中一个成立，其余全靠人记。）
 
-## 为什么分两种形态
+## 为什么红利暂时走信号执行
 
-**froec 线整条移植**：因子简单（PB 分位 + 单季 ROE 改善 + 流通市值），
-QMT 的 `get_financial_data` 够用，能自包含。
+**先纠正一次误判**：早先把 `sgmspeg_v0b` 也划进「无法移植」，理由是它要
+jqfactor 近似（Barra 式 5 年回归斜率）—— 那是 `sgmspeg.py`（三路本体）的
+需求，**不是 v0b 的**。v0b 的 SQL 只用四样：宇宙、`floatmv`、`is_risk_warned`、
+累计 `eps`，比 froec 还简单（froec 还要 PB 分位 + 5 个单季的 ROE 改善）。
+已改为整条移植。
 
-**红利 / sgmspeg_v0b 走信号执行**：红利要分红历史 + 252 日 beta 回归，
-v0b 要 jqfactor 近似（Barra 式 5 年回归斜率）。把这些搬到 QMT，等于用一套
-没核对过的字段名和 as-of 语义重造因子链 —— 而本仓库的全部结论都建立在
-已验证的「双键 as-of（pub_date + change_date）」口径上。重造一遍最可能的
-结果是**看着能跑、数字悄悄是错的**。所以选股留本地，QMT 只下单：
+红利需要的六类数据，逐项判定：
+
+| 需要什么 | QMT 对应 | 判定 |
+|---|---|---|
+| 总市值 | `close × CAPITALSTRUCTURE.total_capital` | ✅ froec 已在算 |
+| PE(TTM) | 市值 / TTM 净利 | ✅ 同上 |
+| 扣非ROE、营收/净利同比 | `ASHAREINCOME` + `ASHAREBALANCESHEET` | ✅ 同族，需核字段名 |
+| beta_252 对沪深300 | 纯价格回归，`get_market_data_ex` 就够 | ✅ 不需要外部数据 |
+| **每股分红 + 除权日** | 接口名与字段语义未核对 | ⚠️ **只剩这一项** |
+
+所以红利**不是不能移植，是差一次核对**。`qmt/probe_dividend.py` 就是干这个的：
+它把本地 `std/dividend.parquet` 的实际分红值（每 10 股、税前）嵌成 EXPECT，
+逐个试候选接口，对上了才算这条路通。核对完就能把红利也改成整条移植。
+
+在那之前，红利走信号执行 —— 选股留本地，QMT 只下单：
 
 ```bash
 python3 export_signal.py strategies/红利/红利指数增强.py \

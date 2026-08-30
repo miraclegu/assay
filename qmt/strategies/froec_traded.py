@@ -54,6 +54,12 @@ BENCHMARK    = '000905.SH' # 基准（同时用它的日线索引当交易日历）
 POOL_SECTOR  = '沪深A股'   # 选股母池板块
 
 STOCK_NUM      = 10        # 最大持仓数
+CANDIDATE_NUM  = 10        # 选股池截断长度 —— froec 与 v0b 【唯一的流程差别】。
+                           # 两者的后处理顺序完全相同：
+                           #   候选 -> 停牌/涨跌停过滤 -> 20日涨停黑名单 -> 截到 STOCK_NUM
+                           # froec=10：候选就只有 10，过滤完可能不足 10 且【不补位】
+                           #           （聚宽原版 get_stock_list()[:10] 的行为）
+                           # v0b=15  ：候选留 15 的余量，过滤完通常仍能凑满 10
 LIMIT_DAYS     = 20        # 近 N 日买过且涨停过 -> 拉黑
 PB_TOP_RATIO   = 0.5       # PB 由低到高取前 50%
 ROE_TOP_RATIO  = 0.1       # ROE 改善度取前 10%
@@ -84,6 +90,14 @@ MIN_LOT          = 100     # 最小交易单位
 # [!] 止损的采纳依据是「保费≈0 + 赔付方向一致」，不是「它更赚钱」：
 #   逐年独立口径下保费 -0.00pp（8/11 年差额精确为 0），赔付是 2024 回撤 -6.16pp。
 #   赔付证据 n=1（样本内只有 2024-02 一次尾部事件）。别指望它提高收益。
+# 选股模式：本模板的下单/过滤/炸板/止损那套基础设施是共用的，只有【选股】不同。
+#   'roec'      PB 升序前 50% -> 单季 ROE 改善前 10% -> 行业过滤 -> 流通市值升序
+#               对应本地 strategies/小市值/froec.py
+#   'mincap_eps' 累计 EPS>0 -> 流通市值升序（不看 PB、不看 ROE、不做行业过滤）
+#               对应本地 strategies/小市值/sgmspeg_v0b.py
+#               [!] 它比 roec 【更简单】：只要 floatmv + eps + ST + 宇宙四样。
+SELECT_MODE     = 'roec'
+
 TRADED_UNIVERSE = True  # 候选宇宙 = 决策日【实际有成交】的股票（assay: paused_in_pool=0）
 STOP_LOSS       = 0.0  # 固定止损：相对建仓价回撤到 -35% 清仓；0 = 关
 STOP_INTRADAY   = True  # True=当日最低价判定(盘中触发) / False=收盘价判定(日频)
@@ -176,6 +190,8 @@ def get_stock_list(C, ref_date):
     pool = _base_pool(C, ref_date)
     if not pool:
         return []
+    if SELECT_MODE == 'mincap_eps':
+        return _select_mincap_eps(C, pool, ref_date)
 
     price = _price_frame(C, pool, ref_date)          # close / preClose / volume
     if price.empty:
@@ -237,6 +253,40 @@ def get_stock_list(C, ref_date):
     sub['circ_cap_value'] = sub['close'] * sub['circulating_capital']
     sub = sub.sort_values('circ_cap_value', ascending=True)
     return list(sub.index)
+
+
+def _select_mincap_eps(C, pool, ref_date):
+    """v0b 口径：累计 EPS>0 的票，按流通市值升序取前 CANDIDATE_NUM。
+
+    与 roec 模式的差别只在这里 —— 不看 PB、不看 ROE 改善、不做行业过滤。
+    ST / 次新 / 科创 / 退市 已在 _base_pool 里剔过。
+
+    [!] EPS 用【累计】不是单季：本地 v0b 取 fin_indicator_q 的 eps 按决策日 as-of，
+        对应 QMT 的 ASHAREINCOME 累计归母净利 / 总股本。用单季会选出不同的票。
+    """
+    price = _price_frame(C, pool, ref_date)
+    if price.empty:
+        return []
+    if TRADED_UNIVERSE:
+        price = price[price['volume'] > 0]
+        if price.empty:
+            return []
+    fin = _fin_matrix(C, list(price.index), ref_date)
+    if fin.empty:
+        return []
+    df = price.join(fin, how='inner')
+    df = df[df['total_capital'] > 0]
+    if df.empty:
+        return []
+    df['eps'] = df['netprofit_0'] / df['total_capital']
+    df = df[df['eps'] > 0]
+    if df.empty:
+        return []
+    df['circ_cap_value'] = df['close'] * df['circulating_capital']
+    df = df.sort_values('circ_cap_value', ascending=True)
+    # 不在这里截断：截断统一由 weekly_adjustment 用 CANDIDATE_NUM 做，
+    # 两个地方都截会让「截多少」这件事分散在两处，改一处漏一处。
+    return list(df.index)
 
 
 #============================== 1-2 行业过滤 ==================================
@@ -305,7 +355,7 @@ def weekly_adjustment(C, today):
         return
     g.last_week_key = week_key
 
-    target = get_stock_list(C, prev)[:10]
+    target = get_stock_list(C, prev)[:CANDIDATE_NUM]
     target = filter_paused_stock(C, target, prev)
     target = filter_limitup_stock(C, target, prev, today)
     target = filter_limitdown_stock(C, target, prev, today)

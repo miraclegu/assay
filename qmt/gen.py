@@ -49,6 +49,16 @@ PROFILES = [
          local={'stop_loss': 0.35, 'stop_intraday': 1},
          metrics={'annual': 40.87, 'max_drawdown': 38.54, 'sharpe': 1.33},
          set={'TRADED_UNIVERSE': True, 'STOP_LOSS': 0.35, 'STOP_INTRADAY': True}),
+    dict(out='sgmspeg_v0b.py', tpl='froec.py',
+         title='SG-MS-PEG-HL v0b（小市值 + 累计EPS>0）',
+         strategy='strategies/小市值/sgmspeg_v0b.py',
+         run_id='20260828-205350-a76665',
+         local={},
+         metrics={'annual': 32.68, 'max_drawdown': 52.26, 'sharpe': 1.08},
+         set={'SELECT_MODE': 'mincap_eps', 'CANDIDATE_NUM': 15,
+              'NEW_STOCK_DAYS': 375, 'INDUSTRY_CONTROL': False,
+              'EXCLUDE_PREFIX': ('688', '4', '8', '9', '2'),
+              'TRADED_UNIVERSE': False, 'STOP_LOSS': 0.0, 'STOP_INTRADAY': True}),
     dict(out='hongli_index_plus.py', tpl='signal_executor.py',
          title='红利指数增强（信号执行：选股在本地，QMT 只下单）',
          strategy='strategies/红利/红利指数增强.py',
@@ -59,15 +69,6 @@ PROFILES = [
          export=('python3 export_signal.py strategies/红利/红利指数增强.py '
                  '--param div_method=fiscal_year --cash 1000000 '
                  '-o signal_hongli.csv')),
-    dict(out='sgmspeg_v0b.py', tpl='signal_executor.py',
-         title='SG-MS-PEG-HL v0b（信号执行：选股在本地，QMT 只下单）',
-         strategy='strategies/小市值/sgmspeg_v0b.py',
-         run_id='20260828-205350-a76665',
-         local={},
-         metrics={'annual': 32.68, 'max_drawdown': 52.26, 'sharpe': 1.08},
-         set={'SIGNAL_PATH': r'D:\work\finacial\signal_v0b.csv'},
-         export=('python3 export_signal.py strategies/小市值/sgmspeg_v0b.py '
-                 '--cash 1000000 -o signal_v0b.csv')),
 ]
 
 
