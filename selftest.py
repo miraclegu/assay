@@ -606,6 +606,53 @@ def t_server():
     return '8 个端点契约通过（持仓分页/倒序/越界收敛）；5 类非法 run_id 全部 404'
 
 
+@case('数据字典：读磁盘 md 并渲染，改文件即生效', tag='fast')
+def t_docs():
+    """★ 关键是【不烤内容进前端】这个承诺要真成立。
+
+    验三件事：
+      1. _DOCS 里每一篇都能解到实际文件（路径写错了会静默变成「缺」）
+      2. markdown 渲染后不残留裸标记（表格分隔行、裸 ** 漏出来最常见）
+      3. 改文件不重启服务就生效 —— 这是整个设计的理由，必须有断言守着
+    """
+    import re
+    from assay import server as sv
+
+    d = sv.api_docs({})
+    miss = [x['rel'] for x in d['docs'] if not x['exists']]
+    assert not miss, '这些 _DOCS 路径解不到文件: %s' % miss
+
+    n_tab = n_row = 0
+    for x in d['docs']:
+        r = sv.api_doc({'key': x['key']})
+        h = r['html']
+        assert h and '<' in h, '%s 渲染为空' % x['key']
+        # 裸 markdown 漏出来 = 渲染器没覆盖到某种语法。
+        # 先剥掉 code/pre —— 里面的 `**kw`（如 Feed.query(sql, **kw)）是真内容不是漏出。
+        bare = re.sub(r'<pre>.*?</pre>|<code>.*?</code>', '', h, flags=re.S)
+        assert not re.search(r'\|\s*-{3,}', bare), '%s 表格分隔行没吃掉' % x['key']
+        assert '**' not in bare, '%s 裸 ** 漏出' % x['key']
+        assert not re.search(r'^#{1,6} ', bare, re.M), '%s 裸 # 漏出' % x['key']
+        n_tab += h.count('<table')
+        n_row += h.count('<tr')
+    assert sv.api_doc({'key': 'nope_不存在'}) is None, '未知 key 应返回 None -> 404'
+
+    # 改文件立即生效（这是本功能存在的全部理由）
+    path = sv._doc_path([x for x in sv._DOCS if x[0] == 'trap'][0][3])
+    raw = open(path, encoding='utf-8').read()
+    token = '__assay_selftest_%d__' % len(raw)
+    try:
+        open(path, 'w', encoding='utf-8').write(raw + '\n\n' + token + '\n')
+        h2 = sv.api_doc({'key': 'trap'})['html']
+        assert token in h2, '改了 md 但接口没反映 —— 说明内容被缓存或烤死了'
+    finally:
+        open(path, 'w', encoding='utf-8').write(raw)
+    assert token not in sv.api_doc({'key': 'trap'})['html'], '还原失败'
+
+    return '%d 篇全部解析到，共 %d 张表 %d 行；改 md 不重启即生效' % (
+        len(d['docs']), n_tab, n_row)
+
+
 @case('网页看板真实渲染（playwright）', tag='web')
 def t_ui():
     """★ JS 语法检查过不代表能渲染 —— 运行时错误在终端里看不到。
@@ -821,6 +868,70 @@ def t_ui():
         httpd.shutdown()
     return ('目录树(任意深度/默认收起/按运行时间倒序)/详情/9 页签/返回/后退 全通，'
             '0 JS 错误，表头 gap %dpx；下钻: %s' % (gap, drill))
+
+
+@case('数据字典页：侧栏 / 切篇 / 过滤 / 跨篇命中数', tag='web')
+def t_docs_ui():
+    """服务端渲染对了不代表页面能用 —— 过滤是 DOM 操作，只有真浏览器能验。
+
+    重点验【跨篇命中数】：过滤时侧栏要标出每篇的命中行数，
+    否则你只看得到当前这篇，而「这个概念在哪一篇」恰恰是最常问的。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    errs = []
+    try:
+        with sync_playwright() as pw:
+            b = pw.chromium.launch()
+            pg = b.new_page()
+            pg.on('pageerror', lambda e: errs.append('PAGEERROR %s' % e))
+            pg.on('console',
+                  lambda m: errs.append(m.text) if m.type == 'error' else None)
+            pg.goto('http://127.0.0.1:%d/#/docs/trap' % port)
+            pg.wait_for_timeout(1500)
+            n_side = pg.locator('.ditem').count()
+            assert n_side >= 8, '侧栏只有 %d 条' % n_side
+            src = pg.locator('#dc .dsrc').inner_text()
+            assert '4-按陷阱' in src, '打开的不是指定那篇: %s' % src
+            tot = pg.locator('#dc table.dt tbody tr').count()
+            assert tot > 30, '表格只渲染出 %d 行' % tot
+
+            pg.fill('#dq', 'report_type')
+            pg.wait_for_timeout(2200)
+            vis = pg.locator('#dc table.dt tbody tr:visible').count()
+            assert 0 < vis < tot, '过滤没生效（%d/%d）' % (vis, tot)
+            assert pg.locator('#dc .dhi').count() > 0, '命中处没高亮'
+            hits = [t.inner_text() for t in pg.locator('.dmeta').all()]
+            n_hit = len([x for x in hits if '命中' in x])
+            assert n_hit >= 3, '跨篇命中数只标出 %d 篇' % n_hit
+            assert pg.locator('.ditem.nohit').count() > 0, '无命中的篇没淡掉'
+
+            pg.fill('#dq', '')
+            pg.wait_for_timeout(700)
+            back = pg.locator('#dc table.dt tbody tr:visible').count()
+            assert back == tot, '清空过滤没恢复（%d != %d）' % (back, tot)
+
+            pg.click('.ditem[href="#/docs/qmt"]')
+            pg.wait_for_timeout(900)
+            assert pg.locator('#dc table.dt').count() > 5, '切篇后表格没出来'
+            pg.click('#back')
+            pg.wait_for_timeout(700)
+            assert pg.locator('.tree').count() >= 1, '返回目录后目录树没了'
+            b.close()
+    finally:
+        httpd.shutdown()
+    assert not errs, '控制台报错: %s' % errs[:3]
+    return '侧栏 %d 篇 · %d 行 · 过滤 %d 行 · 跨篇命中标出 %d 篇 · 无控制台错误' % (
+        n_side, tot, vis, n_hit)
 
 
 @case('版本页：简介/源码/参数表单/触发回测', tag='web')
