@@ -605,37 +605,129 @@ def _peek(r):
      '不是因子名写错。要用多因子得先去客户端【数据管理->补充数据】勾【多因子数据】。'),
 
 
-# ================================ OPEN 已清空 ================================
+# ============================== 待确认 Q：m_endDate ==========================
 #
-# 2026-09-01：分红归属期这条线【彻底定案】（见 CONFIRMED 的「定案·终」），
-# OPEN 里没有待确认项了。
+# 有一份材料称：get_divid_factors 返回 list of objects，取 item.m_endDate 即报告期，
+# 且签名是 (code, start, end) 三参数。这与本探针【已经跑出来的输出】直接冲突：
+#     601398.SH 共 23 条  key=1721059200000(2024-07-16)  n=7
+#       [0]=0.3064 [1]=0.0 [2]=0.0 [3]=0.0 [4]=0.0 [5]=0 [6]=1.0526
+#   -> 返回是 dict，value 是 7 元素 list（按下标全打过），没有第 8 个字段；
+#      三参数调用报 TypeError（CONFIRMED 里记的「只接 1~2 个参数」）。
 #
-# 三条策略线的最终状态：
-#   froec / froec_traded / froec_traded_stop35  -> 已原生移植，数据全部到位
-#   sgmspeg_v0b   -> 需要 jqfactor 近似（Barra 式 5 年回归斜率），保持信号执行器；
-#                    已有 sgmspeg_v0b_replay.py 可在 QMT 回测
-#   红利指数增强   -> QMT 侧无分红的会计年度归属（存储层就没有），保持信号执行器；
-#                    已有 hongli_index_plus_replay.py 可在 QMT 回测
+# 但这一路我已经错了五次，不该只凭自己的输出就否掉。两个真实可能：
+#   [1] xtdata.get_divid_factors(code, start, end) 【确实是三参数】（官方文档如此），
+#       返回 DataFrame —— 那份材料可能混了 xtdata 版与 ContextInfo 版。
+#   [2] ContextInfo 版有我没试过的第三种调用形态。
 #
-# 已排除、不要再试的路（每条都花过一轮以上）：
-#   · PERSHAREINDEX 的分红字段（官方 15 字段里没有；13 个候选名全 NaN）
-#   · 现金流量表「分配股利…支付的现金」（付现口径 + 银行混入偿付利息，2023 差 10 倍）
-#   · 从除权日推归属期（年派 100%、中期 0%、季度 0%，近 5 年 22751 笔实测）
-#   · 多因子/因子库（iQuant 多因子由国信提供已停更；EP 目录只有 config 没有 data.fe）
-#   · 空 field_list 枚举字段（财务接口不认这个约定）
-#   · Method2 判字段存在性（nan 有第二种含义，两个反例）
-#
-# 纪律（这一路踩出来的，按代价排序）：
-#   1. 先 dir(C) / __doc__ 枚举，再谈有没有 —— 猜不中名字 != 能力不存在
-#   2. 能查到官方文档的不要用探针去发现；文档也会错，验证这一步不能省
-#   3. 一个能力有没有，要把【所有可能提供它的接口】都查过；
-#      API 之上还有【存储层】—— DividData/Finance/EP 三个目录一看就清楚了
-#   4. 判别规则本身要先在【已知有值】的字段上验证（L3 只跑 4 个样本就宣布成立，被 M1 推翻）
-#   5. 打印要打【值】不是列名（L1 因 columns 分支优先级写错，15 个字段全打成「字段 1 个」）
-#   6. 本文件【不许出现模块级 import】—— 一律函数内导入（踩过两次）
-#   7. 本文件【不许用 emoji】—— GBK 编不了，io.open(p,'w') 先截断再 encode，
-#      抛异常就留下 0 字节文件（踩过两次）
-#   8. selftest 现在会编译本文件并查 6/7 两条 —— 曾经推了个语法坏的版本上去还全绿
+# 本节把这两个可能一次问清：dir() 容器与元素、三参数的确切报错、
+# 任何名字像 m_* / endDate / report 的属性、以及 xtdata 版能不能调。
+
+
+def q1_divid_shape(C):
+    """把返回值的类型与属性全掀开 —— 不猜，直接 dir()。"""
+    try:
+        r = _call_timeout(lambda: C.get_divid_factors('601398.SH'))
+    except Exception as e:
+        print('   get_divid_factors(code) 异常: %s' % str(e)[:70])
+        return
+    print('   容器类型: %s' % type(r).__name__)
+    members = [x for x in dir(r) if not x.startswith('__')]
+    print('   容器 dir(): %s' % str(members[:24])[:220])
+    if isinstance(r, dict):
+        ks = sorted(r)
+        print('   dict，%d 条；key 类型 %s' % (len(ks), type(ks[0]).__name__ if ks else '?'))
+        if not ks:
+            return
+        v = r[ks[-1]]
+        print('   ---- 取最后一条的 value ----')
+        print('   value 类型: %s' % type(v).__name__)
+        vm = [x for x in dir(v) if not x.startswith('__')]
+        print('   value dir(): %s' % str(vm[:40])[:400])
+        m_attrs = [x for x in vm if x.startswith('m_')]
+        print('   ★ 名字以 m_ 开头的属性: %s' % (m_attrs or '无'))
+        date_like = [x for x in vm if any(w in x.lower() for w in
+                     ('end', 'date', 'report', 'period', 'time'))]
+        print('   ★ 名字像日期/报告期的属性: %s' % (date_like or '无'))
+        try:
+            print('   len(value) = %d' % len(v))
+            print('   逐元素: %s' % [(i, v[i]) for i in range(len(v))])
+        except Exception as e:
+            print('   value 不可索引: %s' % str(e)[:50])
+        for name in ('m_endDate', 'm_exDivDate', 'm_cashDiv', 'endDate',
+                     'report_date', 'reportDate'):
+            print('   hasattr(value, %-14s) = %s' % (name, hasattr(v, name)))
+    else:
+        print('   不是 dict —— 逐元素看前 2 条')
+        try:
+            for it in list(r)[:2]:
+                im = [x for x in dir(it) if not x.startswith('__')]
+                print('      元素类型 %s  m_ 属性: %s'
+                      % (type(it).__name__, [x for x in im if x.startswith('m_')][:20]))
+        except Exception as e:
+            print('      迭代失败 %s' % str(e)[:50])
+
+
+def q2_divid_signatures(C):
+    """三参数到底报什么错 —— 把原文打出来，别转述。"""
+    calls = [
+        ("(code)", lambda: C.get_divid_factors('601398.SH')),
+        ("(code, '20240101')", lambda: C.get_divid_factors('601398.SH', '20240101')),
+        ("(code, '20240101', '20261231')",
+         lambda: C.get_divid_factors('601398.SH', '20240101', '20261231')),
+        ("(code, 20240101, 20261231)",
+         lambda: C.get_divid_factors('601398.SH', 20240101, 20261231)),
+        ("(code, 1)", lambda: C.get_divid_factors('601398.SH', 1)),
+    ]
+    for label, fn in calls:
+        try:
+            r = _call_timeout(fn)
+            n = len(r) if hasattr(r, '__len__') else '?'
+            print('   %-34s -> %s len=%s' % (label, type(r).__name__, n))
+        except Exception as e:
+            print('   %-34s -> %s: %s' % (label, type(e).__name__, str(e)[:90]))
+    print('   -- get_divid_factors 的 __doc__ --')
+    f = getattr(C, 'get_divid_factors', None)
+    d = (getattr(f, '__doc__', None) or '').strip() if f else ''
+    if d:
+        for ln in d.splitlines()[:12]:
+            print('      %s' % ln.rstrip()[:110])
+    else:
+        print('      无 __doc__')
+
+
+def q3_xtdata_divid(C):
+    """xtdata 版是三参数返回 DataFrame（官方文档）—— 试试它有没有报告期列。
+
+    已知 xtdata 在完整版 QMT 里连不上端口 58610，所以预期是连接错误。
+    但 get_divid_factors 是【读本地缓存】的，也许不需要连接 —— 值得一试。
+    """
+    try:
+        import xtquant.xtdata as xtd
+    except Exception as e:
+        print('   import xtquant.xtdata 失败: %s' % str(e)[:70])
+        return
+    print('   import 成功')
+    for label, fn in (
+        ("xtd.get_divid_factors('601398.SH')",
+         lambda: xtd.get_divid_factors('601398.SH')),
+        ("xtd.get_divid_factors('601398.SH','20240101','20261231')",
+         lambda: xtd.get_divid_factors('601398.SH', '20240101', '20261231')),
+    ):
+        try:
+            r = _call_timeout(fn)
+        except Exception as e:
+            print('   %-56s -> %s: %s' % (label[:56], type(e).__name__, str(e)[:70]))
+            continue
+        print('   %-56s -> %s' % (label[:56], type(r).__name__))
+        cols = getattr(r, 'columns', None)
+        if cols is not None:
+            print('      ★ 列名 %d 个: %s' % (len(cols), list(cols)))
+            try:
+                print('      尾 3 行:\n%s' % r.tail(3).to_string()[:600])
+            except Exception:
+                pass
+        else:
+            print('      %s' % str(r)[:200])
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -643,5 +735,7 @@ def _peek(r):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    # 暂无待确认项 —— 见上方「OPEN 已清空」的说明
+    ('Q1 ★ 掀开 get_divid_factors 返回值：dir() 容器与元素，找 m_endDate', q1_divid_shape),
+    ('Q2 三参数到底报什么错 + __doc__ 原文', q2_divid_signatures),
+    ('Q3 xtdata 版（官方是三参数返回 DataFrame）有没有报告期列', q3_xtdata_divid),
 ]
