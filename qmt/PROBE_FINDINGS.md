@@ -10,6 +10,78 @@
 这样一个文件随时能看到「已知什么、还差什么」的全貌，文件也会随核对推进
 自然变短。本 md 与探针里的 `CONFIRMED` 保持一致 —— 探针是可执行的那份。
 
+聚宽侧对应的速查表在 `datalake/docs/聚宽接口备忘.md`。
+
+---
+
+# 速查表（先查这里，别重新探测）
+
+下面每条都是**实测定案**。正文按四轮时间线记录了推导过程与踩过的错，
+但**日常查用只需要这张表**。
+
+## 能用的（已核对）
+
+| 要什么 | 怎么取 | 备注 |
+|---|---|---|
+| 行情 OHLCV | `C.get_market_data_ex(['open','close','high','low','volume','amount','preClose'], …, dividend_type='front')` | 与本地**逐项精确吻合** |
+| 全 A 股票池 | `C.get_stock_list_in_sector('沪深A股')` | 5216 只（本地同日在市 5152）。`'沪深京A股'` 5555、`'沪深300'` 300 |
+| ST 判定 | `C.get_stock_list_in_sector('沪深风险警示')` | 206 只。`ST板块`/`ST`/`风险警示`/`*ST` 等 9 个名字全 0 |
+| **申万一级行业** | `C.get_stock_list_in_sector('SW1' + 行业名)` | ★ **前缀+行业名不加分隔符**。`'SW1银行'`→42 只含 601398；`'银行'`→**0 只**。31 个行业全通，合计 5551 只 |
+| 行业（等价写法） | `C.get_industry('SW1银行')` | 与 `get_stock_list_in_sector` 返回**完全一致** |
+| **财务（时点正确）** | `C.get_financial_data(fields, codes, s, e, report_type='announce_time')` | ★★ **必须显式传**，见下方「绝对不要」 |
+| 财务（无插值） | `C.get_raw_financial_data(fields, codes, s, e)` | → `{code: {field: {报告期毫秒戳: 值}}}`。**不带公告日** |
+| **报告期 / 公告日** | 当**字段**请求：`ASHAREINCOME.m_timetag` / `ASHAREINCOME.m_anntime` | 毫秒时间戳、**北京时间**。601398：报告期 2023-12-31、公告日 2024-03-28，与本地 `report_date`/`pub_date` 精确吻合 |
+| 分红 | `C.get_divid_factors(code)` | 只接 1~2 个参数。`{除权日毫秒戳: [7个数]}`，`[0]`=每股税前现金分红，与本地 `bonus_ratio_rmb/10` **11/11 吻合**；`[6]`=复权因子 |
+| 总股本 / 流通股本 | `C.get_total_share(code)` / `C.get_float_caps(code)` | 601398 → 356406257089 / 269612212539。也在 `get_instrumentdetail` 的 `TotalVolume`/`FloatVolume` 里 |
+| 停牌 | `C.is_suspended_stock(code)` | → bool |
+| 指数权重 | `C.get_weight_in_index('000300.SH', code)` | → float（%） |
+| 交易日历 | `C.get_trading_dates('SH', s, e, count)` | ★ 第 4 参是 `count`。`('SH','','',10)` = 最近 10 个交易日 |
+| 合约详情 | `C.get_instrumentdetail(code)` | 30 键。`OpenDate`=上市日、`InstrumentName`、`PreClose`、`IsTrading` |
+| 指数日线 | `'000300.SH'` | `'399300.SZ'` 返回空。→ beta 自己回归即可 |
+| 账户 | `get_trade_detail_data`（模块级） | 空账号 `''` 也能读到 ACCOUNT。`passorder` 全局可见 |
+
+## 🔴 绝对不要
+
+| 别这么做 | 为什么 |
+|---|---|
+| `get_financial_data(f, s, a, b)` **不传 report_type** | **== `'report_time'` == 未来函数**。文档写的「默认即 `announce_time`」**与实测不符** |
+| `report_type='report_time'` | 按报告期填充：601398 在 **20241231** 就给出 2025-03-29 才公告的年报，**提前 88 天** |
+| `report_type` 传 `'announce'`/`'report'`/`'1'`/`'0'` | **静默返回 `None`**，不报错 → 财务整片为空、策略照跑、一只票都选不出来 |
+| `UpStopPrice` / `DownStopPrice` 当历史涨跌停价 | 是**实时值**：探针跑于 2026-08-30 而参考日 2025-06-30，601398 返回 8.60/7.04 而实际 8.25/6.75。必须按 `preClose×(1±涨跌幅)` 自算 |
+| 光秃秃的行业名 `'银行'` | → 0 只。必须带前缀 |
+| `THY1*` / `TGN*` 板块 | 本环境**无成分数据**，全 0 |
+| `ASHAREFINANCIALINDICATOR.*` | ★ **这张表根本不存在**。官方只有 5 张：`ASHAREBALANCESHEET`/`ASHAREINCOME`/`ASHARECASHFLOW`/`CAPITALSTRUCTURE`/`PERSHAREINDEX` |
+| 表名非全大写（`Balance.`/`Income.`/`BALANCESHEET.`） | 全 NaN |
+| 财务日期带横杠（`'2024-01-01'`） | 全 NaN。必须 `YYYYMMDD`，且 start/end 必传 |
+| `utcfromtimestamp` 解毫秒戳 | 会**差一天**。QMT 的时间戳是北京时间 00:00 |
+| 在 ContextInfo 里用 `xtdata` | 完整版 QMT 里 import 成功但**连不上**数据端口 58610。策略一律走 ContextInfo |
+
+## 三条纪律（踩出来的）
+
+1. **每节独立 try/except** —— 曾经一节抛异常把整轮结果打断了一半
+2. **不用 `not r` 判空** —— 返回可能是 pandas Panel，会抛 *The truth value of a Panel is ambiguous*
+3. **`_call_timeout` 包住所有接口调用** —— QMT 的 `print` 是缓冲的，一处卡死就整轮无输出
+
+## 方法论（最贵的教训）
+
+| 错误 | 代价 |
+|---|---|
+| **猜接口名，猜不中就断言「没有」** | 四条「取不到」全是错的。正解是 `dir(C)` 先枚举 —— 115 个成员一列就完 |
+| **只请求业务字段却抱怨拿不到日期** | 只请求 4 个字段当然只返回 4 列。公告日一直都有 |
+| **能查文档的却用探针穷举** | G 轮试 18 个行业名全 0，而文档一句话说清「前缀+行业名」。**凡是能查到文档的，不要用探针去发现** |
+| **把候选挂在不存在的表上** | 8 个扣非候选里 6 个挂在 `ASHAREFINANCIALINDICATOR`，全 NaN 与字段名对不对无关 |
+
+## 还没定案
+
+| 项 | 卡在哪 | 影响 |
+|---|---|---|
+| 扣非净利 | 8 个候选全 NaN（6 个挂错表）。候选已改挂 `PERSHAREINDEX`，见 `OPEN` 的 I1–I4 | 阻塞红利指数增强 B 腿的 `inc_return` |
+| `get_factor_data` | 签名是 `(stock_list, factor_list, start, end)`，但 `['pe']` 返回 None → 因子名不对 | 无（搁置） |
+| `get_his_st_data` | 四只候选 ST 股全返回空 dict | 无（ST 已有可用方案） |
+| `get_turn_over_rate` | 只接 1 个参数且返回 nan | 无（搁置） |
+
+---
+
 ⚠️ 不要为新问题新建探针脚本。往 `OPEN` 里加一节即可。
 （之前一轮一个脚本：probe_dividend / probe_hongli_fields / probe_fin /
 probe_round2 —— 结果就是每轮都要重问一遍已经确认过的东西。）

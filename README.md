@@ -15,6 +15,18 @@ finacial/
 datalake 对 assay 一无所知。datalake 路径不硬编码，由 `ASSAY_DATALAKE`
 或 `--datalake` 指定；换数据源只需另写一个实现同样接口的 Feed。
 
+## 📖 数据接口与口径速查（先查这里，别重新探测）
+
+| 文件 | 内容 |
+|---|---|
+| **`../datalake/docs/聚宽接口备忘.md`** | 聚宽接口与口径速查表：期间口径（单季/累计）、分子分母（归母/全口径）、as-of 语义、数值口径分歧、接口陷阱 |
+| **`qmt/PROBE_FINDINGS.md`**（开头速查表） | QMT 接口：能用的 / 🔴 绝对不要 / 还没定案。正文是四轮推导过程 |
+| `qmt/probe_all.py` 的 `CONFIRMED` | 上一份的**可执行版**，跑一次就打印全部已定案结论 |
+| `../datalake/docs/jqfactor-口径.md` | 聚宽 `get_factor_values` 各因子的确切定义（含已排除的候选清单） |
+
+新结论的落点：**先写进代码注释/loader docstring（挨着代码），再在速查表加一行。**
+反过来只写表不写代码，会让两边分叉。
+
 ## 用法
 
 ```bash

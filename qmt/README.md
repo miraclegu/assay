@@ -110,7 +110,11 @@ GBK 表示不了 `⚠ ✔ ✅` 等符号，用 `[!] v [OK]` 代替。
 
 ## 🔴 当前状态：froec 三条被财务数据卡住
 
-探针实测结论见 **`qmt/PROBE_FINDINGS.md`**。摘要：
+探针实测结论见 **`qmt/PROBE_FINDINGS.md`** —— 该文件开头是**速查表**
+（能用的 / 🔴 绝对不要 / 还没定案），日常查用只看那张表即可，正文是四轮推导过程。
+聚宽侧对应的速查表在 **`datalake/docs/聚宽接口备忘.md`**。
+
+摘要：
 
 **可用**：`get_market_data_ex`（OHLCV+amount+preClose，与本地逐项吻合）、
 `get_instrumentdetail`（上市日 5/5 对、名称、流通股本）、`get_divid_factors`
