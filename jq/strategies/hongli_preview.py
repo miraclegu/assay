@@ -280,13 +280,14 @@ def pick(t, prev):
     A_bak = a_all[TARGET_NUM[0]:TARGET_NUM[0] + BACKUP_NUM[0]]
 
     # ---- Sleeve B 红利价值：基本面四条 -> 高股息 ----
-    df = get_fundamentals(query(valuation.code).filter(
+    df = get_fundamentals(query(valuation.code, valuation.day).filter(
         valuation.code.in_(initial),
         valuation.pe_ratio.between(5, 50),
         indicator.inc_return.between(5, 100),
         indicator.inc_total_revenue_year_on_year.between(5, 100),
         indicator.inc_net_profit_year_on_year.between(10, 100),
     ), date=prev)
+    assert_asof(df, prev, '基本面四条查询')    # ★ 这条最该核 —— 四个财务阈值全在这
     b_pool = list(df.code)
     print('  基本面四条过滤后：%d 只' % len(b_pool))
     b_sorted, dy_b = dividend_ratio_sorted(b_pool, prev, 0.00, 0.10, 0.03)
