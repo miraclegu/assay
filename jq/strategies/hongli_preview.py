@@ -242,10 +242,12 @@ def dividend_ratio_sorted(stock_list, time1, p1, p2, threshold):
     div = dividend_by_fiscal_year(stock_list, time1)
     if len(div) == 0:
         return [], pd.DataFrame()
-    cap = get_fundamentals(
-        query(valuation.code, valuation.market_cap).filter(
+    _cap = get_fundamentals(
+        query(valuation.code, valuation.day, valuation.market_cap).filter(
             valuation.code.in_(list(div.index))),
-        date=time1).set_index('code')
+        date=time1)
+    assert_asof(_cap, time1, '总市值查询')     # ★ 自证基准日，见函数注释
+    cap = _cap[['code', 'market_cap']].set_index('code')
     df = pd.concat([div.rename('bonus_amount_rmb'), cap], axis=1, sort=False)
     df = df[df.market_cap.notna() & (df.market_cap > 0)]
     df['dividend_ratio'] = (df['bonus_amount_rmb'] / 10000) / df['market_cap']
@@ -311,7 +313,18 @@ def _dr(dy, dy_b, s):
     return 0.0
 
 
+ALLOW_BACKTEST_ENV = False   # 只有在你完全清楚后果时才改 True
+
+
 def warn_if_backtest():
+    """在回测环境里【直接拒绝运行】，不是打个警告了事。
+
+    为什么必须硬拒 —— 实测踩过：在回测（起点 2019-01-01）里跑预览脚本，
+        get_fundamentals(q, date=prev)  被 avoid_future_data 压到回测当前日期
+        get_price(end_date=prev)        没被拦住，拿到 TRADE_DATE 的价格
+    结果是一份【看起来完全合理】的下单清单，实际是「8 年前的选股 + 今天的价格」。
+    这种输出比报错危险得多。
+    """
     """本脚本是给【研究环境】的。在回测里跑会取到回测日期【之后】的数据 ——
     那是未来函数，而且日志时间戳会是回测当前时间，很容易看错。
 
@@ -325,10 +338,35 @@ def warn_if_backtest():
             print('       · get_price(end_date=TRADE_DATE) 会取到回测日期之后的数据')
             print('         = 未来函数，结果不可用于任何评估')
             print('       · 日志时间戳是【回测当前时间】而不是 TRADE_DATE，容易看错')
-            print('     （实测过一次：日志显示 2019-01-01，而价格是 2026-08-31 的）')
+            print('       · 最坏的情况：基本面被压到回测日期、价格却是 TRADE_DATE 的')
+            print('         -> 「8 年前的选股 + 今天的价格」，看着合理其实全错')
+            print('     请改到【研究环境（Jupyter）】跑。')
             print('=' * 76)
+            if not ALLOW_BACKTEST_ENV:
+                raise RuntimeError('本脚本只能在研究环境跑。确实要在回测里跑，'
+                                   '把 ALLOW_BACKTEST_ENV 改成 True 并自行承担后果。')
             return True
     return False
+
+
+def assert_asof(df, prev, what):
+    """自证：get_fundamentals 返回的 day 列必须等于 prev。
+
+    比「检测全局 context」更直接 —— 它直接问「你给我的到底是哪天的数据」。
+    回测环境里 avoid_future_data 会把 date 压到回测当前日期而【不报错】，
+    只有核对返回的 day 才看得出来。
+    """
+    if df is None or 'day' not in getattr(df, 'columns', []):
+        return
+    days = set(str(x)[:10] for x in df['day'].dropna().unique())
+    if not days:
+        return
+    if days != {str(prev)}:
+        raise RuntimeError(
+            '[基准日不一致] %s 请求的是 %s，但 get_fundamentals 返回的是 %s。\n'
+            '    回测环境里 avoid_future_data 会把 date 压到回测当前日期而不报错，\n'
+            '    结果是「那一天的选股 + TRADE_DATE 的价格」—— 全错。\n'
+            '    请在【研究环境（Jupyter）】跑。' % (what, prev, sorted(days)))
 
 
 def main():

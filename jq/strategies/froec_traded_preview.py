@@ -62,6 +62,7 @@ INDUSTRY_FILTER = ['钢铁I', '煤炭I', '石油石化I', '采掘I',
                    '交运设备I', '交通运输I', '传媒I', '环保I']
 REBAL_WEEKDAY   = 1            # 每周第几个交易日调仓（1 = 周一）
 STOP_LOSS       = 0.35
+FLOATMV_SANITY  = 200.0        # 领域自检阈值（亿元）：目标里最大流通市值超过它就报警
 
 LOCAL_PORT = {
     'strategy': 'strategies/小市值/froec_traded.py',
@@ -215,9 +216,11 @@ def pick(prev):
     print('  过滤次新/科创/ST 后 %d 只' % len(initial))
 
     # ---- PB 半区（eps>0 且 pb>0）----
-    q = query(valuation.code, valuation.pb_ratio, indicator.eps).filter(
+    q = query(valuation.code, valuation.day, valuation.pb_ratio,
+              indicator.eps).filter(
         valuation.code.in_(initial)).order_by(valuation.pb_ratio.asc())
     df = get_fundamentals(q, date=prev)
+    assert_asof(df, prev, 'PB/eps 查询')      # ★ 自证基准日，见函数注释
     df = df[df['eps'] > 0]
     df = df[df['pb_ratio'] > 0]
     pb_list = list(df.code)
@@ -256,10 +259,22 @@ def pick(prev):
     # ---- 流通市值升序，取前 CANDIDATE_NUM ----
     if not roe_list:
         return [], pd.DataFrame()
-    q = query(valuation.code, valuation.circulating_market_cap).filter(
+    q = query(valuation.code, valuation.day,
+              valuation.circulating_market_cap).filter(
         valuation.code.in_(roe_list)).order_by(
         valuation.circulating_market_cap.asc())
     cap = get_fundamentals(q, date=prev)
+    assert_asof(cap, prev, '流通市值查询')
+    # ★ 领域自检：froec 是【小市值】线。目标里出现几百亿的票 = 基准日错配的信号。
+    #   实测踩过：香农芯创（2018 年名聚隆科技）2018 年 10.6 亿、2026 年 688.6 亿，
+    #   混合日期时它会出现在「市值升序前 10」里。
+    if len(cap):
+        mx = float(cap['circulating_market_cap'].head(CANDIDATE_NUM).max())
+        if mx > FLOATMV_SANITY:
+            print('[!!] 目标组合里最大流通市值 %.1f 亿 > 阈值 %.0f 亿 —— 很可能是'
+                  % (mx, FLOATMV_SANITY))
+            print('     【基准日错配】（选股用了一个日期、价格用了另一个）。')
+            print('     froec 是小市值线，正常目标应该都在几十亿以内。请核对运行环境。')
     target = list(cap.code)[:CANDIDATE_NUM]
     return target, cap.set_index('code')
 
@@ -294,18 +309,58 @@ def check_stop(holds, cost, px, prev):
 
 
 # ============================== 主流程 ======================================
+ALLOW_BACKTEST_ENV = False   # 只有在你完全清楚后果时才改 True
+
+
 def warn_if_backtest():
+    """在回测环境里【直接拒绝运行】，不是打个警告了事。
+
+    为什么必须硬拒 —— 实测踩过：在回测（起点 2019-01-01）里跑本脚本，
+        get_fundamentals(q, date=prev)  被 avoid_future_data 压到回测当前日期
+                                        -> 拿到 2018-12-28 的 PB/ROE/市值
+        get_price(end_date=prev)        没被拦住 -> 拿到 2026-08-31 的价格
+    结果是一份【看起来完全合理】的下单清单，实际是「8 年前的选股 + 今天的价格」：
+    香农芯创（2018 年名为聚隆科技）2018 年流通市值 10.6 亿、PB 1.35，
+    选它没错；但 2026 年它是 688.6 亿、PB 14.78，按市值升序排全市场第 4971 位。
+    这种输出比报错危险得多，所以宁可不跑。
+    """
     for name in ('context', 'g'):
         if name in globals():
             print('=' * 76)
-            print('[!!] 检测到全局 %s —— 你可能在【回测/模拟环境】里跑本脚本。' % name)
+            print('[!!] 检测到全局 %s —— 你在【回测/模拟环境】里跑本脚本。' % name)
             print('     本脚本只该在【研究环境（Jupyter）】跑。在回测里跑的话：')
             print('       · get_price(end_date=TRADE_DATE) 会取到回测日期之后的数据')
             print('         = 未来函数，结果不可用于任何评估')
             print('       · 日志时间戳是【回测当前时间】而不是 TRADE_DATE，容易看错')
+            print('       · 最坏的情况：基本面被压到回测日期、价格却是 TRADE_DATE 的')
+            print('         -> 「8 年前的选股 + 今天的价格」，看着合理其实全错')
+            print('     请改到【研究环境（Jupyter）】跑。')
             print('=' * 76)
+            if not ALLOW_BACKTEST_ENV:
+                raise RuntimeError('本脚本只能在研究环境跑。确实要在回测里跑，'
+                                   '把 ALLOW_BACKTEST_ENV 改成 True 并自行承担后果。')
             return True
     return False
+
+
+def assert_asof(df, prev, what):
+    """自证：get_fundamentals 返回的 day 列必须等于 prev。
+
+    这是比「检测全局 context」更直接的判据 —— 它直接问「你给我的到底是哪天的数据」。
+    回测环境里 avoid_future_data 会把 date 压到回测当前日期而【不报错】，
+    只有核对返回的 day 才看得出来。
+    """
+    if df is None or 'day' not in getattr(df, 'columns', []):
+        return
+    days = set(str(x)[:10] for x in df['day'].dropna().unique())
+    if not days:
+        return
+    if days != {str(prev)}:
+        raise RuntimeError(
+            '[基准日不一致] %s 请求的是 %s，但 get_fundamentals 返回的是 %s。\n'
+            '    回测环境里 avoid_future_data 会把 date 压到回测当前日期而不报错，\n'
+            '    结果是「那一天的选股 + TRADE_DATE 的价格」—— 全错。\n'
+            '    请在【研究环境（Jupyter）】跑。' % (what, prev, sorted(days)))
 
 
 def main():
