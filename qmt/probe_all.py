@@ -202,6 +202,28 @@ CONFIRMED = [
      '另有 Top10Holder / Top10FlowHolder / HolderNum。'
      '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
      "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
+    ('[**] L3 找到【字段存在性判别器】—— 比「全 NaN」精确得多', '2026-09-01',
+     'get_financial_data 的第二种签名 (tabname, colname, market, code) 返回单个 float：'
+     "  Method2('PERSHAREINDEX','adjusted_net_profit','SH','601398')       -> 0.0；"
+     "  Method2('PERSHAREINDEX','__不存在的字段__','SH','601398')            -> nan；"
+     "  Method2('PERSHAREINDEX','dividend_per_share','SH','601398')        -> nan；"
+     "  Method2('ASHAREINCOME','net_profit_excl_min_int_inc','SH','601398')-> 7.5786e+10。"
+     '★ 判别规则：【nan = 字段不存在；任何数值（含 0.0）= 字段存在】。'
+     'dividend_per_share 与我编造的字段名返回完全一样 -> 该字段在本环境【确实不存在】。'
+     '这比之前的「全 NaN」精确得多 —— 全 NaN 分不清是名字错还是没下载数据。'
+     '★ 以后测「有没有某字段」一律先用 Method2 判别，别再用 Method1 看 NaN。'
+     '★ 另：adjusted_net_profit 返回 0.0 而非 nan -> 字段【存在】，只是该 barpos 上是 0。'),
+    ('[定案] 空 field_list 不能枚举字段', '2026-09-01',
+     "get_financial_data([], …) -> DataFrame 【字段 0 个】；"
+     "get_financial_data(['PERSHAREINDEX.'], …) -> 一个空名列 ['']。"
+     '文档里「field_list=[] 取全部字段」那条约定是 get_local_data 的，财务接口不认。'
+     "[?] get_raw_financial_data([], …) -> dict len=1 keys=['601398.SH'] —— "
+     '内层没打开（探针漏了 _dig），可能才是枚举入口。见 OPEN 的 M2。'),
+    ('[**] get_local_data 已过时 -> 用 get_market_data_ex(subscribe=False)', '2026-09-01',
+     'QMT 自己的提示原文：「get_local_data接口版本较老，推荐使用 get_market_data_ex 替代，'
+     '参数 subscribe 设置为 False，只取本地数据不从服务器订阅数据」。'
+     '★ 这条对【批量导出数据给 datalake】有用 —— 那件事一直卡在 xtdata 连不上端口 58610，'
+     '而 get_market_data_ex(subscribe=False) 是 ContextInfo 侧的本地取数方案。'),
     ('[**] PERSHAREINDEX 官方字段清单（15 个）—— 不再猜名字', '2026-09-01',
      's_fa_ocfps=每股经营活动现金流量 / s_fa_bps=每股净资产 / '
      's_fa_eps_basic=基本每股收益 / s_fa_eps_diluted=稀释每股收益 / '
@@ -451,33 +473,56 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 L：枚举收尾 ============================
+# ============================== 待确认 M：补两处漏 ============================
 #
-# K 轮已用【官方字段清单】而不是猜名字，确认 PERSHAREINDEX 15 个字段里没有分红。
-# 但还有一个从没用过的枚举入口：文档说 get_local_data 的 field_list 传【空列表】
-# = 取全部字段。若这个约定对财务接口也成立，就能一次把字段全列出来，
-# 把「有没有某字段」这类问题永久关掉 —— 不用再一个个猜。
+# L 轮的两个结果没看全，是【探针自己的漏】不是接口的问题：
+#   ① L1 只打了列名没打值 —— 15 个字段全返回 DataFrame，但哪些有值不知道
+#      （_try 里 columns 分支优先级写错，把值那条路盖掉了）
+#   ② get_raw_financial_data([], …) 返回 dict len=1 keys=['601398.SH']，
+#      内层没打开 —— 重写时把 _dig 删了。这可能才是全字段枚举入口。
+# 本轮只补这两处，外加把 Method2 判别器用起来。
 
 
-def _try(C, label, call):
+def _peekval(r):
+    """★ 单字段请求要看【值】不是列名。上一轮就是在这里漏掉的：
+    columns 分支优先，把值那条路整个盖掉，结果 15 个字段全打成「字段 1 个」。"""
     try:
-        r = _call_timeout(call)
+        import numpy as np
+        if r is None:
+            return 'None'
+        if hasattr(r, 'values'):
+            v = np.asarray(r.values, dtype='float64').ravel()
+            ok = v[~np.isnan(v)]
+            if not len(ok):
+                return '全 NaN'
+            return '非空 %d/%d  首 %.6g  末 %.6g' % (len(ok), len(v), ok[0], ok[-1])
+        return str(r)[:70]
     except Exception as e:
-        print('   %-54s -> %s' % (label, str(e)[:58]))
-        return None
-    t = type(r).__name__
+        return '看不了(%s)' % str(e)[:34]
+
+
+def _dig(r, code, depth=0):
+    """逐层拆开返回，目标是拿到【字段名清单】。"""
+    pad = '      ' + '  ' * depth
+    if r is None:
+        print('%sNone' % pad); return
+    if isinstance(r, dict):
+        ks = list(r)
+        print('%sdict len=%d keys=%s' % (pad, len(ks), str(ks[:20])[:170]))
+        if depth < 3 and ks:
+            k = code if code in r else ks[0]
+            print('%s-> 展开 [%s]' % (pad, k))
+            _dig(r[k], code, depth + 1)
+        return
     cols = getattr(r, 'columns', None)
     if cols is not None:
-        print('   %-54s -> %s 字段 %d 个: %s'
-              % (label, t, len(cols), str(list(cols)[:30])[:150]))
-    elif isinstance(r, dict):
-        print('   %-54s -> dict len=%d keys=%s' % (label, len(r), str(list(r)[:6])[:90]))
-    else:
-        print('   %-54s -> %s %s' % (label, t, _peek(r)))
-    return r
+        print('%s%s shape=%s 字段 %d 个: %s'
+              % (pad, type(r).__name__, getattr(r, 'shape', '?'),
+                 len(cols), str(list(cols)[:40])[:250]))
+        return
+    print('%s%s %s' % (pad, type(r).__name__, str(r)[:150]))
 
 
-# 官方 15 个字段（来自迅投文档，不是猜的）。逐个取一次，确认哪些在本环境有值。
 PSI15 = [
     ('s_fa_ocfps', '每股经营现金流'), ('s_fa_bps', '每股净资产'),
     ('s_fa_eps_basic', '基本每股收益'), ('s_fa_eps_diluted', '稀释每股收益'),
@@ -491,63 +536,93 @@ PSI15 = [
 ]
 
 
-def l1_psi15(C):
-    """官方 15 个字段逐个核对。重点是 adjusted_net_profit（扣非净利，直接可用）。
+def m1_psi15_values(C):
+    """15 个字段【看值】+ 用 Method2 判存在性。两个维度一起才说得清。
 
-    本地对数基准（601398，亿元）：
-        归母净利 2023 = 3639.93   2024 = 3658.63
-        扣非净利 需与 panel.adjusted_profit_q 累计后比
+    本地对数基准（601398 2023 年报）：
+        归母净利 3.63993e+11   全口径 3.65116e+11
+        扣非净利 见 panel.adjusted_profit_q（单季，需累计）
     """
+    print('   字段                              Method1 取值（2024-04 窗口）        Method2')
     for f, cn in PSI15:
-        _try(C, 'PERSHAREINDEX.%-28s %s' % (f, cn),
-             lambda f=f: C.get_financial_data(
-                 ['PERSHAREINDEX.' + f], ['601398.SH'], '20240401', '20240420',
-                 report_type='announce_time'))
-    print('   [判读] inc_net_profit 应约 3.64e+11（2023年报归母），不是个增长率 ——')
-    print('          迅投的 inc_ 前缀是「收入/利润」，与聚宽的 inc_*_yoy 含义相反。')
-    print('          adjusted_net_profit 有值就不必再用「扣非EPS x 总股本」绕。')
+        m1 = '?'
+        try:
+            r = _call_timeout(lambda f=f: C.get_financial_data(
+                ['PERSHAREINDEX.' + f], ['601398.SH'], '20240401', '20240420',
+                report_type='announce_time'))
+            m1 = _peekval(r)
+        except Exception as e:
+            m1 = '异常 %s' % str(e)[:24]
+        m2 = '?'
+        try:
+            v = _call_timeout(lambda f=f: C.get_financial_data(
+                'PERSHAREINDEX', f, 'SH', '601398'))
+            m2 = ('nan -> 【字段不存在】' if (v != v) else '%.6g -> 存在' % v)
+        except Exception as e:
+            m2 = '异常 %s' % str(e)[:20]
+        print('   %-30s %-34s %s' % (f + '(' + cn + ')', m1, m2))
+    print('   [判读] 归母净利 inc_net_profit 应约 3.64e+11（2023年报），不是增长率。')
+    print('          扣非净利 adjusted_net_profit 若有值 -> 直接可用，不必绕 EPS x 股本。')
 
 
-def l2_enumerate_fields(C):
-    """★ 空 field_list = 取全部字段。文档对 get_local_data 是这么说的，
-    试试财务接口是否也认这个约定 —— 认的话「有没有某字段」就永久不用猜了。
+def m2_raw_enumerate(C):
+    """★ get_raw_financial_data([], …) 返回了 code 键 —— 内层可能是全字段。
+
+    上一轮只打了 dict len=1 keys=[...] 就过去了（探针把 _dig 删了）。
+    这次逐层拆开。若内层真是全字段，「有没有某字段」这类问题就永久关掉了。
     """
-    print('   -- get_local_data（文档说 field_list=[] 取全部字段）--')
     for label, call in (
-        ("([], ['601398.SH'], '1d')",
-         lambda: C.get_local_data([], ['601398.SH'], '1d', '20240101', '20240110')),
-        ("([], ['601398.SH'], '1d', count=-1)",
-         lambda: C.get_local_data([], ['601398.SH'], '1d', '20240101', '20240110', -1)),
-    ):
-        _try(C, label, call)
-    print('   -- 财务接口试空 field_list --')
-    for label, call in (
-        ('get_financial_data([], …)',
+        ("raw([], ['601398.SH'], 2024 全年)",
+         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240101', '20241231')),
+        ("raw([], ['601398.SH'], 单日)",
+         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240401', '20240401')),
+        ("raw(['PERSHAREINDEX'], …)",
+         lambda: C.get_raw_financial_data(['PERSHAREINDEX'], ['601398.SH'],
+                                          '20240101', '20241231')),
+        ("fin([], …) 对照（已知返回 0 字段）",
          lambda: C.get_financial_data([], ['601398.SH'], '20240401', '20240420',
                                       report_type='announce_time')),
-        ('get_raw_financial_data([], …)',
-         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240101', '20241231')),
-        ("get_financial_data(['PERSHAREINDEX.'], …) 只给表名带点",
-         lambda: C.get_financial_data(['PERSHAREINDEX.'], ['601398.SH'],
-                                      '20240401', '20240420',
-                                      report_type='announce_time')),
     ):
-        _try(C, label, call)
+        print('   -- %s --' % label)
+        try:
+            r = _call_timeout(call)
+        except Exception as e:
+            print('      异常 %s' % str(e)[:70]); continue
+        _dig(r, '601398.SH')
 
 
-def l3_method2(C):
-    """get_financial_data 的第二种签名：(tabname, colname, market, code, report_type, barpos)。
+def m3_dividend_final(C):
+    """用 Method2 判别器把分红字段这件事【彻底关掉】。
 
-    传一个【故意写错的字段名】，看报错信息会不会把合法字段列出来 ——
-    很多接口的报错就是最好的字段清单。
+    nan = 字段不存在；任何数值（含 0.0）= 存在。
+    对照组：__不存在的字段__ 必须是 nan，net_profit_excl_min_int_inc 必须有值 ——
+    两个对照都对，中间那些结果才可信。
     """
-    for args in (
-        ('PERSHAREINDEX', 'adjusted_net_profit', 'SH', '601398'),
-        ('PERSHAREINDEX', '__不存在的字段__', 'SH', '601398'),
-        ('PERSHAREINDEX', 'dividend_per_share', 'SH', '601398'),
-        ('ASHAREINCOME', 'net_profit_excl_min_int_inc', 'SH', '601398'),
-    ):
-        _try(C, 'Method2%s' % (args,), lambda a=args: C.get_financial_data(*a))
+    cands = [
+        ('PERSHAREINDEX', '__对照_不存在__'),
+        ('ASHAREINCOME', 'net_profit_excl_min_int_inc'),
+        ('PERSHAREINDEX', 'dividend_per_share'),
+        ('PERSHAREINDEX', 'dividend_per_share_before_tax'),
+        ('PERSHAREINDEX', 's_fa_dps'),
+        ('PERSHAREINDEX', 'cash_dividend_per_share'),
+        ('PERSHAREINDEX', 'dividend_payout_ratio'),
+        ('PERSHAREINDEX', 'dividend_yield'),
+        ('PERSHAREINDEX', 's_fa_undistributedps'),
+        ('ASHARECASHFLOW', 'dividend_interest_payment'),
+        ('ASHAREBALANCESHEET', 'dividend_payable'),
+        ('ASHAREBALANCESHEET', 'div_payable'),
+    ]
+    for tab, col in cands:
+        try:
+            v = _call_timeout(lambda tab=tab, col=col:
+                              C.get_financial_data(tab, col, 'SH', '601398'))
+        except Exception as e:
+            print('   %-22s.%-32s -> 异常 %s' % (tab, col, str(e)[:34])); continue
+        tag = 'nan -> 【不存在】' if (v != v) else '%.6g -> 存在' % v
+        print('   %-22s.%-32s -> %s' % (tab, col, tag))
+    print('   [判读] 两个对照必须先对：__对照_不存在__ 是 nan、'
+          'net_profit_excl_min_int_inc 有值。')
+    print('          对照都对，中间那些「不存在」才是结论而不是噪声。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -555,7 +630,7 @@ def l3_method2(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('L1 官方 15 个字段逐个核对（重点 adjusted_net_profit 扣非净利）', l1_psi15),
-    ('L2 ★ 空 field_list 枚举全部字段 —— 关掉「猜字段名」这件事', l2_enumerate_fields),
-    ('L3 Method2 签名：故意写错字段名，看报错是否列出合法值', l3_method2),
+    ('M1 15 个字段【看值】+ Method2 判存在性（补 L1 的漏）', m1_psi15_values),
+    ('M2 ★ raw([], …) 内层逐层拆开 —— 可能是全字段枚举入口', m2_raw_enumerate),
+    ('M3 用判别器把分红字段彻底关掉（带两个对照组）', m3_dividend_final),
 ]
