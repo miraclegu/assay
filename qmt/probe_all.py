@@ -202,7 +202,19 @@ CONFIRMED = [
      '另有 Top10Holder / Top10FlowHolder / HolderNum。'
      '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
      "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
-    ('[**] L3 找到【字段存在性判别器】—— 比「全 NaN」精确得多', '2026-09-01',
+    ('[已作废] L3 的「字段存在性判别器」—— M1 找到两个反例', '2026-09-01',
+     '★★ 上一轮宣布 Method2 的 nan = 字段不存在，M1 立刻推翻了它，两个反例：'
+     '  [1] adjusted_earnings_per_share：Method2 -> nan，但 Method1 【非空 13/13 值 0.97】；'
+     '  [2] ASHARECASHFLOW.dividend_interest_payment：Method2 -> nan，'
+     '      但中文写法「现金流量表.分配股利、利润或偿付利息支付的现金」Method1 【非空 843 个】。'
+     '-> Method2 的 nan 有第二种含义（该字段在 Method2 的默认 barpos 上无值），'
+     '   【不能用来判定字段是否存在】。'
+     '★ 连带后果：dividend_per_share 返回 nan 也【不能】证明它不存在 —— '
+     '  分红字段的证据基础退回到「Method1 全 NaN」，而全 NaN 分不清名字错还是没数据。'
+     '★ 教训：一个判别规则只跑了 4 个样本（其中 2 个是我自己挑的对照）就宣布成立，'
+     '  样本量根本不够。要先在【已知有值】的字段上验证规则本身。'
+     '（下面保留原文，记住错在哪。）'),
+    ('[?] 原 L3 判别器（已作废，保留原文）', '2026-09-01',
      'get_financial_data 的第二种签名 (tabname, colname, market, code) 返回单个 float：'
      "  Method2('PERSHAREINDEX','adjusted_net_profit','SH','601398')       -> 0.0；"
      "  Method2('PERSHAREINDEX','__不存在的字段__','SH','601398')            -> nan；"
@@ -213,6 +225,27 @@ CONFIRMED = [
      '这比之前的「全 NaN」精确得多 —— 全 NaN 分不清是名字错还是没下载数据。'
      '★ 以后测「有没有某字段」一律先用 Method2 判别，别再用 Method1 看 NaN。'
      '★ 另：adjusted_net_profit 返回 0.0 而非 nan -> 字段【存在】，只是该 barpos 上是 0。'),
+    ('[**] M1 定案：PERSHAREINDEX 15 个字段里【只有 9 个有值】', '2026-09-01',
+     '601398 2024-04 窗口逐个实测（Method1 非空 13/13）：'
+     's_fa_ocfps 3.9758 / s_fa_bps 9.55 / s_fa_eps_basic 0.98 / s_fa_eps_diluted 0.98 / '
+     's_fa_undistributedps 5.3649 / s_fa_surpluscapitalps 0.4157 / '
+     'adjusted_earnings_per_share 0.97 / du_return_on_equity 10.037 / gear_ratio 91.5507。'
+     '[!!] 六个【金额类】字段值【恒为 0】（不是 NaN 是 0，所以非空检查也拦不住）：'
+     'inc_revenue / inc_gross_profit / inc_profit_before_tax / du_profit / '
+     'inc_net_profit / adjusted_net_profit。'
+     '★ 纠正上一轮：我说「adjusted_net_profit 直接就是扣非净利润，不必绕 EPS x 股本」'
+     '是【错的】—— 它恒为 0，扣非只能走 adjusted_earnings_per_share x get_total_share。'
+     '★ 金额一律去三大报表取（ASHAREINCOME 原值已验证与本地 8/8 吻合）。'
+     '★ Method1 与 Method2 取的【不是同一报告期】：s_fa_bps 9.55 vs 5.46、'
+     'du_return_on_equity 10.037 vs 3.7869、s_fa_eps_basic 0.98 vs 0.21 -> '
+     'Method2 只适合快速探路，取值一律用 Method1 + m_timetag。'),
+    ('[定案] M2：raw 的空 field_list 也不能枚举，这条路彻底封死', '2026-09-01',
+     "get_raw_financial_data([], ['601398.SH'], 2024全年) -> 外层有 code 键但"
+     '【内层是空 dict】；单日窗口同样为空；raw 只给表名 -> dict len=0；'
+     'get_financial_data([], …) -> DataFrame 字段 0 个。'
+     '-> QMT 侧【没有任何字段枚举入口】，字段名只能查官方文档。'
+     '文档里「field_list=[] 取全部字段」那条是 get_local_data 的约定，'
+     '而 get_local_data 本身已过时（见下一条）。'),
     ('[定案] 空 field_list 不能枚举字段', '2026-09-01',
      "get_financial_data([], …) -> DataFrame 【字段 0 个】；"
      "get_financial_data(['PERSHAREINDEX.'], …) -> 一个空名列 ['']。"
@@ -473,156 +506,35 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 M：补两处漏 ============================
+# ================================ OPEN 已清空 ================================
 #
-# L 轮的两个结果没看全，是【探针自己的漏】不是接口的问题：
-#   ① L1 只打了列名没打值 —— 15 个字段全返回 DataFrame，但哪些有值不知道
-#      （_try 里 columns 分支优先级写错，把值那条路盖掉了）
-#   ② get_raw_financial_data([], …) 返回 dict len=1 keys=['601398.SH']，
-#      内层没打开 —— 重写时把 _dig 删了。这可能才是全字段枚举入口。
-# 本轮只补这两处，外加把 Method2 判别器用起来。
-
-
-def _peekval(r):
-    """★ 单字段请求要看【值】不是列名。上一轮就是在这里漏掉的：
-    columns 分支优先，把值那条路整个盖掉，结果 15 个字段全打成「字段 1 个」。"""
-    try:
-        import numpy as np
-        if r is None:
-            return 'None'
-        if hasattr(r, 'values'):
-            v = np.asarray(r.values, dtype='float64').ravel()
-            ok = v[~np.isnan(v)]
-            if not len(ok):
-                return '全 NaN'
-            return '非空 %d/%d  首 %.6g  末 %.6g' % (len(ok), len(v), ok[0], ok[-1])
-        return str(r)[:70]
-    except Exception as e:
-        return '看不了(%s)' % str(e)[:34]
-
-
-def _dig(r, code, depth=0):
-    """逐层拆开返回，目标是拿到【字段名清单】。"""
-    pad = '      ' + '  ' * depth
-    if r is None:
-        print('%sNone' % pad); return
-    if isinstance(r, dict):
-        ks = list(r)
-        print('%sdict len=%d keys=%s' % (pad, len(ks), str(ks[:20])[:170]))
-        if depth < 3 and ks:
-            k = code if code in r else ks[0]
-            print('%s-> 展开 [%s]' % (pad, k))
-            _dig(r[k], code, depth + 1)
-        return
-    cols = getattr(r, 'columns', None)
-    if cols is not None:
-        print('%s%s shape=%s 字段 %d 个: %s'
-              % (pad, type(r).__name__, getattr(r, 'shape', '?'),
-                 len(cols), str(list(cols)[:40])[:250]))
-        return
-    print('%s%s %s' % (pad, type(r).__name__, str(r)[:150]))
-
-
-PSI15 = [
-    ('s_fa_ocfps', '每股经营现金流'), ('s_fa_bps', '每股净资产'),
-    ('s_fa_eps_basic', '基本每股收益'), ('s_fa_eps_diluted', '稀释每股收益'),
-    ('s_fa_undistributedps', '每股未分配利润'),
-    ('s_fa_surpluscapitalps', '每股资本公积'),
-    ('adjusted_earnings_per_share', '扣非每股收益'),
-    ('inc_revenue', '主营收入'), ('inc_gross_profit', '毛利润'),
-    ('inc_profit_before_tax', '利润总额'), ('du_profit', '净利润'),
-    ('inc_net_profit', '归母净利润'), ('adjusted_net_profit', '扣非净利润'),
-    ('du_return_on_equity', '净资产收益率'), ('gear_ratio', '资产负债比率'),
-]
-
-
-def m1_psi15_values(C):
-    """15 个字段【看值】+ 用 Method2 判存在性。两个维度一起才说得清。
-
-    本地对数基准（601398 2023 年报）：
-        归母净利 3.63993e+11   全口径 3.65116e+11
-        扣非净利 见 panel.adjusted_profit_q（单季，需累计）
-    """
-    print('   字段                              Method1 取值（2024-04 窗口）        Method2')
-    for f, cn in PSI15:
-        m1 = '?'
-        try:
-            r = _call_timeout(lambda f=f: C.get_financial_data(
-                ['PERSHAREINDEX.' + f], ['601398.SH'], '20240401', '20240420',
-                report_type='announce_time'))
-            m1 = _peekval(r)
-        except Exception as e:
-            m1 = '异常 %s' % str(e)[:24]
-        m2 = '?'
-        try:
-            v = _call_timeout(lambda f=f: C.get_financial_data(
-                'PERSHAREINDEX', f, 'SH', '601398'))
-            m2 = ('nan -> 【字段不存在】' if (v != v) else '%.6g -> 存在' % v)
-        except Exception as e:
-            m2 = '异常 %s' % str(e)[:20]
-        print('   %-30s %-34s %s' % (f + '(' + cn + ')', m1, m2))
-    print('   [判读] 归母净利 inc_net_profit 应约 3.64e+11（2023年报），不是增长率。')
-    print('          扣非净利 adjusted_net_profit 若有值 -> 直接可用，不必绕 EPS x 股本。')
-
-
-def m2_raw_enumerate(C):
-    """★ get_raw_financial_data([], …) 返回了 code 键 —— 内层可能是全字段。
-
-    上一轮只打了 dict len=1 keys=[...] 就过去了（探针把 _dig 删了）。
-    这次逐层拆开。若内层真是全字段，「有没有某字段」这类问题就永久关掉了。
-    """
-    for label, call in (
-        ("raw([], ['601398.SH'], 2024 全年)",
-         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240101', '20241231')),
-        ("raw([], ['601398.SH'], 单日)",
-         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240401', '20240401')),
-        ("raw(['PERSHAREINDEX'], …)",
-         lambda: C.get_raw_financial_data(['PERSHAREINDEX'], ['601398.SH'],
-                                          '20240101', '20241231')),
-        ("fin([], …) 对照（已知返回 0 字段）",
-         lambda: C.get_financial_data([], ['601398.SH'], '20240401', '20240420',
-                                      report_type='announce_time')),
-    ):
-        print('   -- %s --' % label)
-        try:
-            r = _call_timeout(call)
-        except Exception as e:
-            print('      异常 %s' % str(e)[:70]); continue
-        _dig(r, '601398.SH')
-
-
-def m3_dividend_final(C):
-    """用 Method2 判别器把分红字段这件事【彻底关掉】。
-
-    nan = 字段不存在；任何数值（含 0.0）= 存在。
-    对照组：__不存在的字段__ 必须是 nan，net_profit_excl_min_int_inc 必须有值 ——
-    两个对照都对，中间那些结果才可信。
-    """
-    cands = [
-        ('PERSHAREINDEX', '__对照_不存在__'),
-        ('ASHAREINCOME', 'net_profit_excl_min_int_inc'),
-        ('PERSHAREINDEX', 'dividend_per_share'),
-        ('PERSHAREINDEX', 'dividend_per_share_before_tax'),
-        ('PERSHAREINDEX', 's_fa_dps'),
-        ('PERSHAREINDEX', 'cash_dividend_per_share'),
-        ('PERSHAREINDEX', 'dividend_payout_ratio'),
-        ('PERSHAREINDEX', 'dividend_yield'),
-        ('PERSHAREINDEX', 's_fa_undistributedps'),
-        ('ASHARECASHFLOW', 'dividend_interest_payment'),
-        ('ASHAREBALANCESHEET', 'dividend_payable'),
-        ('ASHAREBALANCESHEET', 'div_payable'),
-    ]
-    for tab, col in cands:
-        try:
-            v = _call_timeout(lambda tab=tab, col=col:
-                              C.get_financial_data(tab, col, 'SH', '601398'))
-        except Exception as e:
-            print('   %-22s.%-32s -> 异常 %s' % (tab, col, str(e)[:34])); continue
-        tag = 'nan -> 【不存在】' if (v != v) else '%.6g -> 存在' % v
-        print('   %-22s.%-32s -> %s' % (tab, col, tag))
-    print('   [判读] 两个对照必须先对：__对照_不存在__ 是 nan、'
-          'net_profit_excl_min_int_inc 有值。')
-    print('          对照都对，中间那些「不存在」才是结论而不是噪声。')
+# 2026-09-01：M 轮跑完，OPEN 里【暂时没有待确认项】。
+#
+# 分红归属报告期这件事的最终状态（证据基础已修正）：
+#   · get_divid_factors -> 除权日 + 每股金额（金额与本地 12/12 精确吻合），7 个数无日期
+#   · PERSHAREINDEX 官方 15 字段里没有分红字段；13 个分红候选名 Method1 全 NaN
+#   · get_dividend / get_divid_plan / get_bonus 不存在；财务表只有 5 张 + 三张股东表
+#   · 唯一有值的「现金流量表.分配股利…」是付现口径且银行混入偿付利息（2023 差 10 倍）
+#   · QMT 侧没有任何字段枚举入口 -> 无法证明「穷尽了所有字段名」
+#   ★ 所以结论的强度是：【在已知的所有入口和已查的所有字段名里都没有】，
+#     不是【证明不存在】。要再推进只能靠官方完整数据字典或客服确认。
+#
+# 三条策略线的移植状态：
+#   froec / froec_traded / froec_traded_stop35  -> 已原生移植
+#   sgmspeg_v0b   -> 需要 jqfactor 近似，保持信号执行器；已有 replay 版可在 QMT 回测
+#   红利指数增强   -> 缺分红的会计年度归属，保持信号执行器；已有 replay 版可在 QMT 回测
+#
+# 纪律（这一路踩出来的，按代价排序）：
+#   1. 先 dir(C) / __doc__ 枚举，再谈有没有 —— 猜不中名字 != 能力不存在
+#   2. 能查到官方文档的不要用探针去发现
+#   3. 一个能力有没有，要把【所有可能提供它的接口】都查过
+#      （分红既可能在分红接口，也可能在财务表）
+#   4. 判别规则本身要先在【已知有值】的字段上验证 —— L3 只跑 4 个样本就宣布成立，被 M1 推翻
+#   5. 文档也会错（report_type 默认值），探针验证这一步不能省
+#   6. 本文件【不许出现模块级 import】—— 一律函数内导入（已踩两次）
+#   7. 打印要打【值】不是列名 —— L1 因为 columns 分支优先级写错，15 个字段全打成「字段 1 个」
+#   8. 改本文件【不许用 emoji】—— GBK 编不了，而 io.open(p,'w') 会先截断再 encode，
+#      抛异常就留下 0 字节文件。已踩两次，第二次就是写这段注释的时候。
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -630,7 +542,5 @@ def m3_dividend_final(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('M1 15 个字段【看值】+ Method2 判存在性（补 L1 的漏）', m1_psi15_values),
-    ('M2 ★ raw([], …) 内层逐层拆开 —— 可能是全字段枚举入口', m2_raw_enumerate),
-    ('M3 用判别器把分红字段彻底关掉（带两个对照组）', m3_dividend_final),
+    # 暂无待确认项 —— 见上方「OPEN 已清空」的说明
 ]
