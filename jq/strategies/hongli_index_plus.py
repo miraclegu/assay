@@ -230,9 +230,9 @@ BENCHMARK = '000015.XSHG' # 仅供聚宽页面展示（价格指数，不含股�
                           # 真实全收益基准用 510880 后复权离线算，年化 5.72%
 
 # ---------------- A-3 成本参数 ----------------
-# VERIFY_MODE = True  : 用 JQ 平台默认费率跑，用来验收 A-2（见文件头）
-#                       此时第 1 交易日结果应【精确复现】409.31% / 年化 17.09%
-# VERIFY_MODE = False : 用账户真实费率（万0.88，无最低）+ 指定滑点，做实盘口径回测
+# COST_MODE = 'jq_default'   : 用 JQ 平台默认费率，用来验收 A-2（见文件头）
+#                              此时第 1 交易日结果应【精确复现】409.31% / 年化 17.09%
+# COST_MODE = 'account_real' : 用账户真实费率（万0.88，无最低）+ 指定滑点
 # ★ 本文件新增第三档 'align_local'：与本地标星那次回测【逐项一致】。
 #   要和本地对账就用它 —— 成本不一致的话，差出来的是费率不是策略。
 COST_MODE = 'align_local'      # 'align_local' | 'jq_default' | 'account_real'
@@ -347,11 +347,12 @@ def initialize(context):
     g.stat_dedup = 0
 
     log.info('[CONFIG] v2 | target=%s backup=%s | 第%d个交易日调仓 '
-             'pick=%s trade=%s limitup=%s | verify=%s slippage=%.5f '
-             'commission=%.6f/min%s tax=%.4f'
+             'pick=%s trade=%s limitup=%s | cost=%s slippage=%.5f '
+             'commission=%.6f/min%s tax=%.4f%s'
              % (TARGET_NUM, BACKUP_NUM, REBALANCE_DAY,
                 TIME_PICK, TIME_TRADE, TIME_LIMIT_UP,
-                VERIFY_MODE, SLIPPAGE, COMMISSION, MIN_COMMISSION, CLOSE_TAX))
+                COST_MODE, SLIPPAGE, COMMISSION, MIN_COMMISSION, CLOSE_TAX,
+                '(2023-08-28起%.4f)' % STAMP_TAX_AFTER if STAMP_AUTO else ''))
 
     run_daily(prepare_stock_list, TIME_PREPARE)
     run_monthly(get_stock_list, REBALANCE_DAY, TIME_PICK)

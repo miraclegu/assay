@@ -27,6 +27,83 @@ sys.path.insert(0, ROOT)
 
 TOL = 0.015          # 与 qmt/check.py 一致
 
+# 聚宽注入的全局名（策略里不 import 也能用）。未定义名检查要放过它们。
+JQ_GLOBALS = {
+    'g', 'log', 'context', 'attribute_history', 'history',
+    'get_price', 'get_current_data', 'get_fundamentals', 'get_fundamentals_continuously',
+    'get_all_securities', 'get_security_info', 'get_index_stocks', 'get_industry_stocks',
+    'get_trade_days', 'get_all_trade_days', 'get_factor_values', 'get_extras',
+    'get_billboard_list', 'get_locked_shares', 'get_money_flow', 'get_mtss',
+    'finance', 'query', 'valuation', 'indicator', 'income', 'balance', 'cash_flow',
+    'bank_indicator', 'macro', 'opt', 'jy', 'normalize_code',
+    'order', 'order_value', 'order_target', 'order_target_value', 'order_percent',
+    'order_target_percent', 'cancel_order', 'get_open_orders', 'get_orders', 'get_trades',
+    'set_benchmark', 'set_option', 'set_order_cost', 'set_slippage', 'set_universe',
+    'set_commission', 'OrderCost', 'FixedSlippage', 'PriceRelatedSlippage',
+    'LimitOrderStyle', 'MarketOrderStyle',
+    'run_daily', 'run_weekly', 'run_monthly', 'scheduler',
+    'inout_cash', 'record', 'read_file', 'write_file',
+    'initialize', 'handle_data', 'before_trading_start', 'after_trading_end',
+    'process_initialize', 'after_code_changed',
+    # `from jqdata import *` 带进来的（星号导入本检查解析不了，只能列白名单）
+    'datetime', 'timedelta', 'date', 'time', 'np', 'numpy', 'math',
+}
+
+# 星号导入无法静态解析。遇到未列在白名单里的 `from X import *`，
+# 把 X 打出来提醒 —— 否则未定义名检查会变成一堆假阳性，然后被人无视。
+STAR_OK = {'jqdata', 'jqfactor', 'jqlib.technical_analysis', 'kuanke.user_space_api'}
+
+
+def undefined_names(src):
+    """静态查未定义的全局名 —— ast.parse 过了不代表能跑。
+
+    实测代价：把 VERIFY_MODE 换成 COST_MODE 后，[CONFIG] 日志行里还引用着
+    VERIFY_MODE。check.py 只做 ast.parse，语法没问题，一到聚宽就
+    NameError: name 'VERIFY_MODE' is not defined —— 而且是在 initialize 里炸，
+    整个回测起不来。这个检查就是为了拦住它。
+
+    做法：收集所有【被赋值/定义/import/形参/推导式变量】的名字，
+    再扫所有 Name(Load) 与装饰器，凡不在集合、不是 builtins、不在
+    JQ_GLOBALS 里的就报出来。有作用域上的粗糙（不区分局部/全局），
+    所以只报「全文都没定义过」的名字 —— 这类必错，不会有假阳性。
+    """
+    import builtins
+    tree = ast.parse(src)
+    bound = set(dir(builtins)) | set(JQ_GLOBALS)
+    used = []
+
+    for node in ast.walk(tree):
+        # 绑定：赋值 / 函数定义 / 类 / import / 形参 / for / with / except / 推导式 / global
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+            a = node.args if hasattr(node, 'args') else None
+            if a is not None:
+                for grp in (a.args, getattr(a, 'posonlyargs', []), a.kwonlyargs):
+                    for x in grp:
+                        bound.add(x.arg)
+                for x in (a.vararg, a.kwarg):
+                    if x is not None:
+                        bound.add(x.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for al in node.names:
+                bound.add((al.asname or al.name).split('.')[0])
+        elif isinstance(node, ast.Global):
+            bound.update(node.names)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used.append((node.id, node.lineno))
+
+    seen, out = set(), []
+    for name, ln in used:
+        if name in bound or name in seen:
+            continue
+        seen.add(name)
+        out.append((name, ln))
+    return out
+
 
 def _local_port(src, path):
     """从源码里取出 LOCAL_PORT 字面量。用 ast.literal_eval 而不是 exec ——
@@ -53,6 +130,20 @@ def check(path):
         ast.parse(src)
     except SyntaxError as e:
         return ['%s 语法错误: 第 %s 行 %s' % (rel, e.lineno, e.msg)], 0
+
+    stars = [n.module for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.ImportFrom)
+             and any(a.name == '*' for a in n.names)]
+    unknown_star = [m for m in stars if m not in STAR_OK]
+    if unknown_star:
+        errs.append('%s 有未登记的星号导入 %s —— 未定义名检查会失准，'
+                    '把它加进 STAR_OK 并把它提供的名字加进 JQ_GLOBALS'
+                    % (rel, unknown_star))
+
+    und = undefined_names(src)
+    if und:
+        errs.append('%s 引用了未定义的名字（聚宽里会 NameError）: %s'
+                    % (rel, ', '.join('%s(第%d行)' % (n, l) for n, l in und[:6])))
 
     try:
         lp = _local_port(src, path)
