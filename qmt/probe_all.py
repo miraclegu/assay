@@ -148,6 +148,60 @@ CONFIRMED = [
      '至少 (stock_list, ?, ?)；'
      "get_trading_dates('SH','20240101','20240131') 报 missing 1 required "
      "positional argument: 'count' -> 第 4 个参数是 count。"),
+    ('[**] report_type 三列对照定案 —— 且【默认值与文档不符】', '2026-08-31',
+     '601398 净利(元) 三种调法逐日对照：'
+     '  日期      announce_time   不传          report_time；'
+     '  20241230  2.6902e+11      2.6902e+11    2.6902e+11；'
+     '  20241231  2.6902e+11      3.6586e+11    3.6586e+11  <- 提前 88 天；'
+     '  20250328  2.6902e+11      3.6586e+11    3.6586e+11；'
+     '  20250331  3.6586e+11      8.4156e+10    8.4156e+10。'
+     "★ 显式传 'announce_time' 完全正确：年报公告日 2025-03-29(周六)，03-28 还是 Q3 值，"
+     '03-31 才切到年报值。★★ 但【不传 == report_time == 未来函数】—— '
+     "文档写的「默认即 announce_time」与实测不符，必须显式传，不能靠默认。"),
+    ('[**] 板块名前缀实测：SW1 全通，THY1/TGN 全 0', '2026-08-31',
+     "get_stock_list_in_sector('SW1银行') -> 42 只含 601398 [OK]；'银行' -> 0 只。"
+     'get_industry(名) 与 get_stock_list_in_sector(名) 【返回完全一致】，可互换。'
+     "SW2股份制银行 -> 9 只；CSRC1金融业 -> 120 只含 601398；CSRC1采矿业 -> 83 只含 601088；"
+     'SW1煤炭 -> 33 只含 601088；SW1电力设备 -> 415 只含 300750；SW1汽车 -> 323 只。'
+     '★ SW1 全 31 个一级行业逐个跑：31 个都有成分股，合计 5551 只（全市场约 5200，量级对）'
+     ' -> 申万一级映射完全可用，已接进 _resolve_industry_sectors。'
+     "[!] THY1银行 / TGN银行 都是 0 只 —— 通达信那套在本环境没有成分数据，别用。"),
+    ('[!] 申万版本差：本地 2014 版 vs QMT 2021 版', '2026-08-31',
+     "本地策略用聚宽 sw_l1_name（申万 2014 版，'钢铁I'/'采掘I'/'交运设备I'/'金融服务I'），"
+     'QMT 的 SW1 是 2021 版 31 个一级行业。对应关系：'
+     '采掘(2014)->煤炭+石油石化，金融服务(2014)->银行+非银金融（都已被黑名单其它项覆盖）；'
+     '★ 交运设备(2014) 在 2021 版散入 汽车/机械设备/国防军工，【无法对应，只能放弃】。'
+     '所以 QMT 版行业过滤与本地不完全一致。可接受的理由：逐年独立回测里该过滤 '
+     't=+1.56、11 年中 7 年为正，本就不显著。但差异写在代码注释里，不藏着。'),
+    ('[定案] get_raw_financial_data 返回三层嵌套 dict', '2026-08-31',
+     "{code: {field: {报告期毫秒时间戳: 值}}}。实测 601398 取 2023-2024 净利 -> "
+     '8 个键 [1680192000000(=2023-03-31), …, 1703952000000(=2023-12-31), …] '
+     '正好是 8 个季报，【无日度插值】—— 干净的报告期序列。'
+     '[!] 但它【不带公告日】，要 PIT 还得配 m_anntime 或 announce_time 口径。'
+     "[!] 整表拉不出来：['ASHAREINCOME'] -> 空 dict；'ASHAREINCOME'(字符串) -> TypeError；"
+     "['ASHAREINCOME.*'] -> 键回来了但值是空 dict。所以【拿不到全字段清单】，"
+     '字段名只能查文档。'),
+    ('[定案] ContextInfo 版 get_instrumentdetail 没有 iscomplete', '2026-08-31',
+     "get_instrumentdetail(code, True) 报 'takes 2 positional arguments but 3 were given'，"
+     'get_instrument_detail 同。iscomplete 是 xtdata 版才有的参数 -> 扩展字段这条路断了，'
+     '行业改走 SW1 板块（已通）。'),
+    ('[定案] get_trading_dates 可用；另两个方法的签名', '2026-08-31',
+     "get_trading_dates('SH','20240101','20240131',100) -> list len=22 "
+     "['20240102','20240103',…] [OK] 第 4 个参数是 count；"
+     "get_trading_dates('SH','','',10) -> 最近 10 个交易日 -> 可用来取交易日历。"
+     "get_factor_data 签名是 (stock_list, factor_list, start_date, end_date)，"
+     "但 factor_list=['pe'] 返回 None -> 因子名不对，价值不大先搁置。"
+     "get_turn_over_rate 只接 1 个参数(code)且返回 nan -> 搁置。"),
+    ('[?] get_his_st_data 四只候选 ST 股全返回空 dict', '2026-08-31',
+     '000005.SZ / 600870.SH / 000561.SZ / 601258.SH 全是 dict len=0。'
+     '可能这几只当前已摘帽或已退市，也可能要先下载数据。'
+     '★ 不追了：ST 判定已有可用方案 —— 沪深风险警示板块（206 只，已实测）。'),
+    ('[定案] 财务表只有 5 张，ASHAREFINANCIALINDICATOR【不存在】', '2026-08-31',
+     '官方口径：ASHAREBALANCESHEET(资产负债表) / ASHAREINCOME(利润表) / '
+     'ASHARECASHFLOW(现金流量表) / CAPITALSTRUCTURE(股本表) / PERSHAREINDEX(主要指标)，'
+     '另有 Top10Holder / Top10FlowHolder / HolderNum。'
+     '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
+     "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
     ('[!!] QMT 财务【按报告期前向填充】= 未来函数', '2026-08-31',
      '实测 601398：20241225~1230 净利 2690.3 亿(2024Q3)，20241231 变成 3658.6 亿'
      '(2024年报) —— 而 2024 年报公告日是 2025-03-29，提前 88 天。'
@@ -294,238 +348,118 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 H：下一轮 ==============================
+# ============================== 待确认 I：下一轮 ==============================
 #
-# ★ 方法变了：这一轮不再穷举猜参数 —— 先查官方文档拿到用法，探针只负责【验证】。
-#   G 轮花了一整轮试 18 个行业名全 0，而文档一句话就说清了「板块名 = 前缀+行业名」。
-#   凡是能查到文档的，不要用探针去发现。
-
-
-def _doc(C, fn):
-    f = getattr(C, fn, None)
-    if f is None:
-        print('   C.%-24s 不存在' % fn)
-        return None
-    d = (getattr(f, '__doc__', None) or '').strip()
-    print('   C.%-24s %s' % (fn, ('__doc__: ' + d.splitlines()[0][:70]) if d else '存在，无 __doc__'))
-    return f
+# 只剩一件事：红利指数增强 B 腿要的三个聚宽指标，QMT 侧怎么取。
+# 本轮不看「有没有值」而是【当场和本地真值对数】—— 有值但对不上比没有值更危险。
 
 
 def _try(C, label, call):
     try:
         r = _call_timeout(call)
     except Exception as e:
-        print('   %-46s -> %s' % (label, str(e)[:70]))
+        print('   %-52s -> %s' % (label, str(e)[:60]))
         return None
     t = type(r).__name__
     if isinstance(r, (list, tuple)):
-        print('   %-46s -> %s len=%d %s' % (label, t, len(r), str(list(r)[:6])[:100]))
+        print('   %-52s -> %s len=%d %s' % (label, t, len(r), str(list(r)[:5])[:80]))
     elif isinstance(r, dict):
-        print('   %-46s -> dict len=%d keys=%s' % (label, len(r), str(list(r)[:8])[:95]))
+        print('   %-52s -> dict len=%d %s' % (label, len(r), str(list(r)[:5])[:80]))
     else:
-        print('   %-46s -> %s %s' % (label, t, _peek(r)))
+        print('   %-52s -> %s %s' % (label, t, _peek(r)))
     return r
 
 
-# 申万一级 31 个行业（2021 版）。文档说板块名 = 'SW1' + 行业名，本节就是验证这一条。
-SW1 = ['农林牧渔', '基础化工', '钢铁', '有色金属', '电子', '家用电器', '食品饮料',
-       '纺织服饰', '轻工制造', '医药生物', '公用事业', '交通运输', '房地产',
-       '商贸零售', '社会服务', '综合', '建筑材料', '建筑装饰', '电力设备',
-       '国防军工', '计算机', '传媒', '通信', '银行', '非银金融', '汽车',
-       '机械设备', '煤炭', '石油石化', '环保', '美容护理']
+# 本地真值（std/fin_indicator_q.parquet，聚宽口径，比率存【小数】不是百分数）。
+# 探针把 QMT 的候选字段打在旁边，能不能对上一眼就知道。
+LOCAL_REF = [
+    # code,        报告期,     公告日,      inc_return, inc_rev,  inc_np
+    ('601398.SH', '2023年报', '2024-03-28', 0.0255, -0.0716, 0.0070),
+    ('601398.SH', '2024年报', '2025-03-29', 0.0246,  0.0187, 0.0135),
+    ('600036.SH', '2023年报', '2024-03-26', 0.0311, -0.0138, 0.0550),
+    ('600036.SH', '2024年报', '2025-03-26', 0.0294,  0.0753, 0.0752),
+]
+
+# 文档给出的 PERSHAREINDEX(主要指标) 字段。前几轮的错在于把它们挂到了
+# ASHAREFINANCIALINDICATOR —— 那张表根本不存在，所以必然全 NaN。
+PSI = [
+    ('PERSHAREINDEX.adjusted_earnings_per_share', '扣非每股收益'),
+    ('PERSHAREINDEX.adjusted_net_profit_rate',    '扣非净利润同比增长 -> 可能对应 inc_np 附近'),
+    ('PERSHAREINDEX.du_return_on_equity',         '净资产收益率'),
+    ('PERSHAREINDEX.du_profit_rate',              '净利润同比增长'),
+    ('PERSHAREINDEX.s_fa_eps_basic',              '基本每股收益（已知有值 0.98）'),
+    ('PERSHAREINDEX.s_fa_eps_diluted',            '稀释每股收益（已知有值 0.98）'),
+    ('PERSHAREINDEX.s_fa_deductedprofit',         '扣非净利润？（搜索给的名字，未验证）'),
+    ('PERSHAREINDEX.inc_total_revenue_rate',      '营收同比？（猜，若 NaN 就放弃这个名字）'),
+    ('PERSHAREINDEX.main_business_income_rate',   '主营收入同比？（同上）'),
+]
+
+CN = [
+    ('主要指标.扣非每股收益', ''),
+    ('主要指标.净资产收益率', ''),
+    ('主要指标.净利润同比增长', ''),
+    ('利润表.净利润', '★ 这条是【中文写法能不能用】的判定，它一定有值'),
+    ('资产负债表.固定资产', ''),
+]
 
 
-def h3_announce_time(C):
-    """★ 本轮最要紧的一节：直接验证 report_type 能不能消掉未来函数。
+def i1_psi_fields(C):
+    """PERSHAREINDEX 字段：挂对表再试一次。用 announce_time 口径。"""
+    print('   [!] 上一轮扣非全 NaN 的真因：6 个候选挂在 ASHAREFINANCIALINDICATOR，')
+    print('       而官方财务表只有 5 张，没有这一张。这轮全部挂到 PERSHAREINDEX。')
+    for f, memo in PSI:
+        r = _try(C, '%-44s %s' % (f, memo[:14]),
+                 lambda f=f: C.get_financial_data([f], ['601398.SH'],
+                                                  '20240101', '20250630',
+                                                  report_type='announce_time'))
+        del r
 
-    已知事实（上一轮实测）：601398 用 report_type='report_time' 时
-        20241225~20241230  净利 2690.3 亿（2024Q3，公告 2024-10-31）
-        20241231           净利 3658.6 亿（2024 年报，公告 2025-03-29）  <- 提前 88 天
-    若 'announce_time' 口径正确，20241231 那天【应该还是 2690.3 亿】，
-    要到 2025-03-29 之后才变。这一节就看这一个数。
-    """
-    fld = ['ASHAREINCOME.net_profit_excl_min_int_inc']
+
+def i2_chinese_fields(C):
+    """中文表名.中文字段名 —— 文档说支持。通了的话就不用再猜英文名。"""
+    print('   文档示例用的是 [\'利润表.净利润\', \'资产负债表.固定资产\']')
+    for f, memo in CN:
+        _try(C, '%-30s %s' % (f, memo[:26]),
+             lambda f=f: C.get_financial_data([f], ['601398.SH'],
+                                              '20240101', '20250630',
+                                              report_type='announce_time'))
+
+
+def i3_compare_local(C):
+    """★ 当场对数：QMT 候选字段 vs 本地聚宽真值。有值但对不上比没有值更危险。"""
+    print('   本地真值（聚宽口径，小数不是百分数）：')
+    print('   %-12s %-9s %-12s %9s %9s %9s'
+          % ('code', '报告期', '公告日', 'inc_return', 'inc_rev', 'inc_np'))
+    for c, rep, pub, a, b, d in LOCAL_REF:
+        print('   %-12s %-9s %-12s %9.4f %9.4f %9.4f' % (c, rep, pub, a, b, d))
+    print()
+    print('   QMT 侧（取公告后一个月，announce_time 口径）：')
+    for c, rep, pub, _a, _b, _d in LOCAL_REF:
+        end = pub.replace('-', '')
+        end = str(int(end[:6]) + 1) + '28'          # 公告月 +1 个月
+        print('   -- %s %s（查询到 %s）--' % (c, rep, end))
+        for f, _m in PSI[:4]:
+            _try(C, '     ' + f,
+                 lambda f=f, c=c, end=end: C.get_financial_data(
+                     [f], [c], end[:6] + '01', end, report_type='announce_time'))
+    print('   [判读] 若某字段末值 ≈ 本地 inc_np/inc_rev（注意 QMT 可能是【百分数】，'
+          '要 /100 再比），就是它；差一个量级先想单位，别急着否定。')
+
+
+def i4_derive_adjroe(C):
+    """退路：扣非ROE = 扣非EPS x 总股本 / 归母权益。三个料都已实测可用。"""
+    print('   若 i1/i2 都拿不到现成的扣非ROE同比，用这条还原：')
+    print('     扣非净利 = adjusted_earnings_per_share x get_total_share')
+    print('     扣非ROE  = 扣非净利 / tot_shrhldr_eqy_excl_min_int')
+    print('     inc_return = 扣非ROE(t) / 扣非ROE(t-4) - 1')
     code = '601398.SH'
-    for label, call in (
-        ("report_type='announce_time' ★",
-         lambda: C.get_financial_data(fld, [code], '20241220', '20250430',
-                                      report_type='announce_time')),
-        ('不传 report_type（文档称默认即 announce_time）',
-         lambda: C.get_financial_data(fld, [code], '20241220', '20250430')),
-        ("report_type='report_time'（已知的未来函数口径，做对照）",
-         lambda: C.get_financial_data(fld, [code], '20241220', '20250430',
-                                      report_type='report_time')),
-    ):
-        print('   -- %s --' % label)
-        try:
-            r = _call_timeout(call)
-        except Exception as e:
-            print('      异常 %s' % str(e)[:80])
-            continue
-        _show_np(r, code)
-    print('   [判读] 20241231 那天：2690.3e8 = 时点正确；3658.6e8 = 仍是未来函数。')
-
-
-def _show_np(r, code):
-    """把返回里 601398 的净利序列按日期打出来，只挑关键几天。"""
-    try:
-        df = r
-        if isinstance(r, dict):
-            df = r.get(code) or list(r.values())[0]
-        if hasattr(r, 'items') and hasattr(r, 'major_axis'):     # Panel
-            df = r[code]
-        if df is None:
-            print('      返回里没有 %s' % code)
-            return
-        for d in ('20241226', '20241230', '20241231', '20250102',
-                  '20250328', '20250331', '20250429'):
-            v = None
-            for idx in df.index:
-                if str(idx).replace('-', '')[:8] == d:
-                    row = df.loc[idx]
-                    v = row.iloc[0] if hasattr(row, 'iloc') else row
-                    break
-            print('      %s  %s' % (d, ('%.4e' % float(v)) if v is not None else '（无此日）'))
-    except Exception as e:
-        print('      解析失败 %s' % str(e)[:70])
-
-
-def h1_sector_name(C):
-    """验证「板块名 = 前缀 + 行业名」。601398 应落在 SW1银行 / CSRC1金融业。"""
-    print('   文档说：板块名 = 前缀 + 行业名，不加分隔符（如 SW1汽车 / CSRC1采矿业）')
-    print('   -- 前缀族抽样，看哪个前缀通 --')
-    for nm in ('SW1银行', 'SW2股份制银行', 'CSRC1金融业', 'THY1银行', 'TGN银行',
-               'SW1汽车', 'CSRC1采矿业', 'SW1煤炭', 'SW1电力设备'):
-        for fn in ('get_stock_list_in_sector', 'get_industry'):
-            f = getattr(C, fn, None)
-            if f is None:
-                continue
-            try:
-                lst = _call_timeout(lambda f=f, nm=nm: f(nm)) or []
-            except Exception as e:
-                print('   %-24s %-24s -> %s' % (fn, nm, str(e)[:40]))
-                continue
-            hit = [c for c in lst if c in ('601398.SH', '601088.SH', '300750.SZ')]
-            print('   %-24s %-16s -> %5d 只 %s'
-                  % (fn, nm, len(lst), ('命中 %s' % hit) if hit else ''))
-    print('   -- 若上面通了，就跑全部 31 个申万一级，建 code->行业 映射 --')
-    f = getattr(C, 'get_stock_list_in_sector', None)
-    if f is None:
-        return
-    total, ok = 0, 0
-    for nm in SW1:
-        try:
-            lst = _call_timeout(lambda nm=nm: f('SW1' + nm)) or []
-        except Exception:
-            lst = []
-        if lst:
-            ok += 1
-            total += len(lst)
-    print('   SW1 全 31 个行业：%d 个有成分股，合计 %d 只（全市场约 5200 只可比对）'
-          % (ok, total))
-
-
-def h2_raw_fields(C):
-    """get_raw_financial_data 的【内层结构】—— 上一轮只打了 type 没打键。"""
-    f = getattr(C, 'get_raw_financial_data', None)
-    if f is None:
-        print('   不存在')
-        return
-    r = None
-    try:
-        r = _call_timeout(lambda: f(['ASHAREINCOME.net_profit_excl_min_int_inc'],
-                                    ['601398.SH'], '20230101', '20241231'))
-    except Exception as e:
-        print('   异常 %s' % str(e)[:70])
-    _dig(r, '601398.SH')
-    print('   -- 试整表：只给表名不给字段，看能不能一次拿到全字段清单 --')
-    for req in (['ASHAREINCOME'], 'ASHAREINCOME',
-                ['ASHAREINCOME.*'], ['ASHAREFINANCIALINDICATOR']):
-        try:
-            r2 = _call_timeout(lambda req=req: f(req, ['601398.SH'],
-                                                 '20230101', '20241231'))
-        except Exception as e:
-            print('   %-28s -> %s' % (str(req)[:26], str(e)[:60]))
-            continue
-        print('   %-28s ->' % str(req)[:26])
-        _dig(r2, '601398.SH')
-
-
-def _dig(r, code, depth=0):
-    """把嵌套返回逐层拆开打印，目标是拿到【字段名清单】。"""
-    pad = '      ' + '  ' * depth
-    if r is None:
-        print('%sNone' % pad)
-        return
-    if isinstance(r, dict):
-        ks = list(r)
-        print('%sdict len=%d keys=%s' % (pad, len(ks), str(ks[:12])[:110]))
-        if depth < 2 and ks:
-            k = code if code in r else ks[0]
-            print('%s-> 展开 [%s]' % (pad, k))
-            _dig(r[k], code, depth + 1)
-        return
-    cols = getattr(r, 'columns', None)
-    if cols is not None:
-        print('%s%s shape=%s' % (pad, type(r).__name__, getattr(r, 'shape', '?')))
-        print('%s字段 %d 个: %s' % (pad, len(cols), list(cols)[:40]))
-        try:
-            print('%s尾 2 行:\n%s' % (pad, r.tail(2).to_string()[:600]))
-        except Exception:
-            pass
-        return
-    print('%s%s %s' % (pad, type(r).__name__, str(r)[:200]))
-
-
-def h4_detail_complete(C):
-    """get_instrument_detail 的 iscomplete 扩展字段 —— 文档提到有这个参数。"""
-    for fn in ('get_instrumentdetail', 'get_instrument_detail'):
-        f = getattr(C, fn, None)
-        if f is None:
-            continue
-        base = None
-        try:
-            base = _call_timeout(lambda f=f: f('601398.SH')) or {}
-        except Exception:
-            base = {}
-        for arg in (True, 1):
-            try:
-                r = _call_timeout(lambda f=f, arg=arg: f('601398.SH', arg))
-            except Exception as e:
-                print('   %s(code, %r) -> %s' % (fn, arg, str(e)[:70]))
-                continue
-            if not isinstance(r, dict):
-                print('   %s(code, %r) -> %s' % (fn, arg, type(r).__name__))
-                continue
-            extra = [k for k in r if k not in base]
-            print('   %s(code, %r) -> %d 键，比默认多 %d 个: %s'
-                  % (fn, arg, len(r), len(extra), str(extra)[:200]))
-            for k in extra:
-                print('       %-24s = %s' % (k, str(r[k])[:60]))
-
-
-def h5_st_and_rest(C):
-    """真 ST 股验 get_his_st_data；补齐 get_factor_data / get_trading_dates 的参数。"""
-    print('   -- get_his_st_data：换真 ST 股（工行从没 ST 所以上一轮是空 dict）--')
-    for code in ('000005.SZ', '600870.SH', '000561.SZ', '601258.SH'):
-        _try(C, "get_his_st_data(%r)" % code,
-             lambda code=code: C.get_his_st_data(code))
-    print('   -- get_trading_dates：第 4 个参数是 count --')
-    for args in (('SH', '20240101', '20240131', 100),
-                 ('SH', '20240101', '20240131', 0),
-                 ('SH', '', '', 10)):
-        _try(C, 'get_trading_dates%s' % (args,),
-             lambda args=args: C.get_trading_dates(*args))
-    print('   -- get_factor_data：缺 3 个位置参数，首个是 stock_list --')
-    for args in ((['601398.SH'], '20240101', '20241231'),
-                 (['601398.SH'], 'pe', '20240101'),
-                 (['601398.SH'], ['pe'], '20240101', '20241231')):
-        _try(C, 'get_factor_data(%s…)' % str(args[1])[:20],
-             lambda args=args: C.get_factor_data(*args))
-    print('   -- get_turn_over_rate：上一轮返回 nan，试带日期 --')
-    for args in (('601398.SH', '20240102'), ('601398.SH', 20240102)):
-        _try(C, 'get_turn_over_rate%s' % (args,),
-             lambda args=args: C.get_turn_over_rate(*args))
+    _try(C, 'get_total_share(%r)' % code, lambda: C.get_total_share(code))
+    for f in ('PERSHAREINDEX.adjusted_earnings_per_share',
+              'ASHAREBALANCESHEET.tot_shrhldr_eqy_excl_min_int'):
+        _try(C, f, lambda f=f: C.get_financial_data(
+            [f], [code], '20240101', '20250630', report_type='announce_time'))
+    print('   [判读] 601398 2024年报：归母权益 3.9698e+12，若扣非EPS≈0.97，')
+    print('          总股本 3.564e+11 -> 扣非净利≈3.457e+11 -> 扣非ROE≈8.7%，量级应对。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -533,10 +467,8 @@ def h5_st_and_rest(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ("H3 ★★ report_type='announce_time' 能否消掉未来函数（就看 20241231 一个数）",
-     h3_announce_time),
-    ('H1 板块名 = 前缀+行业名（验证文档说法，顺带建 SW1 映射）', h1_sector_name),
-    ('H2 get_raw_financial_data 内层结构 -> 整表字段清单（找扣非）', h2_raw_fields),
-    ('H4 get_instrument_detail(code, iscomplete) 扩展字段', h4_detail_complete),
-    ('H5 真 ST 股验 get_his_st_data + 补齐三个方法的参数', h5_st_and_rest),
+    ('I1 PERSHAREINDEX 字段（上轮挂错表了，这轮挂对再试）', i1_psi_fields),
+    ('I2 中文表名.中文字段名（文档说支持，通了就不用猜英文名）', i2_chinese_fields),
+    ('I3 ★ 当场与本地真值对数（有值但对不上比没有值更危险）', i3_compare_local),
+    ('I4 退路：扣非EPS x 总股本 / 归母权益 还原扣非ROE', i4_derive_adjroe),
 ]

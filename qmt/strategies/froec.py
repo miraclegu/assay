@@ -66,9 +66,19 @@ ROE_TOP_RATIO  = 0.1       # ROE 改善度取前 10%
 NEW_STOCK_DAYS = 250       # 上市不足 N 个自然日 -> 次新股剔除
 
 INDUSTRY_CONTROL = True    # 是否启用行业黑名单
-INDUSTRY_FILTER  = ['钢铁', '煤炭', '石油石化', '采掘',          # 重资产
-                    '银行', '非银金融', '金融服务',              # 高负债
-                    '交运设备', '交通运输', '传媒', '环保']       # 盈利差
+# [!] 口径差异，必须知道：本地策略用的是聚宽 sw_l1_name = 申万【2014 版】
+#     （'钢铁I' / '采掘I' / '交运设备I' / '金融服务I' 这套带 I 后缀的名字），
+#     而 QMT 的 SW1 板块是申万【2021 版】31 个一级行业。两版不是一一对应：
+#         采掘   (2014) -> 2021 版拆成 煤炭 + 石油石化（已被下面两项覆盖）
+#         金融服务(2014) -> 2021 版拆成 银行 + 非银金融（已被下面两项覆盖）
+#         交运设备(2014) -> 2021 版散入 汽车 / 机械设备 / 国防军工（★ 无法对应，只能放弃）
+#     所以 QMT 版的行业过滤与本地【不完全一致】。可接受的理由：逐年独立回测里
+#     这个过滤 t=+1.56、11 年中 7 年为正，本就不显著；但差异必须写在这里而不是藏着。
+INDUSTRY_FILTER  = ['钢铁', '煤炭', '石油石化',                  # 重资产（含 2014 版「采掘」）
+                    '银行', '非银金融',                          # 高负债（含 2014 版「金融服务」）
+                    '交通运输', '传媒', '环保']                   # 盈利差
+
+SW1_PREFIX       = 'SW1'   # 申万一级板块名前缀，见 _resolve_industry_sectors
 
 FIN_REFRESH_DAYS = 7       # 财报矩阵缓存天数；调大(如 30)可显著提速，代价是财报采纳滞后
 FIN_BATCH        = 200     # get_financial_data 每批股票数
@@ -852,13 +862,21 @@ def _capital_map(C, stocks, ref_date):
 _FIN_CALLS = (
     ("report_type='announce_time' ★按公告期",
      lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='announce_time')),
-    ('默认（文档称默认即 announce_time）',
-     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b)),
-    ('report_type=1',
+    ('report_type=1（形态兜底，语义未验证）',
      lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 1)),
-    ("report_type='report_time' [!] 未来函数口径，仅作最后兜底",
-     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='report_time')),
 )
+
+# [!] 这两种【绝对不要用】，留在这里是为了别再有人「顺手简化一下」：
+#       C.get_financial_data(f, s, a, b)                        # 不传
+#       C.get_financial_data(f, s, a, b, report_type='report_time')
+#     实测三列对照（601398，净利，单位元）：
+#         日期        announce_time   不传          report_time
+#         20241230    2.6902e+11      2.6902e+11    2.6902e+11
+#         20241231    2.6902e+11      3.6586e+11    3.6586e+11   <- 提前 88 天
+#         20250328    2.6902e+11      3.6586e+11    3.6586e+11
+#         20250331    3.6586e+11      8.4156e+10    8.4156e+10
+#     【不传 == report_time】—— 文档写的「默认即 announce_time」与实测不符。
+#     所以必须显式传，不能靠默认。
 
 
 def _fin_nonempty(r):
@@ -1274,30 +1292,32 @@ def _resolve_st_sector(C):
 
 
 def _resolve_industry_sectors(C):
-    """把 INDUSTRY_FILTER 的行业名映射成 QMT 真实板块名。"""
+    """把 INDUSTRY_FILTER 的行业名映射成 QMT 板块名。
+
+    [已实测] QMT 板块名 = 【前缀 + 行业名，不加分隔符】，不是「申万XX」也不是光秃秃的行业名。
+        get_stock_list_in_sector('SW1银行')     -> 42 只，含 601398.SH   [OK]
+        get_stock_list_in_sector('银行')        ->  0 只                 <- 上一轮就栽在这
+        get_industry('SW1银行')                 -> 与上者等价
+        SW1 全 31 个一级行业逐个跑：31 个都有成分股，合计 5551 只（全市场约 5200，量级对）
+    前缀族：SW1/SW2 申万一二级、CSRC1/CSRC2 证监会、THY1/THY2 通达信、TGN/GN 概念、DY1 地域。
+    实测 THY1银行 / TGN银行 都是 0 只 —— 通达信那套在本环境没有成分数据，别用。
+    """
     if g.industry_sectors is not None:
         return g.industry_sectors
-    all_sectors = _sector_list(C)
-    resolved = []
+    resolved, missing = [], []
     for kw in INDUSTRY_FILTER:
-        hit = None
-        if all_sectors:
-            cands = [s for s in all_sectors if '申万' in s and kw in s]
-            if not cands:
-                cands = [s for s in all_sectors if s == kw]
-            if cands:
-                hit = sorted(cands, key=len)[0]
+        name = SW1_PREFIX + kw
+        if _sector_members(C, name, ''):
+            resolved.append(name)
         else:
-            for guess in (kw, '申万' + kw, '申万一级行业-' + kw):
-                if _sector_members(C, guess, ''):
-                    hit = guess
-                    break
-        if hit:
-            resolved.append(hit)
-        else:
-            print('[init][warn] 行业黑名单未匹配到板块: %s' % kw)
+            missing.append(kw)
     g.industry_sectors = resolved
-    print('[init] 行业黑名单板块(%d): %s' % (len(resolved), resolved))
+    print('[init] 行业黑名单板块(%d/%d): %s'
+          % (len(resolved), len(INDUSTRY_FILTER), resolved))
+    if missing:
+        # 不静默：黑名单少一个行业 = 选股池多一批本该剔除的票，结果会悄悄漂移
+        print('[init][warn] 这些行业没匹配到 %s 板块，过滤【未生效】: %s'
+              % (SW1_PREFIX, missing))
     return resolved
 
 
