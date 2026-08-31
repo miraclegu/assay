@@ -1384,9 +1384,42 @@ def t_qmt():
     # 只数带「关联」二字的行，否则会把同步那 5 行也算进来（一度报成 10 个文件）。
     ok = [l for l in r.stdout.splitlines() if '关联' in l and l.strip().startswith('v ')]
     n = sum(int(x) for l in ok for x in re.findall(r'关联 (\d+) 个', l))
+
+    # ★ check.py 只管 strategies/ 下生成出来的文件，【不看 qmt/ 根目录的工具脚本】。
+    #   实测代价：往 probe_all.py 里写进一个字符串未闭合的补丁，提交推送后
+    #   selftest 依然全绿 —— 因为没人编译它。凡是要在 QMT 里粘贴运行的文件，
+    #   都必须过「真 GBK + 能编译 + 无模块级 import + 无 emoji」这四条。
+    import ast
+    root = os.path.dirname(os.path.abspath(__file__))
+    tools = [f for f in ('qmt/probe_all.py', 'qmt/gen.py', 'qmt/check.py')
+             if os.path.exists(os.path.join(root, f))]
+    n_tool = 0
+    for rel in tools:
+        fp = os.path.join(root, rel)
+        raw = open(fp, 'rb').read()
+        if rel == 'qmt/probe_all.py':          # 要粘进 QMT 的，编码有硬要求
+            assert raw.startswith(b'#coding:gbk'), '%s 缺 #coding:gbk 声明' % rel
+            try:
+                src = raw.decode('gbk')
+            except UnicodeDecodeError as e:
+                raise AssertionError('%s 声明了 gbk 但实际不是: %s' % (rel, e))
+            emo = [c for c in src if ord(c) > 0x1F000]
+            assert not emo, '%s 含 emoji %s —— GBK 编不了，写文件时会截断' % (rel, emo[:3])
+            mod_imports = [l for l in src.splitlines()
+                           if l[:7] == 'import ' or l[:5] == 'from ']
+            assert not mod_imports, \
+                '%s 有模块级 import %s —— 本探针一律函数内导入' % (rel, mod_imports[:3])
+        else:
+            src = raw.decode('utf-8')
+        try:
+            ast.parse(src)
+        except SyntaxError as e:
+            raise AssertionError('%s 语法错误: 第 %s 行 %s' % (rel, e.lineno, e.msg))
+        n_tool += 1
     syn = [l for l in r.stdout.splitlines() if '<- _tpl/' in l]
-    return ('%d 个 QMT 策略文件：与模板同步 %d 个、编译通过、%d 个 profile 与归档一致'
-            % (len(ok), len(syn), n))
+    return ('%d 个 QMT 策略文件：与模板同步 %d 个、编译通过、%d 个 profile 与归档一致；'
+            '另核 %d 个工具脚本（探针的 GBK/emoji/模块级 import 一并查）'
+            % (len(ok), len(syn), n, n_tool))
 
 
 @case('选中标记：打星 / 冒泡 / 不误触发', tag='web')
