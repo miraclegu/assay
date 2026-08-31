@@ -196,6 +196,24 @@ CONFIRMED = [
      '000005.SZ / 600870.SH / 000561.SZ / 601258.SH 全是 dict len=0。'
      '可能这几只当前已摘帽或已退市，也可能要先下载数据。'
      '★ 不追了：ST 判定已有可用方案 —— 沪深风险警示板块（206 只，已实测）。'),
+    ('[**] 官方表清单（xtdata 文档）= 8 张，确实没有分红表', '2026-09-01',
+     "download_financial_data / get_financial_data 的 table_list 官方取值："
+     "'Balance'(资产负债表) / 'Income'(利润表) / 'CashFlow'(现金流量表) / "
+     "'Capital'(股本表) / 'Holdernum'(股东数) / 'Top10holder'(十大股东) / "
+     "'Top10flowholder'(十大流通股东) / 'Pershareindex'(每股指标)。"
+     '★ 8 张里【没有分红表 / 除权除息表 / 分红送转表】。'
+     '这条来自官方文档的完整清单，不是一个个试出来的 —— 比之前说「只有 5 张」准确'
+     '（当时漏了三张股东表）。'),
+    ('[**] get_divid_factors 的 7 个数 —— 官方字段定义', '2026-09-01',
+     '[0] interest    每股股利（税前，元）；'
+     '[1] stockBonus  每股红股（股）；'
+     '[2] stockGift   每股转增股本（股）；'
+     '[3] allotNum    每股配股数（股）；'
+     '[4] allotPrice  配股价格（元）；'
+     '[5] gugai       是否股改（股改在算复权系数时有特殊算法）；'
+     '[6] dr          除权系数。'
+     '★ 官方定义确认【没有报告期字段】—— 之前是从实测值全为 0 推的，现在有文档依据。'
+     '也解释了两只银行 [1]~[5] 为何全是 0：它们只派现金，不送股不转增不配股不股改。'),
     ('[定案] 财务表只有 5 张，ASHAREFINANCIALINDICATOR【不存在】', '2026-08-31',
      '官方口径：ASHAREBALANCESHEET(资产负债表) / ASHAREINCOME(利润表) / '
      'ASHARECASHFLOW(现金流量表) / CAPITALSTRUCTURE(股本表) / PERSHAREINDEX(主要指标)，'
@@ -506,35 +524,160 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ================================ OPEN 已清空 ================================
+# ============================== 待确认 N：因子库枚举 ==========================
 #
-# 2026-09-01：M 轮跑完，OPEN 里【暂时没有待确认项】。
+# 两条新线索（都来自官方文档，不是猜）：
+#   [1] get_factor_data 的因子名【必须带表名前缀】，如 'Valuation_and_Market_Cap.PE'。
+#       之前传 ['pe'] 返回 None 是少了前缀，不是因子不存在 —— 又一次同类错误。
+#       前提：QMT 客户端【数据管理】->【补充数据】要勾选【多因子数据】并下载。
+#   [2] ★ 因子库在磁盘上是【按因子名建目录】的：
+#           {安装目录}/datadir/EP/{因子名}_Xdat2/data.fe
+#       -> os.listdir 就能把全部因子名列出来。这是一路上一直缺的【枚举入口】。
 #
-# 分红归属报告期这件事的最终状态（证据基础已修正）：
-#   · get_divid_factors -> 除权日 + 每股金额（金额与本地 12/12 精确吻合），7 个数无日期
-#   · PERSHAREINDEX 官方 15 字段里没有分红字段；13 个分红候选名 Method1 全 NaN
-#   · get_dividend / get_divid_plan / get_bonus 不存在；财务表只有 5 张 + 三张股东表
-#   · 唯一有值的「现金流量表.分配股利…」是付现口径且银行混入偿付利息（2023 差 10 倍）
-#   · QMT 侧没有任何字段枚举入口 -> 无法证明「穷尽了所有字段名」
-#   ★ 所以结论的强度是：【在已知的所有入口和已查的所有字段名里都没有】，
-#     不是【证明不存在】。要再推进只能靠官方完整数据字典或客服确认。
-#
-# 三条策略线的移植状态：
-#   froec / froec_traded / froec_traded_stop35  -> 已原生移植
-#   sgmspeg_v0b   -> 需要 jqfactor 近似，保持信号执行器；已有 replay 版可在 QMT 回测
-#   红利指数增强   -> 缺分红的会计年度归属，保持信号执行器；已有 replay 版可在 QMT 回测
-#
-# 纪律（这一路踩出来的，按代价排序）：
-#   1. 先 dir(C) / __doc__ 枚举，再谈有没有 —— 猜不中名字 != 能力不存在
-#   2. 能查到官方文档的不要用探针去发现
-#   3. 一个能力有没有，要把【所有可能提供它的接口】都查过
-#      （分红既可能在分红接口，也可能在财务表）
-#   4. 判别规则本身要先在【已知有值】的字段上验证 —— L3 只跑 4 个样本就宣布成立，被 M1 推翻
-#   5. 文档也会错（report_type 默认值），探针验证这一步不能省
-#   6. 本文件【不许出现模块级 import】—— 一律函数内导入（已踩两次）
-#   7. 打印要打【值】不是列名 —— L1 因为 columns 分支优先级写错，15 个字段全打成「字段 1 个」
-#   8. 改本文件【不许用 emoji】—— GBK 编不了，而 io.open(p,'w') 会先截断再 encode，
-#      抛异常就留下 0 字节文件。已踩两次，第二次就是写这段注释的时候。
+# 官方「迅投因子」页面自己说：因子分类是 成长/基础/每股/质量/动量/风险/技术/情绪，
+# 【没有分红类】，并建议联系客服问股息指标。所以 N2 的预期结果可能还是「确实没有」——
+# 但这次是【列出全部因子名之后】说没有，跟之前猜三个名字就说没有不是一回事。
+
+
+def _try(C, label, call):
+    try:
+        r = _call_timeout(call)
+    except Exception as e:
+        print('   %-52s -> %s' % (label, str(e)[:56]))
+        return None
+    t = type(r).__name__
+    cols = getattr(r, 'columns', None)
+    if cols is not None:
+        print('   %-52s -> %s 字段 %d: %s'
+              % (label, t, len(cols), str(list(cols)[:12])[:90]))
+    elif isinstance(r, dict):
+        print('   %-52s -> dict len=%d %s' % (label, len(r), str(list(r)[:8])[:80]))
+    else:
+        print('   %-52s -> %s %s' % (label, t, _peek(r)))
+    return r
+
+
+# N 轮的跨节状态。不用 g —— g 是 QMT 注入的，本地干跑时不存在，
+# 而这两节的枚举逻辑值得能在本地验证。
+_STATE = {}
+
+
+def n1_locate_datadir(C):
+    """先把 datadir 找到 —— 后面枚举因子名全靠它。
+
+    已知安装根（从早前 xtdata 的报错路径读出来的，路径里带反斜杠这里用正斜杠写）：
+        D:/国金证券QMT交易端/bin.x64/lib/site-packages/xtquant/xtdata.py
+    所以安装根是 D:/国金证券QMT交易端。datadir 位置各版本不同，都试一遍；
+    另外从 xtquant 的实际位置反推，比硬编码可靠。
+    """
+    import os
+    import sys
+    print('   -- 运行环境线索 --')
+    try:
+        print('      cwd        = %s' % os.getcwd()[:110])
+    except Exception as e:
+        print('      cwd        取不到 %s' % str(e)[:40])
+    print('      executable = %s' % str(getattr(sys, 'executable', '?'))[:110])
+    for pth in list(getattr(sys, 'path', []))[:6]:
+        print('      sys.path[] = %s' % str(pth)[:110])
+
+    roots = []
+    try:
+        import xtquant
+        d = os.path.abspath(xtquant.__file__)
+        for _ in range(5):
+            d = os.path.dirname(d)
+        print('      xtquant 反推安装根 = %s' % d[:110])
+        roots += [d, os.path.join(d, 'datadir')]
+    except Exception as e:
+        print('      xtquant 反推失败: %s' % str(e)[:60])
+    roots += [r'D:\国金证券QMT交易端', r'D:\国金证券QMT交易端\datadir',
+              r'C:\国金证券QMT交易端', r'C:\国金证券QMT交易端\datadir']
+
+    _STATE['datadir'] = None
+    for r in roots:
+        try:
+            ok = os.path.isdir(r)
+        except Exception:
+            ok = False
+        print('      %-56s %s' % (str(r)[:56], '存在' if ok else '无'))
+        if not ok:
+            continue
+        if os.path.basename(r).lower() == 'datadir':
+            _STATE['datadir'] = _STATE['datadir'] or r
+        else:
+            cand = os.path.join(r, 'datadir')
+            if os.path.isdir(cand):
+                _STATE['datadir'] = _STATE['datadir'] or cand
+    print('   -> datadir = %s' % (_STATE['datadir'] or '未找到'))
+
+
+def n2_enumerate_factors(C):
+    """★ 把因子库【全部因子名】列出来 —— 一路上一直缺的枚举入口。
+
+    目录结构（官方文档）：{datadir}/EP/{因子名}_Xdat2/data.fe
+    EP 只是其中一个分类目录，所以先列 datadir 下的所有子目录再逐个找 *_Xdat2。
+    """
+    import os
+    dd = _STATE.get('datadir')
+    if not dd:
+        print('   [!] datadir 未找到。看 N1 打出的 cwd / sys.path，')
+        print('       把真实路径填进 n1 的 roots 再跑一次。')
+        return
+    try:
+        subs = sorted(os.listdir(dd))
+    except Exception as e:
+        print('   列 datadir 失败: %s' % str(e)[:70])
+        return
+    print('   datadir 下 %d 项: %s' % (len(subs), str(subs[:40])[:400]))
+    hit = 0
+    for sub in subs:
+        d = os.path.join(dd, sub)
+        try:
+            if not os.path.isdir(d):
+                continue
+            items = os.listdir(d)
+        except Exception:
+            continue
+        fac = sorted(x[:-6] for x in items if x.endswith('_Xdat2'))
+        if not fac:
+            continue
+        hit += 1
+        print('   -- %s：%d 个因子 --' % (sub, len(fac)))
+        for k in range(0, min(len(fac), 240), 6):
+            print('      %s' % '  '.join('%-20s' % x for x in fac[k:k + 6]))
+        div = [x for x in fac if any(w in x.lower() for w in
+               ('div', 'dps', 'yield', 'payout', 'bonus'))]
+        print('      >>> 名字含 div/dps/yield/payout/bonus 的: %s' % (div or '无'))
+    if not hit:
+        print('   [!] datadir 下没有 *_Xdat2 形态的因子目录 ——')
+        print('       多半是【数据管理->补充数据】没勾【多因子数据】，先下载再跑。')
+
+
+def n3_factor_api(C):
+    """按正确写法调 get_factor_data：因子名【带表名前缀】。
+
+    签名（缺参报错泄露的）：(stock_list, factor_list, start_date, end_date)
+    """
+    known = ['Valuation_and_Market_Cap.PE', 'Valuation_and_Market_Cap.PB',
+             'Valuation_and_Market_Cap.PETTM']
+    div = ['Valuation_and_Market_Cap.DividendYield',
+           'Valuation_and_Market_Cap.DividendYieldTTM',
+           'Valuation_and_Market_Cap.DivYield',
+           'Valuation_and_Market_Cap.DividendPerShare',
+           'factor_metrics.DividendPerShare',
+           'factor_metrics.DPS',
+           'factor_base_derivative.DividendYield']
+    print('   -- 先验证【已知存在】的因子，确认调用形态对了 --')
+    for f in known:
+        _try(C, f, lambda f=f: C.get_factor_data(
+            ['601398.SH'], [f], '20240101', '20241231'))
+    print('   -- 再试股息类候选（正式名字以 N2 列出来的为准，这里只是先探） --')
+    for f in div:
+        _try(C, f, lambda f=f: C.get_factor_data(
+            ['601398.SH'], [f], '20240101', '20241231'))
+    print('   [判读] 若 PE/PB 也取不到 -> 是【多因子数据没下载】不是因子名问题，')
+    print('          先去客户端【数据管理】->【补充数据】勾【多因子数据】。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -542,5 +685,7 @@ def _peek(r):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    # 暂无待确认项 —— 见上方「OPEN 已清空」的说明
+    ('N1 定位 datadir（后面枚举因子名靠它）', n1_locate_datadir),
+    ('N2 ★★ 枚举因子库全部因子名 —— 一直缺的枚举入口', n2_enumerate_factors),
+    ('N3 get_factor_data 正确写法：因子名带表名前缀', n3_factor_api),
 ]
