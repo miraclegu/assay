@@ -31,15 +31,28 @@ from jqfactor import get_factor_values
 # 要预览哪个交易日的调仓。留 None = 今天（若今天不是交易日会提示）
 TRADE_DATE = '2026-09-01'
 
-# 当前持仓：{股票代码: 股数}。代码用聚宽格式（六位数字 + .XSHG/.XSHE）
+# 当前持仓：{股票 或 代码: 股数}。三种写法都认，可以混着写：
+#     '招商银行'      -> 按名称查（用 T-1 那天的名称，改过名的股票用当时的名字）
+#     '600036'        -> 六位代码，自动补 .XSHG / .XSHE
+#     '600036.XSHG'   -> 完整聚宽代码
 # 空仓就写 {}
 HOLDINGS = {
-    # '601398.XSHG': 10000,
-    # '600036.XSHG': 2000,
+    # '招商银行': 2000,
+    # '601398': 10000,
+    # '600519.XSHG': 100,
 }
 
-# 可用现金（元）
+# 可用现金（元）。只填【能用来买股票的现金】，不含已被持仓占用的市值
 CASH = 1000000.0
+
+# 买入资金分配口径
+#   'twopass' 两轮（默认，推荐）：先按 cash/n 预分配，买不进的不占份额，
+#             剩余现金（含买不进的那份 + 取整残差）平分给已建仓的补仓
+#   'fixed'   本地标星那次回测用的：per = cash/n 固定，买不进的那份【闲置】
+#   'seq'     JQ v7 的逐笔：per = cash/(n-i)，买不进的份额【流给后面】-> 后面超配
+# 三者本地回测差异 <= 0.03pp 年化（10.5 年，见 分析结论-本地复现.md），
+# 但实盘上 twopass 明显更合理：既不闲置现金，也不让权重向后漂。
+BUY_ALLOC = 'twopass'
 
 # 昨日涨停的持仓股（炸板离场用）。留空则脚本自己按 T-1 行情判定
 YESTERDAY_LIMIT_UP = None
@@ -65,6 +78,41 @@ LOCAL_PORT = {
     'aligned':  {'preview': '本文件是 hongli_index_plus.py 的盘前预览版，'
                             '选股逻辑逐段搬来未改动；数量为估算'},
 }
+
+
+# ============================== 持仓解析 ====================================
+def resolve_holdings(prev):
+    """把 HOLDINGS 的键统一成聚宽代码。名称、六位代码、完整代码都认。
+
+    [!] 名称用【T-1 那天的名称】查 —— 股票改过名的话，用当时的名字。
+        解析不了的会明确报出来，不会静默丢掉（静默丢一只 = 那只不会被卖）。
+    """
+    allsec = get_all_securities('stock', date=prev)
+    name2code, bad = {}, []
+    for code in allsec.index:
+        nm = allsec.loc[code, 'display_name']
+        name2code.setdefault(nm, code)
+
+    out = {}
+    for key, sh in HOLDINGS.items():
+        k = str(key).strip()
+        code = None
+        if '.XSH' in k.upper():
+            code = k
+        elif k.isdigit() and len(k) == 6:
+            code = k + ('.XSHE' if k[0] in '013' else '.XSHG')
+        elif k in name2code:
+            code = name2code[k]
+        if code is None or code not in set(allsec.index):
+            bad.append(k)
+            continue
+        out[code] = out.get(code, 0) + int(sh)
+    if bad:
+        print('[!] 这些持仓解析不了，已【忽略】—— 它们不会出现在卖出清单里，请核对：')
+        for k in bad:
+            print('      %s' % k)
+        print('    名称要用 %s 那天的名称；代码用六位或完整聚宽格式。' % prev)
+    return out
 
 
 # ============================== 基准日 ======================================
@@ -263,7 +311,28 @@ def _dr(dy, dy_b, s):
     return 0.0
 
 
+def warn_if_backtest():
+    """本脚本是给【研究环境】的。在回测里跑会取到回测日期【之后】的数据 ——
+    那是未来函数，而且日志时间戳会是回测当前时间，很容易看错。
+
+    判据：回测/模拟环境里有全局 context / g（平台注入），研究环境里没有。
+    """
+    for name in ('context', 'g'):
+        if name in globals():
+            print('=' * 76)
+            print('[!!] 检测到全局 %s —— 你可能在【回测/模拟环境】里跑本脚本。' % name)
+            print('     本脚本只该在【研究环境（Jupyter）】跑。在回测里跑的话：')
+            print('       · get_price(end_date=TRADE_DATE) 会取到回测日期之后的数据')
+            print('         = 未来函数，结果不可用于任何评估')
+            print('       · 日志时间戳是【回测当前时间】而不是 TRADE_DATE，容易看错')
+            print('     （实测过一次：日志显示 2019-01-01，而价格是 2026-08-31 的）')
+            print('=' * 76)
+            return True
+    return False
+
+
 def main():
+    warn_if_backtest()
     t, prev = resolve_dates(TRADE_DATE)
     rebal, first_day = is_rebalance_day(t)
 
@@ -285,6 +354,10 @@ def main():
         print('    下面仍然把「若今天调仓会选出什么」打出来，供参考。')
         print()
 
+    holds = resolve_holdings(prev)
+    print('  当前持仓 %d 只，可用现金 %.2f，分配口径 %s'
+          % (len(holds), CASH, BUY_ALLOC))
+
     target, backup, A, B, dy, dy_b = pick(t, prev)
 
     print()
@@ -296,7 +369,7 @@ def main():
     #     get_price 返回重复行 -> set_index('code') 索引重复 ->
     #     px.loc[s,'close'] 返回 Series 而不是数字 -> 后面格式化直接 TypeError。
     #     打桩时就是在这里炸的。dict.fromkeys 保序去重。
-    codes = list(dict.fromkeys(list(target) + list(HOLDINGS)))
+    codes = list(dict.fromkeys(list(target) + list(holds)))
     px = get_price(codes, end_date=prev, frequency='1d',
                    count=1, fields=['close'], fq='pre', panel=False,
                    skip_paused=False, fill_paused=True).set_index('code')
@@ -315,12 +388,12 @@ def main():
     print('-' * 76)
     print('需要卖出')
     print('-' * 76)
-    sells = [s for s in HOLDINGS if s not in target]
+    sells = [s for s in holds if s not in target]
     est_cash = CASH
     if not sells:
         print('  （无）')
     for s in sells:
-        sh = HOLDINGS[s]
+        sh = holds[s]
         p = float(px.loc[s, 'close']) if s in px.index else 0.0
         val = sh * p
         est_cash += val
@@ -330,28 +403,75 @@ def main():
     # ---- 买入：目标里没持有的。数量算法与回测版 trade() 逐笔一致 ----
     print()
     print('-' * 76)
-    print('需要买入   [!] 数量是【估算】：限价按 T-1 收盘 x1.05，与回测版同算法；')
-    print('           实盘以下单当时的可用现金重算为准')
+    print('需要买入   分配口径 %s' % BUY_ALLOC)
+    print('           [!] 数量是【估算】：限价按 T-1 收盘 x1.05（与回测版同算法）。')
+    print('               实盘按开盘价成交，股数会变，以下单当时的可用现金重算为准。')
     print('-' * 76)
-    buys = [s for s in target if s not in HOLDINGS]
+    buys = [s for s in target if s not in holds]
     if not buys:
         print('  （无，目标全部已持有）')
+
+    def lot(code, cash_for_one):
+        """一手 100 股的限价成本 + 这笔钱能买几手（向下取整到 100 股）。"""
+        limit = round(float(px.loc[code, 'close']) * 1.05, 2)
+        return limit, 100 * int(cash_for_one / limit / 100) if limit > 0 else 0
+
+    plan, skipped, spent = {}, [], 0.0
     n = len(buys)
-    cash = est_cash
-    total_cost = 0.0
-    for i, s in enumerate(buys):
-        per = cash / (n - i)
-        limit = round(float(px.loc[s, 'close']) * 1.05, 2)
-        amt = 100 * int(per / limit / 100)
-        if amt <= 0:
-            print('  [跳过] %-12s 资金不足：可分配 %.0f，100 股需 %.0f'
-                  % (s, per, limit * 100))
+    if n:
+        if BUY_ALLOC == 'seq':
+            # JQ v7：逐笔按当时剩余现金分配，跳过的份额流给后面 -> 后面超配
+            cash = est_cash
+            for i, code in enumerate(buys):
+                per = cash / (n - i)
+                limit, amt = lot(code, per)
+                if amt <= 0:
+                    skipped.append((code, limit, per))
+                    continue
+                plan[code] = (amt, limit)
+                cash -= amt * limit
+                spent += amt * limit
+        else:
+            # 第一轮：固定 per = 现金/只数
+            per = est_cash / n
+            for code in buys:
+                limit, amt = lot(code, per)
+                if amt <= 0:
+                    skipped.append((code, limit, per))
+                    continue
+                plan[code] = (amt, limit)
+                spent += amt * limit
+            if BUY_ALLOC == 'twopass' and plan:
+                # 第二轮：剩余现金（含买不进的那份 + 取整残差）平分给已建仓的
+                left = est_cash - spent
+                add = left / len(plan)
+                n_top = 0
+                for code in list(plan):
+                    amt, limit = plan[code]
+                    _, more = lot(code, add)
+                    if more > 0:
+                        plan[code] = (amt + more, limit)
+                        spent += more * limit
+                        n_top += 1
+                if n_top:
+                    print('  [第二轮] 剩余 %.0f 元平分给 %d 只（每只 %.0f），%d 只补上了手数'
+                          % (left, len(plan), add, n_top))
+
+    for code in buys:
+        if code not in plan:
             continue
-        cost = amt * limit
-        cash -= cost
-        total_cost += cost
+        amt, limit = plan[code]
         print('  买入 %-12s %-8s %8d 股   限价 %8.2f   预计占用 %12.2f'
-              % (s, get_security_info(s).display_name, amt, limit, cost))
+              % (code, get_security_info(code).display_name, amt, limit, amt * limit))
+    for code, limit, per in skipped:
+        print('  [买不进] %-12s %-8s 一手 %d 股需 %.0f 元，而分到 %.0f 元'
+              % (code, get_security_info(code).display_name, 100, limit * 100, per))
+    if skipped and BUY_ALLOC == 'fixed':
+        print('        ^ fixed 口径下这些份额【闲置】，共 %.0f 元（%.1f%% 仓位拖累）'
+              % (sum(p for _, _, p in skipped),
+                 100.0 * sum(p for _, _, p in skipped) / est_cash if est_cash else 0))
+        print('        改 BUY_ALLOC=\'twopass\' 可把它分给买得进的那些')
+    total_cost = spent
 
     print()
     print('-' * 76)
@@ -359,8 +479,8 @@ def main():
     print('  买入预计占用           %14.2f' % total_cost)
     print('  剩余                   %14.2f' % (est_cash - total_cost))
     print('  持仓不动的 %d 只：%s'
-          % (len([s for s in HOLDINGS if s in target]),
-             ', '.join(s for s in HOLDINGS if s in target) or '（无）'))
+          % (len([s for s in holds if s in target]),
+             ', '.join(s for s in holds if s in target) or '（无）'))
     print('-' * 76)
     print('[!] 三条与回测的已知差异，看结果时算进去：')
     print('    1. beta 用 JQ get_factor_values（与本地自算差约 +0.05pp）')

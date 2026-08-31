@@ -250,6 +250,23 @@ def initialize(context):
     g.equal_weight = getattr(g, 'equal_weight', 0)
     g.beta_pct = getattr(g, 'beta_pct', 1.0)          # B-3: 0.50=原版/v2/v3, 1.0=v4 起
     g.div_method = getattr(g, 'div_method', 'rolling365')  # A-1/A-6: rolling365 / fiscal_year
+    # ★ 买入资金分配口径 —— 这是与 JQ v7 的一处实现差异，直到 2026-09-01 才发现
+    #   'fixed' 本地原有：per = cash/len(buy) 一次算好。买不起的（如茅台一手 13.6 万
+    #           而每份只有 6.7 万）拒单，那份钱【留作现金】，不流给后面 -> 权重不漂
+    #   'seq'   JQ v7 的 trade()：per = cash/(n-i) 逐笔。跳过的份额【流给后面】
+    #           -> 后面系统性超配。实测 2019-01 那次：前 9 只 6.3~6.7%，
+    #           后 5 只 7.4~8.3%，最大/最小 = 1.31 倍。
+    #           方向不中性：前面是 Sleeve A（低波），后面是 Sleeve B（价值，
+    #           单跑回撤 29.47% vs 低波 17.92%）-> 系统性把权重挪向高风险腿
+    #   'twopass' 两轮：先按 cash/n 预分配下单，再把【实际剩余现金】平分给
+    #           【实际建仓成功】的那些补仓。买不进的不占份额，剩余也不闲置，
+    #           且权重不向后漂 —— 三个毛病一起解决。
+    #           用实际成交结果而不是预测一手价格：调仓在 09:30 开盘价成交，
+    #           选股在 09:01，那时开盘价还不知道，预测法会算错谁买得进。
+    g.buy_alloc = getattr(g, 'buy_alloc', 'fixed')
+    # 第二轮触发门槛：剩余现金 > 一份的这个比例才补。太小的补单会因不足一手
+    # 被拒，白白污染拒单日志（滚动残差每次都有几百块，不该触发补仓）
+    g.twopass_min = getattr(g, 'twopass_min', 0.5)
     # ---- B-1：Sleeve B 的 8 个 between 阈值 ----
     # JQ 把这 8 个数标为「拍的、有过拟合风险」，但任何地方都没给细节，也从未修过。
     # 参数化只为做敏感性 —— 不是修 bug，默认值严格等于原版：
@@ -470,9 +487,27 @@ def trade(context):
                 for s in held_tgt:
                     order_target_value(s, context.portfolio.positions[s].value + add)
         return
-    per = context.portfolio.cash / len(buy)
-    for s in buy:
-        order_target_value(s, per)
+    if g.buy_alloc == 'seq':
+        # JQ v7 口径：逐笔按【当时的】可用现金分配，剩余自动流给后面的买单。
+        # 副作用：某只买不起被整只跳过时，它那一份会摊给后面 -> 后面超配。
+        n = len(buy)
+        for i, s in enumerate(buy):
+            order_target_value(s, context.portfolio.cash / (n - i))
+    elif g.buy_alloc == 'twopass':
+        per = context.portfolio.cash / len(buy)
+        for s in buy:
+            order_target_value(s, per)
+        # 第二轮：谁真的建上仓了，把剩余现金平分给他们
+        got = [s for s in buy if s in context.portfolio.positions]
+        left = context.portfolio.cash
+        if got and left > per * g.twopass_min:
+            add = left / len(got)
+            for s in got:
+                order_target_value(s, context.portfolio.positions[s].value + add)
+    else:
+        per = context.portfolio.cash / len(buy)
+        for s in buy:
+            order_target_value(s, per)
 
 
 def check_limit_up(context):
