@@ -653,6 +653,27 @@ def t_docs():
         len(d['docs']), n_tab, n_row)
 
 
+@case('JQ 策略：与本地归档的关联', tag='fast')
+def t_jq():
+    """聚宽版的 LOCAL_PORT 必须是断言而不是注释。
+
+    关联写成注释留不住：本地策略一改、标星一换，注释还在那儿，人却不会去改它。
+    check.py 核 run_id 在不在归档、params/区间/本金/指标是否对得上 ——
+    反向验证过四种改法（改 run_id / params / cash / metrics）都会红。
+    """
+    import subprocess
+    root = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.isdir(os.path.join(root, 'jq', 'strategies')):
+        return '跳过（jq/ 尚未建立）'
+    r = subprocess.run([sys.executable, 'jq/check.py'],
+                       capture_output=True, text=True, cwd=root)
+    assert r.returncode == 0, 'jq/check.py 失败:\n%s' % (r.stdout + r.stderr)[-600:]
+    ok = [l for l in r.stdout.splitlines() if l.strip().startswith('v ')]
+    assert ok, 'check.py 没有输出通过行:\n%s' % r.stdout[-400:]
+    n_align = sum(int(x) for l in ok for x in re.findall(r'对照 (\d+) 条', l))
+    return '%d 个聚宽策略关联核对通过（选股参数逐项对照 %d 条）' % (len(ok), n_align)
+
+
 @case('网页看板真实渲染（playwright）', tag='web')
 def t_ui():
     """★ JS 语法检查过不代表能渲染 —— 运行时错误在终端里看不到。
