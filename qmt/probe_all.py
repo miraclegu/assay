@@ -535,6 +535,28 @@ def _peek(r):
      '而是这套数据本身停更了。因子路线不再尝试。'
      '★ 但这不影响主线：DividData 是随行情/除权数据一起下的，与多因子无关，'
      'O1-O3 不碰 get_factor_data。'),
+    ('[定案·终] 分红的会计年度归属：三个层次都没有，问题不在「有没有数据」', '2026-09-01',
+     '★ 这条线到此为止。三个层次互相印证，结论一致：'
+     '[API] get_divid_factors 官方 7 字段无报告期；get_dividend / get_divid_plan / '
+     'get_bonus 不存在。'
+     '[官方文档] table_list 8 张表里无分红表；PERSHAREINDEX 官方 15 字段无分红字段。'
+     '[存储层] DividData 是 LevelDB，扫 6 个 .ldb 共 9669 个 key，'
+     '★ 第三段（类型码）取值分布 = {4000: 9669} —— 【只有一个值】，'
+     '存储层就一种记录类型。key 末段时间戳 1998-07-15 ~ 2026-08-27，'
+     '月份分布 5月706 / 6月1256 / 7月759（5-7 月占 72%），3/6/9/12 月末只占 3.5% '
+     '-> 是【除权日】不是报告期。value 里的 double 就是每股股利/配股价那几个数'
+     '（600089：2004-06-14 派 0.1、2016-07-05 派 0.1801、2000-06-08 派 0.1875 + 13.8）'
+     '-> 与 get_divid_factors 一一对应，API 没藏字段。'
+     '★ 覆盖量级核对：本地 dividend 表 56319 条 / 5451 只；'
+     'QMT 36 个 .ldb x 约 1600 key/文件 = 约 5.8 万，同一量级；'
+     '除权日 5/6/7 月占比 QMT 0.26/0.46/0.28 vs 本地 0.30/0.45/0.26，分布吻合。'
+     '-> QMT 的分红数据是【完整的公司行为记录】，缺的只是「按会计年度归属」这层加工。'
+     '★ 纠正上一轮：我说 key 第二段「139051 是内部 ID 不是股票代码」是错的 —— '
+     '实测样例 600089/600094/600095/600096/600097/600098/600099/600100 全是股票代码，'
+     '139051 是深市债券代码（DividData 也覆盖债券）。'
+     '★ 顺带：DividData 是 LevelDB 意味着 datalake 侧【技术上能直接读】，'
+     '但读出来与本地已有的完全同源同量级，且本地还多了 report_date / plan_progress / '
+     'board_plan_pub_date —— 没有理由去读。'),
     ('[**] O 轮定案：DividData 是【LevelDB】，Finance 是每股每表一个私有 .DAT', '2026-09-01',
      'datadir/DividData：42 个 .ldb + LOG，LOG 里是标准 LevelDB 日志'
      '（Recovering log #905 / Level-0 table #908 / Expanding@0 1+1）-> 开放格式。'
@@ -563,226 +585,37 @@ def _peek(r):
      '不是因子名写错。要用多因子得先去客户端【数据管理->补充数据】勾【多因子数据】。'),
 
 
-# ============================== 待确认 P：LevelDB ==========================
+# ================================ OPEN 已清空 ================================
 #
-# N1 保留（P 轮要用它定位 datadir）；O1-O3 已定案，见 CONFIRMED。
-
-
-# N 轮的跨节状态。不用 g —— g 是 QMT 注入的，本地干跑时不存在，
-# 而这两节的枚举逻辑值得能在本地验证。
-_STATE = {}
-
-
-def n1_locate_datadir(C):
-    """先把 datadir 找到 —— 后面枚举因子名全靠它。
-
-    已知安装根（从早前 xtdata 的报错路径读出来的，路径里带反斜杠这里用正斜杠写）：
-        D:/国金证券QMT交易端/bin.x64/lib/site-packages/xtquant/xtdata.py
-    所以安装根是 D:/国金证券QMT交易端。datadir 位置各版本不同，都试一遍；
-    另外从 xtquant 的实际位置反推，比硬编码可靠。
-    """
-    import os
-    import sys
-    print('   -- 运行环境线索 --')
-    try:
-        print('      cwd        = %s' % os.getcwd()[:110])
-    except Exception as e:
-        print('      cwd        取不到 %s' % str(e)[:40])
-    print('      executable = %s' % str(getattr(sys, 'executable', '?'))[:110])
-    for pth in list(getattr(sys, 'path', []))[:6]:
-        print('      sys.path[] = %s' % str(pth)[:110])
-
-    roots = []
-    try:
-        import xtquant
-        d = os.path.abspath(xtquant.__file__)
-        for _ in range(5):
-            d = os.path.dirname(d)
-        print('      xtquant 反推安装根 = %s' % d[:110])
-        roots += [d, os.path.join(d, 'datadir')]
-    except Exception as e:
-        print('      xtquant 反推失败: %s' % str(e)[:60])
-    roots += [r'D:\国金证券QMT交易端', r'D:\国金证券QMT交易端\datadir',
-              r'C:\国金证券QMT交易端', r'C:\国金证券QMT交易端\datadir']
-
-    _STATE['datadir'] = None
-    for r in roots:
-        try:
-            ok = os.path.isdir(r)
-        except Exception:
-            ok = False
-        print('      %-56s %s' % (str(r)[:56], '存在' if ok else '无'))
-        if not ok:
-            continue
-        if os.path.basename(r).lower() == 'datadir':
-            _STATE['datadir'] = _STATE['datadir'] or r
-        else:
-            cand = os.path.join(r, 'datadir')
-            if os.path.isdir(cand):
-                _STATE['datadir'] = _STATE['datadir'] or cand
-    print('   -> datadir = %s' % (_STATE['datadir'] or '未找到'))
-
-
-# ============================== 待确认 O：DividData ==========================
+# 2026-09-01：分红归属期这条线【彻底定案】（见 CONFIRMED 的「定案·终」），
+# OPEN 里没有待确认项了。
 #
-# ★★ N2 找对了枚举入口，但我找错了目标。datadir 下 13 项：
-#     ['BJ','CC','DividData','EP','Finance','Industry','SH','SZ','Sector',
-#      'TradeDateAndETFStockListCache','Weight','increase','quotetimeinfo']
+# 三条策略线的最终状态：
+#   froec / froec_traded / froec_traded_stop35  -> 已原生移植，数据全部到位
+#   sgmspeg_v0b   -> 需要 jqfactor 近似（Barra 式 5 年回归斜率），保持信号执行器；
+#                    已有 sgmspeg_v0b_replay.py 可在 QMT 回测
+#   红利指数增强   -> QMT 侧无分红的会计年度归属（存储层就没有），保持信号执行器；
+#                    已有 hongli_index_plus_replay.py 可在 QMT 回测
 #
-#   [1] DividData —— 分红数据就在这里。API 不给报告期，不代表文件里没有。
-#   [2] Finance   —— 财务数据。
-#   [3] EP 存在但里面没有 *_Xdat2 -> 多因子数据确实没下载，
-#       这也解释了 N3 里连【已知存在】的 PE/PB 都取不到 —— 判据起作用了。
+# 已排除、不要再试的路（每条都花过一轮以上）：
+#   · PERSHAREINDEX 的分红字段（官方 15 字段里没有；13 个候选名全 NaN）
+#   · 现金流量表「分配股利…支付的现金」（付现口径 + 银行混入偿付利息，2023 差 10 倍）
+#   · 从除权日推归属期（年派 100%、中期 0%、季度 0%，近 5 年 22751 笔实测）
+#   · 多因子/因子库（iQuant 多因子由国信提供已停更；EP 目录只有 config 没有 data.fe）
+#   · 空 field_list 枚举字段（财务接口不认这个约定）
+#   · Method2 判字段存在性（nan 有第二种含义，两个反例）
 #
-# 本轮只做一件事：把 DividData / Finance / EP 的目录结构和文件格式看清楚。
-# 不解析内容，先确认「有什么、什么格式、多大」。
-
-
-# ============================== 待确认 P：LevelDB key 结构 ===================
-#
-# O 轮定案：DividData 是【LevelDB】（42 个 .ldb + LOG 里的 "Recovering log /
-# Level-0 table / Expanding@0" 是标准 LevelDB 日志），开放格式不是私有二进制。
-# O3 读出的 key 形如：   SZ|139051|4000|1555862400000
-#   最后一段是毫秒时间戳（1555862400000 -> 2019-04-22、1564675200000 -> 2019-08-02），
-#   都是【除权日】的量级，与 get_divid_factors 一致。
-#
-# 所以只剩一个问题值得问：那个 4000 是不是【唯一的记录类型】？
-#   只有 4000  -> 存储层就一种记录（除权事件），没有报告期，这条路到此为止
-#   有别的类型 -> 值得看那些记录里有什么
-#
-# 做法：不装 leveldb 库（QMT 是 py36，装不了 plyvel）。.ldb 里的 key 是明文，
-#       直接按正则扫可见片段，统计【第三段】的取值分布。这不是解析数据，
-#       只是数 key 的形状 —— 够回答上面那个问题。
-#
-# [!] 只读、不写、不改任何文件。每个文件只读前 4MB，最多扫 6 个文件。
-
-
-def p1_ldb_keys(C):
-    import os
-    import re
-    dd = _STATE.get('datadir')
-    if not dd:
-        print('   [!] datadir 未找到，先看 N1')
-        return
-    root = os.path.join(dd, 'DividData')
-    if not os.path.isdir(root):
-        print('   DividData 不存在')
-        return
-    try:
-        files = sorted(x for x in os.listdir(root) if x.endswith('.ldb'))
-    except Exception as e:
-        print('   列目录失败 %s' % str(e)[:50])
-        return
-    print('   %d 个 .ldb；扫前 6 个（每个只读前 4MB）' % len(files))
-
-    # key 形如 SZ|139051|4000|1555862400000
-    pat = re.compile(rb'(S[HZ]|BJ)\|(\d{1,8})\|(\d{1,6})\|(\d{9,14})')
-    types, mkts, ids, tss, n_key = {}, {}, {}, [], 0
-    for fn in files[:6]:
-        fp = os.path.join(root, fn)
-        try:
-            f = open(fp, 'rb')
-            try:
-                buf = f.read(4 * 1024 * 1024)
-            finally:
-                f.close()
-        except Exception as e:
-            print('      %s 读不了 %s' % (fn, str(e)[:40]))
-            continue
-        hit = pat.findall(buf)
-        n_key += len(hit)
-        for mkt, iid, typ, ts in hit:
-            t = typ.decode('ascii')
-            types[t] = types.get(t, 0) + 1
-            m = mkt.decode('ascii')
-            mkts[m] = mkts.get(m, 0) + 1
-            if len(ids) < 8:
-                ids[iid.decode('ascii')] = 1
-            if len(tss) < 4000:
-                tss.append(int(ts))
-        print('      %-16s %d 个 key' % (fn, len(hit)))
-
-    print('   ---- 共 %d 个 key ----' % n_key)
-    print('   市场段取值: %s' % sorted(mkts.items(), key=lambda kv: -kv[1]))
-    print('   ★ 第三段（类型码）取值分布: %s'
-          % sorted(types.items(), key=lambda kv: -kv[1])[:20])
-    print('   第二段（内部 ID）样例: %s' % sorted(ids)[:8])
-    if tss:
-        import datetime as dt
-        tss = sorted(t for t in tss if 9e11 < t < 2e12)      # 只看合理的毫秒戳
-        if tss:
-            def d(x):
-                return dt.datetime.utcfromtimestamp(
-                    x / 1000.0 + 8 * 3600).strftime('%Y-%m-%d')
-            print('   时间戳范围: %s ~ %s（共 %d 个合理值）'
-                  % (d(tss[0]), d(tss[-1]), len(tss)))
-            # 除权日应集中在 5~8 月；若集中在 3/6/9/12 月末则更像报告期
-            mon = {}
-            for x in tss:
-                mm = int(d(x)[5:7])
-                mon[mm] = mon.get(mm, 0) + 1
-            print('   月份分布: %s' % sorted(mon.items()))
-            print('   [判读] 集中在 5~8 月 -> 是【除权日】；')
-            print('          集中在 3/6/9/12 月末 -> 是【报告期】，那就有戏了。')
-    print('   ---- 结论怎么读 ----')
-    print('   类型码只有一个值   -> 存储层就一种记录，没有报告期，路到此为止；')
-    print('   有多个值           -> 把每个类型的 key 样例打出来再判（下一轮）。')
-
-
-def p2_ldb_sample(C):
-    """挑几条 key 连同它后面的字节打出来 —— 看 value 里有没有第二个日期。
-
-    get_divid_factors 返回 7 个数，若 value 里能数出 7 个 double，
-    就说明存储层和 API 是一一对应的，API 没有隐藏字段。
-    """
-    import os
-    import re
-    import struct
-    dd = _STATE.get('datadir')
-    if not dd:
-        return
-    root = os.path.join(dd, 'DividData')
-    if not os.path.isdir(root):
-        return
-    files = sorted(x for x in os.listdir(root) if x.endswith('.ldb'))
-    pat = re.compile(rb'(S[HZ]|BJ)\|(\d{1,8})\|(\d{1,6})\|(\d{9,14})')
-    shown = 0
-    for fn in files[:3]:
-        fp = os.path.join(root, fn)
-        try:
-            f = open(fp, 'rb')
-            try:
-                buf = f.read(2 * 1024 * 1024)
-            finally:
-                f.close()
-        except Exception:
-            continue
-        for m in pat.finditer(buf):
-            if shown >= 6:
-                break
-            key = m.group(0).decode('ascii')
-            tail = buf[m.end():m.end() + 96]
-            txt = ''.join(chr(b) if 32 <= b < 127 else '.'
-                          for b in bytearray(tail))
-            print('   key = %s' % key)
-            print('      可见: %s' % txt)
-            # 把后面的字节按 double 解一遍，看有没有像每股股利/复权因子的数
-            vals = []
-            for off in range(0, min(len(tail) - 8, 72)):
-                try:
-                    v = struct.unpack_from('<d', tail, off)[0]
-                except Exception:
-                    continue
-                if v == v and 1e-6 < abs(v) < 1e6:
-                    vals.append((off, round(v, 6)))
-            print('      像数值的 double(偏移,值): %s' % vals[:10])
-            shown += 1
-        if shown >= 6:
-            break
-    if not shown:
-        print('   没扫到 key —— 看 P1 的正则是否匹配')
-    print('   [判读] 数值里出现 0.3035 / 1.0234 这类 -> 就是 interest 与 dr，')
-    print('          说明存储层与 get_divid_factors 一一对应，API 没藏字段。')
+# 纪律（这一路踩出来的，按代价排序）：
+#   1. 先 dir(C) / __doc__ 枚举，再谈有没有 —— 猜不中名字 != 能力不存在
+#   2. 能查到官方文档的不要用探针去发现；文档也会错，验证这一步不能省
+#   3. 一个能力有没有，要把【所有可能提供它的接口】都查过；
+#      API 之上还有【存储层】—— DividData/Finance/EP 三个目录一看就清楚了
+#   4. 判别规则本身要先在【已知有值】的字段上验证（L3 只跑 4 个样本就宣布成立，被 M1 推翻）
+#   5. 打印要打【值】不是列名（L1 因 columns 分支优先级写错，15 个字段全打成「字段 1 个」）
+#   6. 本文件【不许出现模块级 import】—— 一律函数内导入（踩过两次）
+#   7. 本文件【不许用 emoji】—— GBK 编不了，io.open(p,'w') 先截断再 encode，
+#      抛异常就留下 0 字节文件（踩过两次）
+#   8. selftest 现在会编译本文件并查 6/7 两条 —— 曾经推了个语法坏的版本上去还全绿
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -790,7 +623,5 @@ def p2_ldb_sample(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('N1 定位 datadir（P 轮要用）', n1_locate_datadir),
-    ('P1 ★★ 扫 .ldb 的 key：类型码是不是只有 4000 一个值', p1_ldb_keys),
-    ('P2 挑几条 key 连 value 一起看，数得出 7 个 double 就说明 API 没藏字段', p2_ldb_sample),
+    # 暂无待确认项 —— 见上方「OPEN 已清空」的说明
 ]
