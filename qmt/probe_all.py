@@ -202,6 +202,46 @@ CONFIRMED = [
      '另有 Top10Holder / Top10FlowHolder / HolderNum。'
      '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
      "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
+    ('[**] I5 定案：分红【没有归属报告期】-> 红利只能保持信号执行器形态', '2026-08-31',
+     'get_divid_factors 的 7 个数全部查明：[0]=每股税前现金分红，[1][2][3][4][5] 实测'
+     '【全是 0.0】（送股/转增/配股/股改类，两只银行 12 条全为 0），[6]=复权因子。'
+     '★ 7 个数里没有任何日期形态，拿不到归属报告期，也拿不到预案公告日。'
+     'key 是【除权日】：601398 六条 QMT key 比本地 a_registration_date 晚 1~3 天，'
+     '正是登记日->次一交易日除权，与本地 a_xr_date 对齐。'
+     'C.get_dividend / get_divid_plan / get_bonus 【都不存在】，'
+     'dir(C) 里与分红相关的只有 get_divid_factors 和 dividend_type。'
+     '-> 红利指数增强的 fiscal_year 股息率口径【无法在 QMT 侧复现】，而它是'
+     'A、B 两条腿【共用】的前置过滤 -> 整条策略不能原生移植。'
+     '换回 rolling365 = 用回已知错的算法：工行 2024 起改半年派，'
+     'as-of 2025-06-01 虚高 +46.0%、2026-06-01 虚高 +53.0%（已用本地真值复算）。'),
+    ('[定案] 每股分红 [0] 与本地吻合（4/6 精确，2 条待复核）', '2026-08-31',
+     '601398 六条全部精确吻合：0.3035/0.3064/0.1434/0.1646/0.1414/0.1689。'
+     '600036 前四条精确吻合：1.522/1.738/1.972/2.000。'
+     '[?] 最后两条截图读出来是 0.012999/0.002999，本地是 1.013/1.003，差恰好 1.0 —— '
+     '但同行的 [6] 复权因子 1.025831/1.027359 反算每股约 1.01/1.02，'
+     '【算术支持真值是 1.013/1.003】，所以大概率是截图首位数字看错。见 OPEN 的 J2：'
+     '改成用 [6] 与 preClose 交叉验算，不靠肉眼。'),
+    ('[**] I1/I2 定案：扣非在 PERSHAREINDEX，且【中文字段名可用】', '2026-08-31',
+     '挂对表就有值（上一轮全 NaN 是因为挂在不存在的 ASHAREFINANCIALINDICATOR）：'
+     'PERSHAREINDEX.adjusted_earnings_per_share=扣非每股收益(601398 -> 0.97/0.98)；'
+     'adjusted_net_profit_rate=扣非净利同比；du_return_on_equity=净资产收益率(10.037)；'
+     'du_profit_rate=净利润同比。'
+     '★ 中文写法【全部可用且与英文一一对应】（同值同覆盖）：'
+     "'主要指标.扣非每股收益' / '主要指标.净资产收益率' / '主要指标.净利润同比增长' / "
+     "'利润表.净利润'(2.69929e+11) / '资产负债表.固定资产'(2.71028e+11)。"
+     '仍全 NaN（名字不对，不要再试）：PERSHAREINDEX 的 s_fa_deductedprofit / '
+     'inc_total_revenue_rate / main_business_income_rate。'),
+    ('[**] I3 定案：QMT 增长率是【累计同比】，本地 inc_* 是【单季同比】', '2026-08-31',
+     'du_profit_rate（百分数）vs 本地【全口径累计】同比，逐只对数：'
+     '  601398 2024  0.5012%  vs  0.50%  [OK]；'
+     '  600036 2023  6.2544%  vs  6.25%  [OK]；'
+     '  600036 2024  1.0493%  vs  1.05%  [OK]；'
+     '  601398 2023  0.8301%  vs  1.13%  差 0.30pp（唯一不合，见 OPEN 的 J3）。'
+     '3/4 精确吻合 -> 口径判定为【累计同比】。'
+     '★ 而本地 inc_net_profit_year_on_year 是【单季同比】（601398 2024 = 1.35%，'
+     '与累计 0.50% 完全不同）-> 【不能直接替换】。'
+     '要复现只能自己从累计转单季：ASHAREINCOME 累计值 + m_timetag 报告期 -> 累计差 -> '
+     '单季 -> 同比。froec 移植里的 _single_quarter 已经是这个逻辑，可复用。'),
     ('[!!] QMT 财务【按报告期前向填充】= 未来函数', '2026-08-31',
      '实测 601398：20241225~1230 净利 2690.3 亿(2024Q3)，20241231 变成 3658.6 亿'
      '(2024年报) —— 而 2024 年报公告日是 2025-03-29，提前 88 天。'
@@ -348,10 +388,10 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 I：下一轮 ==============================
+# ============================== 待确认 J：下一轮 ==============================
 #
-# 只剩一件事：红利指数增强 B 腿要的三个聚宽指标，QMT 侧怎么取。
-# 本轮不看「有没有值」而是【当场和本地真值对数】—— 有值但对不上比没有值更危险。
+# 红利指数增强的成败已定案（I5：分红没有归属报告期 -> 保持信号执行器形态）。
+# 剩下三条都是【小口径复核】，不阻塞任何策略，跑一次收尾即可。
 
 
 def _try(C, label, call):
@@ -360,170 +400,90 @@ def _try(C, label, call):
     except Exception as e:
         print('   %-52s -> %s' % (label, str(e)[:60]))
         return None
-    t = type(r).__name__
-    if isinstance(r, (list, tuple)):
-        print('   %-52s -> %s len=%d %s' % (label, t, len(r), str(list(r)[:5])[:80]))
-    elif isinstance(r, dict):
-        print('   %-52s -> dict len=%d %s' % (label, len(r), str(list(r)[:5])[:80]))
-    else:
-        print('   %-52s -> %s %s' % (label, t, _peek(r)))
+    print('   %-52s -> %s %s' % (label, type(r).__name__, _peek(r)))
     return r
 
 
-# 本地真值（std/fin_indicator_q.parquet，聚宽口径，比率存【小数】不是百分数）。
-# 探针把 QMT 的候选字段打在旁边，能不能对上一眼就知道。
-LOCAL_REF = [
-    # code,        报告期,     公告日,      inc_return, inc_rev,  inc_np
-    ('601398.SH', '2023年报', '2024-03-28', 0.0255, -0.0716, 0.0070),
-    ('601398.SH', '2024年报', '2025-03-29', 0.0246,  0.0187, 0.0135),
-    ('600036.SH', '2023年报', '2024-03-26', 0.0311, -0.0138, 0.0550),
-    ('600036.SH', '2024年报', '2025-03-26', 0.0294,  0.0753, 0.0752),
-]
+def j1_adjeps_coverage(C):
+    """扣非每股收益的覆盖只有 78/359（22%）—— 查清是不是只有年报期才有。
 
-# 文档给出的 PERSHAREINDEX(主要指标) 字段。前几轮的错在于把它们挂到了
-# ASHAREFINANCIALINDICATOR —— 那张表根本不存在，所以必然全 NaN。
-PSI = [
-    ('PERSHAREINDEX.adjusted_earnings_per_share', '扣非每股收益'),
-    ('PERSHAREINDEX.adjusted_net_profit_rate',    '扣非净利润同比增长 -> 可能对应 inc_np 附近'),
-    ('PERSHAREINDEX.du_return_on_equity',         '净资产收益率'),
-    ('PERSHAREINDEX.du_profit_rate',              '净利润同比增长'),
-    ('PERSHAREINDEX.s_fa_eps_basic',              '基本每股收益（已知有值 0.98）'),
-    ('PERSHAREINDEX.s_fa_eps_diluted',            '稀释每股收益（已知有值 0.98）'),
-    ('PERSHAREINDEX.s_fa_deductedprofit',         '扣非净利润？（搜索给的名字，未验证）'),
-    ('PERSHAREINDEX.inc_total_revenue_rate',      '营收同比？（猜，若 NaN 就放弃这个名字）'),
-    ('PERSHAREINDEX.main_business_income_rate',   '主营收入同比？（同上）'),
-]
-
-CN = [
-    ('主要指标.扣非每股收益', ''),
-    ('主要指标.净资产收益率', ''),
-    ('主要指标.净利润同比增长', ''),
-    ('利润表.净利润', '★ 这条是【中文写法能不能用】的判定，它一定有值'),
-    ('资产负债表.固定资产', ''),
-]
+    这决定【单季扣非 ROE 能不能算】：若只有年报有扣非 EPS，
+    单季扣非净利就做不出来，本地 inc_return 在 QMT 侧就没有等价物。
+    """
+    fld = 'PERSHAREINDEX.adjusted_earnings_per_share'
+    print('   对照：du_return_on_equity 同期非空 359 个（几乎每个交易日都有）')
+    for label, args in (
+        ('2024 全年', ('20240101', '20241231')),
+        ('2024Q1 报告窗口(4-25~5-10)', ('20240425', '20240510')),
+        ('2024 中报窗口(8-25~9-10)', ('20240825', '20240910')),
+        ('2024 三季报窗口(10-25~11-10)', ('20241025', '20241110')),
+        ('2025 年报窗口(3-25~4-10)', ('20250325', '20250410')),
+    ):
+        _try(C, '%-28s %s' % (label, args),
+             lambda a=args: C.get_financial_data([fld], ['601398.SH'], a[0], a[1],
+                                                 report_type='announce_time'))
+    print('   [判读] 若只有年报窗口非空 -> 扣非只有年度值 -> 单季扣非ROE 做不出来；')
+    print('          若四个报告窗口都非空 -> 是季度序列，78 个只是「值变化的天数」。')
 
 
-# 本地 601398 已实施分红（std/dividend.parquet，聚宽口径）。
-# 探针把 get_divid_factors 的 7 个数打在旁边 —— 关键是看有没有【归属报告期】。
-DIV_REF = """  601398 本地真值（std/dividend.parquet，聚宽口径，已换算成元/股）：
-    归属报告期      登记日        每股      类型
-    2022-12-31   2023-07-14   0.3035   年度分红
-    2023-12-31   2024-07-15   0.3064   年度分红
-    2024-06-30   2025-01-06   0.1434   中期分红   <- 2024 年起改【半年派】
-    2024-12-31   2025-07-11   0.1646   年度分红
-    2025-06-30   2025-12-12   0.1414   中期分红
-    2025-12-31   2026-05-12   0.1689   年度分红
+def j2_divid_precision(C):
+    """[0] 与 [6] 交叉验算 —— 不靠肉眼读截图。
 
-  为什么必须有【归属报告期】—— 用上面真值复算过的算术：
-    as-of 2025-06-01  rolling365 = 0.3064(2023年报) + 0.1434(2024中期) = 0.4498
-                      fiscal_year(2024) = 0.1434 + 0.1646 = 0.3080    虚高 +46.0%
-    as-of 2026-06-01  rolling365 = 0.1646(2024年报) + 0.1414(2025中期)
-                                   + 0.1689(2025年报)                = 0.4749
-                      fiscal_year(2025) = 0.1414 + 0.1689 = 0.3103    虚高 +53.0%
-  窗口里混进了【不同归属期】的分红 —— 只有除权日和金额是分不开的。"""
-
-
-def i5_divid_fields(C):
-    """★ 红利指数增强的成败在这一节。
-
-    策略的股息率过滤是【两条腿共用的前置条件】，用的是 fiscal_year 口径：
-    按【分红归属会计年度】(report_date) 汇总，不是按除权日滚动 365 天。
-    换回 rolling365 已被实测判定为【错的】—— 工行 2025-06-01 虚高 +46%、
-    2026-06-01 虚高 +53%，且虚高集中在 2024 后改半年派的银行/央企，
-    正是本策略的重仓处。
-
-    所以要问的只有一个问题：get_divid_factors 的 7 个数里，
-    有没有【归属报告期】或【预案公告日】？
-    已知 [0]=每股税前现金分红、[3][4]=配股比例/配股价、[6]=复权因子，
-    [1][2][5] 未查明。若其中有报告期 -> 可原生移植；没有 -> 只能保持
-    「本地选股 + QMT 执行」的信号执行器形态。
+    600036 最后两条截图读出来 0.012999/0.002999，本地是 1.013/1.003。
+    复权因子反算：每股 ≈ preClose x (factor - 1) / factor。对得上就是读错了。
     """
     import datetime as dt          # 本探针一律【函数内导入】，模块级不放 import
-    print(DIV_REF)
-    print()
-    for code in ('601398.SH', '600036.SH'):
+    for code in ('600036.SH', '601398.SH'):
         try:
-            r = _call_timeout(lambda code=code: C.get_divid_factors(code))
+            r = _call_timeout(lambda code=code: C.get_divid_factors(code)) or {}
         except Exception as e:
-            print('   get_divid_factors(%r) -> %s' % (code, str(e)[:70])); continue
+            print('   %s -> %s' % (code, str(e)[:60])); continue
         if not isinstance(r, dict) or not r:
-            print('   get_divid_factors(%r) -> %s（空）' % (code, type(r).__name__)); continue
-        ks = sorted(r)[-6:]                    # 只看最近 6 条
-        print('   -- %s 共 %d 条，最近 6 条 --' % (code, len(r)))
-        for k in ks:
+            print('   %s 空' % code); continue
+        for k in sorted(r)[-4:]:
+            v = list(r[k])
+            per, fac = float(v[0]), float(v[6]) if len(v) > 6 else 0.0
+            # 除权日前收盘价
+            px = None
             try:
-                bj = dt.datetime.utcfromtimestamp(k / 1000.0 + 8 * 3600).strftime('%Y-%m-%d')
+                d = _call_timeout(lambda k=k: C.get_market_data_ex(
+                    ['preClose'], [code], period='1d',
+                    end_time=dt.datetime.utcfromtimestamp(k / 1000.0 + 8 * 3600)
+                                        .strftime('%Y%m%d'),
+                    count=1, dividend_type='none', fill_data=False, subscribe=False))
+                df = d.get(code) if isinstance(d, dict) else None
+                if df is not None and len(df):
+                    px = float(df['preClose'].iloc[-1])
             except Exception:
-                bj = str(k)
-            v = list(r[k]) if hasattr(r[k], '__iter__') else [r[k]]
-            print('      key=%s(%s)  n=%d  %s' % (k, bj, len(v),
-                  ' '.join('[%d]=%s' % (i, x) for i, x in enumerate(v))))
-        print('   [判读] key 对上本地的【登记日/除权日】而不是 report_date。')
-        print('          在 7 个数里找 2022~2025 这样的年份、或 20241231 这样的日期形态 ——')
-        print('          找到 = 能原生移植；找不到 = 只能保持信号执行器形态。')
-    print('   -- 顺带确认没有别的分红接口（dir(C) 里与分红相关的只有这两个）--')
-    for fn in ('get_divid_factors', 'dividend_type', 'get_dividend',
-               'get_divid_plan', 'get_bonus'):
-        print('   C.%-22s %s' % (fn, '存在' if hasattr(C, fn) else '不存在'))
+                pass
+            est = (px * (fac - 1.0) / fac) if (px and fac > 1) else None
+            print('   %s key=%s  [0]=%.6f  [6]=%.6f  preClose=%s  由因子反算每股=%s'
+                  % (code, k, per, fac, ('%.2f' % px) if px else '?',
+                     ('%.4f' % est) if est else '?'))
+            if est:
+                print('        比值 [0]/反算 = %.4f   （≈1 则 [0] 可信；≈0.01 则少了整数位）'
+                      % (per / est if est else 0))
 
 
-def i1_psi_fields(C):
-    """PERSHAREINDEX 字段：挂对表再试一次。用 announce_time 口径。"""
-    print('   [!] 上一轮扣非全 NaN 的真因：6 个候选挂在 ASHAREFINANCIALINDICATOR，')
-    print('       而官方财务表只有 5 张，没有这一张。这轮全部挂到 PERSHAREINDEX。')
-    for f, memo in PSI:
-        r = _try(C, '%-44s %s' % (f, memo[:14]),
-                 lambda f=f: C.get_financial_data([f], ['601398.SH'],
-                                                  '20240101', '20250630',
-                                                  report_type='announce_time'))
-        del r
+def j3_np_rate_gap(C):
+    """601398 2023 年报 du_profit_rate 0.8301% vs 本地全口径累计同比 1.13%，差 0.30pp。
 
-
-def i2_chinese_fields(C):
-    """中文表名.中文字段名 —— 文档说支持。通了的话就不用再猜英文名。"""
-    print('   文档示例用的是 [\'利润表.净利润\', \'资产负债表.固定资产\']')
-    for f, memo in CN:
-        _try(C, '%-30s %s' % (f, memo[:26]),
-             lambda f=f: C.get_financial_data([f], ['601398.SH'],
-                                              '20240101', '20250630',
-                                              report_type='announce_time'))
-
-
-def i3_compare_local(C):
-    """★ 当场对数：QMT 候选字段 vs 本地聚宽真值。有值但对不上比没有值更危险。"""
-    print('   本地真值（聚宽口径，小数不是百分数）：')
-    print('   %-12s %-9s %-12s %9s %9s %9s'
-          % ('code', '报告期', '公告日', 'inc_return', 'inc_rev', 'inc_np'))
-    for c, rep, pub, a, b, d in LOCAL_REF:
-        print('   %-12s %-9s %-12s %9.4f %9.4f %9.4f' % (c, rep, pub, a, b, d))
-    print()
-    print('   QMT 侧（取公告后一个月，announce_time 口径）：')
-    for c, rep, pub, _a, _b, _d in LOCAL_REF:
-        end = pub.replace('-', '')
-        end = str(int(end[:6]) + 1) + '28'          # 公告月 +1 个月
-        print('   -- %s %s（查询到 %s）--' % (c, rep, end))
-        for f, _m in PSI[:4]:
-            _try(C, '     ' + f,
-                 lambda f=f, c=c, end=end: C.get_financial_data(
-                     [f], [c], end[:6] + '01', end, report_type='announce_time'))
-    print('   [判读] 若某字段末值 ≈ 本地 inc_np/inc_rev（注意 QMT 可能是【百分数】，'
-          '要 /100 再比），就是它；差一个量级先想单位，别急着否定。')
-
-
-def i4_derive_adjroe(C):
-    """退路：扣非ROE = 扣非EPS x 总股本 / 归母权益。三个料都已实测可用。"""
-    print('   若 i1/i2 都拿不到现成的扣非ROE同比，用这条还原：')
-    print('     扣非净利 = adjusted_earnings_per_share x get_total_share')
-    print('     扣非ROE  = 扣非净利 / tot_shrhldr_eqy_excl_min_int')
-    print('     inc_return = 扣非ROE(t) / 扣非ROE(t-4) - 1')
-    code = '601398.SH'
-    _try(C, 'get_total_share(%r)' % code, lambda: C.get_total_share(code))
-    for f in ('PERSHAREINDEX.adjusted_earnings_per_share',
-              'ASHAREBALANCESHEET.tot_shrhldr_eqy_excl_min_int'):
-        _try(C, f, lambda f=f: C.get_financial_data(
-            [f], [code], '20240101', '20250630', report_type='announce_time'))
-    print('   [判读] 601398 2024年报：归母权益 3.9698e+12，若扣非EPS≈0.97，')
-    print('          总股本 3.564e+11 -> 扣非净利≈3.457e+11 -> 扣非ROE≈8.7%，量级应对。')
+    其余 3 组都精确吻合，所以不是口径问题而是那一期的数。
+    两个候选：① QMT 用的是归母（本地归母 0.97%，也不等）
+             ② 2022 年基数被重述过
+    把 2021~2024 四年的累计净利原值打出来，自己反算同比就知道分母是哪一年的哪个版本。
+    """
+    for fld in ('ASHAREINCOME.net_profit_incl_min_int_inc',
+                'ASHAREINCOME.net_profit_excl_min_int_inc'):
+        print('   -- %s（年报期原值）--' % fld)
+        for y in (2021, 2022, 2023, 2024):
+            _try(C, '  %d 年报' % y,
+                 lambda y=y, fld=fld: C.get_financial_data(
+                     [fld], ['601398.SH'], '%d0401' % (y + 1), '%d0420' % (y + 1),
+                     report_type='announce_time'))
+    print('   本地：601398 归母 2022=3610.4亿 2023=3639.9亿 2024=3658.6亿')
+    print('        归母同比 2023=+0.97% 2024=+0.51%；全口径同比 2023=+1.13% 2024=+0.50%')
+    print('   [判读] 用打出来的原值反算，看 0.8301% 是拿哪两期算出来的。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -531,9 +491,7 @@ def i4_derive_adjroe(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('I1 PERSHAREINDEX 字段（上轮挂错表了，这轮挂对再试）', i1_psi_fields),
-    ('I2 中文表名.中文字段名（文档说支持，通了就不用猜英文名）', i2_chinese_fields),
-    ('I3 ★ 当场与本地真值对数（有值但对不上比没有值更危险）', i3_compare_local),
-    ('I4 退路：扣非EPS x 总股本 / 归母权益 还原扣非ROE', i4_derive_adjroe),
-    ('I5 ★★ 分红有没有【归属报告期】—— 红利能否原生移植就看这个', i5_divid_fields),
+    ('J1 扣非每股收益的覆盖（78/359）—— 决定单季扣非ROE能否算', j1_adjeps_coverage),
+    ('J2 每股分红 [0] 用复权因子交叉验算（不靠肉眼读截图）', j2_divid_precision),
+    ('J3 601398 2023 净利同比差 0.30pp 的来源', j3_np_rate_gap),
 ]
