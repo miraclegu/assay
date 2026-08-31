@@ -46,12 +46,20 @@ JQ_GLOBALS = {
     'initialize', 'handle_data', 'before_trading_start', 'after_trading_end',
     'process_initialize', 'after_code_changed',
     # `from jqdata import *` 带进来的（星号导入本检查解析不了，只能列白名单）
-    'datetime', 'timedelta', 'date', 'time', 'np', 'numpy', 'math',
+    'datetime', 'timedelta', 'date', 'time', 'np', 'numpy', 'math', 'dt',
+    # 补：froec 线用到的
+    'get_history_fundamentals', 'get_industry', 'get_industries',
+    'get_industry_stocks', 'OrderStatus', 'get_bars', 'get_ticks',
+    'get_current_tick', 'get_dominant_future', 'get_future_contracts',
+    'get_margincash_stocks', 'get_marginsec_stocks', 'get_concept',
+    'get_concept_stocks', 'get_security_info', 'sm', 'statsmodels',
+    'SMA', 'MA', 'EMA', 'MACD', 'KDJ', 'RSI', 'BOLL', 'ATR',
 }
 
 # 星号导入无法静态解析。遇到未列在白名单里的 `from X import *`，
 # 把 X 打出来提醒 —— 否则未定义名检查会变成一堆假阳性，然后被人无视。
-STAR_OK = {'jqdata', 'jqfactor', 'jqlib.technical_analysis', 'kuanke.user_space_api'}
+STAR_OK = {'jqdata', 'jqfactor', 'jqlib.technical_analysis',
+           'kuanke.user_space_api', 'jqlib.optimizer'}
 
 
 def undefined_names(src):
@@ -74,6 +82,17 @@ def undefined_names(src):
 
     for node in ast.walk(tree):
         # 绑定：赋值 / 函数定义 / 类 / import / 形参 / for / with / except / 推导式 / global
+        # [!] Lambda 也要收形参 —— 漏了它会把 lambda x: x.foo 里的 x 报成未定义。
+        #     实测在 froec v3 的 df.groupby('code').apply(lambda x: x.reset_index())
+        #     上误报了一次。
+        if isinstance(node, ast.Lambda):
+            a = node.args
+            for grp in (a.args, getattr(a, 'posonlyargs', []), a.kwonlyargs):
+                for x in grp:
+                    bound.add(x.arg)
+            for x in (a.vararg, a.kwarg):
+                if x is not None:
+                    bound.add(x.arg)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(node.name)
             a = node.args if hasattr(node, 'args') else None
