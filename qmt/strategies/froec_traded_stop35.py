@@ -835,15 +835,29 @@ def _capital_map(C, stocks, ref_date):
     return out
 
 
-# get_financial_data 的第 5 个参数 report_type 各版本接受的形态不一致。
-# 探针实测（同一账号同一版本）：传 'announce' / 'report' / '1' / '0' 一律返回 None，
-# 传整数 1 或 0 才返回数据。硬写某一种形态的风险是【静默返回 None】——
-# 财务整片为空，策略不会报错，只会一只票都选不出来。故走降级阶梯并缓存首个可用形态。
+# [!!] report_type 就是未来函数的根因，这里是全文件最要紧的一行。
+#
+# 官方文档（迅投知识库 innerApi/data_function）：report_type 取
+#     'announce_time'  按【公告期】取数 —— 发布日之后到下个财报发布日之间，
+#                      给的都是该期财报的值。这是默认值，也是【时点正确】的口径。
+#     'report_time'    按【报告期】取数 —— 上年 Q4 的值就落在上年报告期上。
+#
+# 而移植原来硬写的正是 report_type='report_time'，等于【主动要了未来函数那一版】：
+# 实测 601398 在 20241231 当天就给出 2025-03-29 才公告的年报，提前 88 天。
+# 换成 'announce_time' 是一个词的修复，比在下游拿 m_anntime 事后过滤更干净
+# （m_anntime 仍然照请求，用作交叉校验与 raw 口径的兜底）。
+#
+# 另一个坑：传不认识的字符串（'announce'/'report'/'1'/'0'）是【静默返回 None】不报错，
+# 结果是财务整片为空、策略照跑、只是一只票都选不出来。故走降级阶梯并缓存首个可用形态。
 _FIN_CALLS = (
-    ('report_type=1',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 1)),
-    ('report_type=0',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 0)),
-    ("report_type='report_time'", lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='report_time')),
-    ('无 report_type',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b)),
+    ("report_type='announce_time' ★按公告期",
+     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='announce_time')),
+    ('默认（文档称默认即 announce_time）',
+     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b)),
+    ('report_type=1',
+     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 1)),
+    ("report_type='report_time' [!] 未来函数口径，仅作最后兜底",
+     lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='report_time')),
 )
 
 

@@ -291,3 +291,55 @@ File "D:\国金证券QMT交易端\bin.x64\lib\site-packages\xtquant\xtdata.py", 
 
 **纪律**：G1~G5 每节都先 `_doc()` 打 `__doc__` 再调用。__doc__ 里通常直接写着参数名，
 比试十个参数便宜得多。这一轮的教训就是：**能枚举的东西不要猜。**
+
+---
+
+## 2026-08-31 第三轮：**先查文档，探针只做验证**
+
+G 轮花了一整轮试 18 个行业名全返回 0，而官方文档一句话就说清了。
+**方法从此改成：凡是能查到文档的，不要用探针去发现。** 探针只负责验证文档说法。
+
+### 根因找到了，而且是一个词
+
+[迅投知识库 · 行情函数](https://dict.thinktrader.net/innerApi/data_function.html)：
+
+| `report_type` | 含义 |
+|---|---|
+| `'announce_time'` | 按**公告期**取数 —— 发布日之后到下个财报发布日之间给的都是该期财报的值。**默认值，时点正确** |
+| `'report_time'` | 按**报告期**取数 —— 上年 Q4 的值就落在上年报告期上 |
+
+**移植里硬写的正是 `report_type='report_time'`** —— 主动要了未来函数那一版。
+这完整解释了 601398 在 20241231 就给出 2025-03-29 才公告的年报（提前 88 天）。
+
+已改成 `'announce_time'` 优先的降级阶梯，`'report_time'` 降为最后兜底。
+`m_anntime` 照旧请求，用作交叉校验与 raw 口径的兜底 —— 两条腿互相印证。
+
+### 板块名 = 前缀 + 行业名，不加分隔符
+
+如 `SW1汽车` / `CSRC1采矿业`。前缀族：
+`SW1`/`SW2` 申万一二级、`CSRC1`/`CSRC2` 证监会、`THY1`/`THY2` 通达信行业、
+`TGN`/`GN` 概念、`DY1` 地域。
+
+**上一轮试的是光秃秃的「银行」，所以返回 0 —— 不是取不到，是名字少了前缀。**
+
+### G 轮实测定案
+
+- `get_raw_financial_data([field], codes, s, e)` → `{code: dict}`，**两只票都有值**。
+  官方说明：同参数但**不做日度插值**，只返回原始报告期行 —— 正是我们要的形态。
+- 直接可用、免查财务表：`get_total_share`→356406257089、`get_float_caps`→269612212539、
+  `is_suspended_stock`→`False`、`get_weight_in_index('000300.SH','601398.SH')`→`0.992`。
+- `get_his_st_data` 只接**单个字符串**（传 list 时报错泄露了内部名 `get_st_status`）。
+  工行返回空 dict 是因为它从没 ST，不是不可用。
+- 扣非净利 8 个候选**全 NaN**；但 `PERSHAREINDEX.s_fa_eps_diluted` → 0.98 有值。
+  **停止逐个猜名字** —— 用 `get_raw_financial_data` 拉整表字段清单去找。
+- `get_factor_data` 缺 3 个位置参数（首个 `stock_list`）；`get_trading_dates` 第 4 个参数是 `count`。
+
+### 下一轮 `OPEN`（H1–H5）
+
+**H3 最要紧，只看一个数**：601398 在 20241231 的净利。
+`'report_time'` 下是 3658.6 亿（年报，未来函数）；若 `'announce_time'` 口径正确，
+**那天应该还是 2690.3 亿**（2024Q3），要到 2025-03-29 之后才变。
+一个数就能判定未来函数消没消掉。
+
+H1 验证 `SW1银行` 并跑全 31 个申万一级建映射；H2 拉整表字段清单找扣非；
+H4 `get_instrument_detail(code, iscomplete)` 扩展字段；H5 真 ST 股 + 补齐三个方法的参数。
