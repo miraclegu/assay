@@ -524,37 +524,22 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 N：因子库枚举 ==========================
-#
-# 两条新线索（都来自官方文档，不是猜）：
-#   [1] get_factor_data 的因子名【必须带表名前缀】，如 'Valuation_and_Market_Cap.PE'。
-#       之前传 ['pe'] 返回 None 是少了前缀，不是因子不存在 —— 又一次同类错误。
-#       前提：QMT 客户端【数据管理】->【补充数据】要勾选【多因子数据】并下载。
-#   [2] ★ 因子库在磁盘上是【按因子名建目录】的：
-#           {安装目录}/datadir/EP/{因子名}_Xdat2/data.fe
-#       -> os.listdir 就能把全部因子名列出来。这是一路上一直缺的【枚举入口】。
-#
-# 官方「迅投因子」页面自己说：因子分类是 成长/基础/每股/质量/动量/风险/技术/情绪，
-# 【没有分红类】，并建议联系客服问股息指标。所以 N2 的预期结果可能还是「确实没有」——
-# 但这次是【列出全部因子名之后】说没有，跟之前猜三个名字就说没有不是一回事。
+    ('[**] N 轮：datadir 结构 = 找对了枚举入口，但目标找错了', '2026-09-01',
+     'datadir = D:/国金证券QMT交易端/datadir（从 xtquant.__file__ 反推成功）。'
+     "下面 13 项：BJ / CC / DividData / EP / Finance / Industry / SH / SZ / "
+     "Sector / TradeDateAndETFStockListCache / Weight / increase / quotetimeinfo。"
+     '★★ 有【DividData】目录 —— 分红数据的磁盘落点；旁边还有 Finance(财务)、'
+     'Industry(行业)、Sector(板块)、Weight(指数权重)。'
+     '我一直在找 API 里的分红字段，而数据是按【专门目录】存的。'
+     '★ EP 存在但里面【没有 *_Xdat2】-> 多因子数据确实没下载。'
+     '这也解释了 N3 里连【已知存在】的 PE/PB 都取不到 —— '
+     '「先验证已知存在的因子」这个判据起作用了：全空说明是没下载数据，'
+     '不是因子名写错。要用多因子得先去客户端【数据管理->补充数据】勾【多因子数据】。'),
 
 
-def _try(C, label, call):
-    try:
-        r = _call_timeout(call)
-    except Exception as e:
-        print('   %-52s -> %s' % (label, str(e)[:56]))
-        return None
-    t = type(r).__name__
-    cols = getattr(r, 'columns', None)
-    if cols is not None:
-        print('   %-52s -> %s 字段 %d: %s'
-              % (label, t, len(cols), str(list(cols)[:12])[:90]))
-    elif isinstance(r, dict):
-        print('   %-52s -> dict len=%d %s' % (label, len(r), str(list(r)[:8])[:80]))
-    else:
-        print('   %-52s -> %s %s' % (label, t, _peek(r)))
-    return r
+# ============================== 待确认 O：DividData =========================
+#
+# N1 保留（O 轮要用它定位 datadir）；N2/N3 已定案，见 CONFIRMED。
 
 
 # N 轮的跨节状态。不用 g —— g 是 QMT 注入的，本地干跑时不存在，
@@ -612,72 +597,200 @@ def n1_locate_datadir(C):
     print('   -> datadir = %s' % (_STATE['datadir'] or '未找到'))
 
 
-def n2_enumerate_factors(C):
-    """★ 把因子库【全部因子名】列出来 —— 一路上一直缺的枚举入口。
+# ============================== 待确认 O：DividData ==========================
+#
+# ★★ N2 找对了枚举入口，但我找错了目标。datadir 下 13 项：
+#     ['BJ','CC','DividData','EP','Finance','Industry','SH','SZ','Sector',
+#      'TradeDateAndETFStockListCache','Weight','increase','quotetimeinfo']
+#
+#   [1] DividData —— 分红数据就在这里。API 不给报告期，不代表文件里没有。
+#   [2] Finance   —— 财务数据。
+#   [3] EP 存在但里面没有 *_Xdat2 -> 多因子数据确实没下载，
+#       这也解释了 N3 里连【已知存在】的 PE/PB 都取不到 —— 判据起作用了。
+#
+# 本轮只做一件事：把 DividData / Finance / EP 的目录结构和文件格式看清楚。
+# 不解析内容，先确认「有什么、什么格式、多大」。
 
-    目录结构（官方文档）：{datadir}/EP/{因子名}_Xdat2/data.fe
-    EP 只是其中一个分类目录，所以先列 datadir 下的所有子目录再逐个找 *_Xdat2。
+
+def _fmt_size(n):
+    for unit in ('B', 'K', 'M', 'G'):
+        if n < 1024 or unit == 'G':
+            return '%.1f%s' % (n, unit)
+        n /= 1024.0
+
+
+def _magic(path, n=16):
+    """读文件头几个字节判格式。feather 是 ARROW1，很多 QMT 文件是私有二进制。"""
+    try:
+        f = open(path, 'rb')
+        try:
+            head = f.read(n)
+        finally:
+            f.close()
+    except Exception as e:
+        return '读不了(%s)' % str(e)[:24]
+    known = [(b'ARROW1', 'feather/arrow'), (b'PAR1', 'parquet'),
+             (b'PK\x03\x04', 'zip'), (b'SQLite', 'sqlite'),
+             (b'{', 'json?'), (b'[', 'json?')]
+    for sig, name in known:
+        if head.startswith(sig):
+            return name
+    printable = sum(1 for b in head if 32 <= (b if isinstance(b, int) else ord(b)) < 127)
+    kind = '文本?' if printable >= n * 0.8 else '二进制'
+    hexs = ' '.join('%02x' % (b if isinstance(b, int) else ord(b)) for b in head[:12])
+    return '%s [%s]' % (kind, hexs)
+
+
+def _walk_head(root, max_depth=3, max_per_dir=12, indent=6):
+    """带上限地列目录树 —— DividData 可能是每只股票一个文件，几千个，不能全打。"""
+    import os
+
+    def rec(d, depth, pad):
+        try:
+            items = sorted(os.listdir(d))
+        except Exception as e:
+            print('%s[列不了: %s]' % (' ' * pad, str(e)[:40]))
+            return
+        dirs = [x for x in items if os.path.isdir(os.path.join(d, x))]
+        files = [x for x in items if not os.path.isdir(os.path.join(d, x))]
+        print('%s(%d 个子目录, %d 个文件)' % (' ' * pad, len(dirs), len(files)))
+        for x in files[:max_per_dir]:
+            fp = os.path.join(d, x)
+            try:
+                sz = os.path.getsize(fp)
+            except Exception:
+                sz = 0
+            print('%s%-34s %8s  %s' % (' ' * pad, x[:34], _fmt_size(sz), _magic(fp)))
+        if len(files) > max_per_dir:
+            print('%s... 还有 %d 个文件' % (' ' * pad, len(files) - max_per_dir))
+        if depth < max_depth:
+            for x in dirs[:max_per_dir]:
+                print('%s[%s]' % (' ' * pad, x))
+                rec(os.path.join(d, x), depth + 1, pad + 2)
+            if len(dirs) > max_per_dir:
+                print('%s... 还有 %d 个子目录' % (' ' * pad, len(dirs) - max_per_dir))
+
+    rec(root, 0, indent)
+
+
+def o1_dividdata(C):
+    """★ DividData 目录 —— 分红数据的磁盘落点。"""
+    import os
+    dd = _STATE.get('datadir')
+    if not dd:
+        print('   [!] datadir 未找到，先看 N1')
+        return
+    for name in ('DividData', 'Finance', 'EP'):
+        d = os.path.join(dd, name)
+        print('   ==== %s ====' % d)
+        if not os.path.isdir(d):
+            print('      不存在')
+            continue
+        _walk_head(d, max_depth=3, max_per_dir=12)
+        print()
+
+
+def o2_find_601398(C):
+    """在 DividData / Finance 里找 601398 相关的文件 —— 有的话就知道按什么组织。"""
+    import os
+    dd = _STATE.get('datadir')
+    if not dd:
+        return
+    pats = ('601398', 'SH601398', '600036')
+    for name in ('DividData', 'Finance'):
+        root = os.path.join(dd, name)
+        if not os.path.isdir(root):
+            continue
+        print('   -- 在 %s 下搜 %s --' % (name, str(pats)))
+        n_hit, n_walk = 0, 0
+        for cur, dirs, files in os.walk(root):
+            n_walk += 1
+            if n_walk > 400:                 # 别把整棵树走完，QMT 里会很慢
+                print('      (只走了前 400 个目录，够看结构了)')
+                break
+            for f in files:
+                if any(p in f for p in pats):
+                    fp = os.path.join(cur, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                    except Exception:
+                        sz = 0
+                    rel = fp[len(root):]
+                    print('      %-56s %8s  %s' % (rel[:56], _fmt_size(sz), _magic(fp)))
+                    n_hit += 1
+                    if n_hit >= 12:
+                        break
+            if n_hit >= 12:
+                break
+        if not n_hit:
+            print('      没命中 —— 说明不是按股票代码分文件，看 O1 的结构')
+
+
+def o3_readable(C):
+    """挑最小的一个文件，把开头当文本打出来 —— 能读就有戏，不能读就到此为止。
+
+    [!] 只读前 400 字节，且只打可见字符。不做任何解析，也不写任何文件。
     """
     import os
     dd = _STATE.get('datadir')
     if not dd:
-        print('   [!] datadir 未找到。看 N1 打出的 cwd / sys.path，')
-        print('       把真实路径填进 n1 的 roots 再跑一次。')
         return
-    try:
-        subs = sorted(os.listdir(dd))
-    except Exception as e:
-        print('   列 datadir 失败: %s' % str(e)[:70])
+    cands = []
+    for name in ('DividData', 'Finance'):
+        root = os.path.join(dd, name)
+        if not os.path.isdir(root):
+            continue
+        n = 0
+        for cur, dirs, files in os.walk(root):
+            n += 1
+            if n > 200:
+                break
+            for f in files:
+                fp = os.path.join(cur, f)
+                try:
+                    sz = os.path.getsize(fp)
+                except Exception:
+                    continue
+                if 100 < sz < 5 * 1024 * 1024:
+                    cands.append((sz, fp))
+    if not cands:
+        print('   没找到合适大小的文件')
         return
-    print('   datadir 下 %d 项: %s' % (len(subs), str(subs[:40])[:400]))
-    hit = 0
-    for sub in subs:
-        d = os.path.join(dd, sub)
+    # [!] 别按大小排 —— 干跑时按大小挑到的全是同一批填充文件，把唯一可读的漏了。
+    #     按【格式】优先：文本 / feather / parquet 先看，二进制最后，且尽量分散在不同目录。
+    def rank(item):
+        sz, fp = item
+        mg = _magic(fp)
+        pri = 0 if ('文本' in mg or 'arrow' in mg or 'parquet' in mg) else 1
+        return (pri, os.path.dirname(fp), sz)
+    cands.sort(key=rank)
+    seen_dir, pick = set(), []
+    for sz, fp in cands:
+        d = os.path.dirname(fp)
+        if d in seen_dir and len(pick) >= 2:
+            continue
+        seen_dir.add(d)
+        pick.append((sz, fp))
+        if len(pick) >= 4:
+            break
+    print('   （%d 个候选，按格式优先挑 %d 个，文本/feather 排前面）'
+          % (len(cands), len(pick)))
+    for sz, fp in pick:
+        print('   ---- %s  (%s, %s) ----' % (fp[-70:], _fmt_size(sz), _magic(fp)))
         try:
-            if not os.path.isdir(d):
-                continue
-            items = os.listdir(d)
-        except Exception:
+            f = open(fp, 'rb')
+            try:
+                head = f.read(400)
+            finally:
+                f.close()
+        except Exception as e:
+            print('      读不了: %s' % str(e)[:50])
             continue
-        fac = sorted(x[:-6] for x in items if x.endswith('_Xdat2'))
-        if not fac:
-            continue
-        hit += 1
-        print('   -- %s：%d 个因子 --' % (sub, len(fac)))
-        for k in range(0, min(len(fac), 240), 6):
-            print('      %s' % '  '.join('%-20s' % x for x in fac[k:k + 6]))
-        div = [x for x in fac if any(w in x.lower() for w in
-               ('div', 'dps', 'yield', 'payout', 'bonus'))]
-        print('      >>> 名字含 div/dps/yield/payout/bonus 的: %s' % (div or '无'))
-    if not hit:
-        print('   [!] datadir 下没有 *_Xdat2 形态的因子目录 ——')
-        print('       多半是【数据管理->补充数据】没勾【多因子数据】，先下载再跑。')
-
-
-def n3_factor_api(C):
-    """按正确写法调 get_factor_data：因子名【带表名前缀】。
-
-    签名（缺参报错泄露的）：(stock_list, factor_list, start_date, end_date)
-    """
-    known = ['Valuation_and_Market_Cap.PE', 'Valuation_and_Market_Cap.PB',
-             'Valuation_and_Market_Cap.PETTM']
-    div = ['Valuation_and_Market_Cap.DividendYield',
-           'Valuation_and_Market_Cap.DividendYieldTTM',
-           'Valuation_and_Market_Cap.DivYield',
-           'Valuation_and_Market_Cap.DividendPerShare',
-           'factor_metrics.DividendPerShare',
-           'factor_metrics.DPS',
-           'factor_base_derivative.DividendYield']
-    print('   -- 先验证【已知存在】的因子，确认调用形态对了 --')
-    for f in known:
-        _try(C, f, lambda f=f: C.get_factor_data(
-            ['601398.SH'], [f], '20240101', '20241231'))
-    print('   -- 再试股息类候选（正式名字以 N2 列出来的为准，这里只是先探） --')
-    for f in div:
-        _try(C, f, lambda f=f: C.get_factor_data(
-            ['601398.SH'], [f], '20240101', '20241231'))
-    print('   [判读] 若 PE/PB 也取不到 -> 是【多因子数据没下载】不是因子名问题，')
-    print('          先去客户端【数据管理】->【补充数据】勾【多因子数据】。')
+        txt = ''.join(chr(b) if 32 <= b < 127 else '.' for b in bytearray(head))
+        for k in range(0, len(txt), 96):
+            print('      %s' % txt[k:k + 96])
+    print('   [判读] 出现 601398 / 20241231 / 0.1646 这类可读片段 -> 值得继续解析；')
+    print('          全是 . 和乱码 -> 私有二进制，这条路到此为止，回头走信号回放。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -685,7 +798,8 @@ def n3_factor_api(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('N1 定位 datadir（后面枚举因子名靠它）', n1_locate_datadir),
-    ('N2 ★★ 枚举因子库全部因子名 —— 一直缺的枚举入口', n2_enumerate_factors),
-    ('N3 get_factor_data 正确写法：因子名带表名前缀', n3_factor_api),
+    ('N1 定位 datadir（O 轮要用）', n1_locate_datadir),
+    ('O1 ★★ DividData / Finance / EP 目录结构与文件格式', o1_dividdata),
+    ('O2 在 DividData / Finance 下搜 601398，看按什么组织', o2_find_601398),
+    ('O3 挑最小的文件读头 400 字节，判断能不能解析', o3_readable),
 ]
