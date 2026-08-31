@@ -69,6 +69,29 @@ PROFILES = [
          export=('python3 export_signal.py strategies/红利/红利指数增强.py '
                  '--param div_method=fiscal_year --cash 1000000 '
                  '-o signal_hongli.csv')),
+    # ★ 回放版：在 QMT 里【回测】本地历史选股。与上面的执行版分工见 signal_replay.py 顶部。
+    #   回测才用得上的东西（QMT 撮合/费用/分钟数据）只能在这里测。
+    dict(out='hongli_index_plus_replay.py', tpl='signal_replay.py',
+         title='红利指数增强（信号回放：QMT 回测本地历史选股）',
+         strategy='strategies/红利/红利指数增强.py',
+         run_id='20260828-210010-adcde3',
+         local={'div_method': 'fiscal_year'},
+         metrics={'annual': 20.07, 'max_drawdown': 17.95, 'sharpe': 1.30},
+         set={'SIGNAL_PATH': r'D:\work\finacial\signal_hongli_series.csv'},
+         export=('python3 export_signal.py strategies/红利/红利指数增强.py '
+                 '--param div_method=fiscal_year --start 2016-01-01 '
+                 '--end 2026-06-30 --cash 1000000 --series '
+                 '-o signal_hongli_series.csv')),
+    dict(out='sgmspeg_v0b_replay.py', tpl='signal_replay.py',
+         title='sgmspeg_v0b（信号回放：QMT 回测本地历史选股）',
+         strategy='strategies/小市值/sgmspeg_v0b.py',
+         run_id='20260828-205350-a76665',
+         local={},
+         metrics={'annual': 32.68, 'max_drawdown': 52.26, 'sharpe': 1.08},
+         set={'SIGNAL_PATH': r'D:\work\finacial\signal_v0b_series.csv'},
+         export=('python3 export_signal.py strategies/小市值/sgmspeg_v0b.py '
+                 '--start 2016-01-01 --end 2026-06-30 --cash 1000000 --series '
+                 '-o signal_v0b_series.csv')),
 ]
 
 
