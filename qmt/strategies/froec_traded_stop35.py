@@ -114,6 +114,15 @@ FIELD_NETPROF = 'ASHAREINCOME.net_profit_excl_min_int_inc'         # 归母净利润(
 FIELD_TOTCAP  = 'CAPITALSTRUCTURE.total_capital'                   # 总股本
 FIELD_CIRCAP  = 'CAPITALSTRUCTURE.circulating_capital'             # 流通股本
 
+# 报告期 / 公告日。QMT 一直都有，只是必须【显式当字段请求】才会返回该列。
+# 实测 601398（探针 E3，与本地 lake 逐字段核对）：
+#     m_timetag = 1.703952e+12  -> 2023-12-31  报告期（本地 report_date 2023-12-31）
+#     m_anntime = 1.7115552e+12 -> 2024-03-28  公告日（本地 pub_date    2024-03-28）
+# 有了 m_anntime 就不必再用「法定披露截止日」兜底 —— 那会让本策略采纳财报
+# 比真实公告晚 0~32 天，与本地 PIT 口径系统性偏离。
+FIELD_REPTIME = 'ASHAREINCOME.m_timetag'
+FIELD_ANNTIME = 'ASHAREINCOME.m_anntime'
+
 
 class _G:
     pass
@@ -137,6 +146,7 @@ def init(C):
 
     g.last_week_key   = None   # 已调仓的 ISO 周标识
     g.fin_cache       = None   # 财报矩阵 DataFrame
+    g.fin_call        = None   # get_financial_data 已定型的调用形态（见 _call_fin）
     g.fin_cache_date  = None
     g.detail_cache    = {}
     g.industry_sectors = None
@@ -704,8 +714,9 @@ def _fin_matrix(C, stocks, ref_date):
     start = _shift_days(ref_date, -900)
     rows = {}
     for batch in _chunks(stocks, FIN_BATCH):
-        raw = _call_fin(C, [FIELD_EQUITY, FIELD_NETPROF], batch, start, ref_date)
-        per_stock = _normalize_fin(raw, batch, [FIELD_EQUITY, FIELD_NETPROF])
+        _f = [FIELD_EQUITY, FIELD_NETPROF, FIELD_REPTIME, FIELD_ANNTIME]
+        raw = _call_fin(C, _f, batch, start, ref_date)
+        per_stock = _normalize_fin(raw, batch, _f)
         for code, df in per_stock.items():
             rec = _build_quarter_record(df, FIELD_EQUITY, FIELD_NETPROF, ref_date)
             if rec:
@@ -824,9 +835,48 @@ def _capital_map(C, stocks, ref_date):
     return out
 
 
+# get_financial_data 的第 5 个参数 report_type 各版本接受的形态不一致。
+# 探针实测（同一账号同一版本）：传 'announce' / 'report' / '1' / '0' 一律返回 None，
+# 传整数 1 或 0 才返回数据。硬写某一种形态的风险是【静默返回 None】——
+# 财务整片为空，策略不会报错，只会一只票都选不出来。故走降级阶梯并缓存首个可用形态。
+_FIN_CALLS = (
+    ('report_type=1',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 1)),
+    ('report_type=0',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, 0)),
+    ("report_type='report_time'", lambda C, f, s, a, b: C.get_financial_data(f, s, a, b, report_type='report_time')),
+    ('无 report_type',            lambda C, f, s, a, b: C.get_financial_data(f, s, a, b)),
+)
+
+
+def _fin_nonempty(r):
+    """注意不能写 `if not r:` —— Panel/DataFrame 的真值判断会抛异常。"""
+    if r is None:
+        return False
+    if isinstance(r, dict):
+        return len(r) > 0
+    if isinstance(r, pd.DataFrame):
+        return not r.empty
+    return True                                   # Panel 等其它形态交给下游 normalize
+
+
 def _call_fin(C, fields, stocks, start_date, end_date):
-    return C.get_financial_data(fields, stocks, start_date, end_date,
-                                report_type='report_time')
+    order = list(_FIN_CALLS)
+    if getattr(g, 'fin_call', None) is not None:  # 已定型：只走选中的那种
+        order = [g.fin_call] + [c for c in order if c is not g.fin_call]
+    for entry in order:
+        name, fn = entry
+        try:
+            r = fn(C, fields, stocks, start_date, end_date)
+        except Exception as e:
+            if g.fin_call is None:
+                print('[fin] %s -> 异常 %s' % (name, e))
+            continue
+        if _fin_nonempty(r):
+            if g.fin_call is not entry:
+                print('[fin] get_financial_data 采用 %s' % name)
+                g.fin_call = entry
+            return r
+    print('[warn] get_financial_data 四种形态全部无数据，请核对字段名与数据下载')
+    return None
 
 
 def _normalize_fin(raw, stocks, fields):
@@ -905,14 +955,27 @@ def _attach_report_cols(df):
     df.columns = [_short(c) for c in df.columns]
 
     # 若 QMT 直接给了报告期/公告日列，优先用它们（不同版本可能有）
-    if 'm_timetag' in df.columns:
-        df['report'] = df['m_timetag'].map(_to_yyyymmdd)
-        if 'm_anndate' in df.columns:
-            df['anndate'] = df['m_anndate'].map(_to_yyyymmdd)
-            df.loc[df['anndate'] <= 0, 'anndate'] = df['report'].map(_deadline_anndate)
+    ann_col = None
+    for cand in ('m_anntime', 'm_anndate', 'ann_dt', 'anndate'):
+        if cand in df.columns:
+            ann_col = cand
+            break
+    if 'm_timetag' in df.columns or ann_col is not None:
+        if 'm_timetag' in df.columns:
+            df['report'] = df['m_timetag'].map(_to_yyyymmdd)
+        else:                                   # 只有公告日：报告期退回按季末推断
+            df['report'] = [_enclosing_report(_to_yyyymmdd(i)) for i in df.index]
+        if ann_col is not None:
+            df['anndate'] = df[ann_col].map(_to_yyyymmdd)
+            bad = df['anndate'] <= 0
+            if bad.any():                       # 个别缺失才退回法定截止日
+                df.loc[bad, 'anndate'] = df.loc[bad, 'report'].map(_deadline_anndate)
         else:
             df['anndate'] = df['report'].map(_deadline_anndate)
-        return df
+        df = df[df['report'] > 0]
+        if df.empty:
+            return None
+        return df.drop_duplicates(subset=['report'], keep='last')
 
     # 常规形态：index 是交易日 -> 按季末重建
     idx = sorted(_to_yyyymmdd(i) for i in df.index)
@@ -982,6 +1045,17 @@ def _to_yyyymmdd(v):
         return int(s)
     except ValueError:
         return 0
+
+
+def _enclosing_report(d):
+    """交易日 d 所处（或刚过）的季末报告期。仅在拿到公告日但没拿到 m_timetag 时用。"""
+    if not d:
+        return 0
+    y, md = d // 10000, d % 10000
+    for cut in (1231, 930, 630, 331):
+        if md >= cut:
+            return y * 10000 + cut
+    return (y - 1) * 10000 + 1231
 
 
 def _quarter_of(rep):

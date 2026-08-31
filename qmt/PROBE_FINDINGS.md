@@ -237,3 +237,57 @@ File "D:\国金证券QMT交易端\bin.x64\lib\site-packages\xtquant\xtdata.py", 
 
 ⚠️ S4 那条很要紧：**板块成分随时间变，回测必须取时点成分而不是最新成分**。
 若 `real_timetag` 不支持，用最新 ST 名单去过滤 2016 年的历史就是未来函数。
+
+---
+
+## 2026-08-31 第二轮：先枚举后验证，四条「取不到」全部翻案
+
+上一轮的方法论纠正落地后，`dir(C)` 一次就把问题解决了大半。
+
+### 定案
+
+**`dir(C)` = 115 个成员**。此前断言「不存在」的能力，方法其实都在：
+`get_industry` / `get_sector` / `create_sector` / `get_raw_financial_data` /
+`get_his_st_data` / `get_float_caps` / `get_total_share` / `get_weight_in_index` /
+`get_factor_data` / `get_smallcap|midcap|largecap` / `is_suspended_stock` …
+
+**公告日一直都有** —— 之前说「拿不到」，实情是**我只请求了 4 个业务字段，所以只返回 4 列**。
+把日期当字段显式请求即可，且能与业务字段同批返回：
+
+| 字段 | 探针值 | 解释 | 本地 601398 |
+|---|---|---|---|
+| `ASHAREINCOME.m_timetag` | 1.703952e+12 | 报告期 **2023-12-31** | `report_date` 2023-12-31 ✔ |
+| `ASHAREINCOME.m_anntime` | 1.7115552e+12 | 公告日 **2024-03-28** | `pub_date` 2024-03-28 ✔ |
+
+毫秒时间戳，**北京时间**（用 `utcfromtimestamp` 会差一天）。
+`ann_dt` / `announce_date` / `anndate` / `report_date` / `first_ann_dt` 全 NaN —— 只是名字不对。
+
+同一批请求返回 `columns: ['net_profit_excl_min_int_inc', 'm_anntime']`，
+20240102 一行就是净利 3639.9 亿 + 公告日 2024-03-28 ——
+**未来函数的直接物证，也是根治它的钥匙。**
+
+> 已改 `_tpl/froec.py`：`_attach_report_cols` 认 `m_anntime`，ROE 取数时把两个日期字段
+> 一起请求。**删掉「法定披露截止日」兜底**（它原本会让 QMT 版比本地晚采纳财报 0~32 天），
+> 只在个别行缺公告日时才退回。至此 QMT 版与本地 PIT 口径对齐。
+
+**`report_type` 是第 5 个位置参数且必须是整数**：`1`/`0` 返回数据，
+`'announce'`/`'report'`/`'1'`/`'0'` 一律返回 `None`。
+原代码硬写 `report_type='report_time'`，一旦该形态不被接受就是**财务整片为空且不报错**。
+已改成降级阶梯 `_FIN_CALLS` + 缓存首个可用形态。
+
+**`get_instrumentdetail` 30 个键里没有行业**：`ProductID`/`ProductName`
+对 601398/601088/300750 全是空字符串。但捡到 `TotalVolume`（总股本）和
+`FloatVolume`（流通股本）—— 不查财务表也能算市值。
+
+### 仍未决 → 进 `probe_all.py` 的 `OPEN`
+
+- **G1 行业**：`get_industry` / `get_sector` 都报 `missing 1 required positional argument`
+  （`'indu…'` / `'sector'`），说明要的是**行业名**不是股票代码 —— 上一轮我传了
+  `601398.SH` 所以返回 `[]`，这不是「取不到」。下一轮先打 `__doc__` 再试候选名。
+- **G2** `get_raw_financial_data` —— 新发现，名字像原始整表，可能一次给全字段清单
+- **G3** 扣非净利（红利 B 腿 `inc_return` 依赖）—— 停止逐个猜，等 G2 的字段清单
+- **G4** `get_his_st_data` —— 历史 ST，比现在用「沪深风险警示」板块（当前时点）准
+- **G5** 指数权重 / 换手 / 股本 / 因子 / 交易日 / 停牌
+
+**纪律**：G1~G5 每节都先 `_doc()` 打 `__doc__` 再调用。__doc__ 里通常直接写着参数名，
+比试十个参数便宜得多。这一轮的教训就是：**能枚举的东西不要猜。**
