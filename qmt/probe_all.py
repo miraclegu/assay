@@ -202,7 +202,15 @@ CONFIRMED = [
      '另有 Top10Holder / Top10FlowHolder / HolderNum。'
      '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
      "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
-    ('[**] I5 定案：分红【没有归属报告期】-> 红利只能保持信号执行器形态', '2026-08-31',
+    ('[?] I5 结论【已降级】—— 当时只探了一个接口就下结论', '2026-09-01',
+     '★★ 这是同类方法论错误的【第四次】：下面这条说「拿不到归属报告期」，'
+     '但我当时【只探了 get_divid_factors 一个接口，完全没查财务表】。'
+     '而财务表本来就是按报告期索引的（m_timetag / m_anntime 已验证可用），'
+     '官方文档说 PERSHAREINDEX（主要指标）里有 dividend_per_share【每股股利】。'
+     '若成立，fiscal_year 口径能原生实现，下面这条要整条推翻。见 OPEN 的 K1-K3。'
+     '教训：一个能力有没有，要把【所有可能提供它的接口】都查过才能下结论 —— '
+     '分红数据既可能在分红接口里，也可能在财务表里。'),
+    ('[?] 原 I5（保留原文，待 K 轮判决）', '2026-08-31',
      'get_divid_factors 的 7 个数全部查明：[0]=每股税前现金分红，[1][2][3][4][5] 实测'
      '【全是 0.0】（送股/转增/配股/股改类，两只银行 12 条全为 0），[6]=复权因子。'
      '★ 7 个数里没有任何日期形态，拿不到归属报告期，也拿不到预案公告日。'
@@ -411,21 +419,152 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ================================ OPEN 已清空 ================================
+# ============================== 待确认 K：分红归属期 ==========================
 #
-# 2026-08-31：J1/J2/J3 全部定案，OPEN 里【暂时没有待确认项】。
+# ★★ 方法论纠正（第四次同类错误，必须记住）：
+#     上一轮断言「拿不到分红的归属报告期」时，我【只探了 get_divid_factors 一个接口】，
+#     完全没查【财务表】。而财务表本来就是按报告期索引的（m_timetag / m_anntime 已验证）。
+#     官方文档说 PERSHAREINDEX（主要指标）里有 dividend_per_share【每股股利】。
+#     若成立，红利指数增强的 fiscal_year 口径就能原生实现 —— 上一轮的结论要整条推翻。
 #
-# 三条策略线的移植状态：
-#   froec / froec_traded / froec_traded_stop35  -> 已原生移植，数据全部到位
-#   sgmspeg_v0b   -> 需要 jqfactor 近似（Barra 式 5 年回归斜率），保持信号执行器
-#   红利指数增强   -> 【结构性不可原生移植】：fiscal_year 股息率口径要分红的
-#                    【归属报告期】，而 get_divid_factors 的 7 个数里没有任何日期，
-#                    且 dir(C) 里没有别的分红接口。这是两条腿共用的前置过滤，
-#                    所以整条策略只能保持信号执行器形态。见 CONFIRMED 的 I5。
-#
-# 再有新问题时在这里按同样形态加一节 def xN_xxx(C) 并挂进 OPEN。
-# 纪律没变：先 dir(C)/__doc__ 枚举 -> 再查官方文档 -> 探针只做验证且带真值对数。
-# 本探针【不许出现模块级 import】—— 一律函数内导入（已踩两次）。
+# 本轮只做验证：先按文档取 dividend_per_share，再【当场与本地真值对数】。
+
+
+def _try(C, label, call):
+    try:
+        r = _call_timeout(call)
+    except Exception as e:
+        print('   %-56s -> %s' % (label, str(e)[:56]))
+        return None
+    print('   %-56s -> %s %s' % (label, type(r).__name__, _peek(r)))
+    return r
+
+
+# 本地真值（std/dividend.parquet，聚宽口径，元/股）。按【归属报告期】排。
+DPS_REF = """  本地真值 —— 按【归属报告期】的每股股利（元）：
+    601398                                   600036
+    2022-12-31  0.3035  年度  预案 2023-03-31   2022-12-31  1.738  年度  预案 2023-03-25
+    2023-12-31  0.3064  年度  预案 2024-03-28   2023-12-31  1.972  年度  预案 2024-03-26
+    2024-06-30  0.1434  中期  预案 2024-08-31   2024-12-31  2.000  年度  预案 2025-03-26
+    2024-12-31  0.1646  年度  预案 2025-03-29   2025-06-30  1.013  中期  预案 2025-12-30
+    2025-06-30  0.1414  中期  预案 2025-08-30   2025-12-31  1.003  年度  预案 2026-03-28
+    2025-12-31  0.1689  年度  预案 2026-03-28
+
+  ★ 判读标准（这一节的全部意义）：
+    若 dividend_per_share 在 2024-06-30 报告期上给 0.1434、在 2024-12-31 给 0.1646
+       -> 【按报告期分开给】= fiscal_year 口径能原生实现，上一轮结论整条推翻。
+    若它在年报期上给 0.3080（= 0.1434+0.1646 的全年合计）
+       -> 也可以：年度合计正是 fiscal_year 要的数，甚至更省事。
+    若它只在年报期有值且等于 0.1646（只算年度那一笔，漏掉中期）
+       -> 半年派仍然错，与 rolling365 同病。
+    若全 NaN -> 名字不对，换 CN 里的中文写法再试。"""
+
+DPS_FIELDS = [
+    ('PERSHAREINDEX.dividend_per_share',   '每股股利 ★文档给的名字'),
+    ('PERSHAREINDEX.dividend_per_share_before_tax', '税前每股股利?'),
+    ('PERSHAREINDEX.s_fa_dps',             '每股股利(万得风格)?'),
+    ('PERSHAREINDEX.cash_dividend_per_share', '每股现金股利?'),
+    ('PERSHAREINDEX.dividend_payout_ratio', '股利支付率?'),
+    ('PERSHAREINDEX.dividend_yield',       '股息率?'),
+    ('ASHARECASHFLOW.cash_pay_dist_dividend_or_profit', '分配股利支付的现金?'),
+    ('ASHARECASHFLOW.dividend_interest_payment', '分配股利/偿付利息支付的现金?'),
+]
+
+DPS_CN = [
+    ('主要指标.每股股利', '★ 中文写法（已验证中文名可用，值得优先试）'),
+    ('主要指标.每股分红', ''),
+    ('主要指标.每股现金股利', ''),
+    ('主要指标.股利支付率', ''),
+    ('主要指标.股息率', ''),
+    ('现金流量表.分配股利、利润或偿付利息支付的现金', ''),
+]
+
+
+def k1_dps_fields(C):
+    """按文档取每股股利。全 NaN 才说明名字不对，不说明取不到。"""
+    print(DPS_REF)
+    print()
+    print('   -- 英文字段名 --')
+    for f, memo in DPS_FIELDS:
+        _try(C, '%-46s %s' % (f, memo[:16]),
+             lambda f=f: C.get_financial_data([f], ['601398.SH'], '20230101', '20260630',
+                                              report_type='announce_time'))
+    print('   -- 中文写法（表名.字段名）--')
+    for f, memo in DPS_CN:
+        _try(C, '%-44s %s' % (f, memo[:18]),
+             lambda f=f: C.get_financial_data([f], ['601398.SH'], '20230101', '20260630',
+                                              report_type='announce_time'))
+
+
+def k2_dps_by_report(C):
+    """★ 决定性一节：把每股股利【按报告期】打出来，与本地逐期对数。
+
+    用 get_raw_financial_data —— 它不做日度插值，返回 {报告期毫秒戳: 值}，
+    正好是「按报告期」的形态，比 get_financial_data 更适合看归属。
+    """
+    import datetime as dt          # 本探针一律函数内导入
+    fld = None
+    for cand in ('PERSHAREINDEX.dividend_per_share', '主要指标.每股股利'):
+        try:
+            r = _call_timeout(lambda cand=cand: C.get_raw_financial_data(
+                [cand], ['601398.SH'], '20230101', '20260630'))
+        except Exception as e:
+            print('   raw(%s) -> %s' % (cand, str(e)[:50])); continue
+        if isinstance(r, dict) and r:
+            fld = cand
+            print('   raw 用字段 %s' % cand)
+            break
+    if fld is None:
+        print('   [!] 两个名字都取不到 raw；看 K1 哪个英文/中文名有值，再回来改这里')
+        return
+    for code, ref in (('601398.SH', {20221231: 0.3035, 20231231: 0.3064,
+                                     20240630: 0.1434, 20241231: 0.1646,
+                                     20250630: 0.1414, 20251231: 0.1689}),
+                      ('600036.SH', {20221231: 1.738, 20231231: 1.972,
+                                     20241231: 2.000, 20250630: 1.013,
+                                     20251231: 1.003})):
+        try:
+            r = _call_timeout(lambda code=code: C.get_raw_financial_data(
+                [fld], [code], '20220101', '20260630'))
+        except Exception as e:
+            print('   %s -> %s' % (code, str(e)[:60])); continue
+        inner = (r or {}).get(code) or {}
+        ser = inner.get(fld) or (list(inner.values())[0] if inner else {})
+        if not isinstance(ser, dict) or not ser:
+            print('   %s 空' % code); continue
+        print('   -- %s（左 QMT / 右 本地）--' % code)
+        for k in sorted(ser):
+            try:
+                d = int(dt.datetime.utcfromtimestamp(
+                    k / 1000.0 + 8 * 3600).strftime('%Y%m%d'))
+            except Exception:
+                d = k
+            v = ser[k]
+            loc = ref.get(d)
+            mark = ''
+            if loc is not None and v is not None:
+                try:
+                    mark = ' [OK]' if abs(float(v) - loc) < 0.002 else ' [差]'
+                except (TypeError, ValueError):
+                    mark = ''
+            print('      %s  QMT %-12s  本地 %-8s%s'
+                  % (d, ('%.4f' % v) if isinstance(v, float) else v,
+                     ('%.4f' % loc) if loc is not None else '-', mark))
+        print('   [判读] 2024-06-30 给 0.1434 且 2024-12-31 给 0.1646 -> 按报告期分开给，')
+        print('          fiscal_year 能原生实现。若年报期给 0.3080 -> 是年度合计，也可用。')
+
+
+def k3_ann_together(C):
+    """把每股股利和公告日一起请求 —— 有公告日才能做 PIT（本地用的是预案公告日）。"""
+    for fld in ('PERSHAREINDEX.dividend_per_share', '主要指标.每股股利'):
+        _try(C, '%s + m_timetag + m_anntime' % fld,
+             lambda fld=fld: C.get_financial_data(
+                 [fld, 'PERSHAREINDEX.m_timetag', 'PERSHAREINDEX.m_anntime'],
+                 ['601398.SH'], '20240101', '20250630',
+                 report_type='announce_time'))
+    print('   [判读] 本地用【董事会预案公告日】做可见性（601398 2024年报 -> 2025-03-29）。')
+    print('          QMT 的 m_anntime 是【定期报告公告日】—— 分红预案通常与年报同日发布，')
+    print('          若两者一致就能直接用；不一致要记下差几天。')
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -433,5 +572,7 @@ def _peek(r):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    # 暂无待确认项 —— 见上方「OPEN 已清空」的说明
+    ('K1 每股股利字段（文档说 PERSHAREINDEX.dividend_per_share）', k1_dps_fields),
+    ('K2 ★★ 每股股利【按报告期】与本地逐期对数 —— 红利成败在此', k2_dps_by_report),
+    ('K3 每股股利 + 公告日一起请求（PIT 要用）', k3_ann_together),
 ]
