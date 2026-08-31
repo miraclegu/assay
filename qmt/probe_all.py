@@ -403,6 +403,59 @@ CN = [
 ]
 
 
+# 本地 601398 已实施分红（std/dividend.parquet，聚宽口径）。
+# 探针把 get_divid_factors 的 7 个数打在旁边 —— 关键是看有没有【归属报告期】。
+DIV_REF = """  601398 本地记录（report_date=归属报告期 / a_registration_date=登记日 / 每股税前）：
+    report 2022-12-31  登记 2023-07-13  0.3035 元/股
+    report 2023-12-31  登记 2024-07-11  0.3064 元/股
+    report 2024-06-30  登记 2024-10-08  0.1434 元/股   <- 中期分红（半年派）
+    report 2024-12-31  登记 2025-07-10  0.1646 元/股"""
+
+
+def i5_divid_fields(C):
+    """★ 红利指数增强的成败在这一节。
+
+    策略的股息率过滤是【两条腿共用的前置条件】，用的是 fiscal_year 口径：
+    按【分红归属会计年度】(report_date) 汇总，不是按除权日滚动 365 天。
+    换回 rolling365 已被实测判定为【错的】—— 工行 2025-06-01 虚高 +46%、
+    2026-06-01 虚高 +53%，且虚高集中在 2024 后改半年派的银行/央企，
+    正是本策略的重仓处。
+
+    所以要问的只有一个问题：get_divid_factors 的 7 个数里，
+    有没有【归属报告期】或【预案公告日】？
+    已知 [0]=每股税前现金分红、[3][4]=配股比例/配股价、[6]=复权因子，
+    [1][2][5] 未查明。若其中有报告期 -> 可原生移植；没有 -> 只能保持
+    「本地选股 + QMT 执行」的信号执行器形态。
+    """
+    import datetime as dt          # 本探针一律【函数内导入】，模块级不放 import
+    print(DIV_REF)
+    print()
+    for code in ('601398.SH', '600036.SH'):
+        try:
+            r = _call_timeout(lambda code=code: C.get_divid_factors(code))
+        except Exception as e:
+            print('   get_divid_factors(%r) -> %s' % (code, str(e)[:70])); continue
+        if not isinstance(r, dict) or not r:
+            print('   get_divid_factors(%r) -> %s（空）' % (code, type(r).__name__)); continue
+        ks = sorted(r)[-6:]                    # 只看最近 6 条
+        print('   -- %s 共 %d 条，最近 6 条 --' % (code, len(r)))
+        for k in ks:
+            try:
+                bj = dt.datetime.utcfromtimestamp(k / 1000.0 + 8 * 3600).strftime('%Y-%m-%d')
+            except Exception:
+                bj = str(k)
+            v = list(r[k]) if hasattr(r[k], '__iter__') else [r[k]]
+            print('      key=%s(%s)  n=%d  %s' % (k, bj, len(v),
+                  ' '.join('[%d]=%s' % (i, x) for i, x in enumerate(v))))
+        print('   [判读] key 对上本地的【登记日/除权日】而不是 report_date。')
+        print('          在 7 个数里找 2022~2025 这样的年份、或 20241231 这样的日期形态 ——')
+        print('          找到 = 能原生移植；找不到 = 只能保持信号执行器形态。')
+    print('   -- 顺带确认没有别的分红接口（dir(C) 里与分红相关的只有这两个）--')
+    for fn in ('get_divid_factors', 'dividend_type', 'get_dividend',
+               'get_divid_plan', 'get_bonus'):
+        print('   C.%-22s %s' % (fn, '存在' if hasattr(C, fn) else '不存在'))
+
+
 def i1_psi_fields(C):
     """PERSHAREINDEX 字段：挂对表再试一次。用 announce_time 口径。"""
     print('   [!] 上一轮扣非全 NaN 的真因：6 个候选挂在 ASHAREFINANCIALINDICATOR，')
@@ -471,4 +524,5 @@ OPEN = [
     ('I2 中文表名.中文字段名（文档说支持，通了就不用猜英文名）', i2_chinese_fields),
     ('I3 ★ 当场与本地真值对数（有值但对不上比没有值更危险）', i3_compare_local),
     ('I4 退路：扣非EPS x 总股本 / 归母权益 还原扣非ROE', i4_derive_adjroe),
+    ('I5 ★★ 分红有没有【归属报告期】—— 红利能否原生移植就看这个', i5_divid_fields),
 ]
