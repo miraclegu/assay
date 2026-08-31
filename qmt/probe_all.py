@@ -47,8 +47,9 @@ CONFIRMED = [
      '它们是【实时值不是历史值】：探针跑于 2026-08-30 而参考日 2025-06-30，'
      '601398 返回 8.60/7.04 而实际 8.25/6.75；300750 返回 447.60 而实际 301.19。'
      '必须自己按 preClose×(1±涨跌幅) 算 —— 移植里 _limit_price 本来就是这么做的。'),
-    ('[!] C.get_sector_list 不存在', '2026-08-30',
-     "报 '_PyContext' object has no attribute。板块清单只能走 xtdata 模块。"),
+    ('[?] C.get_sector_list 不存在（但这不等于「没有办法」）', '2026-08-30',
+     "报 '_PyContext' object has no attribute。★ 当时据此断言「板块清单只能走 "
+     'xtdata」是【推理过头】—— 正确做法是 dir(C) 把方法列全再说，见 OPEN 的 E1。'),
     ('xtquant 可 import，六个函数都在', '2026-08-30',
      'get_sector_list / get_stock_list_in_sector / download_sector_data / '
      'get_financial_data / download_financial_data / get_instrument_detail 全部存在。'),
@@ -73,7 +74,7 @@ CONFIRMED = [
      'PERSHAREINDEX.s_fa_eps_basic 也有值(601398=0.98)，v0b 的累计 EPS 有着落。'
      '表名必须【全大写】：Balance. / Income. / CapitalStructure. / BALANCESHEET. 全 NaN。'
      '扣非净利两个候选(ASHAREFINANCIALINDICATOR.net_profit_after_ded_nr_lp / '
-     'deducted_profit) 仍全 NaN —— 红利 B 袖的 inc_return 还没着落。'),
+     'deducted_profit) 全 NaN —— ★ 只说明这两个名字不对，不说明没有。'),
     ('财务调用签名', '2026-08-31',
      '必须传 start/end 且格式 YYYYMMDD（带横杠全 NaN、不传报 TypeError）。'
      'report_type 参数不支持（传了返回 None）。多股票多字段返回 pandas Panel：'
@@ -90,7 +91,9 @@ CONFIRMED = [
      '两市ST / ST及*ST 全部 0 只。'),
     ('[!] 行业板块不是申万命名', '2026-08-31',
      '银行 / SW银行 / 申万银行 / 申万一级-银行 / 行业-银行 / 银行I / 银行(申万) / '
-     '证监会行业-金融业 / 金融业 —— 全部 0 只。但 QMT 界面「热门板块」里是：'
+     '证监会行业-金融业 / 金融业 —— 全部 0 只（★ 这只说明这几个名字不对，'
+     '不说明取不到行业；get_instrumentdetail 里就有 ProductID/ProductName 没查过）。'
+     '但 QMT 界面「热门板块」里是：'
      '农产品加工 / 酒店及餐饮 / 物流 / 光学光电子 / 造纸 / 化工新材料 / 石油矿业开 / '
      '建筑材料 / 环保工程 / 农业服务 / 机场航运 / 视听器材 / 通信设备 / 交运设备服 '
      '—— 通达信风格，不是申万一级。froec 的 11 个行业黑名单要做映射，见 S6。'),
@@ -228,24 +231,125 @@ def _peek(r):
 
 
 
-def s6_industry_map(C):
-    """行业板块名映射：QMT 用的是通达信风格，不是申万一级。
+def e1_dir(C):
+    """把 ContextInfo 的方法全列出来 —— 不再猜名字。
 
-    froec 的 11 个行业黑名单是申万口径。上一轮试了 9 种申万写法全 0 只，
-    但 QMT 界面「热门板块」里明明有「石油矿业开」「环保工程」这些 ——
-    说明板块存在，只是命名体系不同。本节拿界面上看到的名字反查成分。
+    [!] 这一节本该最先做。前几轮我一直在猜 get_sector_list / get_industry /
+        get_instrumentdetail 之类的名字，猜不中就下结论说「没有」——
+        而成熟系统不可能没有。列一遍就知道了。
     """
-    print('   froec 要屏蔽的 11 个申万行业：钢铁/煤炭/石油石化/采掘/银行/')
-    print('     非银金融/金融服务/交运设备/交通运输/传媒/环保')
-    print('   拿 QMT 界面上的名字反查（命中参考票 = 找对了）：')
+    names = [x for x in dir(C) if not x.startswith('__')]
+    print('   ContextInfo 共 %d 个可见成员' % len(names))
+    kw = ('sector', 'industry', 'financial', 'fin', 'instrument', 'detail',
+          'divid', 'report', 'ann', 'stock', 'list', 'market', 'trade')
+    for k in kw:
+        hit = [n for n in names if k in n.lower()]
+        if hit:
+            print('   含 %-11s : %s' % (k, hit))
+    print('   -- 全量（每行 5 个）--')
+    for i in range(0, len(names), 5):
+        print('      %s' % names[i:i + 5])
+
+
+def e2_detail_full(C):
+    """get_instrumentdetail 的【全部】键值 —— 行业信息很可能就在里面。
+
+    [!] 上一轮我只打了 sorted(d)[:24] 就截断了，而截图里已经能看到
+        ProductID / ProductName 这种像是分类的键，后面还有没显示的。
+    """
+    for code in ('601398.SH', '601088.SH', '300750.SZ'):
+        try:
+            d = _call_timeout(lambda: C.get_instrumentdetail(code))
+        except Exception as e:
+            print('   %s 异常 %s' % (code, str(e)[:60]))
+            continue
+        if not isinstance(d, dict):
+            print('   %s 返回 %s: %s' % (code, type(d).__name__, str(d)[:120]))
+            continue
+        print('   -- %s（%d 个键，全量）--' % (code, len(d)))
+        for k in sorted(d):
+            v = d[k]
+            sv = str(v)
+            if len(sv) > 60:
+                sv = sv[:60] + '...'
+            print('      %-22s = %s' % (k, sv))
+        break                       # 一只票就够看键名，其余只看行业相关
+    print('   -- 另两只只看疑似行业/分类的键 --')
+    for code in ('601088.SH', '300750.SZ'):
+        try:
+            d = _call_timeout(lambda: C.get_instrumentdetail(code)) or {}
+            sub = dict((k, d[k]) for k in d
+                       if any(t in k.lower() for t in
+                              ('product', 'industry', 'sector', 'type', 'class')))
+            print('      %s %s' % (code, sub))
+        except Exception as e:
+            print('      %s 异常 %s' % (code, str(e)[:50]))
+    print('   本地行业参考: 601398=银行 601088=煤炭 300750=电气设备')
+
+
+def e3_anndate(C):
+    """公告日：显式把它当【字段】去请求。
+
+    [!] 上一轮我只请求了 4 个业务字段，当然只返回 4 列 —— 就此断言
+        「拿不到公告日」是错的推理。这里逐个试公告日字段名。
+    """
+    base = 'ASHAREINCOME.net_profit_excl_min_int_inc'
+    for f in ('ASHAREINCOME.m_anntime', 'ASHAREINCOME.m_timetag',
+              'ASHAREINCOME.ann_dt', 'ASHAREINCOME.announce_date',
+              'ASHAREINCOME.anndate', 'ASHAREINCOME.report_date',
+              'ASHAREBALANCESHEET.m_anntime', 'ASHAREINCOME.first_ann_dt'):
+        try:
+            r = _call_timeout(lambda: C.get_financial_data(
+                [f], [CODE], '20240101', '20241231'))
+            print('   %-46s -> %-10s %s' % (f, type(r).__name__, _peek(r)))
+        except Exception as e:
+            print('   %-46s 异常 %s' % (f, str(e)[:45]))
+    print('   -- 与业务字段一起取，看返回里会不会多出公告日列 --')
+    try:
+        r = _call_timeout(lambda: C.get_financial_data(
+            [base, 'ASHAREINCOME.m_anntime'], [CODE], '20240101', '20241231'))
+        print('   两字段一起 -> %s' % type(r).__name__)
+        if hasattr(r, 'minor_axis'):
+            print('      minor_axis: %s' % list(r.minor_axis))
+        elif hasattr(r, 'columns'):
+            print('      columns: %s' % list(r.columns))
+        print('      %s' % str(r)[:300])
+    except Exception as e:
+        print('   异常 %s: %s' % (type(e).__name__, str(e)[:70]))
+    print('   -- report_type 再试（上轮传 report/announce 都返回 None）--')
+    for rt in ('announce', 'report', 1, 0, '1', '0'):
+        try:
+            r = _call_timeout(lambda: C.get_financial_data(
+                [base], [CODE], '20240101', '20241231', rt))
+            print('   第5个位置参数 %-10r -> %-10s %s'
+                  % (rt, type(r).__name__, _peek(r)))
+        except Exception as e:
+            print('   第5个位置参数 %-10r -> %s: %s' % (rt, type(e).__name__, str(e)[:50]))
+
+
+def e4_sector_probe(C):
+    """板块：先看 E1 列出的方法里有没有能【枚举板块】的，再谈映射。"""
+    print('   ST 已定案 = 沪深风险警示。本节只解决行业。')
+    print('   -- 先看有没有能列板块的方法（E1 已列全，这里挑名字像的试）--')
+    for fn in ('get_sector_list', 'get_industry', 'get_stock_industry',
+               'get_sector', 'sector_list', 'get_stock_type'):
+        f = getattr(C, fn, None)
+        if f is None:
+            print('   C.%-22s 无' % fn)
+            continue
+        for args in ((), ('601398.SH',)):
+            try:
+                r = _call_timeout(lambda: f(*args))
+                print('   C.%s(%s) -> %s  %s'
+                      % (fn, ','.join(map(repr, args)), type(r).__name__, str(r)[:200]))
+                break
+            except Exception as e:
+                print('   C.%s(%s) -> %s' % (fn, ','.join(map(repr, args)), str(e)[:60]))
+    print('   -- 通达信风格行业名反查（界面「热门板块」里看到的）--')
     for name in ('银行', '证券', '保险', '煤炭开采', '石油矿业开', '钢铁行业',
                  '水泥', '公路桥梁', '铁路', '航空', '物流', '环保工程',
                  '交运设备服', '通信设备', '造纸', '建筑材料'):
         _sec(C, name, ['601398.SH', '601088.SH', '600028.SH'])
-    print('   >> 有成分的名字连同「命中参考票」一起贴回，我据此建')
-    print('      「申万黑名单 -> QMT 板块名」映射表。')
-    print('   >> 映射不全时 froec 的行业过滤只能关掉 —— 那是相对本地回测的')
-    print('      实质差异，我会先在本地量化它值多少 pp 再决定接不接受。')
 
 
 def _sec(C, name, expect):
@@ -343,9 +447,10 @@ def f5_fallback(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('F2 财务字段  ★ 唯一卡住策略的一条', f2_fields),
-    ('F3 财务调用签名', f3_signature),
-    ('F4 财务 Panel 里到底有没有值', f4_panel_values),
-    ('S6 行业板块名映射（ST 已定案为「沪深风险警示」）', s6_industry_map),
+    ('E1 dir(C) 全量方法清单  ★ 先枚举再谈有没有', e1_dir),
+    ('E2 get_instrumentdetail 全量键值（找行业）', e2_detail_full),
+    ('E3 公告日（显式当字段请求 + report_type 再试）', e3_anndate),
+    ('E4 行业板块', e4_sector_probe),
+    ('F4 财务 Panel 结构复核', f4_panel_values),
     ('F5 退路（本地判断，不调接口）', f5_fallback),
 ]
