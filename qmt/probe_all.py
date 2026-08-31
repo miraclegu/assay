@@ -202,6 +202,38 @@ CONFIRMED = [
      '另有 Top10Holder / Top10FlowHolder / HolderNum。'
      '★ 这解释了上一轮扣非 8 个候选为什么全 NaN —— 其中 6 个挂在这张根本不存在的表上。'
      "★ 字段还支持【中文写法】：['利润表.净利润'] / ['资产负债表.固定资产']。"),
+    ('[**] PERSHAREINDEX 官方字段清单（15 个）—— 不再猜名字', '2026-09-01',
+     's_fa_ocfps=每股经营活动现金流量 / s_fa_bps=每股净资产 / '
+     's_fa_eps_basic=基本每股收益 / s_fa_eps_diluted=稀释每股收益 / '
+     's_fa_undistributedps=每股未分配利润 / s_fa_surpluscapitalps=每股资本公积金 / '
+     'adjusted_earnings_per_share=扣非每股收益 / inc_revenue=主营收入 / '
+     'inc_gross_profit=毛利润 / inc_profit_before_tax=利润总额 / du_profit=净利润 / '
+     'inc_net_profit=归属母公司净利润 / adjusted_net_profit=扣非净利润 / '
+     'du_return_on_equity=净资产收益率 / gear_ratio=资产负债比率。'
+     '★★ 这 15 个里【没有任何分红/股利字段】。'
+     '★ 两个会咬人的纠正：'
+     '① adjusted_net_profit 【直接就是扣非净利润】—— 上一轮费劲用「扣非EPS x 总股本」'
+     '还原、还撞上 57/244 的稀疏覆盖，其实有直接字段；'
+     '② 迅投的 inc_ 前缀【不是增长率】：inc_revenue/inc_gross_profit/inc_net_profit '
+     '都是【金额】。而聚宽的 inc_net_profit_year_on_year 是【增长率】—— '
+     '同样的前缀在两个源里含义相反，这种碰撞比「取不到」危险得多。'),
+    ('[定案] K 轮：分红的【归属报告期】在 ContextInfo API 里确实没有', '2026-09-01',
+     '已穷尽所有可能提供它的入口，不是猜：'
+     '① get_divid_factors -> 除权日 + 每股金额（金额与本地 12/12 精确吻合），无报告期；'
+     '② PERSHAREINDEX 官方 15 个字段里没有分红字段；实测 dividend_per_share / '
+     'dividend_per_share_before_tax / s_fa_dps / cash_dividend_per_share / '
+     'dividend_payout_ratio / dividend_yield 以及中文「每股股利/每股分红/每股现金股利/'
+     '股利支付率/股息率」全 NaN；'
+     '③ get_dividend / get_divid_plan / get_bonus 都不存在；'
+     '④ 财务表只有 5 张 + Top10Holder/Top10FlowHolder/HolderNum。'
+     '★ 唯一有值的分红相关字段是「现金流量表.分配股利、利润或偿付利息支付的现金」'
+     '（= ASHARECASHFLOW.dividend_interest_payment，非空 843 个），'
+     '但它【不能用】：付现口径 + 银行混入偿付利息。本地 601398 逐年：'
+     '2021 948 亿 / 2022 1194 亿 / 2023 【11290 亿】/ 2024 1773 亿，'
+     '而真实现金分红只有 1045/1082/1092/1098 亿 —— 2023 差 10 倍。'
+     '★ 结论的正确说法：QMT 的分红数据是【完整的公司行为记录】（除权日+金额，'
+     '执行系统需要的就是这个），缺的是【按会计年度归属】这一层分析口径 —— '
+     '那是 Wind/聚宽式的加工层，不是原始行情数据。'),
     ('[?] I5 结论【已降级】—— 当时只探了一个接口就下结论', '2026-09-01',
      '★★ 这是同类方法论错误的【第四次】：下面这条说「拿不到归属报告期」，'
      '但我当时【只探了 get_divid_factors 一个接口，完全没查财务表】。'
@@ -419,152 +451,103 @@ def _peek(r):
         return '看不了(%s)' % str(e)[:40]
 
 
-# ============================== 待确认 K：分红归属期 ==========================
+# ============================== 待确认 L：枚举收尾 ============================
 #
-# ★★ 方法论纠正（第四次同类错误，必须记住）：
-#     上一轮断言「拿不到分红的归属报告期」时，我【只探了 get_divid_factors 一个接口】，
-#     完全没查【财务表】。而财务表本来就是按报告期索引的（m_timetag / m_anntime 已验证）。
-#     官方文档说 PERSHAREINDEX（主要指标）里有 dividend_per_share【每股股利】。
-#     若成立，红利指数增强的 fiscal_year 口径就能原生实现 —— 上一轮的结论要整条推翻。
-#
-# 本轮只做验证：先按文档取 dividend_per_share，再【当场与本地真值对数】。
+# K 轮已用【官方字段清单】而不是猜名字，确认 PERSHAREINDEX 15 个字段里没有分红。
+# 但还有一个从没用过的枚举入口：文档说 get_local_data 的 field_list 传【空列表】
+# = 取全部字段。若这个约定对财务接口也成立，就能一次把字段全列出来，
+# 把「有没有某字段」这类问题永久关掉 —— 不用再一个个猜。
 
 
 def _try(C, label, call):
     try:
         r = _call_timeout(call)
     except Exception as e:
-        print('   %-56s -> %s' % (label, str(e)[:56]))
+        print('   %-54s -> %s' % (label, str(e)[:58]))
         return None
-    print('   %-56s -> %s %s' % (label, type(r).__name__, _peek(r)))
+    t = type(r).__name__
+    cols = getattr(r, 'columns', None)
+    if cols is not None:
+        print('   %-54s -> %s 字段 %d 个: %s'
+              % (label, t, len(cols), str(list(cols)[:30])[:150]))
+    elif isinstance(r, dict):
+        print('   %-54s -> dict len=%d keys=%s' % (label, len(r), str(list(r)[:6])[:90]))
+    else:
+        print('   %-54s -> %s %s' % (label, t, _peek(r)))
     return r
 
 
-# 本地真值（std/dividend.parquet，聚宽口径，元/股）。按【归属报告期】排。
-DPS_REF = """  本地真值 —— 按【归属报告期】的每股股利（元）：
-    601398                                   600036
-    2022-12-31  0.3035  年度  预案 2023-03-31   2022-12-31  1.738  年度  预案 2023-03-25
-    2023-12-31  0.3064  年度  预案 2024-03-28   2023-12-31  1.972  年度  预案 2024-03-26
-    2024-06-30  0.1434  中期  预案 2024-08-31   2024-12-31  2.000  年度  预案 2025-03-26
-    2024-12-31  0.1646  年度  预案 2025-03-29   2025-06-30  1.013  中期  预案 2025-12-30
-    2025-06-30  0.1414  中期  预案 2025-08-30   2025-12-31  1.003  年度  预案 2026-03-28
-    2025-12-31  0.1689  年度  预案 2026-03-28
-
-  ★ 判读标准（这一节的全部意义）：
-    若 dividend_per_share 在 2024-06-30 报告期上给 0.1434、在 2024-12-31 给 0.1646
-       -> 【按报告期分开给】= fiscal_year 口径能原生实现，上一轮结论整条推翻。
-    若它在年报期上给 0.3080（= 0.1434+0.1646 的全年合计）
-       -> 也可以：年度合计正是 fiscal_year 要的数，甚至更省事。
-    若它只在年报期有值且等于 0.1646（只算年度那一笔，漏掉中期）
-       -> 半年派仍然错，与 rolling365 同病。
-    若全 NaN -> 名字不对，换 CN 里的中文写法再试。"""
-
-DPS_FIELDS = [
-    ('PERSHAREINDEX.dividend_per_share',   '每股股利 ★文档给的名字'),
-    ('PERSHAREINDEX.dividend_per_share_before_tax', '税前每股股利?'),
-    ('PERSHAREINDEX.s_fa_dps',             '每股股利(万得风格)?'),
-    ('PERSHAREINDEX.cash_dividend_per_share', '每股现金股利?'),
-    ('PERSHAREINDEX.dividend_payout_ratio', '股利支付率?'),
-    ('PERSHAREINDEX.dividend_yield',       '股息率?'),
-    ('ASHARECASHFLOW.cash_pay_dist_dividend_or_profit', '分配股利支付的现金?'),
-    ('ASHARECASHFLOW.dividend_interest_payment', '分配股利/偿付利息支付的现金?'),
-]
-
-DPS_CN = [
-    ('主要指标.每股股利', '★ 中文写法（已验证中文名可用，值得优先试）'),
-    ('主要指标.每股分红', ''),
-    ('主要指标.每股现金股利', ''),
-    ('主要指标.股利支付率', ''),
-    ('主要指标.股息率', ''),
-    ('现金流量表.分配股利、利润或偿付利息支付的现金', ''),
+# 官方 15 个字段（来自迅投文档，不是猜的）。逐个取一次，确认哪些在本环境有值。
+PSI15 = [
+    ('s_fa_ocfps', '每股经营现金流'), ('s_fa_bps', '每股净资产'),
+    ('s_fa_eps_basic', '基本每股收益'), ('s_fa_eps_diluted', '稀释每股收益'),
+    ('s_fa_undistributedps', '每股未分配利润'),
+    ('s_fa_surpluscapitalps', '每股资本公积'),
+    ('adjusted_earnings_per_share', '扣非每股收益'),
+    ('inc_revenue', '主营收入'), ('inc_gross_profit', '毛利润'),
+    ('inc_profit_before_tax', '利润总额'), ('du_profit', '净利润'),
+    ('inc_net_profit', '归母净利润'), ('adjusted_net_profit', '扣非净利润'),
+    ('du_return_on_equity', '净资产收益率'), ('gear_ratio', '资产负债比率'),
 ]
 
 
-def k1_dps_fields(C):
-    """按文档取每股股利。全 NaN 才说明名字不对，不说明取不到。"""
-    print(DPS_REF)
-    print()
-    print('   -- 英文字段名 --')
-    for f, memo in DPS_FIELDS:
-        _try(C, '%-46s %s' % (f, memo[:16]),
-             lambda f=f: C.get_financial_data([f], ['601398.SH'], '20230101', '20260630',
-                                              report_type='announce_time'))
-    print('   -- 中文写法（表名.字段名）--')
-    for f, memo in DPS_CN:
-        _try(C, '%-44s %s' % (f, memo[:18]),
-             lambda f=f: C.get_financial_data([f], ['601398.SH'], '20230101', '20260630',
-                                              report_type='announce_time'))
+def l1_psi15(C):
+    """官方 15 个字段逐个核对。重点是 adjusted_net_profit（扣非净利，直接可用）。
 
-
-def k2_dps_by_report(C):
-    """★ 决定性一节：把每股股利【按报告期】打出来，与本地逐期对数。
-
-    用 get_raw_financial_data —— 它不做日度插值，返回 {报告期毫秒戳: 值}，
-    正好是「按报告期」的形态，比 get_financial_data 更适合看归属。
+    本地对数基准（601398，亿元）：
+        归母净利 2023 = 3639.93   2024 = 3658.63
+        扣非净利 需与 panel.adjusted_profit_q 累计后比
     """
-    import datetime as dt          # 本探针一律函数内导入
-    fld = None
-    for cand in ('PERSHAREINDEX.dividend_per_share', '主要指标.每股股利'):
-        try:
-            r = _call_timeout(lambda cand=cand: C.get_raw_financial_data(
-                [cand], ['601398.SH'], '20230101', '20260630'))
-        except Exception as e:
-            print('   raw(%s) -> %s' % (cand, str(e)[:50])); continue
-        if isinstance(r, dict) and r:
-            fld = cand
-            print('   raw 用字段 %s' % cand)
-            break
-    if fld is None:
-        print('   [!] 两个名字都取不到 raw；看 K1 哪个英文/中文名有值，再回来改这里')
-        return
-    for code, ref in (('601398.SH', {20221231: 0.3035, 20231231: 0.3064,
-                                     20240630: 0.1434, 20241231: 0.1646,
-                                     20250630: 0.1414, 20251231: 0.1689}),
-                      ('600036.SH', {20221231: 1.738, 20231231: 1.972,
-                                     20241231: 2.000, 20250630: 1.013,
-                                     20251231: 1.003})):
-        try:
-            r = _call_timeout(lambda code=code: C.get_raw_financial_data(
-                [fld], [code], '20220101', '20260630'))
-        except Exception as e:
-            print('   %s -> %s' % (code, str(e)[:60])); continue
-        inner = (r or {}).get(code) or {}
-        ser = inner.get(fld) or (list(inner.values())[0] if inner else {})
-        if not isinstance(ser, dict) or not ser:
-            print('   %s 空' % code); continue
-        print('   -- %s（左 QMT / 右 本地）--' % code)
-        for k in sorted(ser):
-            try:
-                d = int(dt.datetime.utcfromtimestamp(
-                    k / 1000.0 + 8 * 3600).strftime('%Y%m%d'))
-            except Exception:
-                d = k
-            v = ser[k]
-            loc = ref.get(d)
-            mark = ''
-            if loc is not None and v is not None:
-                try:
-                    mark = ' [OK]' if abs(float(v) - loc) < 0.002 else ' [差]'
-                except (TypeError, ValueError):
-                    mark = ''
-            print('      %s  QMT %-12s  本地 %-8s%s'
-                  % (d, ('%.4f' % v) if isinstance(v, float) else v,
-                     ('%.4f' % loc) if loc is not None else '-', mark))
-        print('   [判读] 2024-06-30 给 0.1434 且 2024-12-31 给 0.1646 -> 按报告期分开给，')
-        print('          fiscal_year 能原生实现。若年报期给 0.3080 -> 是年度合计，也可用。')
-
-
-def k3_ann_together(C):
-    """把每股股利和公告日一起请求 —— 有公告日才能做 PIT（本地用的是预案公告日）。"""
-    for fld in ('PERSHAREINDEX.dividend_per_share', '主要指标.每股股利'):
-        _try(C, '%s + m_timetag + m_anntime' % fld,
-             lambda fld=fld: C.get_financial_data(
-                 [fld, 'PERSHAREINDEX.m_timetag', 'PERSHAREINDEX.m_anntime'],
-                 ['601398.SH'], '20240101', '20250630',
+    for f, cn in PSI15:
+        _try(C, 'PERSHAREINDEX.%-28s %s' % (f, cn),
+             lambda f=f: C.get_financial_data(
+                 ['PERSHAREINDEX.' + f], ['601398.SH'], '20240401', '20240420',
                  report_type='announce_time'))
-    print('   [判读] 本地用【董事会预案公告日】做可见性（601398 2024年报 -> 2025-03-29）。')
-    print('          QMT 的 m_anntime 是【定期报告公告日】—— 分红预案通常与年报同日发布，')
-    print('          若两者一致就能直接用；不一致要记下差几天。')
+    print('   [判读] inc_net_profit 应约 3.64e+11（2023年报归母），不是个增长率 ——')
+    print('          迅投的 inc_ 前缀是「收入/利润」，与聚宽的 inc_*_yoy 含义相反。')
+    print('          adjusted_net_profit 有值就不必再用「扣非EPS x 总股本」绕。')
+
+
+def l2_enumerate_fields(C):
+    """★ 空 field_list = 取全部字段。文档对 get_local_data 是这么说的，
+    试试财务接口是否也认这个约定 —— 认的话「有没有某字段」就永久不用猜了。
+    """
+    print('   -- get_local_data（文档说 field_list=[] 取全部字段）--')
+    for label, call in (
+        ("([], ['601398.SH'], '1d')",
+         lambda: C.get_local_data([], ['601398.SH'], '1d', '20240101', '20240110')),
+        ("([], ['601398.SH'], '1d', count=-1)",
+         lambda: C.get_local_data([], ['601398.SH'], '1d', '20240101', '20240110', -1)),
+    ):
+        _try(C, label, call)
+    print('   -- 财务接口试空 field_list --')
+    for label, call in (
+        ('get_financial_data([], …)',
+         lambda: C.get_financial_data([], ['601398.SH'], '20240401', '20240420',
+                                      report_type='announce_time')),
+        ('get_raw_financial_data([], …)',
+         lambda: C.get_raw_financial_data([], ['601398.SH'], '20240101', '20241231')),
+        ("get_financial_data(['PERSHAREINDEX.'], …) 只给表名带点",
+         lambda: C.get_financial_data(['PERSHAREINDEX.'], ['601398.SH'],
+                                      '20240401', '20240420',
+                                      report_type='announce_time')),
+    ):
+        _try(C, label, call)
+
+
+def l3_method2(C):
+    """get_financial_data 的第二种签名：(tabname, colname, market, code, report_type, barpos)。
+
+    传一个【故意写错的字段名】，看报错信息会不会把合法字段列出来 ——
+    很多接口的报错就是最好的字段清单。
+    """
+    for args in (
+        ('PERSHAREINDEX', 'adjusted_net_profit', 'SH', '601398'),
+        ('PERSHAREINDEX', '__不存在的字段__', 'SH', '601398'),
+        ('PERSHAREINDEX', 'dividend_per_share', 'SH', '601398'),
+        ('ASHAREINCOME', 'net_profit_excl_min_int_inc', 'SH', '601398'),
+    ):
+        _try(C, 'Method2%s' % (args,), lambda a=args: C.get_financial_data(*a))
 
 
 # [!] 顺序有讲究：【不碰网络】的先跑。
@@ -572,7 +555,7 @@ def k3_ann_together(C):
 # xtdata 那套（connect 127.0.0.1:58610）已从 OPEN 移除，理由见 CONFIRMED
 # 里「xtdata 不是 miniQMT 专有，但策略用不上」那条。
 OPEN = [
-    ('K1 每股股利字段（文档说 PERSHAREINDEX.dividend_per_share）', k1_dps_fields),
-    ('K2 ★★ 每股股利【按报告期】与本地逐期对数 —— 红利成败在此', k2_dps_by_report),
-    ('K3 每股股利 + 公告日一起请求（PIT 要用）', k3_ann_together),
+    ('L1 官方 15 个字段逐个核对（重点 adjusted_net_profit 扣非净利）', l1_psi15),
+    ('L2 ★ 空 field_list 枚举全部字段 —— 关掉「猜字段名」这件事', l2_enumerate_fields),
+    ('L3 Method2 签名：故意写错字段名，看报错是否列出合法值', l3_method2),
 ]
