@@ -1122,6 +1122,94 @@ def _live_loop():
         time.sleep(60)
 
 
+# ==================== 数据同步状态（只读）====================
+# ★ 判据【不在这里实现】—— 调 datalake/build/sync_status.py。
+#   新鲜度写两遍必然漂移（脚本说没问题、页面说落后 3 天）。
+#   同步本身也不在这里跑：调度是 launchd 的事（daily_snapshot.py 漏一天
+#   永久丢失，不能挂在「看板恰好开着」上）。这里只提供【看】+【手动触发一次】。
+
+def _datalake_dir():
+    """datalake 目录。与 PanelFeed 同一套解析。
+
+    ★ 名字不能叫 `_dl_root` —— 本文件第 ~168 行已有一个 `_dl_root(run_id)`
+      （按归档 meta 解 datalake 路径）。Python 对重复定义**不告警**，
+      后定义的直接覆盖前面的，于是 api_equity/trades/holdings/rejects
+      四个调用点全部 TypeError -> 500。实测就是这么炸的。
+    """
+    return os.environ.get('ASSAY_DATALAKE') or \
+        os.path.join(os.path.dirname(registry.ROOT), 'datalake')
+
+
+def api_sync(_q):
+    """GET /api/sync —— 两条腿的新鲜度 + 上次同步日志摘要。"""
+    dl = _datalake_dir()
+    out = {'datalake': dl, 'readonly': not ALLOW_LIVE}
+    script = os.path.join(dl, 'build', 'sync_status.py')
+    if not os.path.isfile(script):
+        return dict(out, error='找不到 %s' % script)
+    import subprocess
+    try:
+        r = subprocess.run(['python3', script, '--json'], cwd=dl,
+                           capture_output=True, text=True, timeout=120)
+        out['status'] = json.loads(r.stdout) if r.returncode == 0 else None
+        if out['status'] is None:
+            out['error'] = (r.stderr or r.stdout or '')[-400:]
+    except Exception as e:                                  # noqa: BLE001
+        out['error'] = '%s: %s' % (type(e).__name__, e)
+    # 最近几次同步日志（只列文件名与大小，内容按需取）
+    ld = os.path.join(dl, '_manifest', 'sync_logs')
+    logs = []
+    if os.path.isdir(ld):
+        for fn in sorted(os.listdir(ld), reverse=True)[:12]:
+            if not fn.endswith('.log'):
+                continue
+            p = os.path.join(ld, fn)
+            logs.append({'name': fn, 'bytes': os.path.getsize(p),
+                         'mtime': datetime.fromtimestamp(
+                             os.path.getmtime(p)).replace(microsecond=0).isoformat()})
+    out['logs'] = logs
+    return out
+
+
+_LOG_RE = re.compile(r'^[0-9]{8}-[0-9]{6}\.log$')
+
+
+def api_sync_log(q):
+    """GET /api/sync/log?name=... —— ★ 只接受 8位日期-6位时间.log 这个形状，
+    且只在 _manifest/sync_logs 下找。文件名来自 URL，不能直接 join。"""
+    name = (q.get('name') or '').strip()
+    if not _LOG_RE.match(name):
+        return {'error': '日志名格式不对：%r' % name}
+    p = os.path.join(_datalake_dir(), '_manifest', 'sync_logs', name)
+    if not os.path.isfile(p):
+        return {'error': '日志不存在：%s' % name}
+    txt = open(p, encoding='utf-8', errors='replace').read()
+    return {'name': name, 'text': txt[-200000:], 'bytes': os.path.getsize(p)}
+
+
+def api_sync_run(_q, body):
+    """POST /api/sync/run —— 手动触发一次同步（后台子进程，复用 _JOBS）。
+
+    ★ 只有【手动】走这里；定时永远是 launchd。理由见 sync_daily.sh 文件头。
+    """
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动，手动同步已关闭。'
+                         '用 python3 serve.py --live 开启。'}
+    dl = _datalake_dir()
+    sh = os.path.join(dl, 'sync_daily.sh')
+    if not os.path.isfile(sh):
+        return {'error': '找不到 %s' % sh}
+    cmd = ['bash', sh]
+    if (body or {}).get('no_live'):
+        cmd.append('--no-live')
+    job_id = 'sync-%s' % datetime.now().strftime('%H%M%S')
+    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+                     'sha': None, 'run_id': None, 'rc': None}
+    threading.Thread(target=_run_job, args=(job_id, cmd, dl),
+                     daemon=True).start()
+    return {'job_id': job_id, 'cmd': ' '.join(cmd)}
+
+
 ROUTES = {
     '/api/docs': api_docs,
     '/api/doc': api_doc,
@@ -1142,6 +1230,8 @@ ROUTES = {
     '/api/live/account': api_live_account,
     '/api/live/signal': api_live_signal,
     '/api/live/code': api_live_code,
+    '/api/sync': api_sync,
+    '/api/sync/log': api_sync_log,
 }
 
 
@@ -1165,7 +1255,8 @@ class Handler(BaseHTTPRequestHandler):
         POSTS = {'/api/backtest': api_backtest, '/api/mark': api_mark,
                  '/api/live/save': api_live_save,
                  '/api/live/fill': api_live_fill,
-                 '/api/live/tick': api_live_tick}
+                 '/api/live/tick': api_live_tick,
+                 '/api/sync/run': api_sync_run}
         fn = POSTS.get(u.path)
         if fn is None:
             return self._send(404, json.dumps({'error': 'no such endpoint'}))

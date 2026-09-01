@@ -43,6 +43,36 @@ QMT 探针只有一个文件 `assay/qmt/probe_all.py`（已定案的进 `CONFIRM
 - 改了引擎必须跑等价性回归（equity 曲线 SHA256）—— `ast.parse` 通过不代表逻辑没坏
 - `python3 assay/selftest.py --fast`（约 20s）/ `--all`
 
+## 每日数据同步
+
+**唯一入口 `datalake/sync_daily.sh`**，六步：tdx2db cron → PIT 快照 →
+load_tdx_kline → 交易日历 → 面板（本年增量）→ beta。跑完**直接触发实盘出信号**。
+实测全程约 100 秒。幂等，中途失败重跑整条即可。
+
+**定时用 launchd 不用 serve.py 的线程**（`_manifest/com.miraclegu.finacial.sync.plist`，
+每日 18:10）。理由：`daily_snapshot.py` 是**漏一天永久丢失**的（tdx 的名称/分类/
+板块成分是 type-1 覆盖写），不能挂在「看板恰好开着」上。launchd 还有个关键属性：
+机器在预定时刻睡着，醒来会补跑。
+
+**为什么跑完直接调 `live.tick()` 而不让 live 自己定时**：信号必须用最新数据。
+靠两个时间常量隔开，同步一慢就错位，而错位的表现是**信号静默用了昨天的数据**。
+依赖写进调用顺序比写进常量可靠 —— live 的 `tick_time` 已降级为 22:00 兜底。
+
+**两条腿的落后语义不能混**（`build/sync_status.py` 是唯一判据，看板只显示）：
+A 腿（行情）每个交易日必然有新数据，缺了就是没同步；B 腿（聚宽财务）是
+**事件驱动**，没公告的日子本来就没有新 pub_date，按交易日算落后是必然误报 ——
+天天标红你就不看红字了，告警失效比没告警更糟。
+
+**别再调 `tdx2db/scripts/update.sh` 和 `full_update.sh`** —— 两者都引用不存在的
+`fast_update_indicators.py`，是坏的。而且 datalake 只用 tdx.db 的
+`raw_kline_daily / raw_adjust_factor / raw_basic_daily / raw_symbol_class`
+四张表，技术指标那步与本链无关。
+
+**交易日历本地就能算**：`tdx.db` 的 `raw_holidays`（休市日，1991~2030）→
+交易日 = 工作日 − 休市日。这条规则与 `std/trading_calendar.parquet` 逐日对数
+一致 5746 天，`build_trade_calendar.py` **每次生成都重跑对数、不一致就拒绝写出**。
+所以不需要从聚宽抽日历（`grab_calendar` 留着当交叉校验）。
+
 ## 实盘模块（live）
 
 `python3 serve.py --live` → 顶栏「💰 实盘」。默认**关闭**（与 `--allow-backtest`

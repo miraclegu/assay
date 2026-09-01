@@ -339,6 +339,7 @@ table.lvt tr:last-child td{border-bottom:0}
     <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
     <button class="btn" id="expand">全部展开</button>
     <button class="btn" id="gopicks" title="独立索引页：只看被标星的规则">★ 选中的规则</button>
+    <button class="btn" id="gosync" title="两条腿的数据新鲜度 / 手动同步 / 同步日志">🔄 数据同步</button>
     <button class="btn" id="golive" title="实盘账户：录成交、按时出买卖清单、策略版本留痕">💰 实盘</button>
     <button class="btn" id="godocs" title="聚宽 / QMT / 本地的接口与口径实测定案（直接读仓库里的 md）">📖 数据字典</button>
   </div>
@@ -397,6 +398,7 @@ function route(){
   const v=/^#\/ver\/([0-9a-f]{6,64})$/.exec(location.hash||'');
   if(v){ openVersion(v[1]); return; }
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
+  if((location.hash||'')==='#/sync'){ showSync(); return; }
   const lm=/^#\/live(?:\/([\w-]+))?$/.exec(location.hash||'');
   if(lm){ showLive(lm[1]||null); return; }
   const dm=/^#\/docs(?:\/([\w-]+))?$/.exec(location.hash||'');
@@ -414,6 +416,7 @@ $('#back').onclick=()=>{location.hash='';};
 $('#gopicks').onclick=()=>{location.hash='#/picks';};
 $('#godocs').onclick=()=>{location.hash='#/docs';};
 $('#golive').onclick=()=>{location.hash='#/live';};
+$('#gosync').onclick=()=>{location.hash='#/sync';};
 
 
 /* ============ 实盘模块 ============ */
@@ -640,6 +643,123 @@ function wireFills(aid, sig, ro){
     if(!confirm('按信号录入 '+rows.length+' 笔？价格用的是 T-1 参考价，成交后请逐笔改成实际价（录反向冲正 + 重录）。')) return;
     done(rows);
   };
+}
+
+
+/* ============ 数据同步 ============ */
+/* 页面不判断新鲜度 —— 判据在 datalake/build/sync_status.py，
+   服务端调它。写两遍必然漂移（脚本说没问题、页面说落后 3 天）。 */
+let SY=null, SYJOB=null;
+
+async function showSync(){
+  stopPoll();
+  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#filter').style.display='none'; $('#expand').style.display='none';
+  $('#back').style.display=''; $('#main').style.display='';
+  let o; try{ o=await j('/api/sync'); }
+  catch(e){ $('#main').innerHTML='<div class="none">读取失败：'+esc(e)+'</div>'; return; }
+  SY=o;
+  const st=o.status||{}, it=st.items||[], cal=st.calendar||{};
+  const A=it.filter(x=>x.leg==='A'), B=it.filter(x=>x.leg==='B');
+  let warn='';
+  if(o.error) warn+=`<div class="lvwarn"><b>状态读取失败</b><br>${esc(o.error)}</div>`;
+  if(st.leg_a_lag) warn+=`<div class="lvwarn"><b>A 腿（行情）落后 ${st.leg_a_lag} 个交易日</b><br>
+     同步没跑成功。点下面「立即同步」，或看最近一次日志。</div>`;
+  if(st.leg_b_days_since>21) warn+=`<div class="lvwarn"><b>B 腿（聚宽财务）距今 ${st.leg_b_days_since} 天没更新</b><br>
+     行情天天新、财务过期时，回测照跑、报告看着完全正常，而选股用的是旧财报
+     （数据字典 E-0「数据新鲜度错配」）。实测代价：2026 中报只覆盖 55.6% 时，
+     froec 同日选股与聚宽只对上 6/10；补完升到 9/10。<br>
+     去聚宽研究环境跑 <code>raw/jq/_ingest/extract_jq_increment.py</code>。</div>`;
+  if(o.readonly) warn+=`<div class="lvwarn">只读模式 —— 可以看，不能手动触发。
+     用 <code>python3 serve.py --live</code> 开启。</div>`;
+
+  /* A 腿看"落后几个交易日"（每个交易日必然有新行情，缺了就是没同步）；
+     B 腿只看"距今几天" —— 财务是事件驱动，没公告的日子本来就没有新
+     pub_date，按交易日算落后是必然误报。判据在服务端，这里只负责显示。 */
+  const row=x=>{
+    let tag;
+    if(x.error) tag=`<span style="color:var(--up)">${esc(x.error)}</span>`;
+    else if(x.leg==='A'){
+      const lag=x.lag_days;
+      tag = lag===0 ? '<span style="color:var(--down)">最新</span>'
+          : (lag ? `<span style="color:var(--warn)">落后 ${lag} 个交易日</span>` : '—');
+    } else {
+      const ds=x.days_since;
+      tag = ds==null ? '—'
+          : (ds>21 ? `<span style="color:var(--up)">距今 ${ds} 天</span>`
+                   : `<span style="color:var(--dim)">距今 ${ds} 天</span>`);
+    }
+    return `<tr><td>${esc(x.name)}</td><td>${esc(x.max||'—')}</td><td>${tag}</td></tr>`;
+  };
+  $('#main').innerHTML=warn+`
+  <div class="lvhead">
+    <h2>数据同步</h2>
+    <span class="lvtag">应到交易日 ${esc(st.expect_trade_day||'?')}</span>
+    <span class="lvtag${cal.source==='tdx.raw_holidays'||cal.source==='jq.get_all_trade_days'?' on':''}">
+      日历 ${esc(cal.source||'缺')} → ${esc(cal.max||'?')}</span>
+    <button class="btn" id="syrun" ${o.readonly?'disabled':''}>立即同步</button>
+    <button class="btn" id="syref">刷新</button>
+  </div>
+  <div class="lvmsg" id="symsg"></div>
+  <div class="lvgrid">
+    <div class="lvsec"><h3>A 腿 · tdx 行情（全自动）</h3>
+      <table class="lvt"><tr><th>项</th><th>最新</th><th>状态</th></tr>
+      ${A.map(row).join('')}</table>
+      <div class="lvwhy" style="margin-top:6px">
+        由 <code>datalake/sync_daily.sh</code> 六步串起：tdx2db cron →
+        <b>PIT 快照（漏一天永久丢失）</b> → load_tdx_kline → 交易日历 → 面板 → beta。
+        跑完直接触发实盘出信号 —— 依赖写进调用顺序，不靠两个时间常量隔开。
+      </div>
+    </div>
+    <div class="lvsec"><h3>B 腿 · 聚宽财务（必须人工）</h3>
+      <table class="lvt"><tr><th>项</th><th>最新</th><th>距今</th></tr>
+      ${B.map(row).join('')}</table>
+      <div class="lvwhy" style="margin-top:6px">
+        聚宽研究环境没有本地 API，只能人工导出。B 腿的"落后"不按交易日算 ——
+        财务是<b>事件驱动</b>的，没公告的日子本来就不该有新 pub_date。
+        ${st.leg_b_days_since!=null?'距今 '+st.leg_b_days_since+' 天。':''}
+      </div>
+    </div>
+    <div class="lvsec"><h3>最近同步日志</h3>
+      ${(o.logs||[]).length?`<table class="lvt"><tr><th>时间</th><th>大小</th></tr>
+        ${o.logs.map(l=>`<tr><td><a href="#" class="sylog" data-n="${esc(l.name)}">${esc(l.name)}</a></td>
+          <td>${(l.bytes/1024).toFixed(1)}K</td></tr>`).join('')}</table>`
+        :'<div class="none">还没有日志</div>'}
+    </div>
+  </div>
+  <pre id="syout" style="display:none;background:var(--panel2);border:1px solid var(--line);
+    border-radius:6px;padding:12px;overflow:auto;max-height:60vh;font:11px/1.6 'SF Mono',Menlo,monospace"></pre>`;
+
+  $('#syref').onclick=()=>showSync();
+  $('#syrun').onclick=async()=>{
+    const m=$('#symsg'); m.className='lvmsg'; m.textContent='已启动…（tdx2db cron 要几分钟）';
+    try{
+      const r=await post('/api/sync/run',{});
+      SYJOB=r.job_id; pollSync();
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
+  document.querySelectorAll('a.sylog').forEach(e=>e.onclick=async ev=>{
+    ev.preventDefault();
+    const r=await j('/api/sync/log?name='+encodeURIComponent(e.dataset.n));
+    const el=$('#syout'); el.style.display=''; el.textContent=r.text;
+    el.scrollTop=el.scrollHeight;
+  });
+}
+
+async function pollSync(){
+  if(!SYJOB) return;
+  const el=$('#syout'); el.style.display='';
+  try{
+    const o=await j('/api/job?id='+SYJOB);
+    el.textContent=(o.lines||[]).join('\n');
+    el.scrollTop=el.scrollHeight;
+    if(o.state==='running'){ setTimeout(pollSync, 2000); return; }
+    const m=$('#symsg');
+    m.className='lvmsg '+(o.rc===0?'ok':'bad');
+    m.textContent=o.rc===0?'同步完成（信号已重算）':('同步失败，rc='+o.rc);
+    SYJOB=null;
+    setTimeout(()=>showSync(), 1200);
+  }catch(e){ SYJOB=null; }
 }
 
 /* ============ 数据字典 ============ */

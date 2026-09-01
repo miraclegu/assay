@@ -1,0 +1,47 @@
+{
+ "account": "froec",
+ "built_at": "2026-09-01T20:42:17",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 1000000.0,
+ "code_sha": "5897d532",
+ "code_sha256": "5897d5323bb78f87565a2e724311123b9188d92266ebe22515f098a4ab407f08",
+ "data_asof": "2026-09-01",
+ "data_fingerprint": {
+  "overall": "6b59805f4a4e",
+  "parts": {
+   "index": {
+    "hash": "ec87bd503bbc",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T20:41:42",
+    "total_bytes": 64585916
+   },
+   "panel": {
+    "hash": "b57200332c86",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T20:42:09",
+    "total_bytes": 1332793009
+   },
+   "std": {
+    "hash": "9923e20c4520",
+    "n_files": 18,
+    "newest_mtime": "2026-09-01T20:42:14",
+    "total_bytes": 373417593
+   }
+  }
+ },
+ "for_date": "2026-09-02",
+ "freed_est": 0,
+ "held_codes": [],
+ "hold": [],
+ "is_rebalance_day": false,
+ "left_est": 1000000.0,
+ "no_price": [],
+ "params": {
+  "stop_intraday": 1,
+  "stop_loss": 0.35,
+  "weekday": 2
+ },
+ "sell": [],
+ "warnings": []
+}

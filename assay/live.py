@@ -39,7 +39,10 @@
 
 `PanelFeed.trading_days` 来自**面板**（有行情的日子），所以永远不含未来。
 而"下一个交易日是哪天"决定了今天要不要调仓，且**无法从星期推出**
-（春节/国庆）。拿不到就 `LiveError` 报错 —— 不猜。
+（春节/国庆）。**但本地能算**：`tdx.db` 的 `raw_holidays` 表有休市日清单
+（1991~2030），交易日 = 工作日 − 休市日，这条规则与权威日历逐日对数一致
+5745 天。生成脚本 `datalake/build/build_trade_calendar.py`，每次生成都重跑
+对数，不一致就拒绝写出。拿不到日历就 `LiveError` 报错 —— 不猜。
 """
 import datetime
 import hashlib
@@ -61,8 +64,18 @@ ACCT_ID_OK = set('abcdefghijklmnopqrstuvwxyz0123456789_-')
 SIDES = ('buy', 'sell')
 LOT_SIZE = 100
 DEFAULT_WARMUP_START = '2016-01-01'
-DEFAULT_TICK_TIME = '18:00'      # 收盘 + datalake 刷新之后
+# ★ 兜底值，不是主路径。主路径是 datalake/sync_daily.sh 同步完成后【直接调
+#   live.tick(force=True)】—— 把「信号必须用最新数据」这条依赖写进调用顺序，
+#   而不是靠「同步 18:10 / 出信号 19:00」两个时间常量隔开。后者一旦同步变慢
+#   就错位，而错位的表现是【信号静默用了昨天的数据】。
+#   所以这里设得很晚：只在同步压根没跑（机器睡了、脚本坏了）时兜一次。
+DEFAULT_TICK_TIME = '22:00'
 PRICE_BUFFER = 1.05              # 限价 = T-1 收盘 x 这个系数（防高开买不进）
+# 可信的日历来源。★ tdx.raw_holidays 那条【每次生成都跑对数】：
+#   工作日 − 休市日 与 std/trading_calendar.parquet 逐日一致 5745 天才写出，
+#   不一致就拒绝写（见 datalake/build/build_trade_calendar.py）。
+#   所以它和聚宽的 get_all_trade_days 同级可信，不是"凑合用"。
+AUTHORITATIVE_CAL = ('tdx.raw_holidays', 'jq.get_all_trade_days')
 
 
 class LiveError(Exception):
@@ -729,7 +742,7 @@ def build_signal(aid, datalake=None):
 
     warn = []
     cm = calendar_meta()
-    if (cm.get('source') or '') != 'jq.get_all_trade_days':
+    if (cm.get('source') or '') not in AUTHORITATIVE_CAL:
         warn.append('交易日历来源是 %r，不是聚宽权威日历 —— 休市安排可能不准。'
                     '跑一次 datalake 的聚宽增量抽取即可覆盖。' % cm.get('source'))
     if t1 < (feed.trading_days[-1] if feed.trading_days else t1):

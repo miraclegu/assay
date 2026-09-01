@@ -1,0 +1,45 @@
+{
+ "account": "hongli",
+ "built_at": "2026-09-01T20:42:16",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 1000000.0,
+ "code_sha": "c04b095c",
+ "code_sha256": "c04b095cdd078955d510e48f664de24d085dcf9272d10bdba4721459456204ef",
+ "data_asof": "2026-09-01",
+ "data_fingerprint": {
+  "overall": "6b59805f4a4e",
+  "parts": {
+   "index": {
+    "hash": "ec87bd503bbc",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T20:41:42",
+    "total_bytes": 64585916
+   },
+   "panel": {
+    "hash": "b57200332c86",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T20:42:09",
+    "total_bytes": 1332793009
+   },
+   "std": {
+    "hash": "9923e20c4520",
+    "n_files": 18,
+    "newest_mtime": "2026-09-01T20:42:14",
+    "total_bytes": 373417593
+   }
+  }
+ },
+ "for_date": "2026-09-02",
+ "freed_est": 0,
+ "held_codes": [],
+ "hold": [],
+ "is_rebalance_day": false,
+ "left_est": 1000000.0,
+ "no_price": [],
+ "params": {
+  "div_method": "fiscal_year"
+ },
+ "sell": [],
+ "warnings": []
+}

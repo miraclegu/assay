@@ -1658,7 +1658,14 @@ def t_live_core():
         s_hl = lv.build_signal('t_hl')
         # 红利是 run_monthly(monthday=1)；froec_traded 是 run_weekly(weekday=2)
         assert s_hl['for_date'] == nxt.isoformat()
-        assert len(s_hl['buy']) == 15, '红利空仓建仓应给 15 只，实得 %d' % len(s_hl['buy'])
+        # ★ 不能无条件断言 15 只 —— 下一个交易日是不是月内第 1 个交易日
+        #   取决于【今天是哪天】。数据同步推进一天后这条就假失败了（实测）。
+        #   正确的写法是把断言挂在 is_rebalance_day 上。
+        if s_hl['is_rebalance_day']:
+            assert len(s_hl['buy']) == 15, \
+                '红利空仓且是调仓日，应给 15 只，实得 %d' % len(s_hl['buy'])
+        else:
+            assert not s_hl['buy'], '非调仓日不该有买入'
 
         # ---- 3b) 非调仓日：持有不动必须是【全部持仓】，不是 targets ----
         #     targets 在非调仓日是空的，照它算会显示成 0 只 —— 看着像空仓，
@@ -1708,10 +1715,12 @@ def t_live_core():
             assert c, '历史版本 %s 读不出来' % row['code_sha']
 
         return ('FIFO 剩 500@20.0；止损两侧 %.1f%%→stop / %.1f%%→非stop；'
-                '红利 %s 建仓 15 只；快照含 %d 个文件、删 runs/ 仍可读、'
+                '红利 %s %s 买入 %d 只；快照含 %d 个文件、删 runs/ 仍可读、'
                 '改依赖后哈希变 %s→%s'
                 % (100 * (1 - low / hit), 100 * (1 - low / safe),
-                   s_hl['for_date'], len(v[0]['files']),
+                   s_hl['for_date'],
+                   '调仓日' if s_hl['is_rebalance_day'] else '非调仓日',
+                   len(s_hl['buy']), len(v[0]['files']),
                    v2[0]['code_sha'], v2[1]['code_sha']))
     finally:
         lv.LIVE = old_live
@@ -1730,6 +1739,7 @@ def t_live_ui():
         from playwright.sync_api import sync_playwright
     except ImportError:
         return '跳过（无 playwright）'
+    import datetime
     import shutil
     import tempfile
     import threading
@@ -1777,16 +1787,25 @@ def t_live_ui():
             assert pg.locator('.ditem.on').count() == 1, '新账户没被选中'
 
             # 绑版本 -> 出信号
-            pg.fill('#bp', 'strategies/红利/红利指数增强.py')
-            pg.fill('#bj', '{"div_method":"fiscal_year"}')
+            # ★ weekday 按【下一个交易日在本周的序号】动态算，保证它一定是
+            #   调仓日 —— 否则没有买入表，用例会随日期时好时坏（实测：
+            #   数据同步推进到 09-01 后，下一个交易日 09-02 不是红利的
+            #   月频调仓日，硬等 table.lvbuy 直接超时）。
+            days = lv.calendar_days()
+            t1 = max(d for d in days if d <= datetime.date.today())
+            nxt = min(d for d in days if d > t1)
+            wk = [d for d in days if d.isocalendar()[:2] == nxt.isocalendar()[:2]]
+            wd = wk.index(nxt) + 1
+            pg.fill('#bp', 'strategies/小市值/froec_traded.py')
+            pg.fill('#bj', '{"stop_loss":0.35,"stop_intraday":1,"weekday":%d}' % wd)
             pg.click('#bb')
             pg.wait_for_timeout(800)
-            assert 'ab' or True
             pg.click('#lvtick')
-            pg.wait_for_selector('table.lvbuy', timeout=60000)
+            pg.wait_for_selector('table.lvbuy', timeout=90000)
             nbuy = pg.locator('table.lvbuy tr').count() - 1
-            assert nbuy == 15, '待办买入应 15 行，实得 %d' % nbuy
-            assert '调仓日' in pg.content(), '没标出是不是调仓日'
+            assert nbuy == 10, '待办买入应 10 行（froec 满仓 10 只），实得 %d' % nbuy
+            assert '· 调仓日' in pg.content(), \
+                'weekday=%d 应让 %s 成为调仓日，页面却没标出' % (wd, nxt)
 
             # 批量粘贴解析（走前端 parseBulk -> 后端校验）
             first = pg.locator('table.lvbuy tr').nth(1).locator('td').first.inner_text()
@@ -1808,12 +1827,193 @@ def t_live_ui():
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('建账户/绑版本/出信号(买入 %d 行)/批量录入/超卖被拒/'
-                    '版本历史 均正常，0 个 JS 错误' % nbuy)
+            return ('建账户/绑版本(weekday=%d 使 %s 成调仓日)/出信号(买入 %d 行)/'
+                    '批量录入/超卖被拒/版本历史 均正常，0 个 JS 错误'
+                    % (wd, nxt, nbuy))
     finally:
         httpd.shutdown()
         lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('数据同步：日历对数 / 两条腿语义 / 脚本可执行', tag='fast')
+def t_sync():
+    """三条自证，都对应一个会静默出错的地方。
+
+    1) **交易日历规则**：交易日 = 工作日 − tdx.raw_holidays。这条规则要能
+       与权威日历（std/trading_calendar.parquet，从行情反推）**逐日一致**，
+       否则外推到未来的调仓日就是错的 —— 而错的表现是「该调仓的日子没提示」
+       或「休市日发一堆单」，两者都不报错。生成脚本每次都重跑对数、
+       不一致就拒绝写出，这里核它确实还成立。
+    2) **两条腿的落后语义不能混**：A 腿（行情）每个交易日必然有新数据，
+       缺了就是同步没跑；B 腿（财务）是**事件驱动**，没公告的日子本来就
+       没有新 pub_date，按交易日算落后是【必然误报】。混用会让页面天天
+       标红，然后你就不看红字了 —— 告警失效比没有告警更糟。
+    3) **同步脚本语法可执行**：它由 launchd 跑，坏了没人看得见。
+    """
+    import datetime
+    import json
+    import subprocess
+
+    import duckdb
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    dl = os.path.join(os.path.dirname(root), 'datalake')
+    tdx = os.path.join(os.path.dirname(root), 'tdx2db', 'tdx.db')
+    if not os.path.exists(tdx):
+        return '跳过（没有 tdx.db）'
+
+    # ---- 1) 日历规则对数 ----
+    con = duckdb.connect()
+    con.execute("ATTACH '%s' AS t (READ_ONLY)" % tdx)
+    hol = {r[0] for r in con.execute('SELECT date FROM t.raw_holidays').fetchall()}
+    truth = [r[0] for r in con.execute(
+        "SELECT date FROM read_parquet('%s/std/trading_calendar.parquet') ORDER BY date"
+        % dl).fetchall()]
+    assert truth, '权威日历为空'
+    lo, hi = truth[0], truth[-1]
+    gen, d = [], lo
+    while d <= hi:
+        if d.weekday() < 5 and d not in hol:
+            gen.append(d)
+        d += datetime.timedelta(days=1)
+    ts, gs = set(truth), set(gen)
+    assert ts == gs, ('「工作日 − raw_holidays」不再等于权威日历：'
+                      '漏判休市 %d 天 %s / 多判交易 %d 天 %s'
+                      % (len(ts - gs), sorted(ts - gs)[:5],
+                         len(gs - ts), sorted(gs - ts)[:5]))
+
+    # 生成出来的 live 日历要有未来交易日，且来源可信
+    calp = os.path.join(root, 'live', 'trade_calendar.json')
+    assert os.path.exists(calp), '缺 live/trade_calendar.json —— 实盘拿不到下一个交易日'
+    cal = json.load(open(calp, encoding='utf-8'))
+    from assay import live as lv
+    assert cal['source'] in lv.AUTHORITATIVE_CAL, \
+        '日历来源 %r 不在可信名单里' % cal['source']
+    nfut = len([x for x in cal['days'] if x > hi.isoformat()])
+    assert nfut > 100, '未来交易日只有 %d 天，太少 —— 外推窗口不够' % nfut
+
+    # ---- 2) 两条腿语义 ----
+    ss = os.path.join(dl, 'build', 'sync_status.py')
+    assert os.path.isfile(ss), '缺 %s' % ss
+    r = subprocess.run(['python3', ss, '--json'], cwd=dl,
+                       capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, 'sync_status.py 挂了：%s' % (r.stderr or '')[-300:]
+    st = json.loads(r.stdout)
+    a = [i for i in st['items'] if i['leg'] == 'A']
+    b = [i for i in st['items'] if i['leg'] == 'B']
+    assert a and b, '两条腿都要有检查项'
+    assert all(i.get('lag_days') is not None or i.get('error') for i in a), \
+        'A 腿必须报「落后几个交易日」'
+    assert all(i.get('lag_days') is None for i in b), \
+        'B 腿不该报交易日落后（财务是事件驱动，按交易日算是必然误报）：%s' \
+        % [i for i in b if i.get('lag_days') is not None]
+    assert all('days_since' in i or i.get('error') for i in b), \
+        'B 腿必须报「距今几天」'
+
+    # ---- 3) 脚本可执行 ----
+    sh = os.path.join(dl, 'sync_daily.sh')
+    assert os.path.isfile(sh), '缺 sync_daily.sh'
+    r = subprocess.run(['bash', '-n', sh], capture_output=True, text=True)
+    assert r.returncode == 0, 'sync_daily.sh 语法错误：%s' % r.stderr[-300:]
+    src = open(sh, encoding='utf-8').read()
+    # ★ 只看【真命令行】，剥掉注释 —— 本会话已经三次栽在"断言匹配到自己写的
+    #   注释文本"上（sync_daily.sh 的文件头正解释了为什么不调那两个坏脚本，
+    #   于是 `'scripts/update.sh' not in src` 必然失败）。
+    #   注释是给人看的说明，断言必须针对会被执行的东西。
+    code = '\n'.join(ln.split('#', 1)[0] for ln in src.splitlines())
+    for bad in ('scripts/update.sh', 'scripts/full_update.sh'):
+        assert bad not in code, \
+            'sync_daily.sh 不该调 %s —— 它引用的 fast_update_indicators.py 不存在' % bad
+    assert 'daily_snapshot.py' in code, 'PIT 快照那步不能少（漏一天永久丢失）'
+    plist = os.path.join(dl, '_manifest', 'com.miraclegu.finacial.sync.plist')
+    assert os.path.isfile(plist), '缺 launchd plist'
+    r = subprocess.run(['plutil', '-lint', plist], capture_output=True, text=True)
+    assert r.returncode == 0, 'plist 格式错误：%s' % r.stdout
+
+    la = max((i['lag_days'] for i in a if i['lag_days'] is not None), default=0)
+    return ('日历 %d 天逐日一致（%s~%s）+ 未来 %d 天；A 腿落后 %d 交易日；'
+            'B 腿距今 %s 天；脚本/plist 均可执行'
+            % (len(truth), lo, hi, nfut, la,
+               '/'.join(str(i.get('days_since')) for i in b)))
+
+
+@case('数据同步页面真实渲染（playwright）', tag='web')
+def t_sync_ui():
+    """两条腿的表格要显示【不同语义】，并且告警必须真的渲染到页面上。
+
+    ★ 判据在服务端（datalake/build/sync_status.py），页面只负责显示。
+      这里核的是「显示没把两条腿混起来」—— A 腿报落后几个交易日，
+      B 腿报距今几天。混了会让页面天天标红，然后你就不看红字了，
+      告警失效比没有告警更糟。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    old = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = False          # 只读：断言手动同步按钮被置灰
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console',
+                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+            pg.goto('http://127.0.0.1:%d/#/sync' % port, wait_until='networkidle')
+            pg.wait_for_selector('.lvsec', timeout=90000)
+            pg.wait_for_timeout(400)
+            txt = pg.content()
+            assert 'A 腿' in txt and 'B 腿' in txt, '两条腿的分区没渲染'
+            # ★ 只取【表格单元格】，不取整节文本 —— 本会话第四次栽在
+            #   "断言匹配到自己写的说明文案"上：B 腿那节的说明里正写着
+            #   「B 腿的"落后"不按交易日算」，于是 `'落后' not in b_txt` 必然失败。
+            #   要断言渲染结果就只看渲染结果，别把旁边的散文一起吃进来。
+            secs = pg.locator('.lvsec')
+            a_cells = secs.nth(0).locator('table.lvt td').all_inner_texts()
+            b_cells = secs.nth(1).locator('table.lvt td').all_inner_texts()
+            a_txt, b_txt = ' | '.join(a_cells), ' | '.join(b_cells)
+            assert a_cells and b_cells, '两条腿的表格都要有行'
+            assert '落后' in a_txt or '最新' in a_txt, \
+                'A 腿该显示「落后 N 个交易日」或「最新」，实得: %s' % a_txt[:120]
+            assert '距今' in b_txt, \
+                'B 腿该显示「距今 N 天」，实得: %s' % b_txt[:120]
+            assert '落后' not in b_txt, \
+                'B 腿的表格里不该出现「落后」—— 财务是事件驱动，'\
+                '按交易日算是必然误报。实得: %s' % b_txt[:120]
+            # 日历来源要显示，且是可信来源（不然实盘会拿不到下一个交易日）
+            from assay import live as lv
+            head = pg.locator('.lvhead').inner_text()
+            assert '日历' in head, '没显示日历来源'
+            assert any(x in head for x in lv.AUTHORITATIVE_CAL), \
+                '日历来源不在可信名单里: %s' % head
+            # 只读模式下手动同步必须置灰（不能只靠前端 —— 接口也会拒，见 api_sync_run）
+            assert pg.locator('#syrun').is_disabled(), '只读模式下「立即同步」应置灰'
+            # 日志可点开
+            n_log = pg.locator('a.sylog').count()
+            if n_log:
+                pg.locator('a.sylog').first.click()
+                pg.wait_for_timeout(600)
+                out = pg.locator('#syout').inner_text()
+                assert '每日数据同步' in out, '日志内容没渲染出来: %s' % out[:120]
+            br.close()
+            assert not errs, '页面有运行时错误：%s' % errs[:3]
+            return ('两条腿语义分离（A 报交易日落后 / B 报距今天数）；'
+                    '日历来源可信；只读拦住手动同步；%d 份日志可点开' % n_log)
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE = old
 
 
 def main():
