@@ -34,9 +34,9 @@
 # ---------------------------- 与本地策略的关联 ------------------------------
 LOCAL_PORT = {
     'strategy':  'strategies/小市值/froec_traded.py',
-    'run_id':    '20260829-170945-4926f5',
-    'params':    {'stop_loss': 0.35, 'stop_intraday': 1},
-    'metrics':   {'annual': 40.87, 'max_drawdown': 38.54, 'sharpe': 1.33},
+    'run_id':    '20260901-103559-159df9',
+    'params':    {'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2},
+    'metrics':   {'annual': 47.06, 'max_drawdown': 41.40, 'sharpe': 1.48},
     'backtest': {
         'start': '2016-01-04', 'end': '2026-08-07', 'cash': 100000,
         'benchmark': '000905.XSHG', 'freq': 'day',
@@ -46,7 +46,7 @@ LOCAL_PORT = {
         'candidate_num':    '10        <-> roe_list[:10]（先截 10 只再过滤，不补位）',
         'listed_days':      '250       <-> filter_new_stock 的 250 天',
         'limit_days':       '20        <-> g.limit_days = 20',
-        'weekday':          '1         <-> run_weekly(..., weekday=1)',
+        'weekday':          '2         <-> run_weekly(..., weekday=2)  ★2026-09-01 起由周一改周二',
         'rebal_time':       '09:30     <-> run_weekly(..., time=9:30)',
         'exit_time':        '14:00     <-> run_daily(check_limit_up, 14:00)',
         'limit_up_exit':    '1         <-> check_limit_up 开启',
@@ -196,7 +196,9 @@ def initialize(context):
     
     # 设置交易运行时间
     run_daily(prepare_stock_list, time='9:05', reference_security='000300.XSHG') #准备预操作股票池
-    run_weekly(weekly_adjustment, weekday=1, time='9:30', reference_security='000300.XSHG') #默认周一开盘调仓，收益最高
+    # ★ 2026-09-01 实盘起：周一 -> 周二。换相位不换规则，p=0.211 不显著，
+    #   详见本地 strategies/小市值/froec_traded.py 的 initialize 注释。
+    run_weekly(weekly_adjustment, weekday=2, time='9:30', reference_security='000300.XSHG')
     run_daily(check_limit_up, time='14:00', reference_security='000300.XSHG') #检查持仓中的涨停股是否需要卖出
     run_daily(print_position_info, time='15:10', reference_security='000300.XSHG') #打印复盘信息
     # ★ 本文件新增：固定止损 + 印花税分段

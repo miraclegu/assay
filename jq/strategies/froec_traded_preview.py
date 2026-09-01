@@ -60,7 +60,7 @@ INDUSTRY_CONTROL = True
 INDUSTRY_FILTER = ['钢铁I', '煤炭I', '石油石化I', '采掘I',
                    '银行I', '非银金融I', '金融服务I',
                    '交运设备I', '交通运输I', '传媒I', '环保I']
-REBAL_WEEKDAY   = 1            # 每周第几个交易日调仓（1 = 周一）
+REBAL_WEEKDAY   = 2            # 每周第几个交易日调仓（★2026-09-01 起 1 -> 2）
 STOP_LOSS       = 0.35
 FLOATMV_SANITY  = 200.0        # 领域自检阈值（亿元）：目标里最大流通市值超过它就报警
 
@@ -139,19 +139,23 @@ def resolve_dates(trade_date):
 
 
 def is_rebalance_day(t):
-    """回测里是 run_weekly(weekday=1) = 每周第 1 个交易日。
+    """回测里是 run_weekly(weekday=2) = 每周第 2 个交易日（2026-09-01 起）。
 
     [!] 用【区间】取本周首个交易日，不用 count —— 聚宽的 count 是从 end_date
         往前数的，get_trade_days(start_date=X, count=1) 语义不明。
     [!] run_weekly 锚在【自然周】上：假期短周会让实际间隔在 1~13 个交易日之间跳
         （本地实测 weekday=1 有 15 次间隔 <= 2 天）。这是原版行为，不是 bug。
+    [!] REBAL_WEEKDAY > 1 时，本周交易日还不够 REBAL_WEEKDAY 个就【不是】调仓日；
+        原来的 else days[0] 兜底会在短周把首日误判成调仓日 —— 已去掉。
     """
     week_start = t - datetime.timedelta(days=t.weekday())
     days = get_trade_days(start_date=week_start, end_date=t)
     days = [d.date() if hasattr(d, 'date') else d for d in days]
     if not days:
         return False, None
-    first = days[REBAL_WEEKDAY - 1] if len(days) >= REBAL_WEEKDAY else days[0]
+    if len(days) < REBAL_WEEKDAY:
+        return False, None
+    first = days[REBAL_WEEKDAY - 1]
     return first == t, first
 
 
