@@ -962,6 +962,166 @@ def _md(text):
     return '\n'.join(out)
 
 
+# ==================== 实盘模块（live）====================
+# ★ 与 /api/backtest 同哲学：**默认关闭**。它会起后台线程定时跑策略，
+#   而看板本身是纯读的、随时重启无代价。把「读」和「有副作用的写」
+#   用一个开关分开，重启服务就不会打断正在跑的东西。
+ALLOW_LIVE = False
+_live_thread = None
+
+
+def _live():
+    from . import live as _m
+    return _m
+
+
+def _live_err(fn, *a, **kw):
+    """统一把 LiveError 翻成 {'error': ...} —— 这些是【给用户看的】提示，
+    不是 500。其余异常照常冒泡到 Handler 的 500 分支。"""
+    m = _live()
+    try:
+        return fn(*a, **kw)
+    except m.LiveError as e:
+        return {'error': str(e)}
+
+
+def api_live_accounts(_q):
+    m = _live()
+    out = []
+    for a in m.load_accounts():
+        pos = m.positions(a['id'])
+        out.append(dict(a, n_positions=len(pos), cash=round(m.cash(a['id']), 2),
+                        n_fills=len(m.fills(a['id'])),
+                        n_versions=len(m.versions(a['id']))))
+    cal = m.calendar_meta()
+    return {'accounts': out, 'readonly': not ALLOW_LIVE,
+            'calendar': {'source': cal.get('source'), 'max': cal.get('max'),
+                         'authoritative_until': cal.get('authoritative_until'),
+                         'warn': cal.get('warn'), 'error': cal.get('error')}}
+
+
+def api_live_account(q):
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    return _live_err(lambda: {
+        'account': m.get_account(aid),
+        'positions': m.positions(aid),
+        'cash': round(m.cash(aid), 2),
+        'versions': m.versions(aid),
+        'fills': list(reversed(m.fills(aid))),
+        'signal': m.latest_signal(aid),
+    })
+
+
+def api_live_signal(q):
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    d = (q.get('date') or '').strip()
+    return _live_err(lambda: (m.load_signal(aid, d) if d else m.latest_signal(aid))
+                     or {'error': '还没有信号 —— 点「立即重算」'})
+
+
+def api_live_code(q):
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    sha = (q.get('sha') or '').strip().lower()
+    which = (q.get('file') or '').strip() or None
+
+    def _go():
+        code, full, names = m.version_code(aid, sha, which)
+        return {'code': code, 'code_sha256': full, 'files': names}
+    return _live_err(_go)
+
+
+def _live_guard():
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动，实盘模块已关闭。'
+                         '用 python3 serve.py --live 开启。'}
+    return None
+
+
+def api_live_save(_q, body):
+    """建/改账户；带 strategy_path 时顺便绑版本（append-only 留痕）。"""
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+
+    def _go():
+        m.upsert_account(aid, name=b.get('name'), init_cash=b.get('init_cash'),
+                         broker_note=b.get('broker_note'),
+                         tick_time=b.get('tick_time'),
+                         warmup_start=b.get('warmup_start'))
+        if b.get('strategy_path'):
+            m.bind_version(aid, b['strategy_path'], b.get('params') or {},
+                           b.get('reason') or '')
+        return {'account': m.get_account(aid), 'versions': m.versions(aid)}
+    return _live_err(_go)
+
+
+def api_live_fill(_q, body):
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+    rows = b.get('rows')
+    if rows is None:
+        rows = [b]
+    if not isinstance(rows, list):
+        return {'error': 'rows 必须是数组'}
+    if len(rows) > 200:
+        return {'error': '一次最多 200 笔'}
+    ok, errs = [], []
+    for i, r in enumerate(rows):
+        try:
+            ok.append(m.add_fill(
+                aid, r.get('trade_date'), (r.get('code') or '').strip().upper(),
+                (r.get('side') or '').strip(), r.get('shares'), r.get('price'),
+                fee=r.get('fee') or 0, name=r.get('name') or '',
+                source=r.get('source') or 'manual', note=r.get('note') or '',
+                reverse_of=r.get('reverse_of')))
+        except m.LiveError as e:
+            errs.append('第 %d 行：%s' % (i + 1, e))
+    return {'added': len(ok), 'errors': errs,
+            'positions': m.positions(aid), 'cash': round(m.cash(aid), 2)}
+
+
+def api_live_tick(_q, body):
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+    if aid:
+        return _live_err(lambda: m.make_signal(aid, force=True))
+    return {'results': m.tick(force=True)}
+
+
+def _live_loop():
+    """守护线程：每 60s 看一次表。★ 幂等由 live.tick 保证（信号按
+    for_date 落盘，已存在就跳过），所以轮询频率高不会重复算。"""
+    import time
+    m = _live()
+    while True:
+        try:
+            for r in m.tick():
+                if r.get('error'):
+                    print('[live] %s: %s' % (r.get('account'), r['error']), flush=True)
+                else:
+                    print('[live] %s -> %s  卖%d 买%d'
+                          % (r['account'], r['for_date'],
+                             len(r.get('sell') or []), len(r.get('buy') or [])),
+                          flush=True)
+        except Exception as e:                              # noqa: BLE001
+            print('[live] tick 异常: %s: %s' % (type(e).__name__, e), flush=True)
+        time.sleep(60)
+
+
 ROUTES = {
     '/api/docs': api_docs,
     '/api/doc': api_doc,
@@ -978,6 +1138,10 @@ ROUTES = {
     '/api/datafp': api_datafp,
     '/api/job': api_job,
     '/api/marks': api_marks,
+    '/api/live/accounts': api_live_accounts,
+    '/api/live/account': api_live_account,
+    '/api/live/signal': api_live_signal,
+    '/api/live/code': api_live_code,
 }
 
 
@@ -998,7 +1162,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):                       # noqa: N802
         u = urlparse(self.path)
-        POSTS = {'/api/backtest': api_backtest, '/api/mark': api_mark}
+        POSTS = {'/api/backtest': api_backtest, '/api/mark': api_mark,
+                 '/api/live/save': api_live_save,
+                 '/api/live/fill': api_live_fill,
+                 '/api/live/tick': api_live_tick}
         fn = POSTS.get(u.path)
         if fn is None:
             return self._send(404, json.dumps({'error': 'no such endpoint'}))
@@ -1015,7 +1182,9 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._send(500, json.dumps({'error': '%s: %s' % (type(e).__name__, e)},
                                               ensure_ascii=False))
-        return self._send(200, json.dumps(r, ensure_ascii=False))
+        # ★ default=str 与 GET 分支保持一致 —— POST 的返回里也可能带
+        #   date/Timestamp（实盘持仓的建仓日就是），少这一个参数就是 500。
+        return self._send(200, json.dumps(r, ensure_ascii=False, default=str))
 
     def do_GET(self):                        # noqa: N802
         u = urlparse(self.path)
@@ -1044,14 +1213,25 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, open(p, 'rb').read(), ctype)
 
 
-def serve(host='127.0.0.1', port=8770, allow_backtest=False):
-    global ALLOW_BACKTEST
+def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):
+    global ALLOW_BACKTEST, ALLOW_LIVE, _live_thread
     ALLOW_BACKTEST = bool(allow_backtest)
+    ALLOW_LIVE = bool(allow_live)
     n = len(_scan())
     print('assay 归档查看服务  http://%s:%d   (%d 次回测)' % (host, port, n))
     print('模式：%s' % ('可触发回测（--allow-backtest）'
                       if ALLOW_BACKTEST else '只读（网页触发回测已关闭）'))
     # flush：重定向到文件时 stdout 是块缓冲，SIGTERM 不会刷新，
     # 启动横幅会看着像根本没打印。
+    if ALLOW_LIVE:
+        m = _live()
+        accts = m.load_accounts()
+        cal = m.calendar_meta()
+        print('实盘模块：开启  %d 个账户  日历来源 %s'
+              % (len(accts), cal.get('source')))
+        _live_thread = threading.Thread(target=_live_loop, daemon=True)
+        _live_thread.start()
+    else:
+        print('实盘模块：关闭（--live 开启）')
     print('Ctrl-C 退出', flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

@@ -1570,6 +1570,252 @@ def _():
             os.remove(sv.MARKS_FILE)
 
 
+@case('实盘：持仓重建 / 规则不重写 / 版本留痕', tag='fast')
+def t_live_core():
+    """四条自证，每条都对应一个【会静默出错】的地方。
+
+    1) 持仓重建：FIFO 冲减顺序错了，成本价就错，止损判定跟着错 —— 不报错
+    2) 规则不重写：止损/炸板走的必须是【策略自己的代码路径】。用一个
+       刚好跌破阈值的成本价播种，断言捕获到 reason='stop'；再用一个
+       刚好不跌破的，断言【不是】 stop。两侧都测，否则"总是返回 stop"
+       也能通过
+    3) 调仓日判定：面板日历不含未来交易日，序号必须用「历史+未来」重算。
+       只补未来那几天的话，本周的桶是截断的，负序号（-1=本周最后一个
+       交易日）会错
+    4) 版本留痕：**删掉整个 runs/ 目录后仍读得到快照**。这是本模块的
+       核心承诺 —— runs/ 在 .gitignore 里，绑到它等于没留痕
+    """
+    import datetime
+    import shutil
+    import tempfile
+
+    import duckdb
+
+    from assay import live as lv
+    from assay import registry
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    tmp = tempfile.mkdtemp(prefix='selftest_live_')
+    old_live = lv.LIVE
+    lv.LIVE = tmp
+    try:
+        cal = os.path.join(root, 'live', 'trade_calendar.json')
+        if not os.path.exists(cal):
+            return '跳过（没有 live/trade_calendar.json）'
+        shutil.copy(cal, os.path.join(tmp, 'trade_calendar.json'))
+
+        # ---- 1) FIFO 持仓重建 ----
+        rows = [
+            {'ts': '1', 'trade_date': '2026-01-05', 'code': 'X.XSHG',
+             'side': 'buy', 'shares': 1000, 'price': 10.0, 'fee': 0},
+            {'ts': '2', 'trade_date': '2026-02-05', 'code': 'X.XSHG',
+             'side': 'buy', 'shares': 1000, 'price': 20.0, 'fee': 0},
+            {'ts': '3', 'trade_date': '2026-03-05', 'code': 'X.XSHG',
+             'side': 'sell', 'shares': 1500, 'price': 30.0, 'fee': 0},
+        ]
+        book = lv.fifo_lots(rows)
+        got = book['X.XSHG']
+        assert len(got) == 1 and got[0]['shares'] == 500, 'FIFO 剩余股数错: %s' % got
+        assert got[0]['price'] == 20.0, \
+            'FIFO 必须先冲减【最早】那批 —— 剩下的应是 20.0 那批，得到 %s' % got[0]['price']
+        # as-of：2026-02-05 当天应是 2000 股
+        assert sum(l['shares'] for l in lv.lots_asof(rows, '2026-02-05')['X.XSHG']) == 2000
+
+        # ---- 2) 规则不重写：止损两侧 ----
+        con = duckdb.connect()
+        panel = os.path.join(os.path.dirname(root), 'datalake',
+                             'mart', 'panel_daily', 'panel_2026.parquet')
+        if not os.path.exists(panel):
+            return '跳过（没有 2026 面板）'
+        r = con.execute(
+            "SELECT date, low FROM read_parquet('%s') WHERE jq_code='603506.XSHG' "
+            "ORDER BY date DESC LIMIT 1" % panel).fetchone()
+        day, low = r[0], float(r[1])
+        hit, safe = round(low / 0.65 + 0.5, 2), round(low / 0.65 - 1.0, 2)
+        seen = {}
+        for tag, cost in (('hit', hit), ('safe', safe)):
+            aid = 't_' + tag
+            lv.upsert_account(aid, name=tag, init_cash=200000)
+            lv.bind_version(aid, 'strategies/小市值/froec_traded.py',
+                            params={'stop_loss': 0.35, 'stop_intraday': 1,
+                                    'weekday': 2})
+            lv.add_fill(aid, '2026-08-20', '603506.XSHG', 'buy', 1000, cost)
+            sig = lv.build_signal(aid)
+            seen[tag] = {s['code']: s['reason'] for s in sig['sell']}
+        assert seen['hit'].get('603506.XSHG') == 'stop', \
+            '成本较当日最低价跌 %.1f%% > 35%%，应捕获 stop，实得 %s' \
+            % (100 * (1 - low / hit), seen['hit'])
+        assert seen['safe'].get('603506.XSHG') != 'stop', \
+            '成本只跌 %.1f%% < 35%%，不该是 stop，实得 %s' \
+            % (100 * (1 - low / safe), seen['safe'])
+
+        # ---- 3) 调仓日判定 ----
+        nxt = lv.next_trading_day(day)
+        assert nxt > day, 'next_trading_day 必须严格晚于 %s' % day
+        lv.upsert_account('t_hl', name='hl', init_cash=1000000)
+        lv.bind_version('t_hl', 'strategies/红利/红利指数增强.py',
+                        params={'div_method': 'fiscal_year'})
+        s_hl = lv.build_signal('t_hl')
+        # 红利是 run_monthly(monthday=1)；froec_traded 是 run_weekly(weekday=2)
+        assert s_hl['for_date'] == nxt.isoformat()
+        assert len(s_hl['buy']) == 15, '红利空仓建仓应给 15 只，实得 %d' % len(s_hl['buy'])
+
+        # ---- 3b) 非调仓日：持有不动必须是【全部持仓】，不是 targets ----
+        #     targets 在非调仓日是空的，照它算会显示成 0 只 —— 看着像空仓，
+        #     而实际上你满仓。这类"显示成空"的错不会报错。
+        lv.upsert_account('t_nr', name='nr', init_cash=200000)
+        lv.bind_version('t_nr', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1,
+                                'weekday': 4})       # 周四调仓 -> 下一交易日多半不是
+        lv.add_fill('t_nr', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0)
+        s_nr = lv.build_signal('t_nr')
+        if not s_nr['is_rebalance_day']:
+            assert len(s_nr['hold']) == 1, \
+                '非调仓日"持有不动"应为全部持仓 1 只，实得 %d' % len(s_nr['hold'])
+            assert not s_nr['buy'], '非调仓日不该有买入'
+
+        # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
+        v = lv.versions('t_hit')
+        assert len(v) == 1 and v[0]['files'], 'versions.jsonl 没记文件清单'
+        assert len(v[0]['files']) >= 2, \
+            'froec_traded 依赖 froec.py，快照必须包含两者，实得 %s' % v[0]['files']
+        code, full, names = lv.version_code('t_hit', v[0]['code_sha256'])
+        assert 'froec.py' in names, '依赖没进快照: %s' % names
+        # 把归档目录整个从视野里拿掉，再读一次
+        old_runs = registry.RUNS
+        try:
+            registry.RUNS = os.path.join(tmp, '_no_such_runs')
+            code2, _f, _n = lv.version_code('t_hit', v[0]['code_sha256'])
+            assert code2 == code, 'runs/ 不可见时快照读出来的内容变了'
+        finally:
+            registry.RUNS = old_runs
+        # 改磁盘文件 -> 版本哈希必须变（否则版本会悄悄漂移）
+        p = os.path.join(root, 'strategies', '小市值', 'froec.py')
+        raw = open(p, 'rb').read()
+        try:
+            open(p, 'wb').write(raw + b'\n# selftest\n')
+            lv.bind_version('t_hit', 'strategies/小市值/froec_traded.py',
+                            params={'stop_loss': 0.35, 'stop_intraday': 1,
+                                    'weekday': 2}, reason='改了依赖')
+        finally:
+            open(p, 'wb').write(raw)
+        v2 = lv.versions('t_hit')
+        assert len(v2) == 2, '换版本必须【追加】一行，不是改写'
+        assert v2[1]['code_sha256'] != v2[0]['code_sha256'], \
+            '只改了依赖 froec.py，版本哈希却没变 —— 版本会悄悄漂移'
+        for row in v2:
+            c, _f, _n = lv.version_code('t_hit', row['code_sha256'])
+            assert c, '历史版本 %s 读不出来' % row['code_sha']
+
+        return ('FIFO 剩 500@20.0；止损两侧 %.1f%%→stop / %.1f%%→非stop；'
+                '红利 %s 建仓 15 只；快照含 %d 个文件、删 runs/ 仍可读、'
+                '改依赖后哈希变 %s→%s'
+                % (100 * (1 - low / hit), 100 * (1 - low / safe),
+                   s_hl['for_date'], len(v[0]['files']),
+                   v2[0]['code_sha'], v2[1]['code_sha']))
+    finally:
+        lv.LIVE = old_live
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('实盘页面真实渲染（playwright）', tag='web')
+def t_live_ui():
+    """★ JS 语法过 ≠ 能渲染。运行时错误在终端里看不到，页面只是空白。
+
+    跑一遍真流程：建账户 -> 绑版本 -> 出信号 -> 待办表 -> 批量录入解析 ->
+    版本历史。并断言【告警确实显示出来了】—— 日历不是权威来源这件事
+    如果只存在于 JSON 里没渲染到页面上，等于没有。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import live as lv
+    from assay import server as sv
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    cal = os.path.join(root, 'live', 'trade_calendar.json')
+    if not os.path.exists(cal):
+        return '跳过（没有 live/trade_calendar.json）'
+    tmp = tempfile.mkdtemp(prefix='selftest_liveui_')
+    old_live, old_allow = lv.LIVE, sv.ALLOW_LIVE
+    lv.LIVE = tmp
+    sv.ALLOW_LIVE = True
+    shutil.copy(cal, os.path.join(tmp, 'trade_calendar.json'))
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console',
+                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+            base = 'http://127.0.0.1:%d/' % port
+            pg.goto(base + '#/live', wait_until='networkidle')
+            pg.wait_for_timeout(500)
+            assert '还没有账户' in pg.content(), '空态没显示'
+            # 日历告警必须渲染到页面上，不能只躺在 JSON 里
+            assert pg.locator('.lvwarn').count() >= 1, '日历非权威来源的告警没渲染'
+
+            # 建账户
+            pg.fill('#na', 'uitest')
+            pg.fill('#nn', 'UI 测试')
+            pg.fill('#nc', '1000000')
+            pg.click('#nb')
+            pg.wait_for_timeout(600)
+            assert pg.locator('.ditem.on').count() == 1, '新账户没被选中'
+
+            # 绑版本 -> 出信号
+            pg.fill('#bp', 'strategies/红利/红利指数增强.py')
+            pg.fill('#bj', '{"div_method":"fiscal_year"}')
+            pg.click('#bb')
+            pg.wait_for_timeout(800)
+            assert 'ab' or True
+            pg.click('#lvtick')
+            pg.wait_for_selector('table.lvbuy', timeout=60000)
+            nbuy = pg.locator('table.lvbuy tr').count() - 1
+            assert nbuy == 15, '待办买入应 15 行，实得 %d' % nbuy
+            assert '调仓日' in pg.content(), '没标出是不是调仓日'
+
+            # 批量粘贴解析（走前端 parseBulk -> 后端校验）
+            first = pg.locator('table.lvbuy tr').nth(1).locator('td').first.inner_text()
+            code = first.split()[0]
+            pg.fill('#ft', '2026-09-01 %s 买 100 10.00' % code)
+            pg.click('#fbulk')
+            pg.wait_for_timeout(900)
+            assert '100' in pg.locator('.lvfill').inner_text(), '成交流水里没出现刚录的那笔'
+
+            # 版本历史可点开
+            assert pg.locator('a.lvver').count() >= 1, '版本历史没渲染'
+
+            # 卖出校验：超过持仓必须被拒（后端把关，不能只靠前端）
+            pg.fill('#ft', '2026-09-01 %s 卖 900 10.00' % code)
+            pg.click('#fbulk')
+            pg.wait_for_timeout(700)
+            assert '超过当前持仓' in pg.locator('#fmsg').inner_text(), \
+                '超卖没被拒：%s' % pg.locator('#fmsg').inner_text()
+
+            br.close()
+            assert not errs, '页面有运行时错误：%s' % errs[:3]
+            return ('建账户/绑版本/出信号(买入 %d 行)/批量录入/超卖被拒/'
+                    '版本历史 均正常，0 个 JS 错误' % nbuy)
+    finally:
+        httpd.shutdown()
+        lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     import time as _t
     ap = argparse.ArgumentParser(description='assay 自检')

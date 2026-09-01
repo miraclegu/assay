@@ -511,3 +511,51 @@ class Broker:
     def _reject(self, code, side, reason):
         self.rejects.append((self.date, code, side, reason))
         return Order(code, side, 0, 0.0, False, reason)
+
+
+class RecordingBroker(Broker):
+    """**只记录委托、不撮合成交** —— 实盘模块用它捕获策略「想做什么」。
+
+    ## 为什么是换 broker，而不是在实盘模块里重写规则
+
+    止损（`stop_check`）、炸板离场（`check_limit_up`）、调仓（`rebalance`/`trade`）
+    三条规则全都依赖引擎内部状态：`g.pos_state`、`g.high_limit`、
+    `pos[code].entry_price`、`context.portfolio.total_value`。在实盘模块里
+    照抄一遍就是**第二份实现** —— 本项目已经因为「同一件事两处写」吃过亏
+    （旧引擎三处各写一遍卖出，交易日志只挂在其中一处，一次归因诊断全错）。
+
+    换掉**成交出口**是唯一不复制规则的办法：策略照常跑它自己的代码路径，
+    我们只是把最后那一下「真的买/卖」换成「记下来」。
+
+    ## 记什么
+
+    `orders` 每项：`{code, kind, target_value, price, phase, date}`
+      kind: 'target'（order_target_value/percent）/ 'stop'（order_stop_sell）
+      target_value == 0 -> 清仓；> 0 -> 目标市值
+
+    ★ 不填单意味着 portfolio 保持播种时的状态，后续任务看到的持仓仍是
+      **你的真实持仓** —— 这正是预览要的语义（"如果现在执行，会发生什么"）。
+      副作用：同一天内策略若先卖后买、且买入依赖卖出腾出的现金，
+      记到的 target_value 会偏小。所以**下单股数由实盘模块按真实现金重算**，
+      这里只取「它想动哪些票、方向是什么」。
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.orders = []
+
+    def _rec(self, code, kind, value, price=None):
+        self.orders.append({
+            'code': code, 'kind': kind, 'target_value': float(value),
+            'price': price, 'phase': self.phase, 'date': self.date,
+        })
+        return Order(code, 'sell' if not value else 'buy', 0, 0.0, True, 'recorded')
+
+    def order_target_value(self, code, value):
+        return self._rec(code, 'target', value)
+
+    def order_target_percent(self, code, pct):
+        return self._rec(code, 'target', self.pf.total_value * pct)
+
+    def order_stop_sell(self, code, price=None):
+        return self._rec(code, 'stop', 0.0, price)

@@ -113,7 +113,17 @@ class Engine:
             return monthday == pos or monthday == neg
         return False
 
-    def run(self, verbose=False):
+    def _boot(self, verbose=False):
+        """绑定 api、应用参数、跑 initialize、排任务、算日历序号。
+
+        ★ 从 run() 里抽出来，因为**实盘预览**（assay/live.py）要用同一套
+          启动流程但不跑整条日历。抽取而不是复制 —— 下面那段参数声明校验
+          有 20 行，两处各写一份迟早只改一处，而它失败的方式是【静默】的
+          （拼错的参数名被当成"没影响"）。
+
+        绑定成功后【不】解绑，由调用方负责（run 的 finally / live 的 finally）；
+        初始化途中抛错则就地解绑，不把全局绑定泄漏出去。
+        """
         api._bind(self)          # 之后 self.g is api.g
         self.ctx.g = self.g
         api.log.verbose = verbose
@@ -147,6 +157,13 @@ class Engine:
                 setattr(self.g, _k, _v)
             self._tasks.sort(key=lambda t: t[0])
             self._build_ordinals()
+        except Exception:
+            api._unbind()        # 初始化失败不留全局绑定
+            raise
+
+    def run(self, verbose=False):
+        self._boot(verbose)
+        try:
             days = self.feed.trading_days
             for i, d in enumerate(days):
                 self.ctx.current_date = d

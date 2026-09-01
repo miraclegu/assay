@@ -43,6 +43,33 @@ QMT 探针只有一个文件 `assay/qmt/probe_all.py`（已定案的进 `CONFIRM
 - 改了引擎必须跑等价性回归（equity 曲线 SHA256）—— `ast.parse` 通过不代表逻辑没坏
 - `python3 assay/selftest.py --fast`（约 20s）/ `--all`
 
+## 实盘模块（live）
+
+`python3 serve.py --live` → 顶栏「💰 实盘」。默认**关闭**（与 `--allow-backtest`
+同理由：它会起常驻定时线程并写盘）。
+
+**核心原则：不重写任何交易规则。** 止损、炸板离场、调仓都埋在策略 + 引擎里，
+依赖 `g.pos_state` / `g.high_limit` / `pos.entry_price` 这些内部状态。
+实盘模块只做两件事：用成交流水重建 Portfolio（FIFO lots，真实成本价），
+把 broker 换成 `RecordingBroker`（只记不成交），让策略跑自己的代码路径。
+所以实盘提示与回测行为天然同源。
+
+三个已经踩过的坑，改这块之前先读：
+
+- **warmup 必须逐日重放**（`live._replay`，30 天）。`g.hold_history`（20 日
+  涨停黑名单）、`g.stop_banned`（止损冷静期）、`g.pos_state`（吊灯窗口）
+  都是逐日累积的。只跑一天这些全是空的 —— **不报错**，只是多买几只
+  本不该买的票
+- **快照是目录不是单文件**。`froec_traded.py` 加载同目录的 `froec.py`；
+  只快照主文件的话，改 `froec.py` 不会改变账户版本哈希 = 版本悄悄漂移。
+  版本哈希覆盖主文件 + 全部依赖
+- **`live/` 入版本控制**，不要绑到 `runs/`（gitignore 的产物目录）。
+  账户绑的版本是决策证据，放在会被清掉的地方等于没留痕
+
+`live/trade_calendar.json` 现在是**临时值**（工作日推的，不含春节/国庆）。
+跑一次聚宽增量抽取（`extract_jq_increment.py` 的 `grab_calendar`）会覆盖成
+权威日历；在那之前信号里会带告警。
+
 ## QMT 移植
 
 `assay/qmt/` 下 5 个策略文件由 `_tpl/` + `PROFILES` 生成：改模板后跑

@@ -16,3 +16,8 @@ runs/
 .DS_Store
 *.log
 signal*.csv
+
+# ---- 实盘：__pycache__ 会被快照目录带出来 ----
+# live/ 本身【要】入版本控制（账户/成交/版本快照是决策证据，见 assay/live.py），
+# 只排掉 import 快照时生成的字节码。
+live/**/__pycache__/

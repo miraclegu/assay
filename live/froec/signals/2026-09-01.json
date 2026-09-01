@@ -1,0 +1,130 @@
+{
+ "account": "froec",
+ "built_at": "2026-09-01T11:28:53",
+ "buy": [
+  {
+   "amount": 100000.0,
+   "code": "600774.XSHG",
+   "limit": 8.0,
+   "name": "汉商集团",
+   "ref_price": 7.62,
+   "shares": 12500
+  },
+  {
+   "amount": 99954.0,
+   "code": "603168.XSHG",
+   "limit": 6.17,
+   "name": "莎普爱思",
+   "ref_price": 5.88,
+   "shares": 16200
+  },
+  {
+   "amount": 99840.0,
+   "code": "300500.XSHE",
+   "limit": 10.4,
+   "name": "启迪设计",
+   "ref_price": 9.9,
+   "shares": 9600
+  },
+  {
+   "amount": 99712.0,
+   "code": "300575.XSHE",
+   "limit": 6.56,
+   "name": "中旗股份",
+   "ref_price": 6.25,
+   "shares": 15200
+  },
+  {
+   "amount": 99696.0,
+   "code": "603381.XSHG",
+   "limit": 16.08,
+   "name": "永臻股份",
+   "ref_price": 15.31,
+   "shares": 6200
+  },
+  {
+   "amount": 99680.0,
+   "code": "605122.XSHG",
+   "limit": 12.46,
+   "name": "四方新材",
+   "ref_price": 11.87,
+   "shares": 8000
+  },
+  {
+   "amount": 99645.0,
+   "code": "301126.XSHE",
+   "limit": 10.95,
+   "name": "达嘉维康",
+   "ref_price": 10.43,
+   "shares": 9100
+  },
+  {
+   "amount": 99603.0,
+   "code": "002910.XSHE",
+   "limit": 10.71,
+   "name": "庄园牧场",
+   "ref_price": 10.2,
+   "shares": 9300
+  },
+  {
+   "amount": 99517.0,
+   "code": "603506.XSHG",
+   "limit": 11.99,
+   "name": "南都物业",
+   "ref_price": 11.42,
+   "shares": 8300
+  },
+  {
+   "amount": 99261.0,
+   "code": "301152.XSHE",
+   "limit": 24.21,
+   "name": "天力锂能",
+   "ref_price": 23.06,
+   "shares": 4100
+  }
+ ],
+ "calendar_source": "provisional-weekdays",
+ "cash": 1000000.0,
+ "code_sha": "5897d532",
+ "code_sha256": "5897d5323bb78f87565a2e724311123b9188d92266ebe22515f098a4ab407f08",
+ "data_asof": "2026-08-31",
+ "data_fingerprint": {
+  "overall": "9f61bcbc79de",
+  "parts": {
+   "index": {
+    "hash": "9d40ff266a7e",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T07:20:10",
+    "total_bytes": 64573143
+   },
+   "panel": {
+    "hash": "85d7c220d9af",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T07:57:48",
+    "total_bytes": 1332351408
+   },
+   "std": {
+    "hash": "a8c145f0c09b",
+    "n_files": 18,
+    "newest_mtime": "2026-09-01T07:58:16",
+    "total_bytes": 373273337
+   }
+  }
+ },
+ "for_date": "2026-09-01",
+ "freed_est": 0,
+ "held_codes": [],
+ "hold": [],
+ "is_rebalance_day": true,
+ "left_est": 3092.0,
+ "no_price": [],
+ "params": {
+  "stop_intraday": 1,
+  "stop_loss": 0.35,
+  "weekday": 2
+ },
+ "sell": [],
+ "warnings": [
+  "交易日历来源是 'provisional-weekdays'，不是聚宽权威日历 —— 休市安排可能不准。跑一次 datalake 的聚宽增量抽取即可覆盖。"
+ ]
+}

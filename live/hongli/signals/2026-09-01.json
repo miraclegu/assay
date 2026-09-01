@@ -1,0 +1,168 @@
+{
+ "account": "hongli",
+ "built_at": "2026-09-01T11:28:53",
+ "buy": [
+  {
+   "amount": 69080.0,
+   "code": "603889.XSHG",
+   "limit": 6.28,
+   "name": "新澳股份",
+   "ref_price": 5.98,
+   "shares": 11000
+  },
+  {
+   "amount": 68655.0,
+   "code": "601229.XSHG",
+   "limit": 9.95,
+   "name": "上海银行",
+   "ref_price": 9.48,
+   "shares": 6900
+  },
+  {
+   "amount": 68544.0,
+   "code": "601009.XSHG",
+   "limit": 12.24,
+   "name": "南京银行",
+   "ref_price": 11.66,
+   "shares": 5600
+  },
+  {
+   "amount": 68400.0,
+   "code": "601328.XSHG",
+   "limit": 7.6,
+   "name": "交通银行",
+   "ref_price": 7.24,
+   "shares": 9000
+  },
+  {
+   "amount": 68343.0,
+   "code": "601857.XSHG",
+   "limit": 11.99,
+   "name": "中国石油",
+   "ref_price": 11.42,
+   "shares": 5700
+  },
+  {
+   "amount": 68328.0,
+   "code": "600012.XSHG",
+   "limit": 17.52,
+   "name": "皖通高速",
+   "ref_price": 16.69,
+   "shares": 3900
+  },
+  {
+   "amount": 68166.0,
+   "code": "600350.XSHG",
+   "limit": 10.82,
+   "name": "山东高速",
+   "ref_price": 10.3,
+   "shares": 6300
+  },
+  {
+   "amount": 68150.0,
+   "code": "601963.XSHG",
+   "limit": 11.75,
+   "name": "重庆银行",
+   "ref_price": 11.19,
+   "shares": 5800
+  },
+  {
+   "amount": 67817.0,
+   "code": "601998.XSHG",
+   "limit": 9.29,
+   "name": "中信银行",
+   "ref_price": 8.85,
+   "shares": 7300
+  },
+  {
+   "amount": 67792.0,
+   "code": "603519.XSHG",
+   "limit": 17.84,
+   "name": "立霸股份",
+   "ref_price": 16.99,
+   "shares": 3800
+  },
+  {
+   "amount": 67200.0,
+   "code": "600803.XSHG",
+   "limit": 19.2,
+   "name": "新奥股份",
+   "ref_price": 18.29,
+   "shares": 3500
+  },
+  {
+   "amount": 66586.0,
+   "code": "601088.XSHG",
+   "limit": 51.22,
+   "name": "中国神华",
+   "ref_price": 48.78,
+   "shares": 1300
+  },
+  {
+   "amount": 64471.0,
+   "code": "601318.XSHG",
+   "limit": 58.61,
+   "name": "中国平安",
+   "ref_price": 55.82,
+   "shares": 1100
+  },
+  {
+   "amount": 63130.0,
+   "code": "601336.XSHG",
+   "limit": 63.13,
+   "name": "新华保险",
+   "ref_price": 60.12,
+   "shares": 1000
+  },
+  {
+   "amount": 40266.0,
+   "code": "603444.XSHG",
+   "limit": 402.66,
+   "name": "吉比特",
+   "ref_price": 383.49,
+   "shares": 100
+  }
+ ],
+ "calendar_source": "provisional-weekdays",
+ "cash": 1000000.0,
+ "code_sha": "c04b095c",
+ "code_sha256": "c04b095cdd078955d510e48f664de24d085dcf9272d10bdba4721459456204ef",
+ "data_asof": "2026-08-31",
+ "data_fingerprint": {
+  "overall": "9f61bcbc79de",
+  "parts": {
+   "index": {
+    "hash": "9d40ff266a7e",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T07:20:10",
+    "total_bytes": 64573143
+   },
+   "panel": {
+    "hash": "85d7c220d9af",
+    "n_files": 24,
+    "newest_mtime": "2026-09-01T07:57:48",
+    "total_bytes": 1332351408
+   },
+   "std": {
+    "hash": "a8c145f0c09b",
+    "n_files": 18,
+    "newest_mtime": "2026-09-01T07:58:16",
+    "total_bytes": 373273337
+   }
+  }
+ },
+ "for_date": "2026-09-01",
+ "freed_est": 0,
+ "held_codes": [],
+ "hold": [],
+ "is_rebalance_day": true,
+ "left_est": 15072.0,
+ "no_price": [],
+ "params": {
+  "div_method": "fiscal_year"
+ },
+ "sell": [],
+ "warnings": [
+  "交易日历来源是 'provisional-weekdays'，不是聚宽权威日历 —— 休市安排可能不准。跑一次 datalake 的聚宽增量抽取即可覆盖。"
+ ]
+}
