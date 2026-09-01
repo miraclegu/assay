@@ -986,15 +986,23 @@ def _live_err(fn, *a, **kw):
 
 
 def api_live_accounts(_q):
+    """GET /api/live/accounts[?all=1] —— 默认隐去已归档的账户。"""
     m = _live()
+    show_all = (_q or {}).get('all') in ('1', 'true')
     out = []
     for a in m.load_accounts():
+        if a.get('archived') and not show_all:
+            continue
         pos = m.positions(a['id'])
         out.append(dict(a, n_positions=len(pos), cash=round(m.cash(a['id']), 2),
                         n_fills=len(m.fills(a['id'])),
                         n_versions=len(m.versions(a['id']))))
     cal = m.calendar_meta()
     return {'accounts': out, 'readonly': not ALLOW_LIVE,
+            # ★ 两个开关是独立的：--live 管账户/成交/信号，--allow-backtest 管
+            #   起子进程跑回测。前端要分别置灰，否则按钮点了才知道被拒。
+            'can_backtest': bool(ALLOW_BACKTEST and ALLOW_LIVE),
+            'next_id': m.new_account_id(),
             'calendar': {'source': cal.get('source'), 'max': cal.get('max'),
                          'authoritative_until': cal.get('authoritative_until'),
                          'warn': cal.get('warn'), 'error': cal.get('error')}}
@@ -1009,6 +1017,7 @@ def api_live_account(q):
         'cash': round(m.cash(aid), 2),
         'versions': m.versions(aid),
         'fills': list(reversed(m.fills(aid))),
+        'cashflows': list(reversed(m.cashflows(aid))),
         'signal': m.latest_signal(aid),
     })
 
@@ -1033,6 +1042,128 @@ def api_live_code(q):
     return _live_err(_go)
 
 
+def api_live_strategy(q):
+    """GET /api/live/strategy?id=&sha= —— 账户绑的这个版本：
+    源码快照 + 参数表 + **用同一版本跑过的历史回测**。
+
+    ★ 关联的键是主文件【自身】哈希，不是账户的打包哈希 ——
+      账户的 code_sha256 覆盖「主文件 + 依赖」（否则改 froec.py 不会改变
+      账户版本号 = 版本悄悄漂移），而归档的 meta.code_sha256 是单文件哈希。
+      两者口径不同，直接比会永远匹配不上。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    sha = (q.get('sha') or '').strip().lower()
+
+    def _go():
+        v = m._version_row(aid, sha)
+        code, full, names = m.version_code(aid, v['code_sha256'])
+        main_sha = m._main_sha(aid, v)
+        out = {'version': v, 'code': code, 'files': names,
+               'main_sha256': main_sha,
+               'params_declared': _parse_params(code),
+               'note': _parse_note(code)[0]}
+        # 归档里同一主文件版本跑过的回测
+        same, other = [], []
+        for rid, d in _scan().items():
+            try:
+                meta = json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
+            except Exception:                               # noqa: BLE001
+                continue
+            if not main_sha or meta.get('code_sha256') != main_sha:
+                continue
+            try:
+                stats = json.load(open(os.path.join(d, 'stats.json'), encoding='utf-8'))
+            except Exception:                               # noqa: BLE001
+                stats = {}
+            row = {'run_id': rid, 'params': meta.get('params') or {},
+                   'start': meta.get('start'), 'end': meta.get('end'),
+                   'cash': meta.get('cash'),
+                   'annual': stats.get('annual'), 'total': stats.get('total_return'),
+                   'max_drawdown': stats.get('max_drawdown'),
+                   'sharpe': stats.get('sharpe'),
+                   'stale': _staleness(meta)[0]}
+            (same if row['params'] == (v.get('params') or {}) else other).append(row)
+        key = lambda r: (r['start'] or '', r['end'] or '')
+        out['runs_same_params'] = sorted(same, key=key, reverse=True)
+        out['runs_other_params'] = sorted(other, key=key, reverse=True)
+        return out
+    return _live_err(_go)
+
+
+def api_live_backtest(_q, body):
+    """POST /api/live/backtest —— 用账户绑的【那个版本 + 那组参数】跑一次回测。
+
+    ★ 只有磁盘文件仍等于绑定版本时才允许。否则跑出来的是**另一个版本**，
+      而它会被归档成「这个版本回测过」—— 与 api_version 里那条同样的陷阱：
+      「文件改过之后，那个版本就是历史快照，拿现在的文件去跑得到的是另一个
+      版本，静默照跑会让归档里出现一条挂错版本的记录」。
+    """
+    bad = _live_guard()
+    if bad:
+        return bad
+    if not ALLOW_BACKTEST:
+        return {'error': '触发回测未开启 —— 加 --allow-backtest'}
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+    try:
+        acct = m.get_account(aid)
+        v = m._version_row(aid, (b.get('sha') or acct.get('code_sha256') or ''))
+    except m.LiveError as e:
+        return {'error': str(e)}
+    rel = v.get('strategy_path') or ''
+    disk = os.path.join(registry.ROOT, rel)
+    if not os.path.isfile(disk):
+        return {'error': '策略文件已不在原路径：%s' % rel}
+    want = m._main_sha(aid, v)
+    cur = hashlib.sha256(open(disk, 'rb').read()).hexdigest()
+    if want and cur != want:
+        return {'error': '磁盘上的 %s 已改动（当前 %s ≠ 绑定版本 %s）。'
+                         '现在跑会归档成【另一个版本】，看起来像"这个版本回测过"。'
+                         '要么先把账户重新绑到当前版本，要么用命令行显式跑。'
+                         % (rel, cur[:8], want[:8])}
+    cmd = ['python3', 'run.py', rel]
+    for k, val in (v.get('params') or {}).items():
+        cmd += ['--param', '%s=%s' % (k, val)]
+    for key, flag in (('start', '--start'), ('end', '--end')):
+        sv = str(b.get(key) or '').strip()
+        if sv:
+            if not _DATE_RE.match(sv):
+                return {'error': '%s 应为 YYYY-MM-DD，收到 %r' % (key, sv)}
+            cmd += [flag, sv]
+    csh = str(b.get('cash') or '').strip()
+    if csh:
+        try:
+            c = float(csh)
+            assert c > 0
+        except Exception:                                   # noqa: BLE001
+            return {'error': '本金必须是正数'}
+        cmd += ['--cash', repr(c)]
+    job_id = 'lvbt-%s' % datetime.now().strftime('%H%M%S')
+    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+                     'sha': want, 'run_id': None, 'rc': None}
+    threading.Thread(target=_run_job, args=(job_id, cmd, registry.ROOT),
+                     daemon=True).start()
+    return {'job_id': job_id, 'cmd': ' '.join(cmd)}
+
+
+def api_live_cash(_q, body):
+    """POST /api/live/cash —— 入金 / 出金 / 分红到账 / 手工调整。append-only。"""
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+
+    def _go():
+        m.add_cashflow(aid, b.get('date'), b.get('amount'),
+                       kind=(b.get('kind') or 'deposit'), note=b.get('note') or '')
+        return {'cash': round(m.cash(aid), 2), 'cashflows': list(reversed(m.cashflows(aid)))}
+    return _live_err(_go)
+
+
 def _live_guard():
     if not ALLOW_LIVE:
         return {'error': '服务以只读模式启动，实盘模块已关闭。'
@@ -1047,7 +1178,7 @@ def api_live_save(_q, body):
         return bad
     m = _live()
     b = body or {}
-    aid = (b.get('id') or '').strip()
+    aid = (b.get('id') or '').strip() or m.new_account_id()
 
     def _go():
         m.upsert_account(aid, name=b.get('name'), init_cash=b.get('init_cash'),
@@ -1057,6 +1188,8 @@ def api_live_save(_q, body):
         if b.get('strategy_path'):
             m.bind_version(aid, b['strategy_path'], b.get('params') or {},
                            b.get('reason') or '')
+        if 'archived' in b:
+            m.archive_account(aid, bool(b['archived']))
         return {'account': m.get_account(aid), 'versions': m.versions(aid)}
     return _live_err(_go)
 
@@ -1230,6 +1363,7 @@ ROUTES = {
     '/api/live/account': api_live_account,
     '/api/live/signal': api_live_signal,
     '/api/live/code': api_live_code,
+    '/api/live/strategy': api_live_strategy,
     '/api/sync': api_sync,
     '/api/sync/log': api_sync_log,
 }
@@ -1256,6 +1390,8 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/save': api_live_save,
                  '/api/live/fill': api_live_fill,
                  '/api/live/tick': api_live_tick,
+                 '/api/live/cash': api_live_cash,
+                 '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         fn = POSTS.get(u.path)
         if fn is None:

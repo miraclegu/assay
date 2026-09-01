@@ -147,6 +147,21 @@ def acct_dir(aid):
     return os.path.join(LIVE, aid)
 
 
+def new_account_id():
+    """自动生成账户 id。
+
+    ★ id 与显示名【解耦】：id 是内部主键（决定 live/<id>/ 目录名，改了就等于
+      换了个账户，流水和版本历史全断），name 随时可改。用户只填 name。
+      —— 原来让用户填 id、且没有改名入口，等于把「一段时间用策略 A、
+      之后换策略 B」这种正常演化逼成「新建一个账户」，历史就断了。
+    """
+    used = {a['id'] for a in load_accounts()}
+    i = 1
+    while ('a%d' % i) in used:
+        i += 1
+    return 'a%d' % i
+
+
 def load_accounts():
     return _read_json(os.path.join(LIVE, 'accounts.json'), [])
 
@@ -154,6 +169,21 @@ def load_accounts():
 def _save_accounts(lst):
     _atomic_write(os.path.join(LIVE, 'accounts.json'),
                   json.dumps(lst, ensure_ascii=False, indent=1, sort_keys=True))
+
+
+def archive_account(aid, on=True):
+    """归档 / 取消归档。**不删任何数据** —— 只是从默认列表里隐去。
+
+    ★ 刻意没有「删除账户」：实盘流水与版本快照是决策证据，删了就没法复盘。
+      真要清理就手动 rm live/<id>/，那时你会清楚自己在丢什么。
+    """
+    lst = load_accounts()
+    hit = next((a for a in lst if a['id'] == aid), None)
+    if hit is None:
+        raise LiveError('账户不存在：%s' % aid)
+    hit['archived'] = bool(on)
+    _save_accounts(lst)
+    return hit
 
 
 def get_account(aid):
@@ -255,6 +285,7 @@ def bind_version(aid, strategy_path, params=None, reason=''):
         else os.path.join(ROOT, strategy_path)
     if not os.path.isfile(p):
         raise LiveError('策略文件不存在：%s' % strategy_path)
+    raw = open(p, 'rb').read()
     params = dict(params or {})
     bad = [(k, why) for k, why in UNSUPPORTED.items()
            if float(params.get(k) or 0)]
@@ -273,6 +304,10 @@ def bind_version(aid, strategy_path, params=None, reason=''):
         'ts': _now(), 'code_sha256': sha, 'code_sha': sha[:8],
         'strategy_path': strategy_path, 'params': params, 'reason': reason,
         'main': os.path.basename(p),
+        # ★ 主文件【自己】的哈希 —— 归档的 meta.code_sha256 就是这个口径
+        #   （单文件字节哈希）。账户的 code_sha256 是**打包哈希**（主文件+依赖），
+        #   两者不可比。想把账户版本关联到历史回测，必须另存这一个。
+        'main_sha256': hashlib.sha256(raw).hexdigest(),
         'files': [os.path.relpath(f, ROOT) for f in files],
     })
     lst = load_accounts()
@@ -287,6 +322,18 @@ def bind_version(aid, strategy_path, params=None, reason=''):
 
 def versions(aid):
     return _read_jsonl(os.path.join(acct_dir(aid), 'versions.jsonl'))
+
+
+def _main_sha(aid, v):
+    """主文件自身哈希。老记录没存这个字段，从快照现算 —— 不迁移文件，
+    因为 versions.jsonl 是 append-only 的账本，改写它本身就违背设计。"""
+    if v.get('main_sha256'):
+        return v['main_sha256']
+    p = os.path.join(acct_dir(aid), 'code', v['code_sha256'][:8],
+                     v.get('main') or '')
+    if os.path.isfile(p):
+        return hashlib.sha256(open(p, 'rb').read()).hexdigest()
+    return None
 
 
 def _version_row(aid, sha):
@@ -390,9 +437,12 @@ def lots_asof(rows, day):
     return fifo_lots([r for r in rows if _d(r['trade_date']) <= day])
 
 
-def cash_asof(init_cash, rows, day):
+def cash_asof(init_cash, rows, day, flows=()):
     day = _d(day)
     v = float(init_cash or 0)
+    for r in flows:
+        if _d(r['date']) <= day:
+            v += float(r.get('signed') or 0)
     for r in rows:
         if _d(r['trade_date']) > day:
             continue
@@ -418,15 +468,57 @@ def positions(aid):
     return out
 
 
-def cash(aid):
-    """现金 = 初始资金 - 买入额 - 费用 + 卖出额。
+def cashflows(aid):
+    """入金 / 出金 / 手工调整。**append-only**，与成交流水同一原则。
 
-    分红现金**不计** —— 它进的是券商账户，我们没有数据源确认到账日与金额。
-    所以这里的现金是【下界】，页面上要说明。
+    ★ 为什么不是「让 init_cash 可改」：init_cash 是【开户那一刻】的余额。
+      后来入金 5 万，改 init_cash 会把这 5 万追溯到开户日，于是过去每一天的
+      权益都变了 —— 而回看历史时没有任何痕迹说明它变过。
+      入金是个**事件**，就该按事件记。分红到账、利息、手续费返还同理。
+    """
+    return _read_jsonl(os.path.join(acct_dir(aid), 'cashflows.jsonl'))
+
+
+CASH_KINDS = ('deposit', 'withdraw', 'dividend', 'adjust')
+
+
+def add_cashflow(aid, date, amount, kind='deposit', note=''):
+    """amount 一律填【正数】，方向由 kind 决定 —— 避免"负的出金"这种双重否定。"""
+    get_account(aid)
+    if kind not in CASH_KINDS:
+        raise LiveError('kind 只能是 %s，收到 %r' % ('/'.join(CASH_KINDS), kind))
+    try:
+        d = _d(date)
+        amount = float(amount)
+    except Exception:                                       # noqa: BLE001
+        raise LiveError('日期或金额格式不对')
+    if amount <= 0:
+        raise LiveError('金额填正数，方向由类型决定（出金选 withdraw）')
+    signed = -amount if kind == 'withdraw' else amount
+    if kind == 'withdraw' and cash(aid) < amount:
+        raise LiveError('出金 %.2f 超过当前现金 %.2f' % (amount, cash(aid)))
+    rec = {'ts': _now(), 'date': d.isoformat(), 'kind': kind,
+           'amount': amount, 'signed': signed, 'note': note}
+    _append_jsonl(os.path.join(acct_dir(aid), 'cashflows.jsonl'), rec)
+    return rec
+
+
+def cash(aid, asof=None):
+    """现金 = 初始资金 + 现金流水 − 买入额 − 费用 + 卖出额。
+
+    分红**按你录的 dividend 流水计**，不自动推 —— 没有数据源能确认到账日
+    与实际税后金额。不录就是不计，此时现金是【下界】。
     """
     acct = get_account(aid)
     v = float(acct.get('init_cash') or 0)
+    lim = _d(asof) if asof else None
+    for r in cashflows(aid):
+        if lim and _d(r['date']) > lim:
+            continue
+        v += float(r.get('signed') or 0)
     for r in fills(aid):
+        if lim and _d(r['trade_date']) > lim:
+            continue
         amt = r['shares'] * r['price']
         v += (-amt if r['side'] == 'buy' else amt) - float(r.get('fee') or 0)
     return v
@@ -612,7 +704,7 @@ def _run_tasks(eng, feed, day, freqs, data_day=None):
 WARMUP_DAYS = 30      # 重放窗口，要盖住 froec 的 limit_days=20
 
 
-def _replay(eng, feed, rows, init_cash, days):
+def _replay(eng, feed, rows, init_cash, days, flows=()):
     """在 warmup 窗口上**逐日重放** run_daily 任务，让策略自己把路径状态建起来。
 
     ★ 为什么不能只跑最后一天。froec 有三处【逐日累积】的状态：
@@ -630,7 +722,7 @@ def _replay(eng, feed, rows, init_cash, days):
         book = lots_asof(rows, d)
         eng.pf.positions.clear()
         _seed(eng, book, feed, feed.prev_trading_day(d) or d)
-        eng.pf.cash = cash_asof(init_cash, rows, d)
+        eng.pf.cash = cash_asof(init_cash, rows, d, flows)
         eng.broker.start_day(d)
         _run_tasks(eng, feed, d, {'d'})
 
@@ -694,7 +786,7 @@ def build_signal(aid, datalake=None):
         rows = fills(aid)
         init = float(acct.get('init_cash') or 0)
         warm = feed.trading_days[-WARMUP_DAYS:]
-        _replay(eng, feed, rows, init, warm[:-1])
+        _replay(eng, feed, rows, init, warm[:-1], cashflows(aid))
         # --- 2) 离场检查：在【最新数据日】跑 run_daily 类任务 ---
         #     语义是「今天收盘触发 -> 明天开盘卖」。本地只有日线，
         #     盘中实时判定物理上做不到，这是能做到的最早时点。

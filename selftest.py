@@ -1681,6 +1681,34 @@ def t_live_core():
                 '非调仓日"持有不动"应为全部持仓 1 只，实得 %d' % len(s_nr['hold'])
             assert not s_nr['buy'], '非调仓日不该有买入'
 
+        # ---- 3c) 现金账务：初始资金 + 流水 − 买 + 卖 ----
+        #     ★ 入金必须是【事件】。改 init_cash 会把它追溯到开户日，
+        #       于是过去每一天的权益都变了，而且没有任何痕迹说明它变过。
+        lv.upsert_account('t_cash', name='cash', init_cash=100000)
+        assert abs(lv.cash('t_cash') - 100000) < 1e-6
+        lv.add_cashflow('t_cash', '2026-08-10', 50000, 'deposit', '入金')
+        assert abs(lv.cash('t_cash') - 150000) < 1e-6, '入金没进现金'
+        lv.add_cashflow('t_cash', '2026-08-11', 20000, 'withdraw', '出金')
+        assert abs(lv.cash('t_cash') - 130000) < 1e-6, '出金没扣'
+        lv.bind_version('t_cash', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        lv.add_fill('t_cash', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0, fee=5)
+        assert abs(lv.cash('t_cash') - (130000 - 11000 - 5)) < 1e-6, \
+            '买入没扣现金/费用：%.2f' % lv.cash('t_cash')
+        # 金额一律正数，方向由 kind 决定 —— 负数要被拒（避免"负的出金"双重否定）
+        for bad_args, why in ((('2026-08-12', -100, 'deposit'), '负金额'),
+                              (('2026-08-12', 999999, 'withdraw'), '出金超过现金'),
+                              (('2026-08-12', 100, 'nope'), '未知类型')):
+            try:
+                lv.add_cashflow('t_cash', *bad_args)
+                raise AssertionError('%s 应被拒' % why)
+            except lv.LiveError:
+                pass
+        # as-of：8-10 那天还没入过 5 万之后的出金
+        assert abs(lv.cash_asof(100000, [], '2026-08-10',
+                                lv.cashflows('t_cash')) - 150000) < 1e-6, \
+            'cash_asof 没按日期截断现金流水'
+
         # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
         v = lv.versions('t_hit')
         assert len(v) == 1 and v[0]['files'], 'versions.jsonl 没记文件清单'
@@ -1714,7 +1742,8 @@ def t_live_core():
             c, _f, _n = lv.version_code('t_hit', row['code_sha256'])
             assert c, '历史版本 %s 读不出来' % row['code_sha']
 
-        return ('FIFO 剩 500@20.0；止损两侧 %.1f%%→stop / %.1f%%→非stop；'
+        return ('FIFO 剩 500@20.0；现金账务(入/出金+成交+as-of)对；'
+                '止损两侧 %.1f%%→stop / %.1f%%→非stop；'
                 '红利 %s %s 买入 %d 只；快照含 %d 个文件、删 runs/ 仍可读、'
                 '改依赖后哈希变 %s→%s'
                 % (100 * (1 - low / hit), 100 * (1 - low / safe),
@@ -1779,7 +1808,8 @@ def t_live_ui():
             assert pg.locator('.lvwarn').count() >= 1, '日历非权威来源的告警没渲染'
 
             # 建账户
-            pg.fill('#na', 'uitest')
+            # id 自动分配 —— 用户只填名称
+            assert pg.locator('#na').count() == 0, '新建表单不该再要用户填 id'
             pg.fill('#nn', 'UI 测试')
             pg.fill('#nc', '1000000')
             pg.click('#nb')
@@ -1818,6 +1848,78 @@ def t_live_ui():
             # 版本历史可点开
             assert pg.locator('a.lvver').count() >= 1, '版本历史没渲染'
 
+            # ---- 账户名与策略解耦：改名 / 改初始资金 ----
+            # ★ 原来只有"新建"没有"编辑"，等于把「一段时间用策略 A、之后换 B」
+            #   这种正常演化逼成「新建一个账户」，流水与版本历史就断了。
+            def _cash():
+                t = pg.locator('.lvtag').first.inner_text()
+                return float(t.replace('现金', '').replace(',', '').strip())
+
+            # ★ 断言【差额】不是绝对值 —— 前面已经录过一笔买入，现金里扣掉了
+            #   那笔成交额。写死 888,888 会假失败（实测 887,888）。
+            pg.fill('#ename', '改过的名字')
+            pg.fill('#ecash', '888888')
+            pg.click('#esave')
+            pg.wait_for_timeout(900)
+            assert '改过的名字' in pg.locator('.lvhead h2').first.inner_text(), '改名没生效'
+            c1 = _cash()
+            assert 880000 < c1 < 888888, \
+                '改初始资金没生效或算错：现金 %.2f（应为 888888 减去已录成交额）' % c1
+
+            # ---- 现金流水（入金）----
+            # init_cash 是【开户那一刻】的余额；后来的入金必须是事件，
+            # 改 init_cash 会把它追溯到开户日、且不留痕迹。
+            pg.fill('#cfa', '20000')
+            pg.click('#cfb')
+            pg.wait_for_timeout(900)
+            c2 = _cash()
+            assert abs((c2 - c1) - 20000) < 0.01, \
+                '入金 20000 后现金应 +20000，实得 %.2f -> %.2f' % (c1, c2)
+
+            # ---- 版本表参数列不能溢出容器 ----
+            bx = pg.locator('table.lvvt').bounding_box()
+            cw = pg.locator('table.lvvt').evaluate(
+                "e=>e.closest('.lvsec').getBoundingClientRect().width")
+            assert bx['width'] <= cw + 1, \
+                '版本表 %.0f 超出容器 %.0f —— 参数列又顶出去了' % (bx['width'], cw)
+            assert pg.locator('.lvkv').count() >= 3, \
+                '参数应拆成 chip 显示，实得 %d 个' % pg.locator('.lvkv').count()
+
+            # ---- 策略详情：源码 + 参数表 + 关联的历史回测 ----
+            pg.click('#lvstrat')
+            pg.wait_for_selector('.stbox', timeout=20000)
+            pg.wait_for_timeout(400)
+            box = pg.locator('.stbox').inner_text()
+            assert len(pg.locator('.stcode').inner_text()) > 1000, '源码快照没渲染'
+            assert pg.locator('.stbox table.lvt tr').count() > 1, '参数表没渲染'
+            # 关联键是【主文件自身哈希】，不是账户的打包哈希。两者口径不同，
+            # 用错会永远匹配不上 —— 所以这里核"要么列出回测，要么明说没有"。
+            assert ('这个版本从没回测过' in box) or ('同参数' in box) or ('其它参数' in box), \
+                '既没列出关联回测、也没说明没有：%s' % box[:200]
+            pg.click('#stclose')
+            pg.wait_for_timeout(300)
+            assert pg.locator('.stbox').count() == 0, '策略详情关不掉'
+
+            # ---- 冲正：追加反向记录，原记录保留并划掉 ----
+            pg.on('dialog', lambda d: d.accept())
+            pg.locator('a.lvrv').first.click()
+            pg.wait_for_timeout(1200)
+            nrev = pg.locator('.lvfill tr.lvrev').count()
+            assert nrev >= 2, '冲正后原记录与冲正记录都该划掉，实得 %d 行' % nrev
+            assert pg.locator('a.lvrv').count() == 0, '已冲正的记录不该再有冲正入口'
+
+            # ---- 归档：从列表隐去，但数据必须还在 ----
+            # ★ 刻意没有「删除账户」—— 实盘流水与版本快照是决策证据。
+            aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            pg.click('#earch')
+            pg.wait_for_timeout(900)
+            assert pg.locator('.ditem').count() == 0, '归档后仍出现在默认列表里'
+            pg.click('#lvall')
+            pg.wait_for_timeout(700)
+            assert pg.locator('.ditem.miss').count() == 1, '「显示已归档」没把它列出来'
+            assert lv.fills(aid), '归档不该动数据，流水却空了'
+            assert lv.versions(aid), '归档不该动数据，版本历史却空了'
+
             # 卖出校验：超过持仓必须被拒（后端把关，不能只靠前端）
             pg.fill('#ft', '2026-09-01 %s 卖 900 10.00' % code)
             pg.click('#fbulk')
@@ -1827,8 +1929,9 @@ def t_live_ui():
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('建账户/绑版本(weekday=%d 使 %s 成调仓日)/出信号(买入 %d 行)/'
-                    '批量录入/超卖被拒/版本历史 均正常，0 个 JS 错误'
+            return ('建账户(id 自动)/绑版本(weekday=%d 使 %s 成调仓日)/出信号(买入 %d 行)/'
+                    '批量录入/超卖被拒/改名/改初始资金/入金/版本表不溢出/'
+                    '策略详情(源码+参数+关联回测)/冲正/归档(数据仍在) 均正常，0 个 JS 错误'
                     % (wd, nxt, nbuy))
     finally:
         httpd.shutdown()

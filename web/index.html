@@ -305,7 +305,9 @@ table.dt td:first-child{color:var(--fg)}
 .lvtag{font-family:"SF Mono",Menlo,monospace;font-size:11px;color:var(--dim);
   background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
 .lvtag.on{color:var(--accent);border-color:var(--accent)}
-.lvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+.lvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}
+/* 表多列的两节给双倍宽度 —— 版本表 3 列挤在 230px 里，参数 chip 会一个一行 */
+.lvsec.wide{grid-column:span 2}
 .lvsec{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--panel2)}
 .lvsec h3{margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
   color:var(--dim);font-weight:600}
@@ -329,6 +331,24 @@ table.lvt tr:last-child td{border-bottom:0}
 .lvfill{max-height:230px;overflow:auto}
 .lvrev{opacity:.55;text-decoration:line-through}
 .lvver{font-family:"SF Mono",Menlo,monospace;font-size:11px}
+/* 版本表：参数列原来直接塞 JSON 字符串，长了就顶出容器。
+   改成【固定表宽 + 参数拆成小 chip + 允许换行】—— 单元格不再是一行长文本。 */
+table.lvvt{table-layout:fixed}
+table.lvvt th:nth-child(1),table.lvvt td:nth-child(1){width:64px}
+table.lvvt th:nth-child(2),table.lvvt td:nth-child(2){width:72px}
+.lvpar{display:flex;flex-wrap:wrap;gap:3px;justify-content:flex-end}
+.lvkv{font-family:"SF Mono",Menlo,monospace;font-size:10px;white-space:nowrap;
+  background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--dim)}
+table.lvt td{overflow-wrap:anywhere}
+/* 策略详情浮层 */
+#stwrap{}
+.stmodal{position:fixed;inset:0;background:rgba(8,10,13,.78);z-index:50;
+  overflow:auto;padding:28px 20px}
+.stbox{max-width:1180px;margin:0 auto;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+.stcode{margin:0;max-height:46vh;overflow:auto;background:var(--bg);
+  border:1px solid var(--line);border-radius:6px;padding:12px;
+  font:11px/1.6 "SF Mono",Menlo,monospace;white-space:pre}
 </style>
 
 <div id="app">
@@ -422,7 +442,8 @@ $('#gosync').onclick=()=>{location.hash='#/sync';};
 /* ============ 实盘模块 ============ */
 /* 页面只负责【显示与录入】。所有规则判定都在服务端 assay/live.py ——
    它把成交流水重建成 Portfolio 再喂给真引擎，不在前端重算任何一条规则。 */
-let LV=null, LVSEL=null;
+let LV=null, LVSEL=null, LVALL=false, PX={}, NMS={};
+const CFK={deposit:'入金', withdraw:'出金', dividend:'分红到账', adjust:'调整'};
 
 /* esc 复用文件上方那个（第 ~357 行）—— 不重复定义。 */
 function num(x,d){ return (x==null||isNaN(x))?'—':Number(x).toLocaleString('zh-CN',
@@ -434,7 +455,7 @@ async function showLive(aid){
   $('#filter').style.display='none'; $('#expand').style.display='none';
   $('#back').style.display=''; $('#main').style.display='';
   let o;
-  try{ o=await j('/api/live/accounts'); }
+  try{ o=await j('/api/live/accounts'+(LVALL?'?all=1':'')); }
   catch(e){ $('#main').innerHTML='<div class="none">实盘模块读取失败：'+esc(e)+'</div>'; return; }
   LV=o; LVSEL=aid||(o.accounts[0]&&o.accounts[0].id)||null;
   const cal=o.calendar||{};
@@ -444,27 +465,36 @@ async function showLive(aid){
     head+=`<div class="lvwarn"><b>交易日历不是权威来源（${esc(cal.source)}）</b><br>${esc(cal.warn||'')}</div>`;
   if(o.readonly) head+=`<div class="lvwarn">服务以只读模式启动 —— 可以看，不能录入 / 建账户 / 重算。
      用 <code>python3 serve.py --live</code> 开启。</div>`;
-  const tabs=o.accounts.map(a=>`<a class="ditem${a.id===LVSEL?' on':''}" href="#/live/${a.id}">
+  const tabs=o.accounts.map(a=>`<a class="ditem${a.id===LVSEL?' on':''}${a.archived?' miss':''}"
+      href="#/live/${a.id}" ${a.archived?'title="已归档"':''}>
       <span>${esc(a.name)}</span><span class="dmeta">${a.n_positions} 只</span></a>`).join('');
   $('#main').innerHTML=head+`<div id="dk">
     <div class="dside">
       <div class="dhint">实盘账户。成交流水<b>只追加</b>，持仓由它推导。<br>
         策略版本绑定后源码<b>永久留痕</b>。</div>
-      <div class="dgrp">账户</div>${tabs||'<div class="none">还没有账户</div>'}
+      <div class="dgrp">账户${LVALL?'（含已归档）':''}</div>
+      ${tabs||'<div class="none">还没有账户</div>'}
+      <div class="lvform" style="padding:2px 8px">
+        <a href="#" id="lvall" class="lvwhy">${LVALL?'只看在用的':'显示已归档的'}</a>
+      </div>
       <div class="dgrp" style="margin-top:14px">新建</div>
       <div class="lvform" style="padding:0 8px">
-        <input id="na" size="6" placeholder="id（英文）">
-        <input id="nn" size="6" placeholder="名称">
+        <input id="nn" placeholder="账户名称" style="flex:1;min-width:110px">
         <input id="nc" size="6" placeholder="初始资金">
         <button class="btn" id="nb" ${o.readonly?'disabled':''}>建</button>
+      </div>
+      <div class="lvwhy" style="padding:2px 8px">
+        id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>）。
+        id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。
       </div>
       <div class="lvmsg" id="nmsg"></div>
     </div>
     <div class="dbody" id="lvbody"></div></div>`;
+  $('#lvall').onclick=ev=>{ ev.preventDefault(); LVALL=!LVALL; showLive(LVSEL); };
   $('#nb').onclick=async()=>{
     const m=$('#nmsg');
     try{
-      const r=await post('/api/live/save',{id:$('#na').value.trim(),
+      const r=await post('/api/live/save',{
         name:$('#nn').value.trim(), init_cash:parseFloat($('#nc').value||'0')});
       m.className='lvmsg ok'; m.textContent='已建';
       showLive(r.account.id);
@@ -488,33 +518,97 @@ async function loadLive(aid){
   catch(e){ b.innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
   const a=o.account, sig=o.signal, ro=LV.readonly;
   const pos=Object.entries(o.positions||{});
+  /* 现价/名称取【信号里的 T-1 参考价】—— 不为此单独造一个行情接口：
+     信号本来就带这些字段，多一个接口就多一处会和信号不一致的地方。 */
+  /* 已被冲正过的原记录 ts —— 用来把它一起划掉。
+     不在服务端算是因为这纯属显示：账本本身只有"追加了一条反向记录"这个事实。 */
+  const REVED=new Set((o.fills||[]).map(f=>f.reverse_of).filter(Boolean));
+  PX={}; NMS={};
+  if(sig&&!sig.error) [].concat(sig.sell||[],sig.buy||[],sig.hold||[]).forEach(x=>{
+    if(x.ref_price) PX[x.code]=x.ref_price;
+    if(x.name) NMS[x.code]=x.name;
+  });
   const vs=(o.versions||[]).slice().reverse();
   b.innerHTML=`
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
     <span class="lvtag">现金 ${num(o.cash,2)}</span>
     <span class="lvtag">持仓 ${pos.length} 只</span>
-    <span class="lvtag${a.code_sha256?' on':''}">${a.code_sha256?
-      esc(a.strategy_path)+' @'+esc(a.code_sha256.slice(0,8)):'未绑定策略'}</span>
-    <span class="lvtag">每日 ${esc(a.tick_time)} 出信号</span>
+    ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
+        title="点开看源码、参数表、以及用这个版本跑过的回测">${esc(a.strategy_path)}
+        @${esc(a.code_sha256.slice(0,8))} ›</a>`
+      :'<span class="lvtag">未绑定策略</span>'}
+    <span class="lvtag" title="兜底值；主路径是数据同步跑完后直接触发">兜底 ${esc(a.tick_time)}</span>
     <button class="btn" id="lvtick" ${ro?'disabled':''}>立即重算</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
   ${sigHtml(sig)}
   <div class="lvgrid">
     ${fillFormHtml(sig,ro)}
-    <div class="lvsec"><h3>当前持仓（由成交流水推导）</h3>
-      ${pos.length?`<table class="lvt"><tr><th>代码</th><th>股数</th><th>成本</th></tr>
-        ${pos.map(([c,p])=>`<tr><td>${esc(c)}</td><td>${num(p.shares)}</td>
-          <td>${num(p.cost,3)}</td></tr>`).join('')}</table>`
+    <div class="lvsec wide"><h3>当前持仓（由成交流水推导）</h3>
+      ${pos.length?`<table class="lvt"><tr><th>代码</th><th>股数</th><th>成本</th><th>现价</th><th>浮盈</th></tr>
+        ${pos.map(([c,p])=>{
+          const px=(PX[c]!=null)?PX[c]:null;
+          const r=(px!=null&&p.cost)?(px/p.cost-1):null;
+          const col=r==null?'':(r>=0?'var(--up)':'var(--down)');
+          return `<tr><td>${esc(c)} ${esc(NMS[c]||'')}</td><td>${num(p.shares)}</td>
+            <td>${num(p.cost,3)}</td><td>${px==null?'—':num(px,2)}</td>
+            <td style="color:${col}">${r==null?'—':(r>=0?'+':'')+(r*100).toFixed(2)+'%'}</td></tr>`;
+        }).join('')}</table>`
         :'<div class="none">空仓</div>'}
-      <div class="lvwhy" style="margin-top:6px">现金不含分红到账 —— 没有数据源确认到账日与金额，所以是下界。</div>
+      <div class="lvwhy" style="margin-top:6px">现价取信号里的 T-1 收盘参考价，只做估算。
+        分红到账**不自动推** —— 没有数据源能确认到账日与税后金额，
+        要记就在下面「现金流水」里录一条 dividend。</div>
     </div>
-    <div class="lvsec"><h3>策略版本（append-only，删 runs/ 也读得到）</h3>
-      ${vs.length?`<table class="lvt"><tr><th>时间</th><th>版本</th><th>参数</th></tr>
-        ${vs.map(v=>`<tr><td>${esc(v.ts.slice(0,16).replace('T',' '))}</td>
-          <td><a class="lvver" href="#" data-sha="${esc(v.code_sha256)}">${esc(v.code_sha)}</a></td>
-          <td class="lvwhy">${esc(JSON.stringify(v.params))}</td></tr>`).join('')}</table>`
+    <div class="lvsec"><h3>账户设置</h3>
+      <div class="lvform">
+        <input id="ename" placeholder="名称" value="${esc(a.name||'')}" style="flex:1;min-width:120px">
+        <input id="ecash" size="6" placeholder="初始资金" value="${a.init_cash||0}">
+      </div>
+      <div class="lvform">
+        <input id="etick" size="6" placeholder="兜底时刻 HH:MM" value="${esc(a.tick_time||'')}">
+        <input id="ewarm" size="6" placeholder="预热起点" value="${esc(a.warmup_start||'')}">
+        <input id="enote" placeholder="券商备注" value="${esc(a.broker_note||'')}" style="flex:1;min-width:100px">
+        <button class="btn" id="esave" ${ro?'disabled':''}>保存</button>
+        <button class="btn" id="earch" ${ro?'disabled':''}
+          title="只从列表隐去，不删任何数据 —— 流水与版本快照是决策证据">
+          ${a.archived?'取消归档':'归档'}</button>
+      </div>
+      <div class="lvmsg" id="emsg"></div>
+      <div class="lvwhy">id <code>${esc(a.id)}</code> 不可改 —— 它决定 live/&lt;id&gt;/
+        目录名，改了等于换账户、流水与版本历史全断。<br>
+        <b>初始资金 = 开户那一刻的余额。</b>后来的入金请走下面的现金流水 ——
+        改初始资金会把入金追溯到开户日，过去每天的权益都变，而且不留痕迹。</div>
+    </div>
+    <div class="lvsec"><h3>现金流水（append-only）</h3>
+      <div class="lvform">
+        <input id="cfd" size="6" placeholder="YYYY-MM-DD" value="${new Date().toISOString().slice(0,10)}">
+        <select id="cfk">
+          <option value="deposit">入金</option><option value="withdraw">出金</option>
+          <option value="dividend">分红到账</option><option value="adjust">调整</option>
+        </select>
+        <input id="cfa" size="6" placeholder="金额（正数）">
+        <input id="cfn" placeholder="备注" style="flex:1;min-width:80px">
+        <button class="btn" id="cfb" ${ro?'disabled':''}>记一笔</button>
+      </div>
+      <div class="lvmsg" id="cfmsg"></div>
+      ${(o.cashflows||[]).length?`<table class="lvt" style="margin-top:6px">
+        <tr><th>日期</th><th>类型</th><th>金额</th><th>备注</th></tr>
+        ${o.cashflows.map(f=>`<tr><td>${esc(f.date)}</td><td>${esc(CFK[f.kind]||f.kind)}</td>
+          <td style="color:${f.signed<0?'var(--down)':'var(--up)'}">${(f.signed>0?'+':'')+num(f.signed,2)}</td>
+          <td class="lvwhy">${esc(f.note||'')}</td></tr>`).join('')}</table>`
+        :'<div class="none" style="margin-top:6px">还没有记录</div>'}
+      <div class="lvwhy">金额一律填正数，方向由类型决定 —— 避免"负的出金"这种双重否定。</div>
+    </div>
+    <div class="lvsec wide"><h3>策略版本（append-only，删 runs/ 也读得到）</h3>
+      ${vs.length?`<table class="lvt lvvt"><tr><th>时间</th><th>版本</th><th>参数</th></tr>
+        ${vs.map(v=>`<tr><td>${esc(v.ts.slice(0,10))}<br><span class="lvwhy">${esc(v.ts.slice(11,16))}</span></td>
+          <td><a class="lvver" href="#" data-sha="${esc(v.code_sha256)}"
+                 title="${esc(v.strategy_path||'')}">${esc(v.code_sha)}</a>
+              ${v.code_sha256===a.code_sha256?'<br><span class="lvwhy">当前</span>':''}</td>
+          <td class="lvpar">${Object.entries(v.params||{}).map(([k,x])=>
+              `<span class="lvkv">${esc(k)}=${esc(x)}</span>`).join('')||'<span class="lvwhy">默认</span>'}
+              ${v.reason?`<div class="lvwhy">${esc(v.reason)}</div>`:''}</td></tr>`).join('')}</table>`
         :'<div class="none">还没绑定过</div>'}
       <div class="lvform">
         <input id="bp" size="6" placeholder="strategies/…/x.py" style="flex:1;min-width:180px">
@@ -523,16 +617,52 @@ async function loadLive(aid){
       </div>
       <div class="lvmsg" id="bmsg"></div>
     </div>
-    <div class="lvsec"><h3>成交流水（${(o.fills||[]).length} 笔）</h3>
+    <div class="lvsec wide"><h3>成交流水（${(o.fills||[]).length} 笔）</h3>
       <div class="lvfill">${(o.fills||[]).length?`<table class="lvt">
-        <tr><th>日期</th><th>代码</th><th>方向</th><th>股数</th><th>价格</th></tr>
-        ${o.fills.map(f=>`<tr class="${f.reverse_of?'lvrev':''}">
+        <tr><th>日期</th><th>代码</th><th>方向</th><th>股数</th><th>价格</th><th>来源</th><th></th></tr>
+        ${o.fills.map(f=>{
+          const rev=!!f.reverse_of, dead=REVED.has(f.ts);
+          return `<tr class="${rev||dead?'lvrev':''}">
           <td>${esc(f.trade_date)}</td><td>${esc(f.code)} ${esc(f.name||'')}</td>
           <td>${f.side==='buy'?'买':'卖'}</td><td>${num(f.shares)}</td>
-          <td>${num(f.price,3)}</td></tr>`).join('')}</table>`
+          <td>${num(f.price,3)}</td>
+          <td class="lvwhy">${rev?'冲正':esc(f.source||'')}</td>
+          <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(f.ts)}"
+            data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
+            data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name||'')}"
+            title="录一条反方向的记录冲掉它。原记录保留 —— 账本只追加。">冲正</a>`}</td>
+          </tr>`;}).join('')}</table>`
         :'<div class="none">还没录过</div>'}</div>
+      <div class="lvwhy">录错了点「冲正」—— 会追加一条反方向记录，
+        原记录**保留并划掉**。不物理删除：实盘账本一旦能被改写就没法复盘。</div>
     </div>
   </div>`;
+  $('#esave').onclick=async()=>{
+    const m=$('#emsg');
+    try{
+      await post('/api/live/save',{id:aid, name:$('#ename').value.trim(),
+        init_cash:parseFloat($('#ecash').value||'0'),
+        tick_time:$('#etick').value.trim(), warmup_start:$('#ewarm').value.trim(),
+        broker_note:$('#enote').value});
+      m.className='lvmsg ok'; m.textContent='已保存';
+      showLive(aid);
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
+  $('#earch').onclick=async()=>{
+    try{ await post('/api/live/save',{id:aid, archived:!a.archived}); showLive(null); }
+    catch(e){ $('#emsg').className='lvmsg bad'; $('#emsg').textContent=String(e); }
+  };
+  $('#cfb').onclick=async()=>{
+    const m=$('#cfmsg');
+    try{
+      await post('/api/live/cash',{id:aid, date:$('#cfd').value.trim(),
+        kind:$('#cfk').value, amount:parseFloat($('#cfa').value),
+        note:$('#cfn').value});
+      loadLive(aid);
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
+  const ls=$('#lvstrat');
+  if(ls) ls.onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256); };
   $('#lvtick').onclick=async()=>{
     const m=$('#lvmsg'); m.className='lvmsg'; m.textContent='算中…（重放 30 天 warmup）';
     try{ await post('/api/live/tick',{id:aid}); loadLive(aid); }
@@ -547,14 +677,102 @@ async function loadLive(aid){
       loadLive(aid);
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
   };
-  b.querySelectorAll('a.lvver').forEach(e=>e.onclick=async ev=>{
-    ev.preventDefault();
-    const r=await j('/api/live/code?id='+aid+'&sha='+e.dataset.sha);
-    const w=window.open('','_blank');
-    w.document.write('<title>'+e.dataset.sha.slice(0,8)+'</title><pre style="font:12px/1.5 monospace;padding:16px">'
-      +r.code.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</pre>');
+  b.querySelectorAll('a.lvver').forEach(e=>e.onclick=ev=>{
+    ev.preventDefault(); openStrat(aid, e.dataset.sha);
+  });
+  b.querySelectorAll('a.lvrv').forEach(e=>e.onclick=async ev=>{
+    ev.preventDefault(); const d=e.dataset;
+    if(!confirm(`冲正：${d.d} ${d.c} ${d.s==='buy'?'买':'卖'} ${d.q} @${d.p}\n`
+      +`会追加一条反方向记录（${d.s==='buy'?'卖':'买'} ${d.q}），原记录保留并划掉。`)) return;
+    try{
+      await post('/api/live/fill',{id:aid, rows:[{trade_date:d.d, code:d.c,
+        side:d.s==='buy'?'sell':'buy', shares:parseInt(d.q,10), price:parseFloat(d.p),
+        name:d.n, source:'reverse', reverse_of:d.ts, note:'冲正'}]});
+      loadLive(aid);
+    }catch(e){ alert(String(e)); }
   });
   wireFills(aid, sig, ro);
+}
+
+/* 策略详情：源码快照 + 参数表 + 【用这个版本跑过的回测】。
+   关联键是主文件自身哈希 —— 账户的 code_sha256 是"主文件+依赖"的打包哈希，
+   与归档的单文件哈希口径不同，直接比永远匹配不上（服务端已处理）。 */
+async function openStrat(aid, sha){
+  let o; try{ o=await j('/api/live/strategy?id='+encodeURIComponent(aid)+'&sha='+sha); }
+  catch(e){ alert(String(e)); return; }
+  const v=o.version||{}, ro=LV.readonly;
+  const runTab=(rows,title)=>rows.length?`<div style="margin-top:8px"><b>${title}（${rows.length}）</b>
+    <table class="lvt"><tr><th>区间</th><th>本金</th><th>年化</th><th>回撤</th><th>夏普</th><th>参数</th></tr>
+    ${rows.map(r=>`<tr><td><a href="#/run/${encodeURIComponent(r.run_id)}">${esc(r.start)}~${esc(r.end)}</a>
+      ${r.stale?'<span class="lvwhy"> 数据已变</span>':''}</td>
+      <td>${num(r.cash)}</td><td>${r.annual==null?'—':(r.annual*100).toFixed(2)+'%'}</td>
+      <td>${r.max_drawdown==null?'—':(r.max_drawdown*100).toFixed(2)+'%'}</td>
+      <td>${r.sharpe==null?'—':Number(r.sharpe).toFixed(2)}</td>
+      <td class="lvpar">${Object.entries(r.params||{}).map(([k,x])=>
+        `<span class="lvkv">${esc(k)}=${esc(x)}</span>`).join('')||'<span class="lvwhy">默认</span>'}</td>
+      </tr>`).join('')}</table></div>`:'';
+  const same=o.runs_same_params||[], other=o.runs_other_params||[];
+  const el=$('#stwrap')||(()=>{ const d=document.createElement('div'); d.id='stwrap';
+    document.getElementById('app').appendChild(d); return d; })();
+  el.className='stmodal';
+  el.innerHTML=`<div class="stbox">
+    <div class="lvhead" style="margin-bottom:8px">
+      <h2>${esc(v.strategy_path||'')}</h2>
+      <span class="lvtag on">@${esc(v.code_sha||'')}</span>
+      <span class="lvtag">主文件 ${esc((o.main_sha256||'').slice(0,8))}</span>
+      <span class="lvtag">${esc(v.ts||'')}</span>
+      <button class="btn" id="stclose">关闭</button>
+    </div>
+    <div class="lvgrid">
+      <div class="lvsec"><h3>绑定的参数</h3>
+        <div class="lvpar">${Object.entries(v.params||{}).map(([k,x])=>
+          `<span class="lvkv">${esc(k)}=${esc(x)}</span>`).join('')||'<span class="lvwhy">全部走默认值</span>'}</div>
+        <h3 style="margin-top:10px">该版本声明的全部参数（${(o.params_declared||[]).length}）</h3>
+        <table class="lvt"><tr><th>名</th><th>默认</th><th>说明</th></tr>
+        ${(o.params_declared||[]).map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.default)}</td>
+          <td class="lvwhy">${esc(x.comment||'')}</td></tr>`).join('')}</table>
+      </div>
+      <div class="lvsec"><h3>用这个版本跑过的回测</h3>
+        ${(same.length||other.length)?runTab(same,'同参数')+runTab(other,'其它参数')
+          :`<div class="lvwarn" style="margin:0"><b>这个版本从没回测过。</b><br>
+             账户绑的是磁盘当前内容，而归档里没有同哈希的记录 ——
+             也就是说你实盘在跑的这套代码+参数，没有对应的历史业绩。</div>`}
+        <div class="lvform">
+          <input id="stbs" size="6" placeholder="起 YYYY-MM-DD" value="2019-01-01">
+          <input id="stbe" size="6" placeholder="止（默认今天）">
+          <input id="stbc" size="6" placeholder="本金" value="1000000">
+          <button class="btn" id="stbt" ${LV.can_backtest?'':'disabled'}
+            title="${LV.can_backtest?'':'需要 python3 serve.py --live --allow-backtest'}"
+            >用这个版本+参数跑一次</button>
+        </div>
+        <div class="lvmsg" id="stbmsg"></div>
+      </div>
+    </div>
+    <div class="lvsec" style="margin-top:12px"><h3>源码快照（${(o.files||[]).join(' + ')}）</h3>
+      <pre class="stcode">${esc(o.code||'')}</pre></div>
+  </div>`;
+  $('#stclose').onclick=()=>{ el.className=''; el.innerHTML=''; };
+  el.onclick=ev=>{ if(ev.target===el){ el.className=''; el.innerHTML=''; } };
+  $('#stbt').onclick=async()=>{
+    const m=$('#stbmsg'); m.className='lvmsg'; m.textContent='已提交…';
+    try{
+      const r=await post('/api/live/backtest',{id:aid, sha:sha,
+        start:$('#stbs').value.trim(), end:$('#stbe').value.trim(),
+        cash:$('#stbc').value.trim()});
+      m.textContent='跑中：'+r.cmd;
+      const tick=async()=>{
+        const o2=await j('/api/job?id='+r.job_id);
+        m.textContent=(o2.lines||[]).slice(-3).join(' | ');
+        if(o2.state==='running'){ setTimeout(tick,2000); return; }
+        m.className='lvmsg '+(o2.rc===0?'ok':'bad');
+        m.innerHTML=o2.rc===0
+          ?`完成 · <a href="#/run/${encodeURIComponent(o2.run_id||'')}">查看结果 →</a>`
+          :('失败 rc='+o2.rc);
+        if(o2.rc===0) setTimeout(()=>openStrat(aid,sha), 1500);
+      };
+      tick();
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
 }
 
 function sigHtml(s){
