@@ -52,7 +52,6 @@ function route(){
   if(v){ openVersion(v[1]); return; }
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
   if((location.hash||'')==='#/sync'){ showSync(); return; }
-  if((location.hash||'')==='#/query'){ showQuery(); return; }
   /* ★ 个股已经搬到独立页 /stock.html。这里保留旧 hash 路由并【跳转】——
      旧链接和书签不该失效，而"点了没反应"是最难查的那种坏。 */
   const sm=/^#\/stock(?:\/([\w.]+))?$/.exec(location.hash||'');
@@ -234,8 +233,8 @@ async function loadLive(aid){
           <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
           <th class="rt">估卖出费</th><th class="tx">建仓</th></tr>
       ${it.map(x=>`<tr>
-        <td>${esc(x.code)}</td>
-        <td class="tx">${esc(x.name||'')}</td>
+        <td>${skLink(x.code, x.code)}</td>
+        <td class="tx">${skLink(x.code, x.name||'')}</td>
         <td class="rt">${num(x.shares)}</td>
         <td class="rt" title="成交均价 ${num(x.cost,4)}（引擎 entry_price 用它）＋买入费 ${num(x.buy_fee,2)}">${num(x.cost_net,3)}</td>
         <td class="rt lvwhy" title="卖到这个价才不亏（含估算卖出费）">${x.breakeven==null?'—':num(x.breakeven,3)}</td>
@@ -951,8 +950,8 @@ async function showFills(aid, off){
       return `<tr class="${rev||dead?'lvrev':''}">
       <td>${esc(f.trade_date)}</td>
       <td class="tx" style="color:${f.side==='buy'?'var(--up)':'var(--down)'}">${f.side==='buy'?'买':'卖'}</td>
-      <td class="tx">${esc(f.code)}</td>
-      <td class="tx">${esc(f.name||'')}</td>
+      <td class="tx">${skLink(f.code, f.code)}</td>
+      <td class="tx">${skLink(f.code, f.name||'')}</td>
       <td class="rt" title="${f.price_from?'取的成交日'+(f.price_from==='open'?'开盘价':'收盘价')+'，不是券商回报':''}">${num(f.price,3)}${
         f.price_from?'<span class="lvwhy">'+(f.price_from==='open'?'开':'收')+'</span>':''}</td>
       <td class="rt">${num(f.shares)}</td>
@@ -1127,6 +1126,17 @@ async function openStrat(aid, sha){
      data_asof：两者不等说明信号是用更早的数据算的（该重算了）。
      🔴 不在前端判"落后几个交易日" —— 那要交易日历，而前端硬编码过
      一次判据就误报过一整页假告警。 */
+/* ---- 实盘里的代码/名称 -> 个股页 ------------------------------------
+   ★ 用 `target="_blank"` 新标签页打开：实盘页往往一直开着（待办、持仓、
+     正在录一半的成交），跳走再回来这些状态就没了。新标签页天然满足
+     "能返回到当前实盘页面"。
+   ★ 代码与名称都可点 —— 只有代码可点的话，习惯认名字的人会以为不能点。 */
+const skLink=(code, text, cls)=>code
+  ? `<a href="/stock.html?code=${encodeURIComponent(code)}" target="_blank"
+       rel="noopener" class="${cls||''}" style="color:inherit"
+       title="在新标签页打开个股：${esc(code)}">${esc(text==null?code:text)}</a>`
+  : esc(text||'');
+
 function dataDayTag(o){
   const dd=o.data_day, sg=o.signal||{}, asof=sg.data_asof;
   if(!dd) return '<span class="lvtag" title="拿不到面板最新日 —— serve.py 可能是旧进程">数据日 —</span>';
@@ -1225,20 +1235,21 @@ function sigHtml(s, alert, alertWhy){
       <div><b style="color:var(--up)">卖出 ${(s.sell||[]).length} 只</b>
         ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th>代码</th><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">参考价</th><th class="tx">原因</th></tr>
-          ${s.sell.map(x=>`<tr><td>${esc(x.code)}</td><td class="tx">${esc(x.name)}</td>
+          ${s.sell.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.ref_price,2)}</td><td class="lvwhy tx">${esc(why[x.reason]||x.reason)}</td></tr>`).join('')}</table>`
           :'<div class="none">无</div>'}</div>
       <div><b style="color:var(--down)">买入 ${(s.buy||[]).length} 只</b>
         ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th>代码</th><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">限价</th><th class="rt">金额</th></tr>
-          ${s.buy.map(x=>`<tr><td>${esc(x.code)}</td><td class="tx">${esc(x.name)}</td>
+          ${s.buy.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.limit,2)}</td><td class="rt">${num(x.amount)}</td></tr>`).join('')}</table>
           <div class="lvwhy">限价 = T-1 收盘 × 1.05（防高开买不进）；twopass 分配，估余 ${num(s.left_est)}</div>`
           :'<div class="none">无</div>'}</div>
       <div><b>持有不动 ${(s.hold||[]).length} 只</b>
-        <div class="lvwhy" style="margin-top:4px">${(s.hold||[]).map(x=>esc(x.name||x.code)).join('、')||'无'}</div></div>
+        <div class="lvwhy" style="margin-top:4px">${(s.hold||[]).map(x=>
+          skLink(x.code, x.name||x.code)).join('、')||'无'}</div></div>
     </div></div></div>`;
 }
 
@@ -1466,563 +1477,11 @@ async function pollSync(){
   }catch(e){ SYJOB=null; }
 }
 
-/* ============ 个股（搜索 / K 线 / 信息） ============ */
-/* ★ 这一页【不出现 SQL】—— 它回答的是固定的几个问题（这只票现在什么样、
-     K 线什么形态、财务什么趋势），所以接口也是固定形状的。
-     要写任意查询去「🔍 查数据」页。两者刻意分开：把 SQL 框摆在看盘页面上，
-     等于每次看个股都要先想一遍口径。
-
-   ★ K 线用 **Canvas 手画**，不引图表库：这个看板是单文件、无构建、无 CDN
-     （见 serve.py 的说明）。引一个库就得要么打包要么联网，两条都不成立。
-
-   ★ 单位【照服务端给的 units 表渲染】，不靠看数值大小猜 —— 同一张面板里
-     百分数和小数是混着的（change_pct/turnover/amplitude 是百分数，
-     roe_ttm/rev_yoy 是小数），猜错 100 倍不报错。 */
-let SKCODE=null, SKNAME='', SKBARS=null, SKN=250, SKFQ='bfq', SKPROF=null,
-    SKHOVER=null, SKSEARCH=null;
-const SK_RANGES=[[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
-
-
-
-async function showStock(code){
-  stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
-  /* 记住上次看的那只 —— 切走再回来不用重新搜 */
-  if(!code) code=localStorage.getItem('skcode')||'';
-  $('#main').innerHTML=`<div id="sk">
-    <div class="lvhead"><h2>📈 个股</h2>
-      <div id="skbox" style="position:relative;flex:0 0 300px">
-        <input id="skq" placeholder="代码或名称，如 601857 / 中国石油 / sh601857"
-          autocomplete="off" style="width:100%;background:var(--panel2);
-          color:var(--fg);border:1px solid var(--line);border-radius:6px;
-          padding:5px 8px;font-size:12px">
-        <div id="skdd" style="display:none;position:absolute;z-index:20;left:0;
-          right:0;top:30px;background:var(--panel);border:1px solid var(--line);
-          border-radius:6px;max-height:320px;overflow:auto"></div>
-      </div>
-      <span style="flex:1"></span>
-      <a class="lvtag" href="#/query" title="要写任意 SQL 去那一页">🔍 查数据</a>
-      <a class="lvtag" href="#/docs" title="字段口径的实测定案">📖 数据字典</a>
-    </div>
-    <div id="skbody"></div></div>`;
-  wireSearch();
-  if(code) loadStock(code); else
-    $('#skbody').innerHTML='<div class="none">搜代码或名称开始 —— '
-      +'支持 601857 / 601857.SH / sh601857 / 中国石油</div>';
-}
-
-function wireSearch(){
-  const q=$('#skq'), dd=$('#skdd');
-  let idx=-1, rows=[], timer=null;
-  const close=()=>{ dd.style.display='none'; idx=-1; };
-  const draw=()=>{
-    if(!rows.length){ dd.innerHTML='<div class="lvwhy" style="padding:8px">没有匹配</div>';
-      dd.style.display=''; return; }
-    dd.innerHTML=rows.map((r,i)=>{
-      const [bt,bc]=boardTag(r.code);
-      return `<div class="skit" data-i="${i}" style="padding:5px 8px;cursor:pointer;
-        display:flex;gap:8px;align-items:baseline;
-        background:${i===idx?'var(--panel2)':'transparent'}">
-        <span style="font-family:'SF Mono',Menlo,monospace;font-size:11px;color:var(--dim)">${esc(r.code.slice(0,6))}</span>
-        <b style="font-size:12px">${esc(r.name)}</b>
-        <span class="lvwhy" style="color:${bc}">${bt}</span>
-        ${r.is_st?'<span class="stale">ST</span>':''}
-        <span class="lvwhy">${esc(r.industry||'')}</span>
-        <span style="flex:1"></span>
-        <span class="lvwhy" style="font-variant-numeric:tabular-nums">${yiv(r.floatmv)}</span>
-      </div>`;}).join('');
-    dd.style.display='';
-    dd.querySelectorAll('.skit').forEach(e=>e.onclick=()=>pick(rows[+e.dataset.i]));
-  };
-  const pick=r=>{ close(); q.value=''; location.hash='#/stock/'+r.code; };
-  q.oninput=()=>{
-    clearTimeout(timer);
-    const t=q.value.trim();
-    if(!t){ close(); return; }
-    /* 防抖 160ms —— 每敲一个字打一次接口在 5200 行上没必要 */
-    timer=setTimeout(async()=>{
-      try{ const r=await j('/api/stock/search?limit=20&q='+encodeURIComponent(t));
-        rows=r.results||[]; idx=rows.length?0:-1; draw();
-      }catch(e){ dd.innerHTML='<div class="lvmsg bad">'+esc(String(e))+'</div>';
-        dd.style.display=''; }
-    }, 160);
-  };
-  q.onkeydown=ev=>{
-    if(ev.key==='Escape'){ close(); return; }
-    if(dd.style.display==='none'||!rows.length) return;
-    if(ev.key==='ArrowDown'){ ev.preventDefault(); idx=Math.min(idx+1,rows.length-1); draw(); }
-    else if(ev.key==='ArrowUp'){ ev.preventDefault(); idx=Math.max(idx-1,0); draw(); }
-    else if(ev.key==='Enter'){ ev.preventDefault(); if(rows[idx]) pick(rows[idx]); }
-  };
-  document.addEventListener('mousedown', ev=>{
-    const b=$('#skbox'); if(b&&!b.contains(ev.target)) close(); });
-}
-
-async function loadStock(code){
-  const b=$('#skbody');
-  b.innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
-  try{
-    const [p,k,f]=await Promise.all([
-      j('/api/stock/profile?code='+encodeURIComponent(code)),
-      j('/api/stock/kline?n='+SKN+'&fq='+SKFQ+'&code='+encodeURIComponent(code)),
-      j('/api/stock/finance?n=12&code='+encodeURIComponent(code)),
-    ]);
-    if(p.error) throw new Error(p.error);
-    SKCODE=p.jq_code; SKNAME=p.sec_name||''; SKPROF=p;
-    SKBARS=k.error?null:k.bars;
-    localStorage.setItem('skcode', SKCODE);
-    b.innerHTML=stockHead(p)+stockKpi(p)+stockChartBox(k)+stockTables(p,f);
-    wireChart();
-    /* ★ 必须 preventDefault：这些是 <a href="#">，不拦的话点一下会把
-       location.hash 改成 '#'，触发 route() 跳回目录页 —— 表现是"点了没反应
-       又好像回到了首页"，而没有任何报错。 */
-    document.querySelectorAll('#sk .skr').forEach(e=>e.onclick=ev=>{
-      ev.preventDefault(); SKN=+e.dataset.n; loadStock(SKCODE); });
-    document.querySelectorAll('#sk .skfq').forEach(e=>e.onclick=ev=>{
-      ev.preventDefault(); SKFQ=e.dataset.f; loadStock(SKCODE); });
-  }catch(e){ b.innerHTML='<div class="lvmsg bad">'+esc(String(e))+'</div>'; }
-}
-
-function stockHead(p){
-  const [bt,bc]=boardTag(p.jq_code);
-  const cp=p.change_pct;
-  return `<div class="lvhead" style="margin-top:6px">
-    <h2 style="font-size:20px">${esc(p.sec_name||p.jq_code)}</h2>
-    <span class="lvtag">${esc(p.jq_code)}</span>
-    <span class="lvtag" style="color:${bc};border-color:${bc}">${bt}</span>
-    ${p.is_st?'<span class="stale">ST</span>':''}
-    ${p.public_status&&p.public_status!=='正常上市'?
-      `<span class="stale">${esc(p.public_status)}</span>`:''}
-    ${p.sw_l1_name?`<span class="lvtag">${esc(p.sw_l1_name)}</span>`:''}
-    ${(p.indexes||[]).map(x=>`<span class="lvtag on">${esc(x)}</span>`).join('')}
-    <span style="flex:1"></span>
-    <span style="font-family:'SF Mono',Menlo,monospace;font-size:22px;
-      color:${upc(cp)}">${p.close_bfq==null?'—':(+p.close_bfq).toFixed(2)}</span>
-    <span style="color:${upc(cp)};font-size:13px">${pctv(cp)}</span>
-    <span class="lvtag">数据日 ${esc(String(p.date).slice(0,10))}</span>
-  </div>`;
-}
-
-function stockKpi(p){
-  const lim=(p.limit_up!=null&&p.limit_down!=null)
-    ? (+p.limit_up).toFixed(2)+' / '+(+p.limit_down).toFixed(2) : '—';
-  return `<div class="kpi">
-    ${cell('今开 / 昨收',
-      (p.open==null?'—':(+p.open).toFixed(2))+' / '+(p.preclose==null?'—':(+p.preclose).toFixed(2)),
-      p.is_limit_up?'<b style="color:var(--up)">涨停</b>':(p.is_limit_down?'<b style="color:var(--down)">跌停</b>':''))}
-    ${cell('最高 / 最低',
-      (p.high==null?'—':(+p.high).toFixed(2))+' / '+(p.low==null?'—':(+p.low).toFixed(2)),
-      '振幅 '+pctn(p.amplitude))}
-    ${cell('涨停 / 跌停', lim, p.limit_pct!=null?'限幅 '+pctn(p.limit_pct,0):'')}
-    ${cell('成交额', yiv(p.amount), '换手 '+pctn(p.turnover)+' · 量 '+yiv(p.volume_shares)+'股')}
-    ${cell('流通 / 总市值', yiv(p.floatmv)+' / '+yiv(p.totalmv), '')}
-  </div>
-  <div class="kpi">
-    ${cell('PE(TTM)', p.pe_ttm==null?'—':(+p.pe_ttm).toFixed(2), 'PEG '+(p.peg==null?'—':(+p.peg).toFixed(2)))}
-    ${cell('PB', p.pb==null?'—':(+p.pb).toFixed(2), 'PS '+(p.ps_ttm==null?'—':(+p.ps_ttm).toFixed(2)))}
-    ${cell('ROE(TTM)', ratv(p.roe_ttm), '单季 '+ratv(p.roe_q))}
-    ${cell('营收同比', ratv(p.rev_yoy), '单季 '+ratv(p.rev_q_yoy))}
-    ${cell('净利同比', ratv(p.np_yoy), '单季 '+ratv(p.np_q_yoy))}
-    ${cell('52 周区间',
-      (p.low_52w==null?'—':(+p.low_52w).toFixed(2))+' ~ '+(p.high_52w==null?'—':(+p.high_52w).toFixed(2)),
-      '不复权价')}
-    ${cell('区间涨幅',
-      `<span style="color:${upc(p.ret_20d)}">${ratv(p.ret_20d)}</span>`,
-      '20日 · 5日 '+ratv(p.ret_5d)+' · 60日 '+ratv(p.ret_60d)+' · 250日 '+ratv(p.ret_250d)
-      +'　<span title="跨除权日不复权会出现假跌幅，所以区间涨幅一律用后复权算">（后复权）</span>')}
-    ${cell('上市', p.listed_days==null?'—':p.listed_days+' 天',
-      p.list_date?String(p.list_date).slice(0,10):'')}
-  </div>`;
-}
-
-function stockChartBox(k){
-  if(k.error) return '<div class="lvmsg bad">K 线：'+esc(k.error)+'</div>';
-  return `<div class="lvsec" style="margin-bottom:14px">
-    <h3>日 K
-      <span style="flex:1"></span>
-      ${SK_RANGES.map(([n,t])=>`<a href="#" class="lvtag skr${SKN===n?' on':''}"
-        data-n="${n}">${t}</a>`).join('')}
-      <span class="lvwhy">|</span>
-      <a href="#" class="lvtag skfq${SKFQ==='bfq'?' on':''}" data-f="bfq"
-        title="券商软件看到的价；open 就是当日集合竞价成交价">不复权</a>
-      <a href="#" class="lvtag skfq${SKFQ==='hfq'?' on':''}" data-f="hfq"
-        title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
-    </h3>
-    <div id="skchart" style="position:relative">
-      <canvas id="skcv" style="width:100%;height:420px;display:block"></canvas>
-      <div id="sktip" style="display:none;position:absolute;pointer-events:none;
-        background:var(--panel);border:1px solid var(--line);border-radius:5px;
-        padding:6px 8px;font:11px/1.6 'SF Mono',Menlo,monospace;
-        white-space:pre;z-index:5"></div>
-    </div>
-    <div class="lvwhy" style="margin-top:4px">
-      MA5/10/20/60 由<b>服务端</b>算（多取 60 根预热后切掉）——
-      前端自己算就得多取 60 根，而"少取了导致头部均线是错的"不报错，只是曲线不对。
-      ${SKFQ==='bfq'?'当前是<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切后复权。'
-                     :'当前是<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'}
-    </div>
-  </div>`;
-}
-
-/* ---- Canvas 画 K 线 ---------------------------------------------------
-   蜡烛 + 4 条均线 + 成交量 + 十字光标。
-   ★ 按 devicePixelRatio 放大再画，否则 Retina 上全是毛边。
-   ★ 涨红跌绿（A 股习惯，与页面 --up/--down 一致）。 */
-function drawK(){
-  const cv=$('#skcv'); if(!cv||!SKBARS||!SKBARS.length) return;
-  const bars=SKBARS, dpr=window.devicePixelRatio||1;
-  const W=cv.clientWidth, H=cv.clientHeight;
-  cv.width=W*dpr; cv.height=H*dpr;
-  const g=cv.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
-  g.clearRect(0,0,W,H);
-  const cs=getComputedStyle(document.documentElement);
-  const UP=cs.getPropertyValue('--up').trim()||'#f05b5b';
-  const DN=cs.getPropertyValue('--down').trim()||'#2fb87a';
-  const LINE=cs.getPropertyValue('--line').trim()||'#2a313a';
-  const DIM=cs.getPropertyValue('--dim').trim()||'#8b97a6';
-  const PADL=52, PADR=8, PADT=8, PADB=18, GAP=10, VOLH=Math.round(H*0.22);
-  const mainH=H-PADT-PADB-GAP-VOLH, volTop=PADT+mainH+GAP;
-  const w=W-PADL-PADR;
-  let lo=Infinity, hi=-Infinity, vmax=0;
-  bars.forEach(b=>{
-    if(b.low!=null) lo=Math.min(lo,b.low);
-    if(b.high!=null) hi=Math.max(hi,b.high);
-    [b.ma5,b.ma10,b.ma20,b.ma60].forEach(m=>{ if(m!=null){ lo=Math.min(lo,m); hi=Math.max(hi,m); } });
-    vmax=Math.max(vmax,b.volume||0);
-  });
-  if(!isFinite(lo)||!isFinite(hi)) return;
-  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
-  const n=bars.length;
-  const bw=Math.max(1, w/n*0.7), step=w/n;
-  const X=i=>PADL+step*(i+0.5);
-  const Y=v=>PADT+mainH-(v-lo)/(hi-lo)*mainH;
-  const VY=v=>volTop+VOLH-(vmax?v/vmax*VOLH:0);
-  /* 横向网格 + 左侧价格刻度 */
-  g.font='10px ui-monospace,Menlo,monospace'; g.textAlign='right';
-  for(let i=0;i<=4;i++){
-    const v=lo+(hi-lo)*i/4, y=Y(v);
-    g.strokeStyle=LINE; g.globalAlpha=.5; g.beginPath();
-    g.moveTo(PADL,y); g.lineTo(W-PADR,y); g.stroke(); g.globalAlpha=1;
-    g.fillStyle=DIM; g.fillText(v.toFixed(2), PADL-5, y+3);
-  }
-  /* 蜡烛 */
-  bars.forEach((b,i)=>{
-    if(b.close==null) return;
-    const up=(b.close>=(b.open==null?b.close:b.open));
-    const c=up?UP:DN;
-    g.strokeStyle=c; g.fillStyle=c; g.lineWidth=1;
-    const x=X(i);
-    g.beginPath(); g.moveTo(x, Y(b.high)); g.lineTo(x, Y(b.low)); g.stroke();
-    const y1=Y(Math.max(b.open,b.close)), y2=Y(Math.min(b.open,b.close));
-    const hh=Math.max(1, y2-y1);
-    if(up){ g.strokeRect(x-bw/2, y1, bw, hh); }   /* 阳线空心，A 股习惯 */
-    else  { g.fillRect(x-bw/2, y1, bw, hh); }
-    /* 成交量 */
-    g.fillStyle=c; g.globalAlpha=.55;
-    g.fillRect(x-bw/2, VY(b.volume||0), bw, volTop+VOLH-VY(b.volume||0));
-    g.globalAlpha=1;
-    /* 涨停/跌停在量柱下方点一个标记 */
-    if(b.limit_up||b.limit_down){
-      g.fillStyle=b.limit_up?UP:DN;
-      g.beginPath(); g.arc(x, volTop+VOLH+4, 1.6, 0, 6.284); g.fill();
-    }
-  });
-  /* 均线 */
-  const MAC={ma5:'#e0a33c', ma10:'#5b9cf0', ma20:'#a06bf0', ma60:'#3ec8d8'};
-  Object.keys(MAC).forEach(k=>{
-    g.strokeStyle=MAC[k]; g.lineWidth=1.1; g.beginPath();
-    let started=false;
-    bars.forEach((b,i)=>{ const v=b[k]; if(v==null){ started=false; return; }
-      if(!started){ g.moveTo(X(i),Y(v)); started=true; } else g.lineTo(X(i),Y(v)); });
-    g.stroke();
-  });
-  /* 图例 */
-  g.textAlign='left'; g.font='10px ui-monospace,Menlo,monospace';
-  let lx=PADL+2;
-  Object.keys(MAC).forEach(k=>{ g.fillStyle=MAC[k];
-    const t=k.toUpperCase(); g.fillText(t, lx, PADT+10); lx+=g.measureText(t).width+10; });
-  /* 底部日期刻度（首 / 中 / 末） */
-  g.fillStyle=DIM; g.textAlign='center';
-  [0, Math.floor(n/2), n-1].forEach(i=>{ if(bars[i])
-    g.fillText(bars[i].date.slice(2), X(i), H-5); });
-  /* 十字光标 */
-  if(SKHOVER!=null&&bars[SKHOVER]){
-    const b=bars[SKHOVER], x=X(SKHOVER);
-    g.strokeStyle=DIM; g.globalAlpha=.6; g.setLineDash([3,3]);
-    g.beginPath(); g.moveTo(x,PADT); g.lineTo(x,volTop+VOLH); g.stroke();
-    g.setLineDash([]); g.globalAlpha=1;
-  }
-  drawK._geo={PADL,PADR,step,n,X};
-}
-
-function wireChart(){
-  const cv=$('#skcv'), tip=$('#sktip'); if(!cv) return;
-  drawK();
-  const hit=ev=>{
-    const r=cv.getBoundingClientRect(), gm=drawK._geo; if(!gm) return null;
-    const i=Math.round((ev.clientX-r.left-gm.PADL)/gm.step-0.5);
-    return (i>=0&&i<gm.n)?i:null;
-  };
-  cv.onmousemove=ev=>{
-    const i=hit(ev);
-    if(i===SKHOVER&&i!=null){ posTip(ev); return; }
-    SKHOVER=i; drawK();
-    if(i==null){ tip.style.display='none'; return; }
-    const b=SKBARS[i];
-    tip.style.display='';
-    tip.textContent=[
-      b.date+(b.limit_up?'  涨停':'')+(b.limit_down?'  跌停':''),
-      '开 '+b.open+'   高 '+b.high,
-      '低 '+b.low+'   收 '+b.close,
-      '涨跌 '+pctv(b.change_pct)+'   换手 '+pctn(b.turnover),
-      '量 '+yiv(b.volume)+'股  额 '+yiv(b.amount),
-      'MA5 '+(b.ma5??'—')+'  MA10 '+(b.ma10??'—'),
-      'MA20 '+(b.ma20??'—')+'  MA60 '+(b.ma60??'—'),
-    ].join('\n');
-    posTip(ev);
-  };
-  const posTip=ev=>{
-    const box=$('#skchart').getBoundingClientRect();
-    let x=ev.clientX-box.left+12, y=ev.clientY-box.top+12;
-    if(x+190>box.width) x=ev.clientX-box.left-190;
-    tip.style.left=x+'px'; tip.style.top=Math.min(y, box.height-140)+'px';
-  };
-  cv.onmouseleave=()=>{ SKHOVER=null; tip.style.display='none'; drawK(); };
-  /* 窗口变化要重画 —— canvas 是按像素画的，CSS 缩放会糊 */
-  if(!wireChart._rs){ wireChart._rs=true;
-    window.addEventListener('resize', ()=>{ if($('#skcv')) drawK(); }); }
-}
-
-function stockTables(p,f){
-  const bars=(SKBARS||[]).slice(-20).reverse();
-  const fr=(f&&f.rows)||[];
-  return `<div class="lvgrid">
-    <div class="lvsec wide"><h3>最近 20 个交易日</h3>
-      <div class="pw"><table class="pkt">
-        <tr><th class="tx">日期</th><th class="rt">开</th><th class="rt">高</th>
-          <th class="rt">低</th><th class="rt">收</th><th class="rt">涨跌</th>
-          <th class="rt">换手</th><th class="rt">成交额</th><th class="tx">标记</th></tr>
-        ${bars.map(b=>`<tr>
-          <td class="tx">${esc(b.date)}</td>
-          <td class="rt">${b.open??'—'}</td><td class="rt">${b.high??'—'}</td>
-          <td class="rt">${b.low??'—'}</td><td class="rt">${b.close??'—'}</td>
-          <td class="rt" style="color:${upc(b.change_pct)}">${pctv(b.change_pct)}</td>
-          <td class="rt">${pctn(b.turnover)}</td>
-          <td class="rt">${yiv(b.amount)}</td>
-          <td class="tx lvwhy">${b.limit_up?'涨停':b.limit_down?'跌停':''}</td>
-        </tr>`).join('')}
-      </table></div>
-      <div class="lvwhy" style="margin-top:4px">价格随上面的复权口径切换。</div>
-    </div>
-    <div class="lvsec wide"><h3>财务（按报告期）</h3>
-      ${fr.length?`<div class="pw"><table class="pkt">
-        <tr><th class="tx">报告期</th><th class="tx">公告日</th>
-          <th class="rt">营收</th><th class="rt">归母净利</th>
-          <th class="rt">单季净利</th><th class="rt">单季同比</th>
-          <th class="rt">EPS</th><th class="rt">ROE</th><th class="rt">每股净资产</th></tr>
-        ${fr.map(r=>`<tr>
-          <td class="tx">${esc(String(r.report_date).slice(0,10))}</td>
-          <td class="tx lvwhy">${esc(String(r.pub_date||'').slice(0,10))}</td>
-          <td class="rt">${yiv(r.revenue)}</td>
-          <td class="rt">${yiv(r.net_profit_parent)}</td>
-          <td class="rt">${yiv(r.np_q)}</td>
-          <td class="rt" style="color:${upc(r.np_q_yoy)}">${ratv(r.np_q_yoy)}</td>
-          <td class="rt">${r.eps_basic==null?'—':(+r.eps_basic).toFixed(3)}</td>
-          <td class="rt">${ratv(r.roe_parent)}</td>
-          <td class="rt">${r.bps==null?'—':(+r.bps).toFixed(2)}</td>
-        </tr>`).join('')}
-      </table></div>
-      <div class="lvwhy" style="margin-top:4px">
-        🔴 <b>报告期 ≠ 公告日</b>。防未来函数一律用<b>公告日</b>做可见性判断
-        —— 用报告期当可见日就是未来函数（回测会凭空领先一两个月）。
-      </div>`:'<div class="none">没有财务数据</div>'}
-    </div>
-  </div>`;
-}
-
-/* ============ 查数据（只读 SQL） ============ */
-/* ★ 安全规则【不在前端】：全在 datalake/build/query.py 里，命令行与页面共用
-     同一份。前端做校验只是体验，挡不住 curl —— 而 `COPY ... TO 'file'`
-     不需要可写连接就能把 mart/ 写坏，且不报错。
-
-   ★ 这一页的价值在【模板】而不是那个输入框。裸给一个 SQL 框等于把
-     "close_bfq 还是 close_hfq"、"volume 单位是股×100"、"pub_date 要做 as-of"
-     这些踩过的坑重新交回给人。每个模板都把口径写在注释里，
-     照着改比从零写安全。 */
-const QT=[
- {n:'某只票的日线', s:
-`-- 不复权 open/high/low/close_bfq；后复权只有 close_hfq（差一个 hfq_factor）
--- 🔴 open 就是当日集合竞价成交价 —— 竞价单的成交价可用它精确还原
-SELECT date, open, high, low, close_bfq, close_hfq, hfq_factor,
-       volume_shares, amount, change_pct
-FROM read_parquet('mart/panel_daily/panel_*.parquet')
-WHERE jq_code = '603506.XSHG' AND date >= DATE '2026-08-01'
-ORDER BY date DESC`},
- {n:'某天的全市场切片', s:
-`-- 面板一天约 5200 行、71 列。挑列不要 SELECT *
--- ⚠ public_status 是【字符串】：'正常上市' / 'ST' / '*ST' / NULL
---   is_st 是 TINYINT（0/1），不是布尔
-SELECT jq_code, symbol, close_bfq, floatmv/1e8 AS 流通市值亿,
-       pe_ttm, pb, roe_ttm, sw_l1_name, is_st, is_limit_up
-FROM read_parquet('mart/panel_daily/panel_*.parquet')
-WHERE date = DATE '2026-09-01' AND public_status = '正常上市'
-ORDER BY floatmv
-LIMIT 50`},
- {n:'小市值选股（复现策略口径）', s:
-`-- ⚠ 这只是"按流通市值排序"，不是 froec 的完整规则（还有 eps>0 / 涨跌停
---   /ST / 上市天数 / 黑名单等，规则在 strategies/小市值/froec.py 里）
-SELECT jq_code, symbol, floatmv/1e8 AS 流通市值亿, close_bfq, eps_q,
-       listed_days, sw_l1_name
-FROM read_parquet('mart/panel_daily/panel_*.parquet')
-WHERE date = DATE '2026-09-01' AND public_status = '正常上市'
-  AND is_st = 0 AND listed_days > 250 AND eps_q > 0
-ORDER BY floatmv
-LIMIT 20`},
- {n:'某只票的财务时序', s:
-`-- 🔴 报告期(fin_report_date) ≠ 公告日(fin_pub_date)。防未来函数一律用公告日
-SELECT DISTINCT fin_report_date, fin_pub_date, revenue, net_profit_parent,
-       eps_basic, roe_parent, np_ttm, np_q, np_q_yoy
-FROM read_parquet('mart/panel_daily/panel_*.parquet')
-WHERE jq_code = '603506.XSHG' AND fin_report_date >= DATE '2024-01-01'
-ORDER BY fin_report_date DESC`},
- {n:'分红记录', s:
-`-- 🔴 bonus_ratio_rmb 是【每 10 股派息】，要 ÷10 才是每股
--- ⚠ 这张表的代码列叫 code（不是 jq_code）；除权日是 a_xr_date
-SELECT code, report_date, board_plan_pub_date, a_xr_date,
-       bonus_ratio_rmb, bonus_ratio_rmb/10 AS 每股派息,
-       plan_progress, visible_date
-FROM dividend
-WHERE code = '601088.XSHG'
-ORDER BY board_plan_pub_date DESC
-LIMIT 20`},
- {n:'交易日历 / 下一个交易日', s:
-`-- ⚠ std/trading_calendar.parquet 只到【已发生】的最后一个交易日，
---   **没有未来日**。未来交易日由 tdx.db 的 raw_holidays 推算
---   （工作日 − 休市日，见 build/build_trade_calendar.py），
---   实盘页的"下次调仓"用的是那一份。这里只能看历史。
-SELECT date FROM trading_calendar
-ORDER BY date DESC
-LIMIT 10`},
- {n:'各表最新数据日（对新鲜度）', s:
-`-- 数据同步页显示的就是这些；这里能自己交叉核一遍
-SELECT '面板' AS 表, max(date)::VARCHAR AS 最新
-  FROM read_parquet('mart/panel_daily/panel_*.parquet')
-UNION ALL SELECT '日线 kline_raw', max(date)::VARCHAR FROM kline_raw
-UNION ALL SELECT '财务指标 pub_date', max(pub_date)::VARCHAR FROM fin_indicator
-UNION ALL SELECT '利润表 pub_date', max(pub_date)::VARCHAR FROM fin_income
-UNION ALL SELECT '交易日历', max(date)::VARCHAR FROM trading_calendar`},
- {n:'指数成分（按日 as-of）', s:
-`-- index_member_asof 已按日展开；列名是 as_of / index_code / stock_code
--- （不是 date / jq_code）—— 直接按 as_of 取，不要自己 join 生效区间
-SELECT as_of, index_code, stock_code
-FROM index_member_asof
-WHERE index_code = '000300.XSHG'
-  AND as_of = (SELECT max(as_of) FROM index_member_asof
-               WHERE index_code = '000300.XSHG')
-LIMIT 30`},
-];
-let QSQL=null, QSCH=null, QBUSY=false;
-
-async function showQuery(){
-  stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
-  if(QSQL==null) QSQL=QT[0].s;
-  $('#main').innerHTML=`<div id="qy">
-    <div class="lvhead"><h2>🔍 查数据</h2>
-      <span class="lvtag">只读</span>
-      <span style="flex:1"></span>
-      <a class="lvtag" href="#/docs" title="接口与口径的实测定案">📖 先查数据字典</a></div>
-    <div class="note">⚠ <b>先看数据字典再写 SQL</b> ——
-      口径搞错不会报错，只会给你一个"看着正常"的错数
-      （<code>close_bfq</code> 还是 <code>close_hfq</code>、
-      <code>volume</code> 单位、<code>pub_date</code> 的 as-of）。
-      下面的模板已经把踩过的坑写在注释里，照着改比从零写安全。</div>
-    <div class="lvform" style="gap:6px;flex-wrap:wrap">
-      ${QT.map((t,i)=>`<button class="btn qt" data-i="${i}">${esc(t.n)}</button>`).join('')}
-    </div>
-    <textarea id="qsql" spellcheck="false" style="width:100%;min-height:170px;
-      margin-top:10px;background:var(--panel2);color:var(--fg);
-      border:1px solid var(--line);border-radius:6px;padding:10px;
-      font:12px/1.6 'SF Mono',Menlo,monospace;resize:vertical">${esc(QSQL)}</textarea>
-    <div class="lvform" style="margin-top:8px;gap:10px;align-items:baseline">
-      <button class="btn" id="qrun">运行　<span class="lvwhy">⌘/Ctrl+Enter</span></button>
-      <label class="lvwhy">最多 <input id="qlim" size="6" value="500"> 行</label>
-      <span class="lvwhy">超过 60 秒会中止。写操作一律被拒（连
-        <code>COPY&nbsp;TO</code> 也拒 —— 它能直接写盘）</span>
-      <span style="flex:1"></span>
-      <a href="#" id="qsch" class="lvwhy">有哪些表 / 列 ▸</a>
-    </div>
-    <div class="lvmsg" id="qmsg"></div>
-    <div id="qschema" style="display:none"></div>
-    <div id="qout"></div>
-  </div>`;
-  const ta=$('#qsql');
-  ta.oninput=()=>{ QSQL=ta.value; };
-  document.querySelectorAll('#qy .qt').forEach(e=>e.onclick=()=>{
-    QSQL=QT[+e.dataset.i].s; ta.value=QSQL; ta.focus(); });
-  ta.onkeydown=ev=>{ if((ev.metaKey||ev.ctrlKey)&&ev.key==='Enter'){
-    ev.preventDefault(); runQuery(); } };
-  $('#qrun').onclick=runQuery;
-  $('#qsch').onclick=async ev=>{ ev.preventDefault();
-    const el=$('#qschema');
-    if(el.style.display===''){ el.style.display='none'; return; }
-    el.style.display=''; el.innerHTML='<div class="lvwhy">取表清单…</div>';
-    try{
-      if(!QSCH) QSCH=await j('/api/query/schema');
-      if(QSCH.error) throw new Error(QSCH.error);
-      /* parquet 排在前面：面板是最常查的那张，而它【不在】lake.db 里 ——
-         只列 lake.db 的表等于这个功能只覆盖一半数据。 */
-      el.innerHTML=`<div class="lvsec" style="margin:8px 0">
-        <h3>parquet（直接 read_parquet）</h3>
-        ${QSCH.parquet.map(t=>`<div style="margin:4px 0">
-          <b>${esc(t.name)}</b> <span class="lvwhy">${esc(t.note||'')}　${t.columns.length} 列</span>
-          <div class="lvwhy" style="word-break:break-all">
-            <code>${esc(t.path)}</code>　${t.columns.map(c=>esc(c)).join('、')}</div></div>`).join('')}
-        <h3 style="margin-top:12px">lake.db（视图，直接写表名）</h3>
-        ${QSCH.tables.map(t=>`<div style="margin:3px 0">
-          <b>${esc(t.name)}</b> <span class="lvwhy">${t.kind==='VIEW'?'视图':'表'}　${t.columns.length} 列</span>
-          <div class="lvwhy" style="word-break:break-all">${t.columns.map(c=>esc(c)).join('、')}</div></div>`).join('')}
-      </div>`;
-    }catch(e){ el.innerHTML=`<div class="lvmsg bad">${esc(String(e))}</div>`; }
-  };
-}
-
-async function runQuery(){
-  if(QBUSY) return;
-  const m=$('#qmsg'), out=$('#qout');
-  QBUSY=true; m.className='lvmsg'; m.textContent='查询中…';
-  try{
-    const r=await post('/api/query',{sql:$('#qsql').value,
-      limit:parseInt($('#qlim').value||'500',10)});
-    if(r.error) throw new Error(r.error);
-    m.className='lvmsg ok';
-    /* ★ 截断必须说出来 —— 悄悄少给几行比查不出来更糟：
-         少的那部分你不知道，而结论已经下了。 */
-    m.innerHTML=r.n+' 行 · '+r.ms+' ms'
-      +(r.truncated?'<b style="color:var(--warn)">　⚠ 已截断到 '+r.limit
-        +' 行（没写 LIMIT，系统自动加的）—— 结果可能不全</b>':'')
-      +'　<a href="#" id="qcopy">复制为 TSV</a>';
-    out.innerHTML=r.n?`<div class="pw" style="margin-top:10px">
-      <table class="pkt"><tr>${r.columns.map(c=>
-        `<th class="tx">${esc(c)}</th>`).join('')}</tr>
-      ${r.rows.map(row=>`<tr>${row.map(v=>
-        `<td class="${typeof v==='number'?'':'tx'}">${v==null?
-          '<span class="lvwhy">NULL</span>':esc(String(v))}</td>`).join('')}</tr>`).join('')}
-      </table></div>`
-      :'<div class="none">没有行</div>';
-    $('#qcopy').onclick=async ev=>{ ev.preventDefault();
-      const tsv=[r.columns.join('\t')].concat(
-        r.rows.map(x=>x.map(v=>v==null?'':String(v)).join('\t'))).join('\n');
-      try{ await navigator.clipboard.writeText(tsv);
-           ev.target.textContent='已复制 ✓（可直接粘进 Excel）'; }
-      catch(e){ ev.target.textContent='复制失败'; } };
-  }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); out.innerHTML=''; }
-  finally{ QBUSY=false; }
-}
+/* 个股与查数据都已经不在这个文件里：
+   · 个股 -> 独立页 /stock.html（本文件的 #/stock 路由只做跳转，旧链接不失效）
+   · 查数据（只读 SQL 页）-> **已取消**。命令行工具仍在
+     `datalake/build/query.py`（`--sql-stdin` / `--schema`），
+     安全规则那三层也还在那里。 */
 
 /* ============ 数据字典 ============ */
 /* 内容【不烤在前端】—— 服务端每次请求重读磁盘上的 md。

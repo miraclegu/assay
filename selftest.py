@@ -3112,11 +3112,51 @@ def t_live_ui():
             pg.wait_for_timeout(1200)
             assert '改过的名字' in pg.locator('.lvhead h2').first.inner_text(), '改名没生效'
 
+            # ---- 代码/名称能点开个股页（新标签页，实盘页不丢状态）----
+            #   ★ 代码与名称【都】可点 —— 只有代码可点的话，习惯认名字的人
+            #     会以为不能点。
+            #   ★ 用 target=_blank：实盘页往往一直开着（待办、正在录一半的
+            #     成交），跳走再回来这些状态就没了。
+            _sk = pg.locator('#lvbody table.lvpos a[href*="/stock.html"]')
+            assert _sk.count() >= 2, \
+                '持仓表里的代码/名称没链到个股页：%d' % _sk.count()
+            _a = _sk.first
+            assert _a.get_attribute('target') == '_blank', \
+                '应在新标签页打开，否则实盘页的状态会丢'
+            assert 'noopener' in (_a.get_attribute('rel') or ''), '缺 rel=noopener'
+            _n_pos = pg.locator('#lvbody table.lvpos tr').count() - 1
+            assert _sk.count() >= _n_pos * 2, \
+                '每只持仓的代码与名称都该可点：%d 只 vs %d 个链接' \
+                % (_n_pos, _sk.count())
+            with pg.context.expect_page() as _np:
+                _a.click()
+            _sp = _np.value
+            _sp.wait_for_selector('#kcv', timeout=40000)
+            _sp.wait_for_timeout(1200)
+            assert '/stock.html' in _sp.url, '没打开个股页：%s' % _sp.url
+            assert 'undefined' not in _sp.locator('#pg').inner_text()
+            # 🔴 新标签页里【不该】出现返回按钮 —— 它有 referrer 但没有可回的
+            #    历史（history.length === 1），显示出来点了什么都不会发生。
+            assert _sp.evaluate('() => history.length') == 1
+            assert _sp.locator('#goback').count() == 0, \
+                '新标签页显示了返回按钮，但点了不会有反应'
+            # 站内再跳一次之后才该有
+            _sp.locator('#body a[href*="/sector.html"]').first.click()
+            _sp.wait_for_timeout(2500)
+            assert _sp.locator('#goback').count() == 1, '站内跳转后应有返回按钮'
+            _sp.close()
+            assert '#/live' in pg.url, '原实盘页被跳走了：%s' % pg.url
+            assert pg.locator('#lvbody table.lvpos').count() == 1, \
+                '原实盘页的持仓表没了 —— 新标签页打开不该影响它'
+
             # ---- 流水独立页 + 分页 + 冲正 ----
             aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
             pg.click('a[href*="/fills"]')
             pg.wait_for_timeout(1200)
             assert '成交流水' in pg.locator('.lvhead').inner_text(), '没跳到流水页'
+            # 流水页的代码/名称也要能点开个股
+            assert pg.locator('#main table.lvt a[href*="/stock.html"]').count() >= 2, \
+                '流水页的代码/名称没链到个股页'
             # 列序按【看的顺序】：哪天、买还是卖、哪只票、什么价、多少股、多少钱。
             # 录入时间与来源是审计信息，平时不看，排在最后。
             _fh = [x.strip() for x in pg.locator('#main table.lvt th').all_inner_texts()]
@@ -3183,6 +3223,7 @@ def t_live_ui():
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
                     '按成交日取档/手填优先/每账户独立/来源写在行上)；'
+                    '持仓与流水的代码名称都能新标签页打开个股（新标签无返回按钮）；'
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
                     '价格区间校验有逃生口；'
                     '排版：流水列序(日/方向/代码/名称/价/量/额/费,录入时间与来源置尾)、'
@@ -3890,22 +3931,18 @@ def t_stock_ui():
         httpd.shutdown()
 
 
-@case('查数据：只读保证 / 模板真能跑 / 自动 LIMIT', tag='fast')
+@case('只读查询器：写操作一律拒 / 自动 LIMIT（CLI）', tag='fast')
 def t_query():
-    """裸给一个 SQL 框是不够的，这一页的价值在【模板】。
+    """`datalake/build/query.py` —— 命令行的只读查询器。
 
-    ★ 所以最核心的断言是「每条模板真的能跑」—— 模板跑不通比没有模板更糟：
-      它看着权威，而人会照着它改。本轮 8 条里我猜错了 4 条 schema
-      （public_status 是字符串不是 1、dividend 的代码列叫 code、
-      index_member_asof 是 as_of/stock_code、std 日历没有未来日），
-      全是这条断言抓出来的。
+    ★ 看板上那个 SQL 页**已取消**，但这个工具留着：它是命令行里最顺手的
+      查数据方式，而且三层只读保证都在这里。
 
     ★ 只读要挡住的重点是 `COPY ... TO 'file'`：它**不需要**可写的数据库
       连接就能写文件系统。只靠"以 READ_ONLY 挂 lake.db"挡不住它，
       而被写坏的是 mart/ —— 之后每次回测都用坏面板，且不报错。
     """
     import json as _json
-    import re as _re
     import subprocess
 
     from assay import server as sv
@@ -3915,7 +3952,6 @@ def t_query():
     sys.path.insert(0, os.path.join(dl, 'build'))
     import query as qmod                                    # noqa: PLC0415
 
-    # ---- 1) 只读：写操作一律拒 ----
     BAD = [
         ("COPY (SELECT 1) TO '/tmp/x.csv'", 'COPY TO 能直接写盘'),
         ("COPY (SELECT 1) TO '/tmp/x.parquet' (FORMAT PARQUET)", '同上'),
@@ -3942,12 +3978,7 @@ def t_query():
             raise AssertionError('%s 应被拒：%r' % (why, q))
         except ValueError:
             pass
-    # 服务端那一层也要拒（不能只有库函数拒 —— curl 直接打的是接口）
-    for q, _why in BAD[:4]:
-        assert (sv.api_query({}, {'sql': q}) or {}).get('error'), \
-            '/api/query 放行了写操作：%r' % q
-
-    # ---- 2) 误杀检查：注释里 / 列名里出现关键字不该被拒 ----
+    # 误杀检查：注释里 / 列名里出现关键字不该被拒
     OK = [
         '-- 说明里提到 copy 和 create\nSELECT 42',
         'SELECT db_create_time FROM (SELECT 1 AS db_create_time)',
@@ -3959,8 +3990,7 @@ def t_query():
     for q in OK:
         qmod.check(q)                   # 抛异常就是误杀
 
-    # ---- 3) 自动 LIMIT + 截断必须说出来 ----
-    #     悄悄少给几行比查不出来更糟：少的那部分你不知道，而结论已经下了。
+    # 自动 LIMIT + 截断必须说出来（悄悄少给几行比查不出来更糟）
     r = qmod.run("SELECT * FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')"
                  % dl, limit=7)
     assert r['n'] == 7 and r['limit_added'] and r['truncated'], \
@@ -3970,142 +4000,34 @@ def t_query():
     assert not r2['limit_added'] and not r2['truncated'], '已有 LIMIT 不该再加'
     assert qmod.MAX_LIMIT <= 50000, 'MAX_LIMIT 太大 —— 3127 万行会把内存吃光'
 
-    # ---- 4) 模板【真的能跑】----
-    html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             'web', 'index.html'), encoding='utf-8').read()
-    blk = html[html.index('const QT=['):html.index('let QSQL=null')]
-    tpl = _re.findall(r"\{n:'([^']+)', s:\n`(.*?)`\}", blk, _re.S)
-    assert len(tpl) >= 8, '模板只解析出 %d 条' % len(tpl)
-    for n, q in tpl:
-        rr = sv.api_query({}, {'sql': q, 'limit': 5})
-        assert not rr.get('error'), '模板「%s」跑不通：%s' % (n, rr.get('error'))
-        assert rr['columns'], '模板「%s」没返回列' % n
-    # 模板里必须带口径提醒 —— 这一页的价值就在这
-    allsql = ' '.join(x[1] for x in tpl)
-    for k in ('close_bfq', 'pub_date', 'bonus_ratio_rmb'):
-        assert k in allsql, '模板里没覆盖 %s 这类易错口径' % k
-
-    # ---- 5) 表清单要覆盖 parquet，不能只有 lake.db ----
+    # 表清单要覆盖 parquet，不能只有 lake.db
     schm = qmod.schema()
     names = {t['name'] for t in schm['parquet']}
     assert 'panel_daily' in names, \
         '表清单里没有面板 —— 它不在 lake.db 里，漏了等于只覆盖一半数据'
     pn = [t for t in schm['parquet'] if t['name'] == 'panel_daily'][0]
     assert len(pn['columns']) >= 70, '面板列数不对：%d' % len(pn['columns'])
-    assert len(schm['tables']) >= 25, 'lake.db 表数不对：%d' % len(schm['tables'])
 
-    # ---- 6) CLI 也能用（同一份规则）----
+    # CLI 真能跑
     out = subprocess.run(['python3', sc, '--json', '--sql-stdin', '--limit', '2'],
                          cwd=dl, input='SELECT 1 AS a', capture_output=True,
                          text=True, timeout=120)
     assert _json.loads(out.stdout)['rows'] == [[1]], 'CLI 跑不出结果'
+
+    # ★ 页面那一层已取消 —— 接口和路由都不该再有，否则是"删了一半"
+    assert not hasattr(sv, 'api_query'), '/api/query 还在'
+    assert '/api/query' not in sv.ROUTES, '路由里还有 /api/query'
+    web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    for fn in sorted(f for f in os.listdir(web) if f.endswith(('.html', '.js'))):
+        src = open(os.path.join(web, fn), encoding='utf-8').read()
+        code = '\n'.join(ln for ln in src.split('\n')
+                          if '//' not in ln and '/*' not in ln and '*' != ln.strip()[:1])
+        assert "'#/query'" not in code and '"#/query"' not in code, \
+            '%s 里还有指向已取消的查数据页的链接' % fn
     return ('只读拒 %d 类写操作（含 COPY TO / 多语句 / 注释藏第二条）、'
-            '%d 种合法写法不误杀、自动 LIMIT 并标截断、'
-            '%d 条模板全部真跑通、表清单含面板 %d 列 + lake.db %d 张表'
-            % (len(BAD), len(OK), len(tpl), len(pn['columns']),
-               len(schm['tables'])))
-
-
-@case('查数据页面真实渲染（playwright）', tag='web')
-def t_query_ui():
-    """页面上真点一遍：模板 → 运行 → 出表；写操作被拒；截断有提示。
-
-    ★ 前端的校验只是体验，挡不住 curl —— 所以这里也顺手核一次
-      「接口层拒绝写操作」，判据与命令行是同一份（datalake/build/query.py）。
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return '跳过（无 playwright）'
-    import threading
-    from http.server import ThreadingHTTPServer
-
-    from assay import server as sv
-    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
-    port = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    try:
-        with sync_playwright() as p:
-            try:
-                br = p.chromium.launch()
-            except Exception as e:                          # noqa: BLE001
-                return '跳过（浏览器不可用: %s）' % type(e).__name__
-            pg = br.new_page(viewport={'width': 1500, 'height': 950})
-            errs = []
-            pg.on('pageerror', lambda e: errs.append(str(e)))
-            pg.on('console',
-                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
-            pg.goto('http://127.0.0.1:%d/#/query' % port, wait_until='networkidle')
-            pg.wait_for_selector('#qsql', timeout=30000)
-
-            n_tpl = pg.locator('#qy .qt').count()
-            assert n_tpl >= 8, '模板按钮只有 %d 个' % n_tpl
-            # 打开页面就该有一条可跑的 SQL 在框里 —— 空框等于让人从零开始
-            assert len(pg.input_value('#qsql').strip()) > 20, 'SQL 框是空的'
-            # 必须显眼地指向数据字典：口径搞错不报错，只给"看着正常"的错数
-            head = pg.locator('#qy').inner_text()
-            assert '数据字典' in head, '没有指向数据字典的入口'
-
-            pg.click('#qrun')
-            pg.wait_for_function(
-                "() => { const e=document.querySelector('#qmsg');"
-                " return e && !/查询中/.test(e.textContent); }", timeout=60000)
-            msg = pg.locator('#qmsg').inner_text()
-            assert 'ms' in msg, '没显示耗时/行数：%s' % msg
-            assert pg.locator('#qout table.pkt tr').count() >= 2, '结果表没渲染'
-            assert 'undefined' not in pg.locator('#qout').inner_text(), \
-                '结果表里有 undefined'
-
-            # ---- 逐条点模板，每条都要真出结果 ----
-            ran = 0
-            for i in range(n_tpl):
-                pg.locator('#qy .qt').nth(i).click()
-                pg.click('#qrun')
-                pg.wait_for_function(
-                    "() => { const e=document.querySelector('#qmsg');"
-                    " return e && !/查询中/.test(e.textContent); }", timeout=60000)
-                cls = pg.locator('#qmsg').get_attribute('class') or ''
-                assert 'bad' not in cls, \
-                    ('第 %d 个模板跑失败：%s'
-                     % (i + 1, pg.locator('#qmsg').inner_text()[:160]))
-                ran += 1
-
-            # ---- 写操作在页面上也要被拒，且说清为什么 ----
-            pg.fill('#qsql', "COPY (SELECT 1) TO '/tmp/selftest_should_not_exist.csv'")
-            pg.click('#qrun')
-            pg.wait_for_function(
-                "() => { const e=document.querySelector('#qmsg');"
-                " return e && !/查询中/.test(e.textContent); }", timeout=60000)
-            assert 'bad' in (pg.locator('#qmsg').get_attribute('class') or ''), \
-                '页面放行了 COPY TO'
-            assert not os.path.exists('/tmp/selftest_should_not_exist.csv'), \
-                '🔴 COPY TO 真的写出了文件 —— 只读没守住'
-
-            # ---- 截断必须显眼提示（悄悄少给几行比查不出来更糟）----
-            pg.fill('#qlim', '3')
-            pg.fill('#qsql', "SELECT jq_code FROM read_parquet("
-                             "'mart/panel_daily/panel_*.parquet')")
-            pg.click('#qrun')
-            pg.wait_for_function(
-                "() => { const e=document.querySelector('#qmsg');"
-                " return e && !/查询中/.test(e.textContent); }", timeout=60000)
-            m2 = pg.locator('#qmsg').inner_text()
-            assert '截断' in m2 and '不全' in m2, '截断没提示：%s' % m2
-
-            # ---- 表清单要能展开，且含面板（它不在 lake.db 里）----
-            pg.click('#qsch')
-            pg.wait_for_timeout(1500)
-            sch = pg.locator('#qschema').inner_text()
-            assert 'panel_daily' in sch, '表清单里没有面板'
-            assert 'close_bfq' in sch, '表清单没列出列名'
-
-            br.close()
-            assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('%d 条模板在页面上逐个点过全部出结果；COPY TO 被拒且没写出文件；'
-                    '截断有提示；表清单含面板与列名；0 个 JS 错误' % ran)
-    finally:
-        httpd.shutdown()
-
+            '%d 种合法写法不误杀、自动 LIMIT 并标截断、表清单含面板 %d 列；'
+            '页面那一层已彻底取消（无 api_query / 无路由 / 无残留链接）'
+            % (len(BAD), len(OK), len(pn['columns'])))
 
 @case('盘面：涨跌家数自洽 / 分档不重不漏 / 回看任意一天', tag='fast')
 def t_market():
@@ -4517,6 +4439,21 @@ def t_new_pages_ui():
             clean()
             n_ranks = pg.locator('.pgrid.c2 .lvsec').count()
             assert n_ranks >= 5, '榜单块只有 %d 个' % n_ranks
+            # ★ 榜单在两列网格里，列多了最右边几列会被压没 —— 原来 8 列时
+            #   「行业」直接看不到了，而这不报错。现在固定 5 列，且逐列量宽度。
+            rh = pg.locator('table.pkt.rk').first.locator('th').all_inner_texts()
+            assert len(rh) == 5, '榜单应是 5 列（多了会被挤没）：%s' % rh
+            assert '名称' in rh[1] and '行业' in rh[1], \
+                '行业应作为名称的注解显示，而不是单独占一列：%s' % rh
+            wid = pg.evaluate(
+                "() => { const t=document.querySelector('table.pkt.rk');"
+                " return [...t.querySelectorAll('tr')[1].children]"
+                ".map(td => Math.round(td.getBoundingClientRect().width)); }")
+            assert min(wid[1:]) >= 40, \
+                '有列被压到 %d px（内容看不见了）：%s' % (min(wid[1:]), wid)
+            row1 = pg.locator('table.pkt.rk').first.locator(
+                'tr').nth(1).locator('td').nth(1).inner_text()
+            assert len(row1.split('\n')) >= 2, '名称下面没带行业：%r' % row1
             # 前后翻日：日期真的变了
             d0 = pg.locator('#mdate').input_value()
             pg.locator('.mshift[data-d="-1"]').click()
@@ -4606,6 +4543,25 @@ def t_new_pages_ui():
             pg.wait_for_selector('#kcv', timeout=40000)
             assert '/stock.html' in pg.url, '从对比点不到个股页'
 
+            # ================= 窄屏不许把整个 body 撑横滚 =================
+            #   🔴 横滚的是【body】的话，读表格时整页会左右晃。
+            #      宽表必须自己在 .pw 里滚。这条抓到过三个真问题：
+            #      顶栏 10 个入口不换行、grid 子项 min-width:auto 让 .pw 失效、
+            #      .pw 的 overflow 只在 #pk 作用域下定义过（别处形同虚设）。
+            narrow = br.new_page(viewport={'width': 1024, 'height': 1000})
+            over = []
+            for path in ('/', '/market.html', '/stock.html?code=601857.XSHG',
+                         '/sector.html?kind=concept', '/watchlist.html',
+                         '/compare.html?codes=601857.XSHG,601088.XSHG'):
+                narrow.goto(base + path, wait_until='networkidle')
+                narrow.wait_for_timeout(2200)
+                ov = narrow.evaluate('() => document.documentElement.scrollWidth'
+                                     ' - document.documentElement.clientWidth')
+                if ov > 2:
+                    over.append((path, ov))
+            narrow.close()
+            assert not over, '窄屏(1024)下这些页面把 body 撑出横滚：%s' % over
+
             # ================= 顶栏导航：每页都能走到每页 =================
             for href in ('/market.html', '/sector.html', '/watchlist.html',
                          '/compare.html', '/stock.html'):
@@ -4685,16 +4641,19 @@ def t_page_inventory():
     # 每个 hash 路由都要有入口
     for route, fn in (('#/live', 'showLive'), ('#/sync', 'showSync'),
                       ('#/docs', 'showDocs'), ('#/picks', 'showPicks'),
-                      ('#/query', 'showQuery'), ('#/stock', 'showStock')):
+                      ('#/stock', None)):
         assert route in js, '路由 %s 不见了' % route
-        assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
+        # fn=None：这个路由只做跳转（个股已搬到独立页 /stock.html），
+        # 本文件里没有对应的 showXxx 实现
+        if fn:
+            assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
     # 流水是独立页，单独核（它的路由带参数）
     assert 'showFills' in defined and '/fills' in js, '成交流水独立页不见了'
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 52, \
-        ('用例只剩 %d 条，少于已知的 52 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 51, \
+        ('用例只剩 %d 条，少于已知的 51 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))

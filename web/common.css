@@ -12,8 +12,12 @@ body{margin:0;background:var(--bg);color:var(--fg);
 a{color:var(--accent);text-decoration:none}
 #app{max-width:1500px;margin:0 auto;padding:0 22px 60px}
 /* ---- 顶栏 ---- */
+/* ★ flex-wrap 必须开：导航有 10 个入口，窄屏（≤1100）放不下就会把页面
+   撑出横向滚动条 —— 而横滚的是【整个 body】，读表格时会整页左右晃。
+   实测 1024 宽溢出 47px。换行只是顶栏占两行，代价小得多。 */
 #top{position:sticky;top:0;background:var(--bg);z-index:9;padding:13px 0 10px;
-  border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px}
+  border-bottom:1px solid var(--line);display:flex;align-items:center;
+  flex-wrap:wrap;gap:8px 12px}
 #top h1{margin:0;font-size:15px;letter-spacing:.5px;color:var(--dim);font-weight:600;
   cursor:pointer;white-space:nowrap}
 #top h1 b{color:var(--fg)}
@@ -258,6 +262,9 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 #pk .why{color:var(--warn);font-size:11px;line-height:1.45;margin-top:3px}
 #pk .cost{color:var(--dim);font-size:10.5px;font-family:ui-monospace,Menlo,monospace}
 #pk .none{color:var(--dim);padding:40px 0;text-align:center}
+/* 目录页顶部那条「选中的规则」也要自己横滚 —— 它有 8 列，窄屏下会把
+   整页撑到 4400px 宽。 */
+#pick{overflow-x:auto}
 
 /* ---- 数据字典 ---- */
 #dk{display:grid;grid-template-columns:214px minmax(0,1fr);gap:20px;margin-top:14px}
@@ -449,6 +456,15 @@ table.lvfr tr.frbody td{background:var(--bg)}
 #top .btn.nav.on{color:var(--accent);border-color:var(--accent)}
 .page{padding:0 18px 40px}
 .pgrid{display:grid;gap:14px;margin-top:14px}
+/* 🔴 grid / flex 的子项默认 `min-width:auto` —— 里面有宽表时子项**不会收缩**，
+   于是整列被撑开、`.pw` 的 overflow-x 形同虚设，最后是【整个 body】横滚
+   （读表格时会整页左右晃）。min-width:0 才让子项能缩、把滚动交回给 .pw。
+   实测：1024 宽下 stock.html 溢出 133px，就是这一条。 */
+.pgrid>*,.lvgrid>*{min-width:0}
+/* 🔴 `.pw` 是【全局】的宽表滚动容器。原来只在 `#pk .pw` 作用域下定义过，
+   别的页面写了 class="pw" 却没有 overflow —— 表现是宽表把整页撑横滚，
+   而 class 名看着"已经处理过了"。作用域化的样式最容易这样漏。 */
+.pw{overflow-x:auto}
 .pgrid.c2{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
 .pgrid.c3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 /* 搜索下拉 */
@@ -481,3 +497,9 @@ table.lvfr tr.frbody td{background:var(--bg)}
 .chip.on{color:var(--accent);border-color:var(--accent)}
 .star{cursor:pointer;color:var(--dim);font-size:13px;user-select:none}
 .star.on{color:var(--warn)}
+
+/* 盘面榜单：窄容器里的表。★ 名称列吃掉剩余宽度，数字列按内容收紧 ——
+   不给列宽约束的话浏览器会平均分配，结果是数字列很宽、名称列被截断。 */
+table.pkt.rk{table-layout:auto;width:100%}
+table.pkt.rk td.tx,table.pkt.rk th.tx{max-width:0}   /* 让 ellipsis 生效 */
+table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}

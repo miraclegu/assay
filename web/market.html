@@ -154,28 +154,40 @@ function inds(o) {
 
 function ranks(o) {
   const rs = o.ranks || {};
+  /* ★ 每个榜只留【固定 4 列 + 这个榜的排序依据】那一列。
+     原来每榜 8 列塞在两列网格里，行业那列直接被挤没了 ——
+     列数超过容器宽度时最右边几列会被压成一条，而这不报错。
+     行业改放名称下面的小字：它是"这只票是干什么的"，属于名称的注解，
+     本来就不该单独占一列。 */
+  const EXTRA = {
+    gainers:   ['成交额', x => yiv(x.amount)],
+    losers:    ['成交额', x => yiv(x.amount)],
+    turnover:  ['换手',   x => pctn(x.turnover)],
+    amount:    ['成交额', x => yiv(x.amount)],
+    amplitude: ['振幅',   x => pctn(x.amplitude)],
+  };
   return `<div class="pgrid c2">${Object.keys(rs).map(k => {
-    const r = rs[k];
+    const r = rs[k], ex = EXTRA[k] || ['成交额', x => yiv(x.amount)];
     return `<div class="lvsec"><h3>${esc(r.title)}
       ${r.note ? `<span class="lvwhy">${esc(r.note)}</span>` : ''}</h3>
-      <div class="pw"><table class="pkt">
-        <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
-          <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
-          <th class="rt">成交额</th><th class="tx">行业</th></tr>
+      <table class="pkt rk">
+        <tr><th class="tx" style="width:18px"></th>
+          <th class="tx">名称 <span class="lvwhy">/ 行业</span></th>
+          <th class="rt">现价</th><th class="rt">涨跌</th>
+          <th class="rt">${esc(ex[0])}</th></tr>
         ${(r.rows || []).map(x => `<tr>
           <td class="tx">${starHtml(x.code, false)}</td>
-          <td class="tx"><a href="${stockHref(x.code)}"
-            style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0, 6))}</a></td>
-          <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+          <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit"
+              title="${esc(x.code)}">${esc(x.name || x.code)}</a>
             ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
-            ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
+            ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}
+            <div class="lvwhy" style="white-space:nowrap;overflow:hidden;
+              text-overflow:ellipsis">${esc(x.code.slice(0, 6))}　${esc(x.industry || '')}</div></td>
           <td class="rt">${fmtN(x.close)}</td>
           <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
-          <td class="rt">${pctn(x.turnover)}</td>
-          <td class="rt">${yiv(x.amount)}</td>
-          <td class="tx lvwhy">${esc(x.industry || '')}</td>
+          <td class="rt">${ex[1](x)}</td>
         </tr>`).join('')}
-      </table></div></div>`;
+      </table></div>`;
   }).join('')}</div>`;
 }
 </script>

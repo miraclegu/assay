@@ -111,7 +111,6 @@ const NAV = [
   ['/compare.html',  '⚖ 对比',     '2~6 只叠加后复权涨幅曲线', 'compare'],
   ['/#/live',        '💰 实盘',     '实盘账户：录成交 / 出买卖清单 / 版本留痕', 'live'],
   ['/#/sync',        '🔄 数据同步', '数据新鲜度 / 手动同步 / 财务导入', 'sync'],
-  ['/#/query',       '🔍 查数据',   '只读 SQL：面板 / 行情 / 财务', 'query'],
   ['/#/docs',        '📖 数据字典', '接口与口径的实测定案', 'docs'],
 ];
 function navHtml(cur) {
@@ -119,6 +118,30 @@ function navHtml(cur) {
     `<a class="btn nav${key === cur ? ' on' : ''}" href="${href}"
        title="${esc(tip)}">${t}</a>`).join('');
 }
+/* 从站内别处跳过来时给一个「‹ 返回」。
+   ★ 判据用 `document.referrer` 且**同源** —— 直接输网址/新标签页打开时
+     没有 referrer，那时不显示：给一个点了没反应的返回按钮比不给更糟。
+   ★ 用 history.back() 而不是跳 referrer：back 能保留原页面的滚动位置与
+     状态（实盘页可能正开着浮层）。 */
+function backLink() {
+  /* 🔴 `history.length > 1` 这条不能少。用 target="_blank" 从实盘页打开时
+     **有 referrer 但没有可回的历史**（新标签的 history.length === 1）——
+     只看 referrer 的话按钮会显示出来，点了却什么都不发生。
+     这正是"给一个点了没反应的返回按钮比不给更糟"。 */
+  if (history.length <= 1) return '';
+  try {
+    const r = document.referrer;
+    if (!r || new URL(r).origin !== location.origin) return '';
+    if (new URL(r).pathname === location.pathname
+        && new URL(r).search === location.search) return '';   /* 自己跳自己 */
+  } catch (e) { return ''; }
+  return '<button class="btn" id="goback" title="回到刚才那一页">‹ 返回</button>';
+}
+function wireBack() {
+  const b = $('#goback');
+  if (b) b.onclick = () => history.back();
+}
+
 /* 每个独立页面的骨架头。★ 页面标题也在这里出，浏览器标签页才分得清。
    `extra` 放页面自己的控件（回测归档那页的返回/过滤/全部展开）——
    它们只在那一页有意义，但必须和导航在同一条栏里，否则顶栏会变两行。 */
@@ -127,7 +150,9 @@ function pageHead(cur, title, extra) {
   const el = $('#top');
   if (!el) return;
   el.innerHTML = `<h1><a href="/" style="color:inherit;text-decoration:none"
-      ><b>assay</b></a> ${esc(title)}</h1>${extra || ''}<div class="sp"></div>${navHtml(cur)}`;
+      ><b>assay</b></a> ${esc(title)}</h1>${backLink()}${extra || ''}
+    <div class="sp"></div>${navHtml(cur)}`;
+  wireBack();
 }
 
 /* ---- 个股搜索框 ------------------------------------------------------
