@@ -671,6 +671,76 @@ def cash(aid, asof=None):
 
 # ============================ 权益与收益 ============================
 
+def _last_px(feed, codes, day):
+    """{code: (最新收盘, 那天的日期)}，按 <= day 取最近一条。
+    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。"""
+    if not codes:
+        return {}
+    q = "','".join(codes)
+    rows = feed.con.execute("""
+        SELECT code, close_bfq, date FROM (
+          SELECT jq_code AS code, close_bfq, date,
+                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
+          FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+          WHERE jq_code IN ('%s') AND date <= DATE '%s'
+            AND date > DATE '%s' - INTERVAL 400 DAY
+        ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def positions_valued(aid, datalake=None):
+    """持仓 + 逐只估值 + 汇总。**页面主视图用的就是它。**
+
+    ★ 价格不再取自"今天的信号" —— 信号只覆盖它当天关心的票，
+      不在信号里的持仓就没有价格（原页面那一版正是这样，浮盈显示 —）。
+      这里按最新数据日独立取价，覆盖全部持仓。
+
+    浮盈只算【价差】，不含已收分红 —— 与引擎 trades 的 ret 口径一致
+    （broker 里 entry_price 在除权时不缩，就是为了让 pnl 只反映价差）。
+    """
+    book = fifo_lots(fills(aid))
+    money = cash(aid)
+    out = {'items': [], 'cash': round(money, 2), 'market_value': 0.0,
+            'pnl': 0.0, 'cost': 0.0, 'equity': round(money, 2), 'asof': None}
+    if not book:
+        return out
+    feed = PanelFeed('2026-01-01', datetime.date.today().isoformat(),
+                     root=datalake)
+    day = feed.trading_days[-1]
+    out['asof'] = day.isoformat()
+    px = _last_px(feed, list(book), day)
+    nm = _names(feed, list(book), day)
+    mv = cst = 0.0
+    for c, lots in sorted(book.items()):
+        sh = sum(l['shares'] for l in lots)
+        avg = sum(l['shares'] * l['price'] for l in lots) / sh
+        p, pd_ = px.get(c, (None, None))
+        v = (sh * p) if p else None
+        pnl = (v - sh * avg) if v is not None else None
+        out['items'].append({
+            'code': c, 'name': nm.get(c, ''), 'shares': sh,
+            'cost': round(avg, 4), 'price': (round(p, 3) if p else None),
+            'px_date': (pd_.isoformat() if pd_ else None),
+            'stale': bool(pd_ and pd_ != day),          # 停牌：价格不是当日的
+            'value': (round(v, 2) if v is not None else None),
+            'pnl': (round(pnl, 2) if pnl is not None else None),
+            'pnl_pct': (round(p / avg - 1, 6) if p and avg else None),
+            'entry': min(l['date'] for l in lots).isoformat(),
+        })
+        cst += sh * avg
+        if v is not None:
+            mv += v
+    for it in out['items']:
+        it['weight'] = (round(it['value'] / (mv + money), 6)
+                        if it['value'] is not None and (mv + money) else None)
+    out['market_value'] = round(mv, 2)
+    out['cost'] = round(cst, 2)
+    out['pnl'] = round(mv - cst, 2)
+    out['pnl_pct'] = round(mv / cst - 1, 6) if cst else None
+    out['equity'] = round(mv + money, 2)
+    return out
+
+
 def equity_curve(aid, datalake=None):
     """逐日权益曲线 + 收益统计。
 
@@ -964,6 +1034,38 @@ def _replay(eng, feed, rows, init_cash, days, flows=()):
         _run_tasks(eng, feed, d, {'d'})
 
 
+UPCOMING_DAYS = 15          # 日历条显示几个交易日（约三周）
+LOOKAHEAD_DAYS = 70         # ★ 找"下次调仓"要看得更远：月频策略（红利是
+                            #   run_monthly monthday=1）的下一次可能在 20+
+                            #   个交易日后，只看 15 天会返回"没有下次调仓"
+                            #   —— 那比不显示更糟，看着像策略不调仓了。
+
+
+def upcoming_rebalance(eng, feed, from_day, days, n=LOOKAHEAD_DAYS):
+    """未来 n 个交易日里哪几天是调仓日。
+
+    ★ 这件事【不需要数据】—— 调仓日由日历序号决定（run_monthly 的"月内第 k
+      个交易日"、run_weekly 的"周内第 k 个交易日"），而日历已经有到 2030。
+      所以可以提前很久告诉你"哪天要调仓"，只是**清单**得等 T-1 收盘。
+
+    为什么要提前提示：调仓日当天早上才打开看板就已经晚了 —— 09:30 开盘调仓，
+    而信号是前一晚算的。提前几天知道日期才好安排。
+
+    返回 [{date, wday, is_rebal}]，只含 from_day 之后的交易日。
+    """
+    fut = [d for d in days if d > from_day][:n]
+    out = []
+    for d in fut:
+        due = False
+        for t, freq, func, wd, md, ev, off in eng._tasks:
+            if freq in ('w', 'm') and eng._due(0, d, freq, wd, md, ev, off):
+                due = True
+                break
+        out.append({'date': d.isoformat(), 'wday': d.isoweekday(),
+                    'is_rebal': due})
+    return out
+
+
 def _twopass(codes, px, money):
     """先按 money/n 预分配，买不进的不占份额，剩余再平分给买得进的。
 
@@ -1036,6 +1138,9 @@ def build_signal(aid, datalake=None):
         # --- 3) 调仓检查：下一个交易日是不是调仓日 ---
         rebal_orders = _run_tasks(eng, feed, t, {'w', 'm'}, data_day=t1)
         is_rebal = bool(rebal_orders)
+        # --- 4) 未来调仓日：纯日历，可以提前很久算出来 ---
+        cal_days = calendar_days()
+        upcoming = upcoming_rebalance(eng, feed, t, cal_days)
         held_after = dict(eng.pf.positions)        # RecordingBroker 不成交，等于真实持仓
     finally:
         api._unbind()
@@ -1082,9 +1187,22 @@ def build_signal(aid, datalake=None):
         warn.append('最新数据日是 %s，距今 %d 天 —— datalake 可能没刷新'
                     % (t1, (datetime.date.today() - t1).days))
 
+    nxt_rb = next((x for x in upcoming if x['is_rebal']), None)
+    if is_rebal:
+        nxt_rb = {'date': t.isoformat(), 'wday': t.isoweekday(), 'is_rebal': True}
+    days_until = None
+    if nxt_rb:
+        days_until = 0 if is_rebal else \
+            (1 + next(i for i, x in enumerate(upcoming) if x['is_rebal']))
+
     fp = feed.fingerprint() if hasattr(feed, 'fingerprint') else {}
     return {
         'warnings': warn, 'calendar_source': cm.get('source'),
+        # ★ 调仓日是【纯日历】的，所以提前算得出来；清单不是（要 T-1 数据）。
+        #   页面上要把这两件事分清楚，别让人以为提前几天就能看到买什么。
+        'upcoming': upcoming[:UPCOMING_DAYS],
+        'next_rebalance': (nxt_rb or {}).get('date'),
+        'days_until_rebalance': days_until,
         'account': aid, 'for_date': t.isoformat(), 'data_asof': t1.isoformat(),
         'built_at': _now(), 'code_sha256': full_sha, 'code_sha': full_sha[:8],
         'params': acct.get('params') or {},

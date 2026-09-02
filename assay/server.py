@@ -998,12 +998,18 @@ def api_live_accounts(_q):
                         n_fills=len(m.fills(a['id'])),
                         n_versions=len(m.versions(a['id']))))
     cal = m.calendar_meta()
+    # ★ 「权不权威」由服务端判 —— 名单只存在 live.AUTHORITATIVE_CAL 一处。
+    #   前端原来硬编码 `source !== 'jq.get_all_trade_days'`，于是把
+    #   tdx.raw_holidays（同级可信、每次生成都跑对数）误报成不权威，
+    #   每次打开实盘页都弹一条假告警。假告警看多了就不看告警了。
+    cal = dict(cal, authoritative=(cal.get('source') in m.AUTHORITATIVE_CAL))
     return {'accounts': out, 'readonly': not ALLOW_LIVE,
             # ★ 两个开关是独立的：--live 管账户/成交/信号，--allow-backtest 管
             #   起子进程跑回测。前端要分别置灰，否则按钮点了才知道被拒。
             'can_backtest': bool(ALLOW_BACKTEST and ALLOW_LIVE),
             'next_id': m.new_account_id(),
             'calendar': {'source': cal.get('source'), 'max': cal.get('max'),
+                         'authoritative': cal.get('authoritative'),
                          'authoritative_until': cal.get('authoritative_until'),
                          'warn': cal.get('warn'), 'error': cal.get('error')}}
 
@@ -1011,17 +1017,58 @@ def api_live_accounts(_q):
 def api_live_account(q):
     m = _live()
     aid = (q.get('id') or '').strip()
-    return _live_err(lambda: {
-        'account': m.get_account(aid),
-        'positions': m.positions(aid),
-        'cash': round(m.cash(aid), 2),
-        'versions': m.versions(aid),
-        'fills': list(reversed(m.fills(aid))),
-        'cashflows': list(reversed(m.cashflows(aid))),
-        'fee_total': round(sum(float(f.get('fee') or 0) for f in m.fills(aid)), 2),
-        'fee_estimated_n': sum(1 for f in m.fills(aid) if f.get('fee_estimated')),
-        'signal': m.latest_signal(aid),
-    })
+    # ★ 主视图【不再整包带流水】—— 成交多了之后这个响应会越来越大，
+    #   而主视图根本不显示流水（它有独立页面 + 分页）。
+    def _go():
+        rows = m.fills(aid)
+        return {
+            'account': m.get_account(aid),
+            'pos': m.positions_valued(aid),
+            'cash': round(m.cash(aid), 2),
+            'versions': m.versions(aid),
+            'cashflows': list(reversed(m.cashflows(aid))),
+            'n_fills': len(rows),
+            'fee_total': round(sum(float(f.get('fee') or 0) for f in rows), 2),
+            'fee_estimated_n': sum(1 for f in rows if f.get('fee_estimated')),
+            'signal': m.latest_signal(aid),
+        }
+    return _live_err(_go)
+
+
+def api_live_fills(q):
+    """GET /api/live/fills?id=&offset=&limit= —— 成交流水，倒序分页。
+
+    ★ 分页在服务端做。成交攒到几千笔时整包发过去，前端渲染几千个 DOM
+      会明显卡 —— 归档的持仓表当初就是这么踩过的（见 api_holdings）。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+
+    def _go():
+        rows = list(reversed(m.fills(aid)))
+        total = len(rows)
+        try:
+            off = max(0, int(q.get('offset') or 0))
+        except Exception:                                   # noqa: BLE001
+            off = 0
+        try:
+            lim = int(q.get('limit') or 50)
+        except Exception:                                   # noqa: BLE001
+            lim = 50
+        lim = max(1, min(500, lim))
+        if off >= total:
+            off = max(0, (total - 1) // lim * lim)          # 越界收敛到最后一页
+        # 已被冲正的原记录：前端要划掉它，服务端顺手标出来，
+        # 免得前端为了判断这个把全量流水都拉一遍
+        reved = {f.get('reverse_of') for f in m.fills(aid) if f.get('reverse_of')}
+        page = []
+        for f in rows[off:off + lim]:
+            page.append(dict(f, _dead=((f.get('uid') or f['ts']) in reved)))
+        return {'total': total, 'offset': off, 'limit': lim, 'rows': page,
+                'fee_total': round(sum(float(f.get('fee') or 0)
+                                       for f in rows), 2),
+                'fee_estimated_n': sum(1 for f in rows if f.get('fee_estimated'))}
+    return _live_err(_go)
 
 
 def api_live_equity(q):
@@ -1298,6 +1345,9 @@ def api_sync(_q):
         r = subprocess.run(['python3', script, '--json'], cwd=dl,
                            capture_output=True, text=True, timeout=120)
         out['status'] = json.loads(r.stdout) if r.returncode == 0 else None
+        if out['status'] and out['status'].get('calendar'):
+            c = out['status']['calendar']
+            c['authoritative'] = c.get('source') in _live().AUTHORITATIVE_CAL
         if out['status'] is None:
             out['error'] = (r.stderr or r.stdout or '')[-400:]
     except Exception as e:                                  # noqa: BLE001
@@ -1378,6 +1428,7 @@ ROUTES = {
     '/api/live/code': api_live_code,
     '/api/live/strategy': api_live_strategy,
     '/api/live/equity': api_live_equity,
+    '/api/live/fills': api_live_fills,
     '/api/sync': api_sync,
     '/api/sync/log': api_sync_log,
 }

@@ -1681,6 +1681,36 @@ def t_live_core():
                 '非调仓日"持有不动"应为全部持仓 1 只，实得 %d' % len(s_nr['hold'])
             assert not s_nr['buy'], '非调仓日不该有买入'
 
+        # ---- 3b2) 调仓日要能【提前】算出来 ----
+        #     ★ 调仓日由日历序号决定（月内/周内第 k 个交易日），而日历有到
+        #       2030 —— 所以能提前很久算。清单不行（要 T-1 收盘）。
+        #       提前提示的理由：调仓日当天早上才打开就已经晚了。
+        s_up = lv.build_signal('t_hl')
+        assert s_up['upcoming'] and len(s_up['upcoming']) == lv.UPCOMING_DAYS, \
+            '日历条应有 %d 天，实得 %s' % (lv.UPCOMING_DAYS,
+                                        len(s_up['upcoming'] or []))
+        assert s_up['next_rebalance'], \
+            ('月频策略必须也能找到下次调仓 —— 只往前看 %d 天会返回 None，'
+             '看着像策略不调仓了（红利的下一次可能在 20+ 个交易日后）'
+             % lv.UPCOMING_DAYS)
+        assert s_up['days_until_rebalance'] is not None
+        if s_up['is_rebalance_day']:
+            assert s_up['days_until_rebalance'] == 0
+            assert s_up['next_rebalance'] == s_up['for_date']
+        else:
+            assert s_up['days_until_rebalance'] >= 1
+            assert s_up['next_rebalance'] > s_up['for_date']
+        # 周频账户：调仓日必须按【周内序号】等间隔出现
+        s_wk = lv.build_signal('t_hit')       # weekday=2
+        rb = [x['date'] for x in (s_wk['upcoming'] or []) if x['is_rebal']]
+        assert len(rb) >= 2, 'weekday=2 的账户在 %d 个交易日里应有 >=2 个调仓日' \
+            % lv.UPCOMING_DAYS
+        # 相邻两个调仓日之间应为 5 个交易日（自然周），假期周会短
+        cal = [d.isoformat() for d in lv.calendar_days()]
+        gaps = [cal.index(rb[i + 1]) - cal.index(rb[i]) for i in range(len(rb) - 1)]
+        assert all(1 <= g <= 8 for g in gaps), \
+            '周频调仓日间隔异常 %s（run_weekly 锚自然周，假期会让间隔变短）' % gaps
+
         # ---- 3c) 现金账务：初始资金 + 流水 − 买 + 卖 ----
         #     ★ 入金必须是【事件】。改 init_cash 会把它追溯到开户日，
         #       于是过去每一天的权益都变了，而且没有任何痕迹说明它变过。
@@ -1895,9 +1925,12 @@ def t_live_core():
 def t_live_ui():
     """★ JS 语法过 ≠ 能渲染。运行时错误在终端里看不到，页面只是空白。
 
-    跑一遍真流程：建账户 -> 绑版本 -> 出信号 -> 待办表 -> 批量录入解析 ->
-    版本历史。并断言【告警确实显示出来了】—— 日历不是权威来源这件事
-    如果只存在于 JSON 里没渲染到页面上，等于没有。
+    这条用例同时钉住【信息架构】：天天要看的留在页面上、偶尔用的进浮层。
+      页面   今日待办 + 当前持仓（含盈亏汇总）
+      浮层   ⚙设置 / ✎记一笔（成交+现金两个 tab）/ 策略（含版本历史）
+      独立页 成交流水 —— 会越来越长，服务端分页
+    并核【策略只有一个入口】—— 原来排头一个标签、下面又一块"策略版本"，
+    是同一件事两处入口。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -1930,38 +1963,44 @@ def t_live_ui():
                 br = p.chromium.launch()
             except Exception as e:                          # noqa: BLE001
                 return '跳过（浏览器不可用: %s）' % type(e).__name__
-            pg = br.new_page(viewport={'width': 1500, 'height': 900})
+            ctx = br.new_context(viewport={'width': 1500, 'height': 950})
+            pg = ctx.new_page()
             errs = []
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console',
                   lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+            pg.on('dialog', lambda d: d.accept())
             base = 'http://127.0.0.1:%d/' % port
             pg.goto(base + '#/live', wait_until='networkidle')
             pg.wait_for_timeout(500)
             assert '还没有账户' in pg.content(), '空态没显示'
-            # 日历告警必须渲染到页面上，不能只躺在 JSON 里
-            assert pg.locator('.lvwarn').count() >= 1, '日历非权威来源的告警没渲染'
+            # ★ tdx.raw_holidays 是权威来源，不该弹"日历不权威"告警。
+            #   前端曾硬编码 `source !== 'jq...'`，每次打开都弹一条假告警 ——
+            #   假告警看多了就不看告警了。
+            # ★ 只看【渲染出来的告警块】，不看 pg.content() —— 后者包含
+            #   内联 <script> 的源码，而那段源码里正有 '交易日历不是权威来源'
+            #   这个模板字符串。本会话第六次栽在"断言匹配到自己写的文本"上。
+            _warn = ' | '.join(pg.locator('.lvwarn').all_inner_texts())
+            assert '不是权威来源' not in _warn, \
+                '把 tdx.raw_holidays 误报成不权威（判据应由服务端给）：%s' % _warn
 
-            # 建账户
-            # id 自动分配 —— 用户只填名称
+            # 建账户：id 自动，只填名称
             assert pg.locator('#na').count() == 0, '新建表单不该再要用户填 id'
             pg.fill('#nn', 'UI 测试')
-            pg.fill('#nc', '1000000')
+            pg.fill('#nc', '400000')
             pg.click('#nb')
-            pg.wait_for_timeout(600)
+            pg.wait_for_timeout(700)
             assert pg.locator('.ditem.on').count() == 1, '新账户没被选中'
 
-            # 绑版本 -> 出信号
-            # ★ weekday 按【下一个交易日在本周的序号】动态算，保证它一定是
-            #   调仓日 —— 否则没有买入表，用例会随日期时好时坏（实测：
-            #   数据同步推进到 09-01 后，下一个交易日 09-02 不是红利的
-            #   月频调仓日，硬等 table.lvbuy 直接超时）。
-            # ★ 基准日要从【数据】取，不是从 today 取 —— 引擎用的是
-            #   feed.trading_days[-1]（最新有行情的一天）。实测踩到：
-            #   今天 09-02 而数据到 09-01，按 today 算出的 weekday 是给
-            #   09-03 的，于是 09-02 不是调仓日、买入表永远等不出来。
-            from assay.feed import PanelFeed
+            # ---- 策略是【唯一入口】：未绑定也要能打开浮层去绑 ----
+            assert pg.locator('#lvstrat').count() == 1, '缺策略入口'
+            body = pg.locator('#lvbody').inner_text()
+            assert '策略版本' not in body, \
+                '主视图不该再有"策略版本"区块 —— 与排头的策略入口重合'
+            pg.click('#lvstrat')
+            pg.wait_for_selector('.stbox', timeout=15000)
             days = lv.calendar_days()
+            from assay.feed import PanelFeed
             t1 = PanelFeed('2026-01-01', datetime.date.today().isoformat()
                            ).trading_days[-1]
             nxt = min(d for d in days if d > t1)
@@ -1970,148 +2009,125 @@ def t_live_ui():
             pg.fill('#bp', 'strategies/小市值/froec_traded.py')
             pg.fill('#bj', '{"stop_loss":0.35,"stop_intraday":1,"weekday":%d}' % wd)
             pg.click('#bb')
-            pg.wait_for_timeout(800)
+            pg.wait_for_timeout(1500)
+            assert pg.locator('.stbox').count() == 0, '绑定后浮层该关掉'
+
+            # ---- 主视图只有【待办 + 持仓】两块 ----
             pg.click('#lvtick')
             pg.wait_for_selector('table.lvbuy', timeout=90000)
+            secs = pg.locator('#lvbody .lvsec h3').all_inner_texts()
+            assert len(secs) == 2, '主视图应只剩两块，实得 %s' % [x[:14] for x in secs]
+            assert '当前持仓' in secs[-1], '第二块该是当前持仓'
             nbuy = pg.locator('table.lvbuy tr').count() - 1
-            assert nbuy == 10, '待办买入应 10 行（froec 满仓 10 只），实得 %d' % nbuy
-            assert '· 调仓日' in pg.content(), \
-                'weekday=%d 应让 %s 成为调仓日，页面却没标出' % (wd, nxt)
+            assert nbuy == 10, '待办买入应 10 行，实得 %d' % nbuy
+            assert '· 调仓日' in pg.locator('#lvbody').inner_text(), \
+                '没标出是不是调仓日'
 
-            # 批量粘贴解析（走前端 parseBulk -> 后端校验）
-            first = pg.locator('table.lvbuy tr').nth(1).locator('td').first.inner_text()
-            code = first.split()[0]
-            pg.fill('#ft', '2026-09-01 %s 买 100 10.00' % code)
-            pg.click('#fbulk')
-            pg.wait_for_timeout(900)
-            assert '100' in pg.locator('.lvfill').inner_text(), '成交流水里没出现刚录的那笔'
-
-            # 版本历史可点开
-            assert pg.locator('a.lvver').count() >= 1, '版本历史没渲染'
-
-            # ---- 账户名与策略解耦：改名 / 改初始资金 ----
-            # ★ 原来只有"新建"没有"编辑"，等于把「一段时间用策略 A、之后换 B」
-            #   这种正常演化逼成「新建一个账户」，流水与版本历史就断了。
-            def _cash():
-                t = pg.locator('.lvtag').first.inner_text()
-                return float(t.replace('现金', '').replace(',', '').strip())
-
-            # ★ 断言【差额】不是绝对值 —— 前面已经录过一笔买入，现金里扣掉了
-            #   那笔成交额。写死 888,888 会假失败（实测 887,888）。
-            pg.fill('#ename', '改过的名字')
-            pg.fill('#ecash', '888888')
-            pg.click('#esave')
-            pg.wait_for_timeout(900)
-            assert '改过的名字' in pg.locator('.lvhead h2').first.inner_text(), '改名没生效'
-            c1 = _cash()
-            assert 880000 < c1 < 888888, \
-                '改初始资金没生效或算错：现金 %.2f（应为 888888 减去已录成交额）' % c1
-
-            # ---- 现金流水（入金）----
-            # init_cash 是【开户那一刻】的余额；后来的入金必须是事件，
-            # 改 init_cash 会把它追溯到开户日、且不留痕迹。
-            pg.fill('#cfa', '20000')
-            pg.click('#cfb')
-            pg.wait_for_timeout(900)
-            c2 = _cash()
-            assert abs((c2 - c1) - 20000) < 0.01, \
-                '入金 20000 后现金应 +20000，实得 %.2f -> %.2f' % (c1, c2)
-
-            # ---- 版本表参数列不能溢出容器 ----
-            bx = pg.locator('table.lvvt').bounding_box()
-            cw = pg.locator('table.lvvt').evaluate(
-                "e=>e.closest('.lvsec').getBoundingClientRect().width")
-            assert bx['width'] <= cw + 1, \
-                '版本表 %.0f 超出容器 %.0f —— 参数列又顶出去了' % (bx['width'], cw)
-            assert pg.locator('.lvkv').count() >= 3, \
-                '参数应拆成 chip 显示，实得 %d 个' % pg.locator('.lvkv').count()
-
-            # ---- 策略详情：源码 + 参数表 + 关联的历史回测 ----
-            pg.click('#lvstrat')
-            pg.wait_for_selector('.stbox', timeout=20000)
-            pg.wait_for_timeout(400)
-            box = pg.locator('.stbox').inner_text()
-            assert len(pg.locator('.stcode').inner_text()) > 1000, '源码快照没渲染'
-            assert pg.locator('.stbox table.lvt tr').count() > 1, '参数表没渲染'
-            # 关联键是【主文件自身哈希】，不是账户的打包哈希。两者口径不同，
-            # 用错会永远匹配不上 —— 所以这里核"要么列出回测，要么明说没有"。
-            assert ('这个版本从没回测过' in box) or ('同参数' in box) or ('其它参数' in box), \
-                '既没列出关联回测、也没说明没有：%s' % box[:200]
-            pg.click('#stclose')
-            pg.wait_for_timeout(300)
-            assert pg.locator('.stbox').count() == 0, '策略详情关不掉'
-
-            # ---- 冲正：追加反向记录，原记录保留并划掉 ----
-            pg.on('dialog', lambda d: d.accept())
-            pg.locator('a.lvrv').first.click()
-            pg.wait_for_timeout(1200)
-            nrev = pg.locator('.lvfill tr.lvrev').count()
-            assert nrev >= 2, '冲正后原记录与冲正记录都该划掉，实得 %d 行' % nrev
-            assert pg.locator('a.lvrv').count() == 0, '已冲正的记录不该再有冲正入口'
-
-            # ---- 费用：三个录入路径都要能填，且"留空"≠"0" ----
-            assert pg.locator('#ff').count() == 1, '逐笔表单缺费用输入框'
+            # ---- 记一笔：一个入口、两个 tab ----
+            pg.click('#lvrec')
+            pg.wait_for_selector('#rfill', timeout=10000)
+            tabs = pg.locator('.rtab').all_inner_texts()
+            assert tabs == ['成交', '现金'], '记一笔应有成交/现金两个 tab，实得 %s' % tabs
+            assert pg.locator('#ff').count() == 1, '缺费用输入框'
             assert pg.input_value('#fd'), \
-                '日期框不该是空的 —— 空了会让第二笔起静默失败（实测踩到）'
+                '日期框不该是空的 —— 空了会让第二笔起静默失败'
 
-            def _c():
-                t = pg.locator('.lvtag').first.inner_text()
-                return float(t.replace('现金', '').replace(',', '').strip())
+            def _cash():
+                for t in pg.locator('.lvtag').all_inner_texts():
+                    if t.startswith('现金'):
+                        return float(t.replace('现金', '').replace(',', '').strip())
+                raise AssertionError('头部没有现金标签')
 
+            # 费用三态（留空=估算 / 填值 / 填 0），断言【差额】不是绝对值
             for code, q, px, fv, amt, want in (
                     ('601857.XSHG', '1000', '11.42', '', 11420.0, None),
                     ('601088.XSHG', '100', '48.78', '3.21', 4878.0, 3.21),
                     ('600012.XSHG', '200', '16.69', '0', 3338.0, 0.0)):
-                b4 = _c()
+                b4 = _cash()
                 pg.fill('#fc', code)
                 pg.fill('#fq', q)
                 pg.fill('#fp', px)
                 pg.fill('#ff', fv)
                 pg.click('#fb')
-                pg.wait_for_timeout(1000)
-                msg = (pg.locator('#fmsg').inner_text()
-                       if pg.locator('#fmsg').count() else '')
-                assert not msg, '录入 %s 失败：%s' % (code, msg)
-                got = round(b4 - _c() - amt, 2)
+                pg.wait_for_timeout(1200)
+                got = round(b4 - _cash() - amt, 2)
                 if want is None:
                     assert got > 0, '费用留空应估算出正数，实得 %.2f' % got
                 else:
                     assert abs(got - want) < 0.011, \
                         '费用应为 %.2f，实得 %.2f' % (want, got)
-            # 流水标题要报费用合计与估算笔数
-            h = pg.locator('.lvsec.wide h3').last.inner_text()
-            assert '费用合计' in h and '估算' in h, '流水标题没报费用合计/估算笔数：%s' % h
-            assert pg.locator('.lvfill').inner_text().count('估') >= 1, \
-                '估算的那笔没标「估」'
+                pg.click('#lvrec')
+                pg.wait_for_selector('#rfill', timeout=8000)
+
+            # 现金 tab：入金
+            pg.click('.rtab[data-t="cash"]')
+            pg.wait_for_timeout(200)
+            c1 = _cash()
+            pg.fill('#cfa', '20000')
+            pg.click('#cfb')
+            pg.wait_for_timeout(1200)
+            assert abs((_cash() - c1) - 20000) < 0.01, \
+                '入金 20000 后现金应 +20000：%.2f -> %.2f' % (c1, _cash())
+
+            # ---- 持仓表：盈亏汇总 + 逐只估值 ----
+            # ★ 限定 .lvpos —— 待办里的买入/卖出表也是 .lvt，不限定会选串
+            #   （实测：持仓 3 只被数成 14 行）
+            th = pg.locator('#lvbody table.lvpos th').all_inner_texts()
+            for k in ('成本', '现价', '市值', '浮盈', '仓位'):
+                assert k in th, '持仓表缺「%s」列：%s' % (k, th)
+            head = ' '.join(pg.locator('#lvbody .lvsec h3').last.inner_text().split())
+            for k in ('市值', '成本', '浮盈'):
+                assert k in head, '持仓汇总缺「%s」：%s' % (k, head)
+            # 价格必须来自独立取价，不是"信号里恰好有的那几只"
+            n_pos = pg.locator('#lvbody table.lvpos tr').count() - 1
+            assert n_pos == 3, '应有 3 只持仓，实得 %d' % n_pos
+            assert '—' not in pg.locator('#lvbody table.lvpos').inner_text(), \
+                '有持仓取不到现价 —— 估值应独立取价，不依赖当天信号'
+
+            # ---- 设置进浮层 ----
+            assert pg.locator('#ename').count() == 0, '设置不该常驻主视图'
+            pg.click('#lvset')
+            pg.wait_for_selector('#ename', timeout=8000)
+            pg.fill('#ename', '改过的名字')
+            pg.click('#esave')
+            pg.wait_for_timeout(1200)
+            assert '改过的名字' in pg.locator('.lvhead h2').first.inner_text(), '改名没生效'
+
+            # ---- 流水独立页 + 分页 + 冲正 ----
+            aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            pg.click('a[href*="/fills"]')
+            pg.wait_for_timeout(1200)
+            assert '成交流水' in pg.locator('.lvhead').inner_text(), '没跳到流水页'
+            assert '第 1/1 页' in pg.locator('#main').inner_text(), '分页控件没渲染'
+            assert pg.locator('#pprev').is_disabled(), '第一页的「上一页」应置灰'
+            n_before = len(lv.fills(aid))
+            pg.locator('a.lvrv').first.click()
+            pg.wait_for_timeout(1500)
+            assert len(lv.fills(aid)) == n_before + 1, '冲正应【追加】一条'
+            assert pg.locator('.lvrev').count() >= 2, '原记录与冲正记录都该划掉'
+
+            # 回账户
+            pg.click('a[href="#/live/%s"]' % aid)
+            pg.wait_for_timeout(1000)
+            assert pg.locator('#lvrec').count() == 1, '没回到账户页'
 
             # ---- 归档：从列表隐去，但数据必须还在 ----
-            # ★ 刻意没有「删除账户」—— 实盘流水与版本快照是决策证据。
-            aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            pg.click('#lvset')
+            pg.wait_for_selector('#earch', timeout=8000)
             pg.click('#earch')
-            pg.wait_for_timeout(900)
+            pg.wait_for_timeout(1200)
             assert pg.locator('.ditem').count() == 0, '归档后仍出现在默认列表里'
             pg.click('#lvall')
             pg.wait_for_timeout(700)
             assert pg.locator('.ditem.miss').count() == 1, '「显示已归档」没把它列出来'
-            assert lv.fills(aid), '归档不该动数据，流水却空了'
-            assert lv.versions(aid), '归档不该动数据，版本历史却空了'
-
-            # 卖出校验：超过持仓必须被拒（后端把关，不能只靠前端）
-            pg.fill('#ft', '2026-09-01 %s 卖 900 10.00' % code)
-            pg.click('#fbulk')
-            pg.wait_for_timeout(700)
-            # ★ 断言"被拒"这件事本身 + 理由里提到持仓，不去匹配具体措辞 ——
-            #   校验从「只看当前持仓」改成「重放整个账本」后措辞就变了，
-            #   而规则并没有变。断言绑死文案会在这种时候假失败。
-            _m = pg.locator('#fmsg').inner_text()
-            assert '录入 0 笔' in _m and '持仓' in _m, '超卖没被拒：%s' % _m
+            assert lv.fills(aid) and lv.versions(aid), '归档不该动数据'
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('建账户(id 自动)/绑版本(weekday=%d 使 %s 成调仓日)/出信号(买入 %d 行)/'
-                    '批量录入/超卖被拒/改名/改初始资金/入金/费用三态/版本表不溢出/'
-                    '策略详情(源码+参数+关联回测)/冲正/归档(数据仍在) 均正常，0 个 JS 错误'
-                    % (wd, nxt, nbuy))
+            return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
+                    '流水独立页分页；策略单一入口(未绑定也能开)；'
+                    '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
+                    '改名；冲正追加并划掉；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
         httpd.shutdown()
         lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow
@@ -2441,6 +2457,50 @@ def t_favicon():
     return ('favicon.svg %d bytes / %s / 曲线 %d 段（含回撤）/ '
             '兜底 data URI 有效 / 配色与 :root 一致'
             % (len(body), ct, n_pt // 2))
+
+
+@case('看板页面清单：每个路由都有实现', tag='fast')
+def t_page_inventory():
+    """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
+    A 函数到 B 函数之间」的方式删代码，**顺手把整个数据同步页
+    （showSync/pollSync）一起切掉了**，同时也切掉了 selftest 里夹在两个
+    web 用例之间的一条用例。
+
+    两个失败都不响亮：
+      · 页面：只有点进 #/sync 才会看到 "showSync is not defined"，
+        而 --fast 层不起浏览器，压根跑不到那儿
+      · 用例：总数从 42 变 41，而没有任何东西核过总数
+
+    所以这里核【路由与实现的对应关系】和【用例总数】——
+    删代码时至少有一处会立刻叫。
+    """
+    web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
+    js = html[html.index('<script>'):]
+
+    # route() 里出现的每个 showXxx()，都必须有对应的 function 定义
+    called = set(re.findall(r'\b(show[A-Z]\w*)\s*\(', js))
+    defined = set(re.findall(r'(?:async\s+)?function\s+(show[A-Z]\w*)\s*\(', js))
+    missing = sorted(called - defined)
+    assert not missing, \
+        ('这些页面函数被调用但没有定义 —— 页面会白屏且只在点进去时才报错：%s'
+         % missing)
+
+    # 每个 hash 路由都要有入口
+    for route, fn in (('#/live', 'showLive'), ('#/sync', 'showSync'),
+                      ('#/docs', 'showDocs'), ('#/picks', 'showPicks')):
+        assert route in js, '路由 %s 不见了' % route
+        assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
+    # 流水是独立页，单独核（它的路由带参数）
+    assert 'showFills' in defined and '/fills' in js, '成交流水独立页不见了'
+
+    # 用例总数 —— 删代码时把整条用例切掉过一次
+    n = len(CASES)
+    assert n >= 42, \
+        ('用例只剩 %d 条，少于已知的 42 —— 是不是删代码时把某条一起切掉了？'
+         '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
+    return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
+            % (len(defined), ' '.join(sorted(defined)), n))
 
 
 def main():
