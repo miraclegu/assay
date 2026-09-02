@@ -1373,7 +1373,8 @@ def api_live_fill(_q, body):
                 source=r.get('source') or 'manual', note=r.get('note') or '',
                 reverse_of=r.get('reverse_of'),
                 fee_estimated=bool(r.get('fee_estimated')),
-                price_from=r.get('price_from')))
+                price_from=r.get('price_from'),
+                force_price=bool(r.get('force_price') or b.get('force_price'))))
         except m.LiveError as e:
             errs.append('第 %d 行：%s' % (i + 1, e))
     return {'added': len(ok), 'errors': errs,

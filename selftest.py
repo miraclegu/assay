@@ -1639,7 +1639,7 @@ def t_live_core():
             lv.bind_version(aid, 'strategies/小市值/froec_traded.py',
                             params={'stop_loss': 0.35, 'stop_intraday': 1,
                                     'weekday': 2})
-            lv.add_fill(aid, '2026-08-20', '603506.XSHG', 'buy', 1000, cost)
+            lv.add_fill(aid, '2026-08-20', '603506.XSHG', 'buy', 1000, cost, force_price=True)
             sig = lv.build_signal(aid)
             seen[tag] = {s['code']: s['reason'] for s in sig['sell']}
         assert seen['hit'].get('603506.XSHG') == 'stop', \
@@ -1674,7 +1674,7 @@ def t_live_core():
         lv.bind_version('t_nr', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1,
                                 'weekday': 4})       # 周四调仓 -> 下一交易日多半不是
-        lv.add_fill('t_nr', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0)
+        lv.add_fill('t_nr', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0, force_price=True)
         s_nr = lv.build_signal('t_nr')
         if not s_nr['is_rebalance_day']:
             assert len(s_nr['hold']) == 1, \
@@ -1722,7 +1722,7 @@ def t_live_core():
         assert abs(lv.cash('t_cash') - 130000) < 1e-6, '出金没扣'
         lv.bind_version('t_cash', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
-        lv.add_fill('t_cash', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0, fee=5)
+        lv.add_fill('t_cash', '2026-08-20', '603506.XSHG', 'buy', 1000, 11.0, fee=5, force_price=True)
         assert abs(lv.cash('t_cash') - (130000 - 11000 - 5)) < 1e-6, \
             '买入没扣现金/费用：%.2f' % lv.cash('t_cash')
         # 金额一律正数，方向由 kind 决定 —— 负数要被拒（避免"负的出金"双重否定）
@@ -1747,14 +1747,14 @@ def t_live_core():
         lv.upsert_account('t_fee', name='fee', init_cash=100000)
         lv.bind_version('t_fee', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
-        r1 = lv.add_fill('t_fee', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42)
+        r1 = lv.add_fill('t_fee', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42, force_price=True)
         assert r1['fee_estimated'] is True, '不填费用应标 fee_estimated'
         assert r1['fee'] == lv.estimate_fee('buy', 1000, 11.42, '2026-08-20')
         r2 = lv.add_fill('t_fee', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78,
-                         fee=3.21)
+                         fee=3.21, force_price=True)
         assert r2['fee'] == 3.21 and not r2.get('fee_estimated')
         r3 = lv.add_fill('t_fee', '2026-08-22', '600012.XSHG', 'buy', 200, 16.69,
-                         fee=0)
+                         fee=0, force_price=True)
         assert r3['fee'] == 0 and not r3.get('fee_estimated'), \
             '明确填 0 不该被当成"没填"而去估算'
         exp = 100000 - (1000 * 11.42 + r1['fee']) - (100 * 48.78 + 3.21) \
@@ -1787,7 +1787,7 @@ def t_live_core():
             '印花税没按日期分段'
         try:
             lv.add_fill('t_fee', '2026-08-23', '601857.XSHG', 'sell', 100,
-                        11.0, fee=-1)
+                        11.0, fee=-1, force_price=True)
             raise AssertionError('非冲正记录的负费用应被拒')
         except lv.LiveError:
             pass
@@ -1921,7 +1921,7 @@ def t_live_core():
         assert early > 5.95, '早于第一档应走默认（偏保守），实得 %.2f' % early
         # add_fill 也按成交日取
         for d, want in (('2026-09-10', 5.95), ('2026-10-08', 3.97)):
-            r = lv.add_fill('t_rate', d, '603889.XSHG', 'buy', 11000, 6.010)
+            r = lv.add_fill('t_rate', d, '603889.XSHG', 'buy', 11000, 6.010, force_price=True)
             assert abs(r['fee'] - want) < 0.011, \
                 'add_fill 在 %s 应算 %.2f，实得 %.2f' % (d, want, r['fee'])
         # 生效日必须递增（不能插到中间、不能同日）
@@ -2028,7 +2028,7 @@ def t_live_core():
         lv.upsert_account('t_gal', name='银河', init_cash=500000)
         lv.add_fee_rate('t_gal', '2026-09-01', GALAXY, note='银河四张账单')
         for nm, code, amt, _c, _g, tot in BILLS:
-            r = lv.add_fill('t_gal', '2026-09-01', code, 'buy', 100, amt / 100.0)
+            r = lv.add_fill('t_gal', '2026-09-01', code, 'buy', 100, amt / 100.0, force_price=True)
             assert abs(r['fee'] - tot) <= 0.011, \
                 '%s 录入时估的费用应 %.2f，实得 %.2f' % (nm, tot, r['fee'])
         # 🔴 反推费率不能用【触及最低】那笔账单：南都物业反推万1.34 vs 真值万0.86
@@ -2094,7 +2094,7 @@ def t_live_core():
         #   成交日从历史里取档，只写 acct['fee'] 不会生效（实测：算成 20.77
         #   的默认费率）。老数据要先 migrate_fee 落成第一档。
         lv.add_fee_rate('t_fee', '2026-09-01', fm, note='真实账单反推')
-        rf = lv.add_fill('t_fee', '2026-09-02', '603889.XSHG', 'buy', 11000, 6.010)
+        rf = lv.add_fill('t_fee', '2026-09-02', '603889.XSHG', 'buy', 11000, 6.010, force_price=True)
         assert abs(rf['fee'] - 5.95) < 0.011, \
             'add_fill 没用账户费率：%.2f' % rf['fee']
         assert rf['fee_estimated'] is True, '自动算的费用要标 fee_estimated'
@@ -2149,8 +2149,8 @@ def t_live_core():
         # 落盘的是【归一化后】的代码 —— 否则同一只票会有两种身份，
         # FIFO 批次分成两堆、持仓看起来是两行
         lv.upsert_account('t_norm', name='norm', init_cash=500000)
-        r1 = lv.add_fill('t_norm', '2026-09-01', '301126.SZ', 'buy', 100, 10.42)
-        r2 = lv.add_fill('t_norm', '2026-09-01', 'sz301126', 'buy', 100, 10.42)
+        r1 = lv.add_fill('t_norm', '2026-09-01', '301126.SZ', 'buy', 100, 10.42, force_price=True)
+        r2 = lv.add_fill('t_norm', '2026-09-01', 'sz301126', 'buy', 100, 10.42, force_price=True)
         assert r1['code'] == r2['code'] == '301126.XSHE', \
             '落盘应是聚宽口径：%s / %s' % (r1['code'], r2['code'])
         _pn = lv.positions('t_norm')
@@ -2179,7 +2179,7 @@ def t_live_core():
         # 留空 / '' / '-' 三种写法都算"没填"
         for i, blank in enumerate((None, '', '-')):
             r = lv.add_fill('t_px', '2026-09-01', '603889.XSHG', 'buy', 100,
-                            price=blank)
+                            price=blank, force_price=True)
             assert abs(r['price'] - 6.010) < 1e-9, \
                 'price=%r 应取开盘价 6.010，实得 %s' % (blank, r['price'])
             assert r.get('price_from') == 'open', \
@@ -2188,14 +2188,14 @@ def t_live_core():
         assert r['fee'] > 0 and r['fee_estimated'] is True, \
             '留空价格后费用仍要按费率估出来，实得 %s' % r['fee']
         # 明确填了价格 -> 以填的为准，且不标 price_from
-        r2 = lv.add_fill('t_px', '2026-09-01', '603889.XSHG', 'buy', 100, 6.088)
+        r2 = lv.add_fill('t_px', '2026-09-01', '603889.XSHG', 'buy', 100, 6.088, force_price=True)
         assert abs(r2['price'] - 6.088) < 1e-9 and not r2.get('price_from'), \
             '填了价格就该用填的那个，且不标"取的价"'
         # ★ 取不到价必须【响亮报错】，不能退回"最近一个交易日"——
         #   那会把 8 月的价当成 9 月的用，数字看着正常但是错的。
         #   最常见的触发场景：调仓日早上就要录，而当天行情要等晚上才同步。
         try:
-            lv.add_fill('t_px', '2028-01-03', '603889.XSHG', 'buy', 100)
+            lv.add_fill('t_px', '2028-01-03', '603889.XSHG', 'buy', 100, force_price=True)
             raise AssertionError('取不到当日行情时不该放行（更不该用旧价顶上）')
         except lv.LiveError as e:
             m = str(e)
@@ -2203,6 +2203,72 @@ def t_live_core():
                 '报错要说清原因和出路：%s' % m
             assert 'None' not in m.split('\n')[1], \
                 '"本地最新数据日"不能是 None —— 那行是判断有没有同步的唯一依据'
+        # ---- 3d3b) 成交价必须落在当日高低区间内 ----
+        #   ★ 这是能【证】的：一笔真实成交不可能高于当日最高、低于当日最低。
+        #     挡的是真正会造成损失的那类错 —— 小数点点错、看错行填了别只票的
+        #     价、误填后复权价（老股差几十倍）。成交价一错成本价就错，
+        #     而成本价要喂给止损判定和红利税档位。
+        #   ★ 刻意**不用**"手填费用反推价格"那套：2026-09-01 实测 11 笔，
+        #     过户费按成交金额【不单调】（38,144 的 0.37 比 37,824 的 0.38 还
+        #     低）—— 券商按分笔成交明细逐笔舍入，我们只有汇总，误差上界是
+        #     0.01×分笔数、未知。那个检查分不清"价格错"和"拆笔多"，只会报
+        #     假警，而假告警看多了就不看告警了。
+        _rg = lv.day_range('605122.XSHG', '2026-09-01')
+        assert _rg and _rg[0] < _rg[1], '取不到当日高低区间：%s' % (_rg,)
+        for bad, why in ((_rg[1] * 1.5, '高于当日最高'),
+                         (_rg[0] * 0.5, '低于当日最低'),
+                         (1.192, '小数点点错'),
+                         (43.7, '误填后复权价')):
+            try:
+                lv.add_fill('t_px', '2026-09-01', '605122.XSHG', 'buy', 100,
+                            price=bad)
+                raise AssertionError('%s（%.3f）应被拒' % (why, bad))
+            except lv.LiveError as e:
+                assert '价格区间' in str(e) and '成本价' in str(e), \
+                    '报错要给出区间并说清代价：%s' % e
+        # 区间内的正常价放行；端点也算区间内
+        for good in (_rg[0], _rg[1], (_rg[0] + _rg[1]) / 2):
+            lv.add_fill('t_px', '2026-09-01', '605122.XSHG', 'buy', 100,
+                        price=round(good, 3))
+        # 取不到当日行情时【跳过】校验 —— 不能因为没同步就不让人录成交
+        assert lv.day_range('605122.XSHG', '2028-01-03') is None
+        assert lv.check_price_in_range('605122.XSHG', '2028-01-03', 999) is None, \
+            '没有当日行情时应跳过价格校验，而不是拒绝录入'
+        # 逃生口：大宗交易可以成交在区间外，面板本身也可能有问题 ——
+        # 必须显式声明（同 rebuild_lake_db 的 --allow-shrink）。
+        # 硬拒而不给出路，最后会变成绕过整个入口。
+        _fp = lv.add_fill('t_px', '2026-09-01', '605122.XSHG', 'buy', 100,
+                          price=99.9, force_price=True)
+        assert abs(_fp['price'] - 99.9) < 1e-9, 'force_price 应放行'
+
+        # ---- 3d3c) 2026-09-01 真实那批 11 笔：费用合计必须精确一致 ----
+        #   ★ 逐笔会有 ±0.01 的出入（过户费按分笔明细逐笔舍入，我们只有
+        #     汇总），但【合计】要精确对上 —— 合计对不上说明费率错了。
+        REAL = (('301126.SZ', 3600, 10.420, 5.00), ('301152.SZ', 1600, 23.000, 5.00),
+                ('300500.SZ', 3800, 9.900, 5.00), ('002910.SZ', 3100, 10.290, 5.00),
+                ('002910.SZ', 600, 10.290, 5.00), ('605122.SH', 3200, 11.920, 5.37),
+                ('603506.SH', 3300, 11.350, 5.37), ('300575.SZ', 6000, 6.250, 5.00),
+                ('603168.SH', 6400, 5.910, 5.38), ('600774.SH', 5000, 7.640, 5.39),
+                ('300375.SZ', 9100, 4.220, 5.00))
+        est_t = act_t = 0.0
+        n_exact = 0
+        for c, q, px, fee in REAL:
+            e = lv.estimate_fee('buy', q, px, '2026-09-01', GALAXY, c)
+            est_t += e
+            act_t += fee
+            if abs(e - fee) < 0.005:
+                n_exact += 1
+            assert abs(e - fee) <= 0.011, \
+                '%s 逐笔差应 ≤1 分（分笔舍入），实得 %+.2f' % (c, e - fee)
+        assert abs(est_t - act_t) < 0.005, \
+            '11 笔费用合计应精确一致：估 %.2f / 实 %.2f' % (est_t, act_t)
+        assert n_exact == 9, '应有 9 笔分毫不差，实得 %d' % n_exact
+        # ★ 002910 同日两笔【各收一次】5 元最低 —— 不按当日同一只票合并。
+        #   这条是账单确认的（3100 和 600 两笔都是 5.00）。
+        assert abs(lv.estimate_fee('buy', 600, 10.29, '2026-09-01', GALAXY,
+                                   '002910.SZ') - 5.00) < 0.005, \
+            '6,174 元那笔也该收满 5 元最低'
+
         # 🔴 报错必须指向【真正的】原因。实测踩过：粘的是 301126.SZ（券商
         #   写法），报的却是"当天行情还没同步"，而那天的行情本地明明有 ——
         #   人会照着那句话去等晚上重试，白等。
@@ -2217,7 +2283,7 @@ def t_live_core():
                 '要点明是代码在面板里找不到：%s' % m
         # 无法判定市场的代码：报错要指向【代码】，而不是"取不到行情"
         try:
-            lv.add_fill('t_px', '2026-09-01', '123456', 'buy', 100)
+            lv.add_fill('t_px', '2026-09-01', '123456', 'buy', 100, force_price=True)
             raise AssertionError('判不出市场的代码应被拒')
         except lv.LiveError as e:
             assert '判不出是哪个市场' in str(e), \
@@ -2230,18 +2296,18 @@ def t_live_core():
         lv.bind_version('t_rev', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
         c_before = lv.cash('t_rev')
-        rb = lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42)
+        rb = lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42, force_price=True)
         assert rb['fee'] > 0, '买入应估出费用'
         lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'sell', 1000, 11.42,
-                    fee=-rb['fee'], reverse_of=rb['uid'])
+                    fee=-rb['fee'], reverse_of=rb['uid'], force_price=True)
         assert abs(lv.cash('t_rev') - c_before) < 1e-9, \
             '冲正后现金应精确回到 %.2f，实得 %.2f（差 %.2f = 多吃的费用）' \
             % (c_before, lv.cash('t_rev'), lv.cash('t_rev') - c_before)
         assert not lv.positions('t_rev'), '冲正后应空仓'
         # 冲正不填费用时不该去估算（估了就抵消不掉）
-        rb2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78)
+        rb2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78, force_price=True)
         rv2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'sell', 100, 48.78,
-                          reverse_of=rb2['uid'])
+                          reverse_of=rb2['uid'], force_price=True)
         assert rv2['fee'] == 0 and not rv2.get('fee_estimated'), \
             '冲正不填费用时应记 0 而不是估算，实得 %s' % rv2['fee']
 
@@ -2256,19 +2322,19 @@ def t_live_core():
         lv.upsert_account('t_edit', name='edit', init_cash=100000)
         lv.bind_version('t_edit', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
-        eb = lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'buy', 1000, 10.0, fee=5)
-        es = lv.add_fill('t_edit', '2026-08-20', '601857.XSHG', 'sell', 500, 12.0, fee=8)
+        eb = lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'buy', 1000, 10.0, fee=5, force_price=True)
+        es = lv.add_fill('t_edit', '2026-08-20', '601857.XSHG', 'sell', 500, 12.0, fee=8, force_price=True)
         assert eb['uid'] != es['uid'], 'uid 必须唯一（ts 是秒精度，会撞）'
         # 被依赖的那笔不能直接冲，但要给出下一步
         try:
             lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'sell', 1000, 10.0,
-                        fee=-5, reverse_of=eb['uid'])
+                        fee=-5, reverse_of=eb['uid'], force_price=True)
             raise AssertionError('被后续记录依赖的冲正应被拒')
         except lv.LiveError as e:
             assert '负持仓' in str(e), '拒绝理由要说清是负持仓：%s' % e
         # 先冲后续那笔 -> 批次必须【完全还原】
         lv.add_fill('t_edit', '2026-08-20', '601857.XSHG', 'buy', 500, 12.0,
-                    fee=-8, reverse_of=es['uid'])
+                    fee=-8, reverse_of=es['uid'], force_price=True)
         # positions() 是接口层，date 已转 ISO 字符串（见其 docstring）；
         # 内部计算用 fifo_lots 才拿 date 对象。这里比字符串。
         lots = lv.positions('t_edit')['601857.XSHG']['lots']
@@ -2279,15 +2345,15 @@ def t_live_core():
              ' —— 成本价/建仓日直接喂给止损判定' % lots)
         # 再冲原始那笔 -> 现金精确回到初始、空仓
         lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'sell', 1000, 10.0,
-                    fee=-5, reverse_of=eb['uid'])
+                    fee=-5, reverse_of=eb['uid'], force_price=True)
         assert not lv.positions('t_edit'), '全部冲正后应空仓'
         assert abs(lv.cash('t_edit') - 100000) < 1e-9, \
             '全部冲正后现金应精确回到 100000，实得 %.2f' % lv.cash('t_edit')
         # 补录一笔日期在所有买入【之前】的卖出 —— 只看当前持仓会放行
-        lv.add_fill('t_edit', '2026-09-01', '601088.XSHG', 'buy', 1000, 48.0, fee=5)
+        lv.add_fill('t_edit', '2026-09-01', '601088.XSHG', 'buy', 1000, 48.0, fee=5, force_price=True)
         try:
             lv.add_fill('t_edit', '2026-08-01', '601088.XSHG', 'sell', 1000, 48.0,
-                        fee=5)
+                        fee=5, force_price=True)
             raise AssertionError('补录更早日期的卖出应被拒（重放时持仓为负）')
         except lv.LiveError:
             pass
@@ -2299,7 +2365,7 @@ def t_live_core():
         lv.upsert_account('t_twr', name='twr', init_cash=100000)
         lv.bind_version('t_twr', 'strategies/小市值/froec_traded.py',
                         params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
-        lv.add_fill('t_twr', '2026-08-10', '601857.XSHG', 'buy', 5000, 11.0, fee=15)
+        lv.add_fill('t_twr', '2026-08-10', '601857.XSHG', 'buy', 5000, 11.0, fee=15, force_price=True)
         e1 = lv.equity_curve('t_twr')
         assert e1['stats'] and e1['dates'], '权益曲线为空'
         assert len(e1['dates']) == len(e1['equity']), '日期与权益长度不一致'
@@ -2699,6 +2765,11 @@ def t_live_ui():
             pg.wait_for_selector('#rfill', timeout=8000)
             assert '留空' in (pg.get_attribute('#fp', 'placeholder') or ''), \
                 '价格框要写明"留空=开盘价"，否则没人知道能留空'
+            # 价格校验要有【逃生口】的入口 —— 硬拒而不给出路，最后会变成
+            # 绕过整个入口（大宗交易确实能成交在当日区间外）
+            assert pg.locator('#fforce').count() == 1, \
+                '缺"不校验价格区间"的勾选 —— 被卡住的人会去改 jsonl'
+            assert not pg.locator('#fforce').is_checked(), '默认应该是校验的'
             # ★ 「按信号成交时用开盘价」只该在成交日行情【已同步】时默认勾上。
             #   调仓日早上录入时那天的行情还不存在，勾着会让整批全部失败；
             #   signal 自带 data_asof，能提前知道的事不要留到报错时才说。
@@ -2811,7 +2882,8 @@ def t_live_ui():
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
                     '按成交日取档/手填优先/每账户独立/来源写在行上)；'
-                    '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘；'
+                    '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
+                    '价格区间校验有逃生口；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

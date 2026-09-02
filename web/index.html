@@ -1084,6 +1084,12 @@ function openRecord(aid, sig, ro, tab){
         <input id="ff" size="9" placeholder="费用(留空=按费率)">
         <button class="btn" id="fb" ${ro?'disabled':''}>录一笔</button>
       </div>
+      <div class="frow"><label></label>
+        <label class="lvwhy" style="flex:0 0 auto;text-align:left">
+          <input type="checkbox" id="fforce"> 按填的价，不校验当日高低区间</label>
+        <span class="lvwhy">默认会校验 —— 价格落在当日 high/low 之外是
+          <b>可证的错</b>（小数点点错、看错行、误填后复权价），而成本价
+          要喂给止损判定。<b>大宗交易</b>等确实成交在区间外时勾上</span></div>
       <div class="lvwhy">
         <b>价格留空 = 按成交日的【开盘价】</b> —— A 股开盘价就是 09:15-09:25
         集合竞价的成交价，所以竞价买入的单子留空就对。<br>
@@ -1143,7 +1149,8 @@ function openRecord(aid, sig, ro, tab){
     const m=()=>$('#fmsg');
     const done=async rows=>{
       try{
-        const r=await post('/api/live/fill',{id:aid, rows:rows});
+        const r=await post('/api/live/fill',{id:aid, rows:rows,
+          force_price:!!($('#fforce')&&$('#fforce').checked)});
         if(r.errors&&r.errors.length){
           /* ★ 批量失败时同一条原因会重复十几遍（比如"当天行情还没同步"
              会对每一行各报一次），按原因折叠，只在前面列出行号。
@@ -1171,7 +1178,8 @@ function openRecord(aid, sig, ro, tab){
       done([{trade_date:$('#fd').value.trim(), code:$('#fc').value.trim().toUpperCase(),
         side:$('#fs').value, shares:parseInt($('#fq').value,10),
         price:(pv===''||pv==='-'?null:parseFloat(pv)),
-        fee:(fv===''?null:parseFloat(fv))}]); };
+        fee:(fv===''?null:parseFloat(fv)),
+        force_price:$('#fforce').checked}]); };
     $('#fbulk').onclick=()=>{ const r=parseBulk($('#ft').value);
       if(r.bad.length){ m().className='lvmsg bad'; m().innerHTML=r.bad.map(esc).join('<br>'); return; }
       if(!r.rows.length){ m().className='lvmsg bad'; m().textContent='没解析出任何一行'; return; }

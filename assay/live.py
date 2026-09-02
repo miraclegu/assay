@@ -48,6 +48,7 @@ import datetime
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import uuid
@@ -427,7 +428,8 @@ def fills(aid):
 
 def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
              name='', source='manual', note='', reverse_of=None,
-             fee_estimated=False, price_from=None, datalake=None):
+             fee_estimated=False, price_from=None, datalake=None,
+             force_price=False):
     """录一笔成交。**只追加**。
 
     校验在这里做而不是页面上 —— 页面能绕过，这里是唯一入口。
@@ -466,6 +468,13 @@ def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
         except Exception:                                   # noqa: BLE001
             raise LiveError('价格必须是数字（留空或填 - 表示按当日开盘价）')
         price_src = None
+        # ★ 手填的价才需要校验；取的开盘价本来就来自当日行情。
+        #   取不到行情时跳过（不能因为没同步就不让人录成交）。
+        #   force_price=True 是**必须显式声明**的逃生口（同 rebuild_lake_db
+        #   的 --allow-shrink）：大宗交易可以成交在区间外，面板本身也可能有
+        #   问题 —— 硬拒会让人没有出路，而"没有出路"最后会变成绕过整个入口。
+        if price > 0 and not force_price:
+            check_price_in_range(code, d, price, datalake)
     # ★ fee=None（没填）与 fee=0（明确说没有费用）是**两件事**。
     #   没填就按引擎口径估一个并标 fee_estimated —— 默认 0 会让现金越算越多，
     #   而"多出来的钱"不会报错，只会让权益悄悄虚高（年换手 4.5 次的话，
@@ -853,7 +862,18 @@ def _stamp_rate(m, d):
     return float(v or 0)
 
 
-def fee_breakdown(side, shares, price, trade_date, model=None, code=None):
+def _round2(x, how='round'):
+    """分位舍入。券商各项的舍入规则**不确定**（实测既有像截尾的、也有像
+    进位的），所以这里可切换 —— 对账时把三种都试一遍，见 fee_recheck。"""
+    if how == 'floor':
+        return math.floor(x * 100 + 1e-9) / 100.0
+    if how == 'ceil':
+        return math.ceil(x * 100 - 1e-9) / 100.0
+    return round(x, 2)
+
+
+def fee_breakdown(side, shares, price, trade_date, model=None, code=None,
+                  rounding='round'):
     """算一笔的费用明细。
 
     mode='flat'：`max(额 × 买/卖总费率, 最低)` —— **不拆项，填多少算多少**。
@@ -877,10 +897,11 @@ def fee_breakdown(side, shares, price, trade_date, model=None, code=None):
     if m.get('mode') == 'flat':
         rate = float(m['sell_rate'] if side == 'sell' else m['buy_rate'])
         tot = max(amt * rate, float(m.get('flat_min') or 0))
+        tot = _round2(tot, rounding)
         return {'mode': 'flat', 'amount': round(amt, 2), 'rate': rate,
                 'commission': None, 'regulatory': None, 'transfer': None,
                 'transfer_extra': False, 'market': market_of(code) if code else None,
-                'stamp': None, 'total': round(tot, 2)}
+                'stamp': None, 'total': tot}
     comm = max(amt * float(m['commission']), float(m['min_commission'] or 0))
     reg = 0.0
     if not m.get('commission_incl_reg'):
@@ -888,16 +909,19 @@ def fee_breakdown(side, shares, price, trade_date, model=None, code=None):
     extra = transfer_is_extra(m, code)
     trf = amt * float(m.get('transfer') or 0) if extra else 0.0
     stamp = amt * _stamp_rate(m, trade_date) if side == 'sell' else 0.0
-    out = {'mode': 'parts', 'amount': round(amt, 2),
-           'commission': round(comm, 2),
-           'regulatory': round(reg, 2), 'transfer': round(trf, 2),
+    # ★ 逐项舍入后相加（券商就是这么算的），不是先加总再舍一次 ——
+    #   两者能差 1 分，而 1 分过户费 ≈ 1,000 元成交金额。
+    comm, reg, trf, stamp = (_round2(x, rounding) for x in (comm, reg, trf, stamp))
+    out = {'mode': 'parts', 'amount': round(amt, 2), 'commission': comm,
+           'regulatory': reg, 'transfer': trf,
            'transfer_extra': extra, 'market': market_of(code) if code else None,
-           'stamp': round(stamp, 2)}
+           'stamp': stamp}
     out['total'] = round(comm + reg + trf + stamp, 2)
     return out
 
 
-def estimate_fee(side, shares, price, trade_date, model=None, code=None):
+def estimate_fee(side, shares, price, trade_date, model=None, code=None,
+                 rounding='round'):
     """一笔成交的估算费用（分）。明细见 fee_breakdown。
 
     这是**估算**：券商是逐项截尾/进位后相加，可能差 ±0.01。
@@ -905,7 +929,8 @@ def estimate_fee(side, shares, price, trade_date, model=None, code=None):
 
     ★ 要 code：过户费是否另收分市场（见 transfer_is_extra）。
     """
-    return fee_breakdown(side, shares, price, trade_date, model, code)['total']
+    return fee_breakdown(side, shares, price, trade_date, model, code,
+                         rounding)['total']
 
 
 # 折算总费率时用的样板代码，只为了给出市场（后缀）
@@ -1062,6 +1087,61 @@ def day_price(code, date, which='open', datalake=None):
             '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
             % (code, d, what, last, what, what))
     return round(float(row[0]), 3)
+
+
+ROUNDINGS = ('round', 'floor', 'ceil')
+
+# ★ 这里曾经有个 fee_recheck：拿手填的费用反推成交金额，用来查"价格是不是
+#   填错了"。**已删除，因为前提是错的。** 2026-09-01 那批 11 笔的实测：
+#     成交金额  37,455 -> 过户费 0.37     38,144 -> 过户费 0.37
+#               37,824 -> 过户费 0.38     38,200 -> 过户费 0.39
+#   按金额**不单调** —— 38,144 的过户费比 37,824 的还低。所以过户费不是
+#   "汇总成交金额"的函数：券商是按【分笔成交明细】逐笔舍入后相加，
+#   一张委托在竞价里拆成几笔就舍几次（3200 股拆成 100+3100 逐笔截尾就掉到
+#   0.37）。我们手里只有汇总、没有分笔，误差上界是 0.01×分笔数，未知。
+#   于是这个检查分不清"价格错了"和"拆笔多了"，只会报假警 ——
+#   而假告警看多了就不看告警了，比没告警更糟。
+#   能证的是下面这条：成交价必须落在当日 high/low 区间内。
+
+
+def day_range(code, date, datalake=None):
+    """当日 high/low（不复权）。取不到返回 None —— 不报错，这是个可选校验。"""
+    d = _d(date)
+    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
+    row = duckdb.connect(':memory:').execute(
+        "SELECT low, high FROM %s WHERE jq_code = ? AND date = DATE '%s'"
+        % (panel, d), [normalize_code(code)]).fetchone()
+    if not row or row[0] is None or row[1] is None:
+        return None
+    return (round(float(row[0]), 3), round(float(row[1]), 3))
+
+
+def check_price_in_range(code, date, price, datalake=None):
+    """成交价必须落在当日高低区间内 —— 落在外面是**可证的**错。
+
+    ★ 与"用费用反推价格"不同，这条没有舍入的模糊性：一笔真实成交的价格
+      不可能高于当日最高、低于当日最低。所以敢直接拒。
+      能挡住的是真正会造成损失的那类错：小数点点错（11.92 填成 1.192）、
+      看错行填了别只票的价、误填了**后复权**价（老股能差几十倍）。
+      而成交价一错，成本价就错 —— 它要喂给止损判定和红利税档位。
+
+    ★ 拿不到当日行情就跳过（返回 None）：这是可选校验，不能因为行情没同步
+      就不让人录成交。
+    """
+    rg = day_range(code, date, datalake)
+    if rg is None:
+        return None
+    lo, hi = rg
+    # 留一点浮点余量。真正的错至少差一个数量级，不靠这点余量。
+    if lo * 0.999 <= price <= hi * 1.001:
+        return rg
+    raise LiveError(
+        '%s 在 %s 的价格区间是 %.3f ~ %.3f，而你填的是 %.3f —— 落在区间外，'
+        '不可能是这天的成交价。\n'
+        '常见原因：小数点点错、看错行填了别只票的价、或者填了**后复权**价。\n'
+        '（成交价一错，成本价就错，而成本价要喂给止损判定和红利税档位。）\n'
+        '确实是这个价（如大宗交易），录入时勾上「按填的价，不校验」。'
+        % (normalize_code(code), _d(date), lo, hi, price))
 
 
 def fifo_lots(rows):
