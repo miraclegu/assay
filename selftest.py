@@ -1761,17 +1761,24 @@ def t_live_core():
             - (200 * 16.69)
         assert abs(lv.cash('t_fee') - exp) < 1e-6, \
             '现金没把费用扣进去：%.2f vs %.2f' % (lv.cash('t_fee'), exp)
-        # 估算口径必须与引擎一致（同一个 Cost，公式抄 broker 的两个成交出口）
+        # ★ 费率是【账户级】的（FEE_DEFAULT / acct['fee']），不再等于引擎 Cost
+        #   —— 引擎默认万2.5+最低5元是**回测口径**（刻意保守），真实账户是
+        #   万0.8含规费+过户费万0.1、无最低。所以这里核的是
+        #   「按给定的模型逐项算对」，而不是「与 Cost 一致」。
+        #   唯一仍复用引擎的是【印花税分段规则】—— 那条不能有第二份实现。
         c = _C()
+        m0 = dict(lv.FEE_DEFAULT)
         for side, sh, px, d in (('buy', 1000, 11.42, '2023-08-25'),
                                 ('sell', 1000, 11.42, '2023-08-25'),
                                 ('sell', 1000, 11.42, '2023-08-28')):
             amt = sh * px
-            want = max(amt * c.commission, c.min_commission) + (
-                amt * c.close_tax_at(lv._d(d)) if side == 'sell'
-                else amt * c.open_tax)
-            assert abs(lv.estimate_fee(side, sh, px, d) - round(want, 2)) < 1e-9, \
-                '%s %s 的估算与引擎口径不一致' % (side, d)
+            want = max(amt * m0['commission'], m0['min_commission']) \
+                + amt * m0['transfer']
+            if side == 'sell':
+                want += amt * c.close_tax_at(lv._d(d))   # 分段规则只此一处
+            assert abs(lv.estimate_fee(side, sh, px, d, m0)
+                       - round(want, 2)) < 1e-9, \
+                '%s %s 的估算与费率模型不一致' % (side, d)
         # 印花税分段必须生效（2023-08-28 起 千1 -> 万5）
         assert lv.estimate_fee('sell', 1000, 11.42, '2023-08-25') > \
             lv.estimate_fee('sell', 1000, 11.42, '2023-08-28'), \
@@ -1782,6 +1789,53 @@ def t_live_core():
             raise AssertionError('非冲正记录的负费用应被拒')
         except lv.LiveError:
             pass
+
+        # ---- 3d2) 账户级费率：用【真实账单】钉住 ----
+        #   2026-09-02 红利账户一笔真实成交：
+        #     买入 新澳股份 6.010 × 11000 = 66,110
+        #       佣金 1.72（万0.26）/ 规费 3.57（万0.54）/ 过户费 0.66（万0.10）
+        #       合计 5.95 = 万0.90
+        #   ★ App 显示的"佣金费率万0.8"是**含规费**的口径：
+        #       66110 × 万0.8 = 5.2888 ≈ 1.72 + 3.57 = 5.29
+        #     单看净佣金万0.26 与 App 的万0.8 对不上 —— 自己拆开去配会
+        #     少收规费那部分，且不报错。
+        #   ★ 这个账户【没有 5 元最低佣金】（净佣金 1.72 < 5 却没被抬到 5），
+        #     而引擎默认 min_commission=5 —— 同一笔回测算 16.53、实际 5.95。
+        BILL = dict(amount=66110.0, commission=1.72, regulatory=3.57,
+                    transfer=0.66)
+        fm = lv.infer_fee_model(**BILL)
+        assert abs(fm['commission'] - 0.00008) < 5e-7, \
+            '反推的佣金率应≈万0.8（含规费），实得 万%.4f' % (fm['commission'] * 1e4)
+        # ★ 容差要留够：券商账单是【按分截尾】的，0.66/66110 = 万0.0998，
+        #   本来就不会正好等于万0.1。写死等号会假失败。
+        assert abs(fm['transfer'] - 0.00001) < 5e-8, \
+            '反推的过户费率应≈万0.1，实得 万%.4f' % (fm['transfer'] * 1e4)
+        assert fm['min_commission'] == 0, '这个账户没有最低佣金'
+        got = lv.estimate_fee('buy', 11000, 6.010, '2026-09-02', fm)
+        assert abs(got - 5.95) < 0.011, \
+            '用反推费率复算应得 5.95（账单），实得 %.2f' % got
+        # 卖出 = 买入 + 印花税万5
+        got_s = lv.estimate_fee('sell', 11000, 6.010, '2026-09-02', fm)
+        assert abs(got_s - (5.95 + 66110 * 0.0005)) < 0.02, \
+            '卖出应为买入 + 印花税万5，实得 %.2f' % got_s
+        # 印花税仍按日期分段（不在 live 里重写规则）
+        assert lv.estimate_fee('sell', 11000, 6.010, '2023-08-25', fm) > got_s, \
+            '2023-08-28 前印花税是千1，应更贵'
+        # 账户配了费率之后，add_fill 不填费用就按它算
+        lv.upsert_account('t_fee', fee=fm)
+        rf = lv.add_fill('t_fee', '2026-09-02', '603889.XSHG', 'buy', 11000, 6.010)
+        assert abs(rf['fee'] - 5.95) < 0.011, \
+            'add_fill 没用账户费率：%.2f' % rf['fee']
+        assert rf['fee_estimated'] is True, '自动算的费用要标 fee_estimated'
+        # 非法费率要被拒
+        for bad, why in (({'commission': -1}, '负佣金率'),
+                         ({'nope': 1}, '未知字段'),
+                         ({'stamp': 'x'}, '印花税非数字非 auto')):
+            try:
+                lv.upsert_account('t_fee', fee=dict(bad))
+                raise AssertionError('%s 应被拒' % why)
+            except lv.LiveError:
+                pass
 
         # ---- 3e) 冲正必须【精确抵消】，含费用 ----
         #     冲正的语义是"这笔交易没发生"，所以原费用也要退掉。若冲正记录
@@ -2084,6 +2138,40 @@ def t_live_ui():
             assert '—' not in pg.locator('#lvbody table.lvpos').inner_text(), \
                 '有持仓取不到现价 —— 估值应独立取价，不依赖当天信号'
 
+            # ---- 费率：从真实账单反推 -> 保存 -> 录入自动算 ----
+            #   2026-09-02 真实账单：66,110 元买入，佣金1.72 规费3.57 过户费0.66
+            #   合计 5.95。★ App 的"佣金费率万0.8"是【含规费】口径。
+            pg.click('#lvset')
+            pg.wait_for_selector('#fi1', timeout=8000)
+            pg.fill('#fi1', '66110')
+            pg.fill('#fi2', '1.72')
+            pg.fill('#fi3', '3.57')
+            pg.fill('#fi4', '0.66')
+            pg.click('#finfer')
+            pg.wait_for_timeout(1000)
+            fi = pg.locator('#fimsg').inner_text()
+            assert '✅' in fi and '5.95' in fi, '反推没对上账单：%s' % fi
+            assert abs(float(pg.input_value('#fr1')) - 0.00008) < 5e-7, \
+                '佣金率没回填成万0.8：%s' % pg.input_value('#fr1')
+            assert float(pg.input_value('#fr2')) == 0, '最低佣金应为 0'
+            pg.click('#fsave')
+            pg.wait_for_timeout(900)
+            pg.locator('#mclose').click()
+            pg.wait_for_timeout(500)
+            b4 = _cash()
+            pg.click('#lvrec')
+            pg.wait_for_selector('#rfill', timeout=8000)
+            pg.fill('#fd', '2026-09-02')
+            pg.fill('#fc', '603889.XSHG')
+            pg.fill('#fq', '11000')
+            pg.fill('#fp', '6.010')
+            pg.fill('#ff', '')
+            pg.click('#fb')
+            pg.wait_for_timeout(1500)
+            paid = round(b4 - _cash() - 66110, 2)
+            assert abs(paid - 5.95) < 0.011, \
+                '账户费率没生效：算出 %.2f，账单 5.95' % paid
+
             # ---- 设置进浮层 ----
             assert pg.locator('#ename').count() == 0, '设置不该常驻主视图'
             pg.click('#lvset')
@@ -2127,6 +2215,7 @@ def t_live_ui():
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
+                    '费率反推真实账单 5.95 一分不差；'
                     '改名；冲正追加并划掉；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
         httpd.shutdown()

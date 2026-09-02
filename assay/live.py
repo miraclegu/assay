@@ -207,7 +207,7 @@ def get_account(aid):
 
 
 def upsert_account(aid, name=None, init_cash=None, broker_note=None,
-                   tick_time=None, warmup_start=None):
+                   tick_time=None, warmup_start=None, fee=None):
     lst = load_accounts()
     hit = next((a for a in lst if a['id'] == aid), None)
     if hit is None:
@@ -227,6 +227,25 @@ def upsert_account(aid, name=None, init_cash=None, broker_note=None,
         hit['tick_time'] = tick_time
     if warmup_start is not None:
         hit['warmup_start'] = warmup_start
+    if fee is not None:
+        bad = [k for k in fee if k not in FEE_FIELDS]
+        if bad:
+            raise LiveError('费率字段只能是 %s，收到 %s'
+                            % ('/'.join(FEE_FIELDS), bad))
+        for k in ('commission', 'min_commission', 'transfer'):
+            if k in fee:
+                try:
+                    fee[k] = float(fee[k])
+                except Exception:                           # noqa: BLE001
+                    raise LiveError('%s 必须是数字' % k)
+                if fee[k] < 0:
+                    raise LiveError('%s 不能为负' % k)
+        if 'stamp' in fee and fee['stamp'] != 'auto':
+            try:
+                fee['stamp'] = float(fee['stamp'])
+            except Exception:                               # noqa: BLE001
+                raise LiveError('stamp 必须是数字或 "auto"')
+        hit['fee'] = dict(hit.get('fee') or {}, **fee)
     _save_accounts(lst)
     return hit
 
@@ -404,7 +423,8 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
     #   一年约 0.5% 的费用凭空消失）。
     if fee is None or fee == '':
         # 冲正不估费用 —— 见下面对负费用的说明。调用方应传 -原费用。
-        fee = 0.0 if reverse_of else estimate_fee(side, shares, price, d)
+        fee = 0.0 if reverse_of else estimate_fee(
+            side, shares, price, d, fee_model(get_account(aid)))
         fee_estimated = not reverse_of
     else:
         try:
@@ -450,27 +470,87 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
     return rec
 
 
-def estimate_fee(side, shares, price, trade_date, cost=None):
-    """按【引擎同一套成本口径】估算费用。
+# ============================ 费率模型 ============================
+# 账户级费率。**按券商 App 显示的口径填**，不要自己拆算 —— 拆错了不报错。
+#
+# ★ 实测定案（2026-09-02，红利账户一笔真实成交反推）：
+#     买入 新澳股份 6.010 × 11000 = 66,110
+#       佣金   1.72  = 万0.26   （净佣金，归券商）
+#       规费   3.57  = 万0.54   （代收：证管费万0.2 + 经手费万0.341，按分截尾）
+#       过户费 0.66  = 万0.10
+#       合计   5.95  = 万0.90
+#   而 App 显示的"佣金费率万0.8"是**含规费**的口径：
+#       66110 × 万0.8 = 5.2888 ≈ 佣金 1.72 + 规费 3.57 = 5.29  ✅
+#   单看净佣金万0.26 与 App 的万0.8 对不上 —— 这就是那条口径差。
+#
+# ★ 这个账户【没有 5 元最低佣金】：净佣金 1.72 < 5 却没被抬到 5。
+#   而引擎默认 min_commission=5 —— 同一笔买入回测算 16.53、实际 5.95。
+#   折成年化：红利差 0.15pp、froec 差 0.33pp（比滑点小一个量级，但真实存在）。
+FEE_FIELDS = ('commission', 'min_commission', 'transfer', 'stamp')
+FEE_DEFAULT = {
+    'commission': 0.00008,     # 佣金费率，**含规费**（照 App 填，万0.8）
+    'min_commission': 0.0,     # 单笔最低佣金（这个账户是 0，不是常见的 5）
+    'transfer': 0.00001,       # 过户费率 万0.1（沪深双边）
+    'stamp': 'auto',           # 卖出印花税：'auto' = 按日期分段（2023-08-28 起万5）
+}
 
-    ★ 不在这里重写费率 —— 直接用 `broker.Cost`，公式也照抄 broker 的两个
-      成交出口（_fill_sell / _fill_buy）：
-          买：max(额 × commission, min_commission) + 额 × open_tax
-          卖：max(额 × commission, min_commission) + 额 × close_tax_at(日期)
-      印花税按日期分段（2023-08-28 起 千1 -> 万5），所以要传成交日。
-      费率写两份的话，实盘现金和回测成本会慢慢分叉而没人发现。
 
-    这是**估算**。券商实际扣费有过户费、规费等零碎，且各家不同 ——
-    所以入账时会标 fee_estimated=True，对完账单再改成实际值。
+def fee_model(acct):
+    """账户的费率模型；没配就用 FEE_DEFAULT。"""
+    m = dict(FEE_DEFAULT)
+    m.update({k: v for k, v in (acct.get('fee') or {}).items()
+              if k in FEE_FIELDS})
+    return m
+
+
+def _stamp_rate(m, d):
+    v = m.get('stamp', 'auto')
+    if v == 'auto':
+        return Cost().close_tax_at(_d(d))
+    return float(v or 0)
+
+
+def estimate_fee(side, shares, price, trade_date, model=None):
+    """按【账户自己的费率】算费用。model 为 None 时用 FEE_DEFAULT。
+
+        买：max(额 × 佣金率, 最低佣金) + 额 × 过户费率
+        卖：上面 + 额 × 印花税率
+
+    ★ 佣金率是**含规费**的（照券商 App 填）—— 券商账单会把它拆成
+      「佣金 + 规费」两行，但两行之和 = 额 × App 显示的那个率。
+      自己拆成净佣金去算，会少收规费那部分且不报错。
+
+    ★ 印花税默认走 `broker.Cost.close_tax_at`，不在这里重写分段日期 ——
+      分段规则写两份的话，实盘现金和回测成本会在 2023-08-28 前后分叉。
+
+    返回四舍五入到分。券商是逐项截尾/进位后相加，可能差 ±0.01 ——
+    对完账单用「冲正 + 重录」填实际值即可（入账已标 fee_estimated）。
     """
-    c = cost or Cost()
+    m = model or dict(FEE_DEFAULT)
     amt = float(shares) * float(price)
-    fee = max(amt * c.commission, c.min_commission)
+    fee = max(amt * float(m['commission']), float(m['min_commission'] or 0))
+    fee += amt * float(m.get('transfer') or 0)
     if side == 'sell':
-        fee += amt * c.close_tax_at(_d(trade_date))
-    else:
-        fee += amt * c.open_tax
+        fee += amt * _stamp_rate(m, trade_date)
     return round(fee, 2)
+
+
+def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
+                    stamp=0.0, min_commission=0.0):
+    """从一笔真实成交的账单反推费率。
+
+    佣金率取 (佣金 + 规费) / 金额 —— 与券商 App 的口径一致。
+    """
+    amount = float(amount)
+    if amount <= 0:
+        raise LiveError('成交金额必须为正')
+    out = {
+        'commission': round((float(commission) + float(regulatory)) / amount, 8),
+        'min_commission': float(min_commission or 0),
+        'transfer': round(float(transfer) / amount, 8),
+        'stamp': ('auto' if not stamp else round(float(stamp) / amount, 8)),
+    }
+    return out
 
 
 def fifo_lots(rows):

@@ -1204,6 +1204,36 @@ def api_live_backtest(_q, body):
     return {'job_id': job_id, 'cmd': ' '.join(cmd)}
 
 
+def api_live_fee_infer(_q, body):
+    """POST /api/live/fee_infer —— 从一笔真实成交的账单反推费率。
+
+    ★ 让用户【照账单填】而不是自己拆算：券商 App 显示的"佣金费率"通常是
+      **含规费**的口径（实测红利账户万0.8 = 净佣金万0.26 + 规费万0.54），
+      自己拆开去配会少收规费那部分，且不报错。
+    """
+    m = _live()
+    b = body or {}
+
+    def _go():
+        mod = m.infer_fee_model(
+            b.get('amount'), b.get('commission') or 0,
+            regulatory=b.get('regulatory') or 0,
+            transfer=b.get('transfer') or 0,
+            stamp=b.get('stamp') or 0,
+            min_commission=b.get('min_commission') or 0)
+        amt = float(b.get('amount'))
+        # 自证：用反推出的费率复算这一笔，应与账单合计一致
+        n = int(b.get('shares') or 0) or 100
+        px = amt / n
+        got = m.estimate_fee('buy', n, px, b.get('date') or '2026-01-01', mod)
+        want = round(float(b.get('commission') or 0)
+                     + float(b.get('regulatory') or 0)
+                     + float(b.get('transfer') or 0), 2)
+        return {'fee': mod, 'recompute': got, 'bill_total': want,
+                'match': abs(got - want) <= 0.02}
+    return _live_err(_go)
+
+
 def api_live_cash(_q, body):
     """POST /api/live/cash —— 入金 / 出金 / 分红到账 / 手工调整。append-only。"""
     bad = _live_guard()
@@ -1240,7 +1270,8 @@ def api_live_save(_q, body):
         m.upsert_account(aid, name=b.get('name'), init_cash=b.get('init_cash'),
                          broker_note=b.get('broker_note'),
                          tick_time=b.get('tick_time'),
-                         warmup_start=b.get('warmup_start'))
+                         warmup_start=b.get('warmup_start'),
+                         fee=b.get('fee'))
         if b.get('strategy_path'):
             m.bind_version(aid, b['strategy_path'], b.get('params') or {},
                            b.get('reason') or '')
@@ -1456,6 +1487,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fill': api_live_fill,
                  '/api/live/tick': api_live_tick,
                  '/api/live/cash': api_live_cash,
+                 '/api/live/fee_infer': api_live_fee_infer,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         fn = POSTS.get(u.path)
