@@ -461,6 +461,7 @@ table.lvfr tr.frbody td{background:var(--bg)}
     <button class="btn" id="gopicks" title="独立索引页：只看被标星的规则">★ 选中的规则</button>
     <button class="btn" id="gosync" title="两条腿的数据新鲜度 / 手动同步 / 同步日志">🔄 数据同步</button>
     <button class="btn" id="golive" title="实盘账户：录成交、按时出买卖清单、策略版本留痕">💰 实盘</button>
+    <button class="btn" id="gostock" title="按代码或名称查个股：K 线 / 报价 / 估值 / 财务">📈 个股</button>
     <button class="btn" id="goquery" title="只读 SQL 查本地数据：面板 / 行情 / 财务 / 交易日历">🔍 查数据</button>
     <button class="btn" id="godocs" title="聚宽 / QMT / 本地的接口与口径实测定案（直接读仓库里的 md）">📖 数据字典</button>
   </div>
@@ -521,6 +522,8 @@ function route(){
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
   if((location.hash||'')==='#/sync'){ showSync(); return; }
   if((location.hash||'')==='#/query'){ showQuery(); return; }
+  const sm=/^#\/stock(?:\/([\w.]+))?$/.exec(location.hash||'');
+  if(sm){ showStock(sm[1]?decodeURIComponent(sm[1]):null); return; }
   const fm=/^#\/live\/([\w-]+)\/fills(?:\/(\d+))?$/.exec(location.hash||'');
   if(fm){ showFills(fm[1], parseInt(fm[2]||'0',10)); return; }
   const lm=/^#\/live(?:\/([\w-]+))?$/.exec(location.hash||'');
@@ -542,6 +545,7 @@ $('#godocs').onclick=()=>{location.hash='#/docs';};
 $('#golive').onclick=()=>{location.hash='#/live';};
 $('#gosync').onclick=()=>{location.hash='#/sync';};
 $('#goquery').onclick=()=>{location.hash='#/query';};
+$('#gostock').onclick=()=>{location.hash='#/stock';};
 
 
 /* ============ 实盘模块 ============ */
@@ -1940,6 +1944,397 @@ async function pollSync(){
     SYJOB=null;
     setTimeout(()=>showSync(), 1200);
   }catch(e){ SYJOB=null; }
+}
+
+/* ============ 个股（搜索 / K 线 / 信息） ============ */
+/* ★ 这一页【不出现 SQL】—— 它回答的是固定的几个问题（这只票现在什么样、
+     K 线什么形态、财务什么趋势），所以接口也是固定形状的。
+     要写任意查询去「🔍 查数据」页。两者刻意分开：把 SQL 框摆在看盘页面上，
+     等于每次看个股都要先想一遍口径。
+
+   ★ K 线用 **Canvas 手画**，不引图表库：这个看板是单文件、无构建、无 CDN
+     （见 serve.py 的说明）。引一个库就得要么打包要么联网，两条都不成立。
+
+   ★ 单位【照服务端给的 units 表渲染】，不靠看数值大小猜 —— 同一张面板里
+     百分数和小数是混着的（change_pct/turnover/amplitude 是百分数，
+     roe_ttm/rev_yoy 是小数），猜错 100 倍不报错。 */
+let SKCODE=null, SKNAME='', SKBARS=null, SKN=250, SKFQ='bfq', SKPROF=null,
+    SKHOVER=null, SKSEARCH=null;
+const SK_RANGES=[[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
+
+const pctv=(v,d)=>v==null?'—':(v>=0?'+':'')+(+v).toFixed(d==null?2:d)+'%';
+/* 换手/振幅/限幅【不带符号】—— 它们不会为负，带个 + 读着别扭且像涨跌 */
+const pctn=(v,d)=>v==null?'—':(+v).toFixed(d==null?2:d)+'%';
+const ratv=(v,d)=>v==null?'—':(v>=0?'+':'')+(v*100).toFixed(d==null?2:d)+'%';
+const yiv=(v)=>v==null?'—':Math.abs(v)>=1e8?(v/1e8).toFixed(2)+'亿'
+              :Math.abs(v)>=1e4?(v/1e4).toFixed(1)+'万':(+v).toFixed(0);
+const upc=v=>v==null?'':(v>0?'var(--up)':v<0?'var(--down)':'var(--dim)');
+
+function boardTag(code){
+  const n=(code||'').slice(0,3);
+  if(n==='300'||n==='301') return ['创','#e0a33c'];
+  if(n==='688') return ['科','#a06bf0'];
+  if(n==='430'||n[0]==='8'||n[0]==='4') return ['北','#3ec8d8'];
+  if(code[0]==='6') return ['沪','#5b9cf0'];
+  return ['深','#2fb87a'];
+}
+
+async function showStock(code){
+  stopPoll();
+  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#filter').style.display='none'; $('#expand').style.display='none';
+  $('#back').style.display=''; $('#main').style.display='';
+  /* 记住上次看的那只 —— 切走再回来不用重新搜 */
+  if(!code) code=localStorage.getItem('skcode')||'';
+  $('#main').innerHTML=`<div id="sk">
+    <div class="lvhead"><h2>📈 个股</h2>
+      <div id="skbox" style="position:relative;flex:0 0 300px">
+        <input id="skq" placeholder="代码或名称，如 601857 / 中国石油 / sh601857"
+          autocomplete="off" style="width:100%;background:var(--panel2);
+          color:var(--fg);border:1px solid var(--line);border-radius:6px;
+          padding:5px 8px;font-size:12px">
+        <div id="skdd" style="display:none;position:absolute;z-index:20;left:0;
+          right:0;top:30px;background:var(--panel);border:1px solid var(--line);
+          border-radius:6px;max-height:320px;overflow:auto"></div>
+      </div>
+      <span style="flex:1"></span>
+      <a class="lvtag" href="#/query" title="要写任意 SQL 去那一页">🔍 查数据</a>
+      <a class="lvtag" href="#/docs" title="字段口径的实测定案">📖 数据字典</a>
+    </div>
+    <div id="skbody"></div></div>`;
+  wireSearch();
+  if(code) loadStock(code); else
+    $('#skbody').innerHTML='<div class="none">搜代码或名称开始 —— '
+      +'支持 601857 / 601857.SH / sh601857 / 中国石油</div>';
+}
+
+function wireSearch(){
+  const q=$('#skq'), dd=$('#skdd');
+  let idx=-1, rows=[], timer=null;
+  const close=()=>{ dd.style.display='none'; idx=-1; };
+  const draw=()=>{
+    if(!rows.length){ dd.innerHTML='<div class="lvwhy" style="padding:8px">没有匹配</div>';
+      dd.style.display=''; return; }
+    dd.innerHTML=rows.map((r,i)=>{
+      const [bt,bc]=boardTag(r.code);
+      return `<div class="skit" data-i="${i}" style="padding:5px 8px;cursor:pointer;
+        display:flex;gap:8px;align-items:baseline;
+        background:${i===idx?'var(--panel2)':'transparent'}">
+        <span style="font-family:'SF Mono',Menlo,monospace;font-size:11px;color:var(--dim)">${esc(r.code.slice(0,6))}</span>
+        <b style="font-size:12px">${esc(r.name)}</b>
+        <span class="lvwhy" style="color:${bc}">${bt}</span>
+        ${r.is_st?'<span class="stale">ST</span>':''}
+        <span class="lvwhy">${esc(r.industry||'')}</span>
+        <span style="flex:1"></span>
+        <span class="lvwhy" style="font-variant-numeric:tabular-nums">${yiv(r.floatmv)}</span>
+      </div>`;}).join('');
+    dd.style.display='';
+    dd.querySelectorAll('.skit').forEach(e=>e.onclick=()=>pick(rows[+e.dataset.i]));
+  };
+  const pick=r=>{ close(); q.value=''; location.hash='#/stock/'+r.code; };
+  q.oninput=()=>{
+    clearTimeout(timer);
+    const t=q.value.trim();
+    if(!t){ close(); return; }
+    /* 防抖 160ms —— 每敲一个字打一次接口在 5200 行上没必要 */
+    timer=setTimeout(async()=>{
+      try{ const r=await j('/api/stock/search?limit=20&q='+encodeURIComponent(t));
+        rows=r.results||[]; idx=rows.length?0:-1; draw();
+      }catch(e){ dd.innerHTML='<div class="lvmsg bad">'+esc(String(e))+'</div>';
+        dd.style.display=''; }
+    }, 160);
+  };
+  q.onkeydown=ev=>{
+    if(ev.key==='Escape'){ close(); return; }
+    if(dd.style.display==='none'||!rows.length) return;
+    if(ev.key==='ArrowDown'){ ev.preventDefault(); idx=Math.min(idx+1,rows.length-1); draw(); }
+    else if(ev.key==='ArrowUp'){ ev.preventDefault(); idx=Math.max(idx-1,0); draw(); }
+    else if(ev.key==='Enter'){ ev.preventDefault(); if(rows[idx]) pick(rows[idx]); }
+  };
+  document.addEventListener('mousedown', ev=>{
+    const b=$('#skbox'); if(b&&!b.contains(ev.target)) close(); });
+}
+
+async function loadStock(code){
+  const b=$('#skbody');
+  b.innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try{
+    const [p,k,f]=await Promise.all([
+      j('/api/stock/profile?code='+encodeURIComponent(code)),
+      j('/api/stock/kline?n='+SKN+'&fq='+SKFQ+'&code='+encodeURIComponent(code)),
+      j('/api/stock/finance?n=12&code='+encodeURIComponent(code)),
+    ]);
+    if(p.error) throw new Error(p.error);
+    SKCODE=p.jq_code; SKNAME=p.sec_name||''; SKPROF=p;
+    SKBARS=k.error?null:k.bars;
+    localStorage.setItem('skcode', SKCODE);
+    b.innerHTML=stockHead(p)+stockKpi(p)+stockChartBox(k)+stockTables(p,f);
+    wireChart();
+    /* ★ 必须 preventDefault：这些是 <a href="#">，不拦的话点一下会把
+       location.hash 改成 '#'，触发 route() 跳回目录页 —— 表现是"点了没反应
+       又好像回到了首页"，而没有任何报错。 */
+    document.querySelectorAll('#sk .skr').forEach(e=>e.onclick=ev=>{
+      ev.preventDefault(); SKN=+e.dataset.n; loadStock(SKCODE); });
+    document.querySelectorAll('#sk .skfq').forEach(e=>e.onclick=ev=>{
+      ev.preventDefault(); SKFQ=e.dataset.f; loadStock(SKCODE); });
+  }catch(e){ b.innerHTML='<div class="lvmsg bad">'+esc(String(e))+'</div>'; }
+}
+
+function stockHead(p){
+  const [bt,bc]=boardTag(p.jq_code);
+  const cp=p.change_pct;
+  return `<div class="lvhead" style="margin-top:6px">
+    <h2 style="font-size:20px">${esc(p.sec_name||p.jq_code)}</h2>
+    <span class="lvtag">${esc(p.jq_code)}</span>
+    <span class="lvtag" style="color:${bc};border-color:${bc}">${bt}</span>
+    ${p.is_st?'<span class="stale">ST</span>':''}
+    ${p.public_status&&p.public_status!=='正常上市'?
+      `<span class="stale">${esc(p.public_status)}</span>`:''}
+    ${p.sw_l1_name?`<span class="lvtag">${esc(p.sw_l1_name)}</span>`:''}
+    ${(p.indexes||[]).map(x=>`<span class="lvtag on">${esc(x)}</span>`).join('')}
+    <span style="flex:1"></span>
+    <span style="font-family:'SF Mono',Menlo,monospace;font-size:22px;
+      color:${upc(cp)}">${p.close_bfq==null?'—':(+p.close_bfq).toFixed(2)}</span>
+    <span style="color:${upc(cp)};font-size:13px">${pctv(cp)}</span>
+    <span class="lvtag">数据日 ${esc(String(p.date).slice(0,10))}</span>
+  </div>`;
+}
+
+function stockKpi(p){
+  const lim=(p.limit_up!=null&&p.limit_down!=null)
+    ? (+p.limit_up).toFixed(2)+' / '+(+p.limit_down).toFixed(2) : '—';
+  return `<div class="kpi">
+    ${cell('今开 / 昨收',
+      (p.open==null?'—':(+p.open).toFixed(2))+' / '+(p.preclose==null?'—':(+p.preclose).toFixed(2)),
+      p.is_limit_up?'<b style="color:var(--up)">涨停</b>':(p.is_limit_down?'<b style="color:var(--down)">跌停</b>':''))}
+    ${cell('最高 / 最低',
+      (p.high==null?'—':(+p.high).toFixed(2))+' / '+(p.low==null?'—':(+p.low).toFixed(2)),
+      '振幅 '+pctn(p.amplitude))}
+    ${cell('涨停 / 跌停', lim, p.limit_pct!=null?'限幅 '+pctn(p.limit_pct,0):'')}
+    ${cell('成交额', yiv(p.amount), '换手 '+pctn(p.turnover)+' · 量 '+yiv(p.volume_shares)+'股')}
+    ${cell('流通 / 总市值', yiv(p.floatmv)+' / '+yiv(p.totalmv), '')}
+  </div>
+  <div class="kpi">
+    ${cell('PE(TTM)', p.pe_ttm==null?'—':(+p.pe_ttm).toFixed(2), 'PEG '+(p.peg==null?'—':(+p.peg).toFixed(2)))}
+    ${cell('PB', p.pb==null?'—':(+p.pb).toFixed(2), 'PS '+(p.ps_ttm==null?'—':(+p.ps_ttm).toFixed(2)))}
+    ${cell('ROE(TTM)', ratv(p.roe_ttm), '单季 '+ratv(p.roe_q))}
+    ${cell('营收同比', ratv(p.rev_yoy), '单季 '+ratv(p.rev_q_yoy))}
+    ${cell('净利同比', ratv(p.np_yoy), '单季 '+ratv(p.np_q_yoy))}
+    ${cell('52 周区间',
+      (p.low_52w==null?'—':(+p.low_52w).toFixed(2))+' ~ '+(p.high_52w==null?'—':(+p.high_52w).toFixed(2)),
+      '不复权价')}
+    ${cell('区间涨幅',
+      `<span style="color:${upc(p.ret_20d)}">${ratv(p.ret_20d)}</span>`,
+      '20日 · 5日 '+ratv(p.ret_5d)+' · 60日 '+ratv(p.ret_60d)+' · 250日 '+ratv(p.ret_250d)
+      +'　<span title="跨除权日不复权会出现假跌幅，所以区间涨幅一律用后复权算">（后复权）</span>')}
+    ${cell('上市', p.listed_days==null?'—':p.listed_days+' 天',
+      p.list_date?String(p.list_date).slice(0,10):'')}
+  </div>`;
+}
+
+function stockChartBox(k){
+  if(k.error) return '<div class="lvmsg bad">K 线：'+esc(k.error)+'</div>';
+  return `<div class="lvsec" style="margin-bottom:14px">
+    <h3>日 K
+      <span style="flex:1"></span>
+      ${SK_RANGES.map(([n,t])=>`<a href="#" class="lvtag skr${SKN===n?' on':''}"
+        data-n="${n}">${t}</a>`).join('')}
+      <span class="lvwhy">|</span>
+      <a href="#" class="lvtag skfq${SKFQ==='bfq'?' on':''}" data-f="bfq"
+        title="券商软件看到的价；open 就是当日集合竞价成交价">不复权</a>
+      <a href="#" class="lvtag skfq${SKFQ==='hfq'?' on':''}" data-f="hfq"
+        title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
+    </h3>
+    <div id="skchart" style="position:relative">
+      <canvas id="skcv" style="width:100%;height:420px;display:block"></canvas>
+      <div id="sktip" style="display:none;position:absolute;pointer-events:none;
+        background:var(--panel);border:1px solid var(--line);border-radius:5px;
+        padding:6px 8px;font:11px/1.6 'SF Mono',Menlo,monospace;
+        white-space:pre;z-index:5"></div>
+    </div>
+    <div class="lvwhy" style="margin-top:4px">
+      MA5/10/20/60 由<b>服务端</b>算（多取 60 根预热后切掉）——
+      前端自己算就得多取 60 根，而"少取了导致头部均线是错的"不报错，只是曲线不对。
+      ${SKFQ==='bfq'?'当前是<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切后复权。'
+                     :'当前是<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'}
+    </div>
+  </div>`;
+}
+
+/* ---- Canvas 画 K 线 ---------------------------------------------------
+   蜡烛 + 4 条均线 + 成交量 + 十字光标。
+   ★ 按 devicePixelRatio 放大再画，否则 Retina 上全是毛边。
+   ★ 涨红跌绿（A 股习惯，与页面 --up/--down 一致）。 */
+function drawK(){
+  const cv=$('#skcv'); if(!cv||!SKBARS||!SKBARS.length) return;
+  const bars=SKBARS, dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth, H=cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr;
+  const g=cv.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  const cs=getComputedStyle(document.documentElement);
+  const UP=cs.getPropertyValue('--up').trim()||'#f05b5b';
+  const DN=cs.getPropertyValue('--down').trim()||'#2fb87a';
+  const LINE=cs.getPropertyValue('--line').trim()||'#2a313a';
+  const DIM=cs.getPropertyValue('--dim').trim()||'#8b97a6';
+  const PADL=52, PADR=8, PADT=8, PADB=18, GAP=10, VOLH=Math.round(H*0.22);
+  const mainH=H-PADT-PADB-GAP-VOLH, volTop=PADT+mainH+GAP;
+  const w=W-PADL-PADR;
+  let lo=Infinity, hi=-Infinity, vmax=0;
+  bars.forEach(b=>{
+    if(b.low!=null) lo=Math.min(lo,b.low);
+    if(b.high!=null) hi=Math.max(hi,b.high);
+    [b.ma5,b.ma10,b.ma20,b.ma60].forEach(m=>{ if(m!=null){ lo=Math.min(lo,m); hi=Math.max(hi,m); } });
+    vmax=Math.max(vmax,b.volume||0);
+  });
+  if(!isFinite(lo)||!isFinite(hi)) return;
+  const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+  const n=bars.length;
+  const bw=Math.max(1, w/n*0.7), step=w/n;
+  const X=i=>PADL+step*(i+0.5);
+  const Y=v=>PADT+mainH-(v-lo)/(hi-lo)*mainH;
+  const VY=v=>volTop+VOLH-(vmax?v/vmax*VOLH:0);
+  /* 横向网格 + 左侧价格刻度 */
+  g.font='10px ui-monospace,Menlo,monospace'; g.textAlign='right';
+  for(let i=0;i<=4;i++){
+    const v=lo+(hi-lo)*i/4, y=Y(v);
+    g.strokeStyle=LINE; g.globalAlpha=.5; g.beginPath();
+    g.moveTo(PADL,y); g.lineTo(W-PADR,y); g.stroke(); g.globalAlpha=1;
+    g.fillStyle=DIM; g.fillText(v.toFixed(2), PADL-5, y+3);
+  }
+  /* 蜡烛 */
+  bars.forEach((b,i)=>{
+    if(b.close==null) return;
+    const up=(b.close>=(b.open==null?b.close:b.open));
+    const c=up?UP:DN;
+    g.strokeStyle=c; g.fillStyle=c; g.lineWidth=1;
+    const x=X(i);
+    g.beginPath(); g.moveTo(x, Y(b.high)); g.lineTo(x, Y(b.low)); g.stroke();
+    const y1=Y(Math.max(b.open,b.close)), y2=Y(Math.min(b.open,b.close));
+    const hh=Math.max(1, y2-y1);
+    if(up){ g.strokeRect(x-bw/2, y1, bw, hh); }   /* 阳线空心，A 股习惯 */
+    else  { g.fillRect(x-bw/2, y1, bw, hh); }
+    /* 成交量 */
+    g.fillStyle=c; g.globalAlpha=.55;
+    g.fillRect(x-bw/2, VY(b.volume||0), bw, volTop+VOLH-VY(b.volume||0));
+    g.globalAlpha=1;
+    /* 涨停/跌停在量柱下方点一个标记 */
+    if(b.limit_up||b.limit_down){
+      g.fillStyle=b.limit_up?UP:DN;
+      g.beginPath(); g.arc(x, volTop+VOLH+4, 1.6, 0, 6.284); g.fill();
+    }
+  });
+  /* 均线 */
+  const MAC={ma5:'#e0a33c', ma10:'#5b9cf0', ma20:'#a06bf0', ma60:'#3ec8d8'};
+  Object.keys(MAC).forEach(k=>{
+    g.strokeStyle=MAC[k]; g.lineWidth=1.1; g.beginPath();
+    let started=false;
+    bars.forEach((b,i)=>{ const v=b[k]; if(v==null){ started=false; return; }
+      if(!started){ g.moveTo(X(i),Y(v)); started=true; } else g.lineTo(X(i),Y(v)); });
+    g.stroke();
+  });
+  /* 图例 */
+  g.textAlign='left'; g.font='10px ui-monospace,Menlo,monospace';
+  let lx=PADL+2;
+  Object.keys(MAC).forEach(k=>{ g.fillStyle=MAC[k];
+    const t=k.toUpperCase(); g.fillText(t, lx, PADT+10); lx+=g.measureText(t).width+10; });
+  /* 底部日期刻度（首 / 中 / 末） */
+  g.fillStyle=DIM; g.textAlign='center';
+  [0, Math.floor(n/2), n-1].forEach(i=>{ if(bars[i])
+    g.fillText(bars[i].date.slice(2), X(i), H-5); });
+  /* 十字光标 */
+  if(SKHOVER!=null&&bars[SKHOVER]){
+    const b=bars[SKHOVER], x=X(SKHOVER);
+    g.strokeStyle=DIM; g.globalAlpha=.6; g.setLineDash([3,3]);
+    g.beginPath(); g.moveTo(x,PADT); g.lineTo(x,volTop+VOLH); g.stroke();
+    g.setLineDash([]); g.globalAlpha=1;
+  }
+  drawK._geo={PADL,PADR,step,n,X};
+}
+
+function wireChart(){
+  const cv=$('#skcv'), tip=$('#sktip'); if(!cv) return;
+  drawK();
+  const hit=ev=>{
+    const r=cv.getBoundingClientRect(), gm=drawK._geo; if(!gm) return null;
+    const i=Math.round((ev.clientX-r.left-gm.PADL)/gm.step-0.5);
+    return (i>=0&&i<gm.n)?i:null;
+  };
+  cv.onmousemove=ev=>{
+    const i=hit(ev);
+    if(i===SKHOVER&&i!=null){ posTip(ev); return; }
+    SKHOVER=i; drawK();
+    if(i==null){ tip.style.display='none'; return; }
+    const b=SKBARS[i];
+    tip.style.display='';
+    tip.textContent=[
+      b.date+(b.limit_up?'  涨停':'')+(b.limit_down?'  跌停':''),
+      '开 '+b.open+'   高 '+b.high,
+      '低 '+b.low+'   收 '+b.close,
+      '涨跌 '+pctv(b.change_pct)+'   换手 '+pctn(b.turnover),
+      '量 '+yiv(b.volume)+'股  额 '+yiv(b.amount),
+      'MA5 '+(b.ma5??'—')+'  MA10 '+(b.ma10??'—'),
+      'MA20 '+(b.ma20??'—')+'  MA60 '+(b.ma60??'—'),
+    ].join('\n');
+    posTip(ev);
+  };
+  const posTip=ev=>{
+    const box=$('#skchart').getBoundingClientRect();
+    let x=ev.clientX-box.left+12, y=ev.clientY-box.top+12;
+    if(x+190>box.width) x=ev.clientX-box.left-190;
+    tip.style.left=x+'px'; tip.style.top=Math.min(y, box.height-140)+'px';
+  };
+  cv.onmouseleave=()=>{ SKHOVER=null; tip.style.display='none'; drawK(); };
+  /* 窗口变化要重画 —— canvas 是按像素画的，CSS 缩放会糊 */
+  if(!wireChart._rs){ wireChart._rs=true;
+    window.addEventListener('resize', ()=>{ if($('#skcv')) drawK(); }); }
+}
+
+function stockTables(p,f){
+  const bars=(SKBARS||[]).slice(-20).reverse();
+  const fr=(f&&f.rows)||[];
+  return `<div class="lvgrid">
+    <div class="lvsec wide"><h3>最近 20 个交易日</h3>
+      <div class="pw"><table class="pkt">
+        <tr><th class="tx">日期</th><th class="rt">开</th><th class="rt">高</th>
+          <th class="rt">低</th><th class="rt">收</th><th class="rt">涨跌</th>
+          <th class="rt">换手</th><th class="rt">成交额</th><th class="tx">标记</th></tr>
+        ${bars.map(b=>`<tr>
+          <td class="tx">${esc(b.date)}</td>
+          <td class="rt">${b.open??'—'}</td><td class="rt">${b.high??'—'}</td>
+          <td class="rt">${b.low??'—'}</td><td class="rt">${b.close??'—'}</td>
+          <td class="rt" style="color:${upc(b.change_pct)}">${pctv(b.change_pct)}</td>
+          <td class="rt">${pctn(b.turnover)}</td>
+          <td class="rt">${yiv(b.amount)}</td>
+          <td class="tx lvwhy">${b.limit_up?'涨停':b.limit_down?'跌停':''}</td>
+        </tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">价格随上面的复权口径切换。</div>
+    </div>
+    <div class="lvsec wide"><h3>财务（按报告期）</h3>
+      ${fr.length?`<div class="pw"><table class="pkt">
+        <tr><th class="tx">报告期</th><th class="tx">公告日</th>
+          <th class="rt">营收</th><th class="rt">归母净利</th>
+          <th class="rt">单季净利</th><th class="rt">单季同比</th>
+          <th class="rt">EPS</th><th class="rt">ROE</th><th class="rt">每股净资产</th></tr>
+        ${fr.map(r=>`<tr>
+          <td class="tx">${esc(String(r.report_date).slice(0,10))}</td>
+          <td class="tx lvwhy">${esc(String(r.pub_date||'').slice(0,10))}</td>
+          <td class="rt">${yiv(r.revenue)}</td>
+          <td class="rt">${yiv(r.net_profit_parent)}</td>
+          <td class="rt">${yiv(r.np_q)}</td>
+          <td class="rt" style="color:${upc(r.np_q_yoy)}">${ratv(r.np_q_yoy)}</td>
+          <td class="rt">${r.eps_basic==null?'—':(+r.eps_basic).toFixed(3)}</td>
+          <td class="rt">${ratv(r.roe_parent)}</td>
+          <td class="rt">${r.bps==null?'—':(+r.bps).toFixed(2)}</td>
+        </tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">
+        🔴 <b>报告期 ≠ 公告日</b>。防未来函数一律用<b>公告日</b>做可见性判断
+        —— 用报告期当可见日就是未来函数（回测会凭空领先一两个月）。
+      </div>`:'<div class="none">没有财务数据</div>'}
+    </div>
+  </div>`;
 }
 
 /* ============ 查数据（只读 SQL） ============ */

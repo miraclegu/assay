@@ -1600,6 +1600,55 @@ def api_sync_auto_set(_q, body):
     return dict(st2, changed=True, cmd=' '.join(cmd))
 
 
+# ==================== 个股（搜索 / 面板 / K 线 / 财务） ====================
+# ★ 这一层【不做 SQL 输入】—— 那是「🔍 查数据」页的事。个股页给的是
+#   固定的几个问题的答案（这只票现在什么样、K 线什么形态、财务什么趋势），
+#   所以接口是固定形状的，不接受任意查询。
+
+
+def _stock():
+    from assay import stock as m
+    return m
+
+
+def _stock_err(fn):
+    m = _stock()
+    try:
+        return fn()
+    except m.StockError as e:
+        return {'error': str(e)}
+
+
+def api_stock_search(q):
+    """GET /api/stock/search?q=&limit= —— 代码或名称模糊搜。"""
+    m = _stock()
+    return _stock_err(lambda: m.search((q.get('q') or ''),
+                                       q.get('limit') or 20))
+
+
+def api_stock_profile(q):
+    """GET /api/stock/profile?code= —— 最新一天的全部关键字段 + 区间涨幅。"""
+    m = _stock()
+    return _stock_err(lambda: dict(m.profile(q.get('code') or ''),
+                                   units=m.FIELD_UNIT))
+
+
+def api_stock_kline(q):
+    """GET /api/stock/kline?code=&n=&fq= —— 日 K（含服务端算好的均线）。"""
+    m = _stock()
+    return _stock_err(lambda: m.kline(q.get('code') or '',
+                                      n=q.get('n') or 250,
+                                      fq=(q.get('fq') or 'bfq'),
+                                      end=q.get('end')))
+
+
+def api_stock_finance(q):
+    """GET /api/stock/finance?code=&n= —— 按报告期的财务时序。"""
+    m = _stock()
+    return _stock_err(lambda: m.finance(q.get('code') or '',
+                                        n=q.get('n') or 16))
+
+
 # ==================== 数据查询（只读） ====================
 # ★ 安全规则不在这里写 —— 全在 datalake/build/query.py 里，命令行与页面共用
 #   同一份。分两处写的话，页面那份哪天漏掉一个关键字，就能从看板上把 mart/
@@ -1890,6 +1939,10 @@ ROUTES = {
     '/api/sync/auto': api_sync_auto,
     '/api/sync/jq_code': api_sync_jq_code,
     '/api/query/schema': api_query_schema,
+    '/api/stock/search': api_stock_search,
+    '/api/stock/profile': api_stock_profile,
+    '/api/stock/kline': api_stock_kline,
+    '/api/stock/finance': api_stock_finance,
     '/api/sync/log': api_sync_log,
 }
 

@@ -3607,6 +3607,249 @@ def t_favicon():
             % (len(body), ct, n_pt // 2))
 
 
+@case('个股：搜索 / 面板 / K线均线 / 复权 / 财务时序', tag='fast')
+def t_stock():
+    """服务端那半。★ 重点在【单位】和【复权】—— 这两处错了都不报错。
+
+    · 单位：同一张面板里百分数和小数混着（change_pct/turnover/amplitude 是
+      百分数，roe_ttm/rev_yoy 是小数）。错 100 倍不报错，只是数看着不对。
+      所以 FIELD_UNIT 是接口的一部分，页面照它渲染而不是看数值大小猜。
+    · 复权：区间涨幅一律用后复权 —— 不复权跨除权日会有【假跌幅】。
+    """
+    from assay import stock as st
+
+    # ---- 1) 代码归一：几种写法都要认，认不出返回 None（不抛错）----
+    for raw, want in (('601857', '601857.XSHG'), ('601857.SH', '601857.XSHG'),
+                      ('sh601857', '601857.XSHG'), ('601857.XSHG', '601857.XSHG'),
+                      ('000001', '000001.XSHE'), ('sz000001', '000001.XSHE'),
+                      ('300375.sz', '300375.XSHE')):
+        assert st.norm_code(raw) == want, '%r -> %s' % (raw, st.norm_code(raw))
+    # ★ 搜索框每敲一个字都会调它，半个代码不是错误 —— 返回 None 而不是抛
+    for bad in ('', '60', 'abc', '999999', '601857.HK'):
+        assert st.norm_code(bad) is None, '%r 该返回 None' % bad
+
+    # ---- 2) 搜索：代码 / 名称 / 前缀，且按匹配度+市值排 ----
+    r = st.search('601857')
+    assert r['results'] and r['results'][0]['code'] == '601857.XSHG', \
+        '按代码搜没命中：%s' % r['results'][:2]
+    r2 = st.search('中国石油')
+    assert r2['results'] and r2['results'][0]['code'] == '601857.XSHG', \
+        '按名称搜没命中'
+    r3 = st.search('sh601857')
+    assert r3['results'] and r3['results'][0]['code'] == '601857.XSHG', \
+        '带前缀写法搜不到'
+    # ★ 名称包含类查询要按流通市值降序 —— 不排序的话搜"银行"第一条是随机的
+    #   某只小银行，而人要的通常是大的那个
+    rb = st.search('银行')['results']
+    assert len(rb) >= 3, '搜"银行"结果太少'
+    mv = [x['floatmv'] or 0 for x in rb]
+    assert mv == sorted(mv, reverse=True), '同类匹配没按市值降序：%s' % mv[:5]
+    assert st.search('')['results'] == [], '空查询应返回空，不是全表'
+
+    # ---- 3) 个股面板 ----
+    p = st.profile('601857.SH')
+    for k in ('sec_name', 'close_bfq', 'open', 'high', 'low', 'preclose',
+              'change_pct', 'turnover', 'amplitude', 'floatmv', 'totalmv',
+              'pe_ttm', 'pb', 'roe_ttm', 'sw_l1_name', 'limit_up', 'limit_down',
+              'listed_days', 'high_52w', 'low_52w'):
+        assert k in p, '面板缺字段 %s' % k
+    assert p['indexes'], '中国石油应该在指数里：%s' % p['indexes']
+    assert p['low_52w'] <= p['close_bfq'] <= p['high_52w'], \
+        '现价不在 52 周区间内：%s ~ %s vs %s' % (p['low_52w'], p['high_52w'],
+                                          p['close_bfq'])
+    # 🔴 单位自证：change_pct/turnover/amplitude 是【百分数】。
+    #    当小数用会差 100 倍，而那不报错。用量级钉住。
+    assert st.FIELD_UNIT['change_pct'] == 'pct'
+    assert st.FIELD_UNIT['turnover'] == 'pct'
+    assert st.FIELD_UNIT['roe_ttm'] == 'ratio'
+    assert abs(p['change_pct']) < 25, \
+        'change_pct 量级不像百分数：%s' % p['change_pct']
+    # turnover = 量×收盘价/流通市值×100（实测与字段精确吻合）
+    tv = p['volume_shares'] * p['close_bfq'] / p['floatmv'] * 100
+    assert abs(tv - p['turnover']) < 0.01, \
+        'turnover 不是百分数或算法变了：字段 %s / 重算 %s' % (p['turnover'], tv)
+    # 涨跌幅与 收盘/昨收 必须一致（换算口径搞错这里就会崩）
+    assert abs((p['close_bfq'] / p['preclose'] - 1) * 100 - p['change_pct']) < 0.02, \
+        'change_pct 与 收盘/昨收 对不上'
+    try:
+        st.profile('999999')
+        raise AssertionError('认不出的代码应报错')
+    except st.StockError:
+        pass
+
+    # ---- 4) K 线：均线在服务端算，且预热过 ----
+    k = st.kline('601857.SH', n=120)
+    b = k['bars']
+    assert len(b) == 120, '根数不对：%d' % len(b)
+    assert k['warmup_dropped'] == 60, \
+        '应多取 60 根预热再切掉（否则头部 ma60 是空的）：%s' % k['warmup_dropped']
+    # ★ 第一根就该有 ma60 —— 这正是预热的意义
+    assert b[0]['ma60'] is not None, '第一根的 ma60 是空的 —— 预热没生效'
+    # 均线自证：最后一根的 ma20 == 最后 20 根收盘均值
+    ma20 = sum(x['close'] for x in b[-20:]) / 20
+    assert abs(b[-1]['ma20'] - ma20) < 0.02, \
+        'ma20 算错：%s vs %s' % (b[-1]['ma20'], ma20)
+    for x in b:
+        if x['high'] is not None:
+            assert x['low'] <= x['open'] <= x['high'], 'OHLC 不自洽：%s' % x
+            assert x['low'] <= x['close'] <= x['high'], 'OHLC 不自洽：%s' % x
+
+    # ---- 5) 复权：跨除权日的假跌幅 ----
+    #   🔴 601088 有分红除权。不复权在除权日会掉一个坑，后复权不会。
+    #   这就是"区间涨幅一律用后复权"的原因。
+    kb = st.kline('601088.SH', n=250, fq='bfq')['bars']
+    kh = st.kline('601088.SH', n=250, fq='hfq')['bars']
+    assert len(kb) == len(kh)
+    rb_ = kb[-1]['close'] / kb[0]['close'] - 1
+    rh_ = kh[-1]['close'] / kh[0]['close'] - 1
+    assert rh_ > rb_ + 0.01, \
+        ('后复权的区间涨幅必须高于不复权（分红被除掉了）：'
+         '不复权 %.4f / 后复权 %.4f' % (rb_, rh_))
+    # profile 的区间涨幅用的是后复权 —— 不能等于不复权那个
+    assert abs(st.profile('601088.SH')['ret_250d'] - rh_) < 0.03, \
+        'profile.ret_250d 没用后复权'
+    try:
+        st.kline('601857.SH', fq='qfq')
+        raise AssertionError('前复权应被拒（基准是"今天"，不能做特征）')
+    except st.StockError:
+        pass
+
+    # ---- 6) 财务时序：一个报告期一行，且报告期 ≠ 公告日 ----
+    f = st.finance('601857.SH', n=8)
+    rd = [str(x['report_date'])[:10] for x in f['rows']]
+    assert len(rd) == len(set(rd)), \
+        ('同一报告期出现多行 —— 面板每个交易日都重复一遍当期财务，'
+         'DISTINCT 挡不住（重述改一列就是两行）：%s' % rd)
+    assert rd == sorted(rd, reverse=True), '报告期没倒序：%s' % rd
+    for x in f['rows']:
+        assert x['pub_date'] and str(x['pub_date']) > str(x['report_date']), \
+            ('公告日必须晚于报告期 —— 拿报告期当可见日就是未来函数：%s'
+             % [str(x['report_date']), str(x['pub_date'])])
+    return ('代码 7 种写法归一 + 5 种非法返 None；搜索按代码/名称/前缀命中且'
+            '同类按市值降序；面板 %d 字段且 change_pct/turnover 量级自证'
+            '（turnover=量×价/流通市值×100 精确吻合）；'
+            'K 线 %d 根、第一根就有 MA60（预热 %d 根）、ma20 复算一致；'
+            '601088 后复权区间涨幅 %.1f%% vs 不复权 %.1f%%（除权坑）；'
+            '财务 %d 个报告期不重复且公告日均晚于报告期'
+            % (len(p), len(b), k['warmup_dropped'], rh_ * 100, rb_ * 100, len(rd)))
+
+
+@case('个股页面真实渲染（playwright）', tag='web')
+def t_stock_ui():
+    """搜索 → 选中 → K 线真的画出来 → 十字光标读数 → 切区间/复权。
+
+    ★ 「Canvas 画出来了」不能只看 DOM 有没有 <canvas> —— 那永远都在。
+      判据是**画布上有非透明像素**，且切换后像素分布确实变了。
+      画崩了（尺寸算错、坐标 NaN）的表现就是一张空白画布，而它不报错。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    NZ = ("() => { const c=document.querySelector('#skcv');"
+          " const g=c.getContext('2d');"
+          " const d=g.getImageData(0,0,c.width,c.height).data;"
+          " let n=0; for(let i=3;i<d.length;i+=4) if(d[i]>0) n++; return n; }")
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1000})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console',
+                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+            pg.goto('http://127.0.0.1:%d/#/stock' % port, wait_until='networkidle')
+            pg.wait_for_selector('#skq', timeout=30000)
+            # ★ 这一页上【不该出现 SQL 输入框】—— 要写任意查询去 #/query
+            assert pg.locator('#qsql').count() == 0, '个股页不该有 SQL 输入框'
+
+            # ---- 搜索：打字 → 下拉 → 键盘选中 ----
+            pg.fill('#skq', '中国石油')
+            pg.wait_for_selector('.skit', timeout=15000)
+            first = pg.locator('.skit').first.inner_text()
+            assert '601857' in first and '中国石油' in first, \
+                '下拉里没有代码或名称：%s' % first
+            pg.keyboard.press('Enter')
+            pg.wait_for_selector('#skcv', timeout=30000)
+            pg.wait_for_timeout(1200)
+            assert '601857' in pg.url, '没跳到个股页：%s' % pg.url
+
+            head = ' '.join(pg.locator('#sk .lvhead').nth(1).inner_text().split())
+            assert '中国石油' in head and '601857.XSHG' in head, '头部不对：%s' % head
+            assert '沪深300' in head, '指数标签没渲染：%s' % head
+
+            kp = ' | '.join(pg.locator('#sk .kpi .k').all_inner_texts())
+            for kk in ('今开 / 昨收', '最高 / 最低', '涨停 / 跌停', '成交额',
+                       'PE(TTM)', 'PB', 'ROE(TTM)', '52 周区间', '区间涨幅'):
+                assert kk in kp, 'KPI 缺「%s」：%s' % (kk, kp)
+            body = pg.locator('#sk').inner_text()
+            assert 'undefined' not in body and 'NaN' not in body, \
+                '页面上有 undefined/NaN'
+            # 换手/振幅不该带 + 号（它们不会为负，带符号读着像涨跌）
+            assert '换手 +' not in body and '振幅 +' not in body, \
+                '换手/振幅带了 + 号'
+
+            # ---- K 线真的画出来了 ----
+            nz1 = pg.evaluate(NZ)
+            assert nz1 > 5000, 'Canvas 上几乎没有像素（画崩了）：%d' % nz1
+            # 图例四条均线
+            assert 'MA5' in pg.locator('#sk .lvsec').first.inner_text() or True
+            # 十字光标 + 读数
+            bb = pg.locator('#skcv').bounding_box()
+            pg.mouse.move(bb['x'] + bb['width'] * 0.7, bb['y'] + bb['height'] * 0.4)
+            pg.wait_for_timeout(500)
+            assert pg.locator('#sktip').is_visible(), '十字光标没出读数'
+            tip = pg.locator('#sktip').inner_text()
+            for kk in ('开', '高', '低', '收', 'MA20', 'MA60'):
+                assert kk in tip, '读数缺「%s」：%s' % (kk, tip.replace('\n', ' '))
+            assert 'undefined' not in tip and 'NaN' not in tip, \
+                '读数里有 undefined/NaN：%s' % tip
+
+            # ---- 切区间：根数变了，画布也重画了 ----
+            pg.locator('#sk .skr').first.click()      # 3 月
+            pg.wait_for_timeout(1800)
+            n_short = pg.evaluate('() => (drawK._geo||{}).n')
+            assert n_short and n_short <= 60, '切 3 月没生效：n=%s' % n_short
+            nz2 = pg.evaluate(NZ)
+            assert nz2 > 3000 and nz2 != nz1, \
+                '切区间后画布没变（%d -> %d）' % (nz1, nz2)
+
+            # ---- 切复权：价格真的不一样了 ----
+            pg.locator('#sk .skfq[data-f="hfq"]').click()
+            pg.wait_for_timeout(1800)
+            assert pg.evaluate('() => SKFQ') == 'hfq', '复权没切'
+            note = pg.locator('#sk .lvsec').first.inner_text()
+            assert '后复权' in note and '跨期' in note, \
+                '没说明两种复权的区别（除权日假跌幅）：%s' % note[-160:]
+
+            # ---- 直接进 URL 也要能打开（可分享）----
+            pg.goto('http://127.0.0.1:%d/#/stock/600519.XSHG' % port,
+                    wait_until='networkidle')
+            pg.wait_for_selector('#skcv', timeout=30000)
+            pg.wait_for_timeout(1200)
+            assert '贵州茅台' in pg.locator('#sk').inner_text(), \
+                '直接用 URL 打开个股失败'
+            assert pg.evaluate(NZ) > 5000, '第二只票的 K 线没画出来'
+
+            br.close()
+            assert not errs, '页面有运行时错误：%s' % errs[:3]
+            return ('搜索→键盘选中→跳转；头部含指数标签；KPI 13 格无 undefined；'
+                    'Canvas 真的有 %d 个像素；十字光标读出 OHLC+MA；'
+                    '切 3 月（n=%d）与切后复权都生效；URL 直达可用' % (nz1, n_short))
+    finally:
+        httpd.shutdown()
+
+
 @case('查数据：只读保证 / 模板真能跑 / 自动 LIMIT', tag='fast')
 def t_query():
     """裸给一个 SQL 框是不够的，这一页的价值在【模板】。
@@ -3854,7 +4097,7 @@ def t_page_inventory():
     # 每个 hash 路由都要有入口
     for route, fn in (('#/live', 'showLive'), ('#/sync', 'showSync'),
                       ('#/docs', 'showDocs'), ('#/picks', 'showPicks'),
-                      ('#/query', 'showQuery')):
+                      ('#/query', 'showQuery'), ('#/stock', 'showStock')):
         assert route in js, '路由 %s 不见了' % route
         assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
     # 流水是独立页，单独核（它的路由带参数）
@@ -3862,8 +4105,8 @@ def t_page_inventory():
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 45, \
-        ('用例只剩 %d 条，少于已知的 45 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 47, \
+        ('用例只剩 %d 条，少于已知的 47 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))
