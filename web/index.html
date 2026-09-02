@@ -673,7 +673,7 @@ async function loadLive(aid){
       <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th><th class="rt">成本</th>
           <th class="rt">现价</th><th class="rt">市值</th>
           <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
-          <th>建仓</th></tr>
+          <th class="rt">估卖出费</th><th class="tx">建仓</th></tr>
       ${it.map(x=>`<tr>
         <td>${esc(x.code)}</td>
         <td class="tx">${esc(x.name||'')}</td>
@@ -684,11 +684,16 @@ async function loadLive(aid){
         <td class="rt" style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
         <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
         <td class="rt">${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
+        <td class="rt lvwhy">${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}</td>
         <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
       </table>
-      <div class="lvwhy" style="margin-top:6px">浮盈只算<b>价差</b>，不含已收分红
-        —— 与引擎 trades 的 ret 口径一致。现金不含分红到账，要记就在
-        「✎ 记一笔 › 现金」里录一条。</div>`
+      <div class="lvwhy" style="margin-top:6px">
+        <b>浮盈是纯价差</b>：成本取<b>成交价</b>，<b>不含买入费</b>，也没预留卖出费
+        —— 与引擎 trades 的 ret 口径一致（改了它实盘就没法和回测比）。<br>
+        费用在别处体现：已付的买入费<b>已从现金里扣过</b>，所以
+        <b>总资产与「累计收益（TWR）」是含费的</b>；要卖才付的那部分见
+        「全平落袋」。<b>别把两处相减</b> —— 那会把买入费减两次。<br>
+        浮盈也不含<b>已收分红</b>；分红到账请在「✎ 记一笔 › 现金」里录一条。</div>`
       :`<div class="none">空仓${o.n_fills?'':' —— 还没录过成交，点「✎ 记一笔」'}</div>`}
   </div>`;
   liveEquityTag(aid);
@@ -730,10 +735,15 @@ function kpiHtml(o){
            (P.items||[]).length+' 只 · 成本 '+num(P.cost,2))}
     ${cell('可用现金', num(P.cash,2),
            wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%')}
-    ${cell('持仓浮盈',
+    ${cell('持仓浮盈 <span class="lvwhy">纯价差</span>',
            `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
-           P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%'
-             +' · 估值日 '+esc(P.asof||'—'):'只算价差，不含分红')}
+           (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':'')
+           +' · 估值日 '+esc(P.asof||'—'))}
+    ${cell('全平落袋',
+           P.pnl_net==null?'—':
+           `<span style="color:${col(P.pnl_net)}">${sgn(P.pnl_net)}${num(P.pnl_net,2)}</span>`,
+           P.exit_fee_est?'扣估算卖出费 '+num(P.exit_fee_est,2)+'（含印花税万5）'
+             :'扣估算卖出费')}
     <div id="kperf" style="display:none"></div>
   </div>
   <div class="kpi" id="kperf2">
@@ -1700,9 +1710,9 @@ async function showSync(){
   const A=it.filter(x=>x.leg==='A'), B=it.filter(x=>x.leg==='B');
   let warn='';
   if(o.error) warn+=`<div class="lvwarn"><b>状态读取失败</b><br>${esc(o.error)}</div>`;
-  if(st.leg_a_lag) warn+=`<div class="lvwarn"><b>A 腿（行情）落后 ${st.leg_a_lag} 个交易日</b><br>
+  if(st.leg_a_lag) warn+=`<div class="lvwarn"><b>行情数据落后 ${st.leg_a_lag} 个交易日</b><br>
      同步没跑成功。点下面「立即同步」，或看最近一次日志。</div>`;
-  if(st.leg_b_days_since>21) warn+=`<div class="lvwarn"><b>B 腿（聚宽财务）距今 ${st.leg_b_days_since} 天没更新</b><br>
+  if(st.leg_b_days_since>21) warn+=`<div class="lvwarn"><b>财务数据距今 ${st.leg_b_days_since} 天没更新</b><br>
      行情天天新、财务过期时，回测照跑、报告看着完全正常，而选股用的是旧财报
      （数据字典 E-0「数据新鲜度错配」）。实测代价：2026 中报只覆盖 55.6% 时，
      froec 同日选股与聚宽只对上 6/10；补完升到 9/10。<br>
@@ -1710,7 +1720,10 @@ async function showSync(){
   if(o.readonly) warn+=`<div class="lvwarn">只读模式 —— 可以看，不能手动触发。
      用 <code>python3 serve.py --live</code> 开启。</div>`;
 
-  /* A 腿看"落后几个交易日"（每个交易日必然有新行情，缺了就是没同步）；
+  /* 内部术语叫 A 腿 / B 腿（sync_status.py 的字段名就是 leg_a / leg_b），
+     但【界面上不用】—— "腿"对着屏幕看的人没有意义。界面写
+     「行情数据 · 全自动」/「财务数据 · 需手动导出」。
+     A 腿看"落后几个交易日"（每个交易日必然有新行情，缺了就是没同步）；
      B 腿只看"距今几天" —— 财务是事件驱动，没公告的日子本来就没有新
      pub_date，按交易日算落后是必然误报。判据在服务端，这里只负责显示。 */
   const row=x=>{
@@ -1743,7 +1756,7 @@ async function showSync(){
   <div class="lvmsg" id="symsg"></div>
   ${autoNote(o.auto)}
   <div class="lvgrid">
-    <div class="lvsec"><h3>A 腿 · tdx 行情（全自动）</h3>
+    <div class="lvsec"><h3>行情数据 · 全自动</h3>
       <table class="lvt"><tr><th>项</th><th>最新</th><th>状态</th></tr>
       ${A.map(row).join('')}</table>
       <div class="lvwhy" style="margin-top:6px">
@@ -1752,14 +1765,28 @@ async function showSync(){
         跑完直接触发实盘出信号 —— 依赖写进调用顺序，不靠两个时间常量隔开。
       </div>
     </div>
-    <div class="lvsec"><h3>B 腿 · 聚宽财务（必须人工）</h3>
+    <div class="lvsec"><h3>财务数据 · 需手动导出</h3>
       <table class="lvt"><tr><th>项</th><th>最新</th><th>距今</th></tr>
       ${B.map(row).join('')}</table>
       <div class="lvwhy" style="margin-top:6px">
-        聚宽研究环境没有本地 API，只能人工导出。B 腿的"落后"不按交易日算 ——
-        财务是<b>事件驱动</b>的，没公告的日子本来就不该有新 pub_date。
+        聚宽研究环境没有本地 API，只能人工导出。财务数据的"落后"<b>不按交易日算</b>
+        —— 它是<b>事件驱动</b>的，没公告的日子本来就不该有新 pub_date；
+        按交易日算会天天标红，然后你就不看红字了。
         ${st.leg_b_days_since!=null?'距今 '+st.leg_b_days_since+' 天。':''}
       </div>
+      <div class="lvform" style="margin-top:8px;gap:8px">
+        <button class="btn" id="jqcode">① 取聚宽代码</button>
+        <label class="btn" style="cursor:pointer">② 上传导出的包
+          <input type="file" id="jqfile" accept=".tar,.tar.gz,.tgz"
+                 style="display:none" ${o.readonly?'disabled':''}></label>
+      </div>
+      <div class="lvwhy" style="margin-top:4px">
+        ① 复制代码 → 粘进聚宽研究环境一个 cell 跑完 → 它打包成<b>一个 tar</b>
+        → ② 上传，服务端自动 merge 并把该跑的 loader <b>全跑一遍</b>
+        （原来这步要照着打印出来的命令手抄 5~8 条，<b>抄漏一条就是 raw 与 std
+        不一致，而那不会报错</b>）。
+      </div>
+      <div class="lvmsg" id="jqmsg"></div>
     </div>
     <div class="lvsec"><h3>最近同步日志</h3>
       ${(o.logs||[]).length?`<table class="lvt"><tr><th>时间</th><th>大小</th></tr>
@@ -1794,6 +1821,53 @@ async function showSync(){
       SYJOB=r.job_id; pollSync();
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
   };
+  /* ① 取聚宽代码：正本是磁盘上那个 extract 脚本，服务端只把 SINCE /
+     QUARTERS 按本地状态替换掉 —— 前端【不另存一份】，两份一定会分叉。 */
+  if($('#jqcode')) $('#jqcode').onclick=async()=>{
+    const m=$('#jqmsg'); m.className='lvmsg'; m.textContent='取代码中…';
+    try{
+      const r=await j('/api/sync/jq_code');
+      if(r.error) throw new Error(r.error);
+      const el=$('#syout'); el.style.display=''; el.textContent=r.code;
+      el.scrollTop=0;
+      const sg=r.suggest||{};
+      m.className='lvmsg '+(r.warn?'bad':'ok');
+      m.innerHTML=(r.warn?'⚠ '+esc(r.warn)+'<br>':'')
+        +'代码已显示在下面，<b>整段复制</b>粘进聚宽研究环境一个 cell 跑。'
+        +(r.substituted&&r.substituted.length
+           ? '<br>已按本地状态填好：<code>'+esc(r.substituted.join('　'))+'</code>'
+             +(sg.oldest?'　（本地最落后的表到 '+esc(sg.oldest)
+               +'，SINCE 往前留了几天重叠 —— <b>重叠不会重复，缺口会静默丢数据</b>）':'')
+           : '')
+        +(sg.note?'<br>'+esc(sg.note):'')
+        +'　<a href="#" id="jqcopy">复制到剪贴板</a>';
+      const cp=$('#jqcopy');
+      if(cp) cp.onclick=async ev=>{ ev.preventDefault();
+        try{ await navigator.clipboard.writeText(r.code);
+             cp.textContent='已复制 ✓'; }
+        catch(e){ cp.textContent='复制失败，请手动全选下面那段'; } };
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
+  /* ② 上传：原始字节直传（几十 MB 不该走 base64）。上传完服务端就
+     merge + 跑全部 loader，日志实时滚在下面。 */
+  if($('#jqfile')) $('#jqfile').onchange=async ev=>{
+    const f=ev.target.files&&ev.target.files[0]; if(!f) return;
+    const m=$('#jqmsg'); m.className='lvmsg';
+    m.textContent='上传 '+f.name+'（'+(f.size/1e6).toFixed(1)+' MB）…';
+    try{
+      const res=await fetch('/api/sync/jq_upload',{method:'POST',
+        headers:{'X-Filename':f.name,'Content-Type':'application/octet-stream'},
+        body:f});
+      const r=await res.json();
+      if(r.error) throw new Error(r.error);
+      m.className='lvmsg ok';
+      m.innerHTML='已收到 '+esc(f.name)+'，包内 <b>'+(r.members||[]).length
+        +'</b> 个文件：<code>'+esc((r.members||[]).join(' '))+'</code><br>'
+        +'正在 merge 并跑 loader —— 日志在下面滚动，<b>别关页面</b>。';
+      SYJOB=r.job_id; pollSync();
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+    finally{ ev.target.value=''; }   /* 清掉，否则同一个文件选不了第二次 */
+  };
   document.querySelectorAll('a.sylog').forEach(e=>e.onclick=async ev=>{
     ev.preventDefault();
     const r=await j('/api/sync/log?name='+encodeURIComponent(e.dataset.n));
@@ -1812,7 +1886,14 @@ async function pollSync(){
     if(o.state==='running'){ setTimeout(pollSync, 2000); return; }
     const m=$('#symsg');
     m.className='lvmsg '+(o.rc===0?'ok':'bad');
-    m.textContent=o.rc===0?'同步完成（信号已重算）':('同步失败，rc='+o.rc);
+    /* 同一个轮询同时服务"立即同步"和"上传财务数据" —— 文案要分开，
+       否则财务导入完了会显示"信号已重算"，而那步压根没跑。 */
+    const isJQ=String(SYJOB||'').indexOf('jq-')===0;
+    m.textContent=o.rc===0
+      ? (isJQ?'财务数据已导入（merge + loader + 面板 + beta 全跑完）'
+             :'同步完成（信号已重算）')
+      : ((isJQ?'导入失败':'同步失败')+'，rc='+o.rc
+         +(isJQ?' —— 日志里会写明是哪一步，前面的步骤已生效':''));
     SYJOB=null;
     setTimeout(()=>showSync(), 1200);
   }catch(e){ SYJOB=null; }

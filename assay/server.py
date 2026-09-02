@@ -26,7 +26,7 @@ import os
 import re
 import sys
 import threading
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -1599,6 +1599,157 @@ def api_sync_auto_set(_q, body):
     return dict(st2, changed=True, cmd=' '.join(cmd))
 
 
+# ==================== 财务数据（聚宽）导入 ====================
+# 闭环三步：① 页面给出可直接粘进研究环境的代码（SINCE/QUARTERS 按本地状态
+# 预填）② 在聚宽跑完下载那**一个** tar ③ 页面上传，服务端 merge + 跑全部
+# loader。原来第 ③ 步要人对着打印出来的命令手抄 5~8 条，抄漏一条就是
+# raw 与 std 不一致 —— 而那不会报错。
+JQ_SCRIPT = os.path.join('raw', 'jq', '_ingest', 'extract_jq_increment.py')
+# 上传体积上限。财务增量实测几十 MB；给到 512MB 是为了万一整批重抽。
+JQ_UPLOAD_MAX = 512 * 1024 * 1024
+JQ_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,80}$')
+
+
+def _jq_overlap_days():
+    """SINCE 往前留几天重叠。
+
+    ★ 留重叠是刻意的：合并按自然键去重，**重叠不会重复，而缺口会静默丢数据**。
+      这条写在 extract 脚本的文件头，这里只是把它变成默认值。
+    """
+    return 5
+
+
+def jq_suggest():
+    """按本地当前状态算出该填的 SINCE / QUARTERS。
+
+    ★ 让人手填这两个值是最容易出错的一处：SINCE 填晚了就是**静默丢数据**
+      （中间那几天的公告永远补不回来，除非重抽）。本地各表的最新 pub_date
+      服务端知道，直接算给它。
+    """
+    import subprocess
+    dl = _datalake_dir()
+    out = {'since': None, 'quarters': None, 'b_max': {}, 'note': None}
+    try:
+        r = subprocess.run(['python3', os.path.join(dl, 'build', 'sync_status.py'),
+                            '--json'], cwd=dl, capture_output=True, text=True,
+                           timeout=120)
+        items = json.loads(r.stdout).get('items') or []
+    except Exception as e:                                  # noqa: BLE001
+        out['note'] = '读不到本地状态（%s），SINCE 请自己填' % type(e).__name__
+        return out
+    mx = {}
+    for it in items:
+        if it.get('leg') == 'B' and it.get('max'):
+            mx[it['key']] = it['max']
+    out['b_max'] = mx
+    if not mx:
+        out['note'] = '本地还没有财务数据 —— 这是首次导入，SINCE 请自己定'
+        return out
+    oldest = min(mx.values())
+    d = datetime.strptime(oldest, '%Y-%m-%d').date() - \
+        timedelta(days=_jq_overlap_days())
+    out['since'] = d.isoformat()
+    out['oldest'] = oldest
+    # 报告期：当前季与上一季（重抽顺带捡回财报重述）
+    today = date.today()
+    q = (today.month - 1) // 3 + 1
+    cur = (today.year, q)
+    prev = (today.year, q - 1) if q > 1 else (today.year - 1, 4)
+    out['quarters'] = ['%dq%d' % cur, '%dq%d' % prev]
+    return out
+
+
+def api_sync_jq_code(_q):
+    """GET /api/sync/jq_code —— 给出可直接粘进聚宽研究环境的代码。
+
+    ★ 正本是磁盘上那个脚本（datalake/raw/jq/_ingest/extract_jq_increment.py），
+      这里只把「改这两处」的 SINCE / QUARTERS 按本地状态替换掉。
+      **不在这里另写一份** —— 两份一定会分叉，而分叉的那份跑出来的数据
+      看着正常。
+    """
+    dl = _datalake_dir()
+    p = os.path.join(dl, JQ_SCRIPT)
+    out = {'path': p, 'suggest': jq_suggest()}
+    if not os.path.isfile(p):
+        return dict(out, error='找不到抽取脚本：%s' % p)
+    src = open(p, encoding='utf-8').read()
+    sug = out['suggest']
+    subs = []
+    if sug.get('since'):
+        src, n = re.subn(r"^SINCE = '[^']*'",
+                         "SINCE = '%s'" % sug['since'], src, count=1,
+                         flags=re.M)
+        if n:
+            subs.append('SINCE=%s' % sug['since'])
+    if sug.get('quarters'):
+        q = ', '.join("'%s'" % x for x in sug['quarters'])
+        src, n = re.subn(r'^QUARTERS = \[[^\]]*\]',
+                         'QUARTERS = [%s]' % q, src, count=1, flags=re.M)
+        if n:
+            subs.append('QUARTERS=[%s]' % q)
+    # ★ 替换失败要说出来，不能默默给一份没改的：那会让人以为已经按本地状态
+    #   填好了，而 SINCE 停在几个月前就是静默丢数据。
+    out['substituted'] = subs
+    out['code'] = src
+    out['bytes'] = len(src.encode('utf-8'))
+    if sug.get('since') and 'SINCE=%s' % sug['since'] not in subs:
+        out['warn'] = ('没能自动替换 SINCE（脚本里那一行的格式变了？）——'
+                       '粘过去之后请手动把 SINCE 改成 %s' % sug['since'])
+    return out
+
+
+def api_sync_jq_upload(headers, raw):
+    """POST /api/sync/jq_upload —— 上传聚宽导出的 tar，随即 merge + 跑全部 loader。
+
+    ★ 走【原始字节】而不是 JSON+base64：几十 MB 的 base64 要多传 33%，
+      而且 json.loads 会把整包再复制一遍。
+    ★ 文件名来自请求头，**只接受 [A-Za-z0-9._-]** 且只落到 _ingest/downloads
+      —— 不能拿它直接 join（路径穿越）。
+    """
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    name = (headers.get('X-Filename') or '').strip()
+    if not JQ_NAME_RE.match(name):
+        return {'error': '文件名不合法：%r（只接受字母数字 . _ -）' % name}
+    if not (name.endswith('.tar') or name.endswith('.tar.gz')
+            or name.endswith('.tgz')):
+        return {'error': '要上传聚宽脚本打包出来的 .tar（收到 %s）' % name}
+    if not raw:
+        return {'error': '上传内容是空的'}
+    dl = _datalake_dir()
+    dst_dir = os.path.join(dl, 'raw', 'jq', '_ingest', 'downloads')
+    os.makedirs(dst_dir, exist_ok=True)
+    # 同名不覆盖：加时间戳。上传的包是**原始凭据**，覆盖了就没法复查
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    dst = os.path.join(dst_dir, '%s__%s' % (stamp, name))
+    tmp = dst + '.part'
+    with open(tmp, 'wb') as fh:
+        fh.write(raw)
+    os.replace(tmp, dst)                       # 先写 .part 再 rename，同 _save_marks
+    # 立刻验一下是不是真的 tar —— 坏包早失败，别等 merge 跑一半
+    import tarfile
+    try:
+        with tarfile.open(dst) as t:
+            members = [m.name for m in t.getmembers()]
+    except Exception as e:                                  # noqa: BLE001
+        os.remove(dst)
+        return {'error': '不是可读的 tar（%s: %s）—— 已删除' % (type(e).__name__, e)}
+    if not members:
+        os.remove(dst)
+        return {'error': 'tar 是空的 —— 已删除。聚宽那边可能一张表都没抽到'}
+    merge = os.path.join(dl, 'build', 'merge_jq_increment.py')
+    if not os.path.isfile(merge):
+        return {'error': '找不到 %s' % merge}
+    cmd = ['python3', merge, dst, '--and-load']
+    job_id = 'jq-%s' % datetime.now().strftime('%H%M%S')
+    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+                     'sha': None, 'run_id': None, 'rc': None}
+    threading.Thread(target=_run_job, args=(job_id, cmd, dl),
+                     daemon=True).start()
+    return {'job_id': job_id, 'saved': dst, 'bytes': len(raw),
+            'members': members, 'cmd': ' '.join(cmd)}
+
+
 _LOG_RE = re.compile(r'^[0-9]{8}-[0-9]{6}\.log$')
 
 
@@ -1663,6 +1814,7 @@ ROUTES = {
     '/api/live/fills': api_live_fills,
     '/api/sync': api_sync,
     '/api/sync/auto': api_sync_auto,
+    '/api/sync/jq_code': api_sync_jq_code,
     '/api/sync/log': api_sync_log,
 }
 
@@ -1694,6 +1846,29 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/sync/auto': api_sync_auto_set,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
+        # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再
+        #   json.loads（多传 33% + 整包再复制一遍）。所以它不能和下面的
+        #   JSON 解析共用一条路。
+        if u.path == '/api/sync/jq_upload':
+            try:
+                n = int(self.headers.get('Content-Length') or 0)
+                if n <= 0:
+                    return self._send(400, json.dumps(
+                        {'error': '没有上传内容'}, ensure_ascii=False))
+                if n > JQ_UPLOAD_MAX:
+                    return self._send(413, json.dumps(
+                        {'error': '文件太大（%.0f MB > 上限 %.0f MB）'
+                                  % (n / 1e6, JQ_UPLOAD_MAX / 1e6)},
+                        ensure_ascii=False))
+                raw = self.rfile.read(n)
+                r = api_sync_jq_upload(self.headers, raw)
+            except Exception as e:                          # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+                return self._send(500, json.dumps(
+                    {'error': '%s: %s' % (type(e).__name__, e)},
+                    ensure_ascii=False))
+            return self._send(200, json.dumps(r, ensure_ascii=False, default=str))
         fn = POSTS.get(u.path)
         if fn is None:
             return self._send(404, json.dumps({'error': 'no such endpoint'}))

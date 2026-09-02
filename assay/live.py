@@ -1488,10 +1488,33 @@ def positions_valued(aid, datalake=None):
     for it in out['items']:
         it['weight'] = (round(it['value'] / (mv + money), 6)
                         if it['value'] is not None and (mv + money) else None)
+    # ★ 浮盈是【纯价差】：成本取成交价，不含买入费；也没预留卖出费。
+    #   这是刻意的 —— 与引擎 trades 的 ret 口径一致（broker 里 entry_price
+    #   在除权时不缩，就为了让 pnl 只反映价差）。改了它，实盘与回测就没法比。
+    #   但"现在全平能落袋多少"是个真问题，所以另算一个【估算卖出费】：
+    #   按当前价、账户当期费率、卖出方向（含印花税）逐只估。
+    #   ⚠ 已付的买入费不在这里 —— 它已经从现金里扣过、已体现在权益和
+    #     账户累计收益（TWR）里。再减一次就是**重复计费**。
+    fee_m = fee_model_at(aid, day)
+    exit_fee = 0.0
+    for it in out['items']:
+        if it['price'] is None:
+            continue
+        try:
+            f = estimate_fee('sell', it['shares'], it['price'], day, fee_m,
+                             it['code'])
+        except LiveError:
+            f = None
+        it['exit_fee_est'] = (round(f, 2) if f is not None else None)
+        if f:
+            exit_fee += f
+    out['exit_fee_est'] = round(exit_fee, 2)
     out['market_value'] = round(mv, 2)
     out['cost'] = round(cst, 2)
     out['pnl'] = round(mv - cst, 2)
     out['pnl_pct'] = round(mv / cst - 1, 6) if cst else None
+    # 全平后落袋的价差（扣估算卖出费）。不扣买入费 —— 见上面的说明。
+    out['pnl_net'] = round(mv - cst - exit_fee, 2)
     out['equity'] = round(mv + money, 2)
     return out
 

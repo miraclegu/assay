@@ -1951,6 +1951,42 @@ def t_live_core():
             assert x.get('rates') and x['rates'].get('buy_rate') is not None, \
                 '每档要带总费率（页面显示总费率而不是佣金）：%s' % x.get('rates')
             assert x.get('model'), '每档要带合并后的完整费率模型（供展开明细）'
+        # ---- 3d3d) 浮盈是【纯价差】，费用不在里面 ----
+        #   ★ 成本取成交价、不含买入费，也不预留卖出费 —— 与引擎 trades 的
+        #     ret 口径一致（broker 里 entry_price 除权时不缩就是为了这个）。
+        #     改了它实盘就没法和回测比。
+        #   ★ 但"现在全平能落袋多少"是真问题 -> exit_fee_est / pnl_net。
+        #   🔴 已付买入费**不在** pnl_net 里：它已从现金扣过、已体现在权益与
+        #     账户 TWR 里，再减一次就是重复计费。
+        lv.upsert_account('t_pnl', name='pnl', init_cash=500000)
+        # 费率就地定义 —— 不依赖后面 3d4 里那个 GALAXY 的声明顺序
+        lv.add_fee_rate('t_pnl', '2026-09-01',
+                        {'mode': 'parts', 'commission': 0.000086,
+                         'min_commission': 5.0, 'commission_incl_reg': False,
+                         'regulatory': 0.0, 'transfer': lv.TRANSFER_RATE,
+                         'transfer_extra': 'xshg', 'stamp': 'auto'},
+                        note='银河')
+        _r = lv.add_fill('t_pnl', '2026-09-01', '603506.SH', 'buy', 3300, 11.350)
+        assert _r['fee'] > 0, '买入应估出费用'
+        _P = lv.positions_valued('t_pnl')
+        _it = _P['items'][0]
+        # 成本 == 成交价（不含买入费）。含了的话 3300 股会摊出 +0.0016
+        assert abs(_it['cost'] - 11.350) < 1e-6, \
+            '成本应等于成交价、不含买入费，实得 %s' % _it['cost']
+        assert abs(_it['pnl'] - (_it['price'] - 11.350) * 3300) < 0.02, \
+            '浮盈应是纯价差'
+        # 估算卖出费：含印花税万5，所以一定比买入费大得多
+        assert _it['exit_fee_est'] > _r['fee'] * 3, \
+            '卖出费该含印花税万5（比买入费大一截）：卖 %s / 买 %s' \
+            % (_it['exit_fee_est'], _r['fee'])
+        assert abs(_P['pnl_net'] - (_P['pnl'] - _P['exit_fee_est'])) < 0.02, \
+            'pnl_net 应等于 浮盈 − 估算卖出费'
+        assert _P['pnl_net'] < _P['pnl'], '全平落袋必须小于浮盈'
+        # 已付买入费只体现在现金/权益，不在 pnl 也不在 pnl_net 里
+        assert abs(_P['equity'] - (lv.cash('t_pnl') + _P['market_value'])) < 0.02
+        assert abs((500000 - lv.cash('t_pnl')) - (3300 * 11.350 + _r['fee'])) < 0.02, \
+            '现金应扣掉本金 + 买入费'
+
         # ---- 3d4) 过户费【分市场】另收：银河四张真实账单逐笔对到分 ----
         #   ★ 银河的"万0.86 最低5元"是个【打包价】：里面已含经手费+证管费，
         #     深市连过户费也在里面，沪市的过户费万0.1 另收。所以同一个账户
@@ -2563,6 +2599,9 @@ def t_live_ui():
             else:
                 # 还没成交 -> 不编数字，说明为什么没有
                 assert '业绩' in _kp2, '没有权益曲线时也要有一格说明：%s' % _kp2
+            # 浮盈那格要写明"纯价差"，并且另有一格"全平落袋"
+            assert '纯价差' in _kp, 'KPI 没写明浮盈是纯价差：%s' % _kp
+            assert '全平落袋' in _kp, 'KPI 缺「全平落袋」（扣估算卖出费）：%s' % _kp
             _kpv = pg.locator('#lvbody .kpi').first.inner_text()
             assert 'undefined' not in _kpv and 'NaN' not in _kpv, \
                 'KPI 板里有 undefined/NaN：%s' % _kpv
@@ -2678,7 +2717,7 @@ def t_live_ui():
             #   （实测：持仓 3 只被数成 14 行）
             th = [x.strip() for x in
                   pg.locator('#lvbody table.lvpos th').all_inner_texts()]
-            for k in ('成本', '现价', '市值', '浮盈', '仓位'):
+            for k in ('成本', '现价', '市值', '浮盈', '仓位', '估卖出费'):
                 assert k in th, '持仓表缺「%s」列：%s' % (k, th)
             # 代码与名称【各占一列】—— 挤在一格里没法按名称扫
             assert th[:2] == ['代码', '名称'], '持仓表前两列应是代码/名称：%s' % th
@@ -3140,6 +3179,7 @@ def t_sync_ui():
         return '跳过（无 playwright）'
     import json as _json
     import threading
+    import urllib.error
     import urllib.request
     from http.server import ThreadingHTTPServer
 
@@ -3174,8 +3214,14 @@ def t_sync_ui():
             pg.goto('http://127.0.0.1:%d/#/sync' % port, wait_until='networkidle')
             pg.wait_for_selector('.lvsec', timeout=90000)
             pg.wait_for_timeout(400)
-            txt = pg.content()
-            assert 'A 腿' in txt and 'B 腿' in txt, '两条腿的分区没渲染'
+            # ★ 界面上【不用】"A 腿/B 腿"这种内部术语 —— 对着屏幕看的人
+            #   没有意义。内部字段名仍是 leg_a/leg_b（sync_status.py）。
+            #   只看渲染出来的标题，不看整页源码（源码里有注释会误判）。
+            _h3 = ' | '.join(pg.locator('.lvsec h3').all_inner_texts())
+            assert '行情数据' in _h3 and '财务数据' in _h3, \
+                '两个分区的标题没渲染：%s' % _h3
+            assert 'A 腿' not in _h3 and 'B 腿' not in _h3, \
+                '界面上不该出现"A 腿/B 腿"：%s' % _h3
             # ★ 只取【表格单元格】，不取整节文本 —— 本会话第四次栽在
             #   "断言匹配到自己写的说明文案"上：B 腿那节的说明里正写着
             #   「B 腿的"落后"不按交易日算」，于是 `'落后' not in b_txt` 必然失败。
@@ -3229,6 +3275,40 @@ def t_sync_ui():
                 auto_note = '自动同步 %s%s（按钮文字一致、只读双层拦住）' % (
                     '开' if au['on'] else '关',
                     ' · ' + au['schedule'] if au.get('schedule') else '')
+            # ---- 财务数据导入：取代码 + 上传 ----
+            #   ★ 代码正本是磁盘上那个 extract 脚本，服务端只替换
+            #     SINCE/QUARTERS。前端另存一份就一定会分叉。
+            assert pg.locator('#jqcode').count() == 1, '缺「取聚宽代码」按钮'
+            assert pg.locator('#jqfile').count() == 1, '缺上传入口'
+            jc = _json.loads(_get('/api/sync/jq_code'))
+            assert not jc.get('error'), '取聚宽代码失败：%s' % jc.get('error')
+            assert 'from jqdata import' in jc['code'], \
+                '给出的不像聚宽研究环境的代码'
+            assert 'def pack()' in jc['code'] and 'tarfile' in jc['code'], \
+                '代码必须自己打包成一个文件（否则要下载十几个 csv）'
+            # SINCE 要按【本地最落后那张表】往前留重叠，不能是脚本里的旧值
+            sg = jc['suggest']
+            if sg.get('since'):
+                assert sg['since'] < sg['oldest'], \
+                    'SINCE(%s) 必须早于本地最落后的 pub_date(%s) —— ' \
+                    '留重叠是刻意的：重叠不重复，缺口会静默丢数据' \
+                    % (sg['since'], sg['oldest'])
+                import re as _re2
+                m_s = _re2.search(r"^SINCE = '([^']*)'", jc['code'], _re2.M)
+                assert m_s and m_s.group(1) == sg['since'], \
+                    '代码里的 SINCE 没被替换成 %s' % sg['since']
+                assert not jc.get('warn'), '替换出了问题：%s' % jc.get('warn')
+            # 只读模式下上传必须被拒（按钮置灰之外，接口也要拒）
+            _rq = urllib.request.Request(
+                base + '/api/sync/jq_upload', data=b'x' * 16,
+                headers={'X-Filename': 'a.tar',
+                         'Content-Type': 'application/octet-stream'})
+            try:
+                _up = _json.loads(urllib.request.urlopen(_rq, timeout=30).read())
+            except urllib.error.HTTPError as e:
+                _up = _json.loads(e.read())
+            assert _up.get('error') and '只读' in _up['error'], \
+                '只读模式下上传应被拒：%s' % _up
             # 日志可点开
             n_log = pg.locator('a.sylog').count()
             if n_log:
@@ -3238,9 +3318,12 @@ def t_sync_ui():
                 assert '每日数据同步' in out, '日志内容没渲染出来: %s' % out[:120]
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('两条腿语义分离（A 报交易日落后 / B 报距今天数）；'
-                    '日历来源可信；只读拦住手动同步；%s；%d 份日志可点开'
-                    % (auto_note, n_log))
+            return ('两条腿语义分离（行情报交易日落后 / 财务报距今天数）；'
+                    '界面无"A 腿/B 腿"内部术语；日历来源可信；'
+                    '只读拦住手动同步与上传；%s；'
+                    '聚宽代码可取且 SINCE 按本地最落后表(%s)预填成 %s；'
+                    '%d 份日志可点开'
+                    % (auto_note, sg.get('oldest'), sg.get('since'), n_log))
     finally:
         httpd.shutdown()
         sv.ALLOW_LIVE = old
