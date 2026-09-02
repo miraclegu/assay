@@ -1,2 +1,1 @@
-{"fee": {"commission": 8.002e-05, "commission_incl_reg": true, "min_commission": 0.0, "stamp": "auto", "transfer": 9.98e-06}, "from": "2026-09-01", "note": "从单份配置迁移", "ts": "2026-09-02T12:54:26", "uid": "487c44b458de"}
 {"fee": {"commission": 2.602e-05, "commission_incl_reg": false, "min_commission": 0.0, "mode": "parts", "regulatory": 5.4e-05, "stamp": "auto", "transfer": 9.98e-06}, "from": "2026-09-01", "note": "按账单逐项：佣金1.72 规费3.57 过户费0.66（与红利同一账单口径）", "supersede": true, "ts": "2026-09-02T13:36:37", "uid": "5d1ed701c54b"}

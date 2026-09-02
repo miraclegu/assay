@@ -359,6 +359,13 @@ table.lvt td{overflow-wrap:anywhere}
 .frow{display:flex;gap:8px;align-items:baseline;margin:0 0 6px;flex-wrap:wrap}
 .frow>label{flex:0 0 96px;text-align:right;color:var(--dim);font-size:12px}
 .frow>.lvwhy{flex:1;min-width:180px}
+/* 费率明细：一项一块，标签在上、值加粗、说明在下 */
+.frd{border:1px solid var(--line);border-radius:5px;padding:6px 9px;background:var(--bg)}
+.frd>span{display:block;font-size:10px;color:var(--dim);letter-spacing:.06em}
+.frd>b{font-family:"SF Mono",Menlo,monospace;font-size:13px}
+.frd>i{display:block;font-style:normal;font-size:10px;color:var(--dim);margin-top:2px}
+table.lvfr tr.frhead:hover td{background:var(--panel2)}
+table.lvfr tr.frbody td{background:var(--bg)}
 /* 调仓日提示条 + 未来交易日历条 */
 .lvrb{border:1px solid var(--line);border-left:3px solid var(--accent);
   border-radius:5px;padding:7px 11px;margin:0 0 8px;font-size:12px;background:var(--bg)}
@@ -696,34 +703,56 @@ function openSettings(aid, a, ro){
           title="只从列表隐去，不删任何数据">${a.archived?'取消归档':'归档'}</button>
         <span class="lvwhy">归档只是从列表隐去，<b>不删任何数据</b>（流水与版本快照是决策证据）</span></div>
       <div class="lvmsg" id="emsg"></div>
-      <h3 style="margin-top:14px">费率（按【成交日】取当时生效的那一档）</h3>
-      ${H.length?`<table class="lvt" style="margin-bottom:8px">
-        <tr><th>生效期间</th><th>方式</th><th>费率</th><th>备注</th></tr>
-        ${H.slice().reverse().map(r=>{
-          const m=r.fee||{};
-          const desc=(m.mode==='flat')
-            ? '买 万'+(((m.buy_rate)||0)*1e4).toFixed(2)+' / 卖 万'+(((m.sell_rate)||0)*1e4).toFixed(2)
-              +(m.flat_min?'，最低 '+m.flat_min:'，无最低')
-            : '佣金 万'+(((m.commission)||0)*1e4).toFixed(3)
-              +(m.commission_incl_reg?'(含规费)':'(净)')
-              +(m.min_commission?'，最低 '+m.min_commission:'，无最低');
-          return `<tr class="${r.active?'':'lvrev'}">
-            <td>${esc(r.from)} ${r.superseded
-              ?'<b style="color:var(--up)">已作废（从未生效）</b>'
-              :'~ '+(r.to?esc(r.to):'<b>至今</b>')}</td>
+      <h3 style="margin-top:14px">费率（按【成交日】取当时生效的那一档）
+        <button class="btn" id="fadd" ${ro?'disabled':''}
+          style="float:right;margin-top:-3px">+ 新增费率</button></h3>
+      ${H.length?`<table class="lvt lvfr">
+        <tr><th>生效期间</th><th>方式</th><th>买入总费率</th><th>卖出总费率</th><th></th></tr>
+        ${H.slice().reverse().map((r,i)=>{
+          const m=r.model||{}, rt=r.rates||{};
+          /* ★ 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
+             看"佣金万0.26"完全说明不了实付万0.9。 */
+          return `<tr class="frhead" data-i="${i}" style="cursor:pointer">
+            <td>${esc(r.from)} ~ ${r.to?esc(r.to):'<b>至今</b>'}</td>
             <td>${m.mode==='flat'?'总费率':'按项'}</td>
-            <td>${esc(desc)}</td>
-            <td class="lvwhy">${esc(r.note||'')}</td></tr>`;}).join('')}</table>`
-        :'<div class="lvwhy" style="margin-bottom:8px">还没配过费率 —— 下面填一档。未配置时按默认费率估（偏保守）。</div>'}
-      <div class="lvwhy" style="margin-bottom:10px">
-        <b>只能新增，不能改已有的。</b>新一档生效，上一档自动在前一天结束
-        （结束时间是<b>推导</b>的：下一档生效日减一天，账本本身只追加）。
-        填错了就再新增一档更晚生效的盖掉，历史仍然看得见改过。<br>
+            <td><b>万${((rt.buy_rate||0)*1e4).toFixed(2)}</b></td>
+            <td><b>万${((rt.sell_rate||0)*1e4).toFixed(2)}</b></td>
+            <td class="lvwhy">▸ 明细</td></tr>
+          <tr class="frbody" data-i="${i}" style="display:none"><td colspan="5">
+            <div class="lvgrid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
+              ${m.mode==='flat'?`
+                <div class="frd"><span>买入总费率</span><b>万${((m.buy_rate||0)*1e4).toFixed(3)}</b></div>
+                <div class="frd"><span>卖出总费率</span><b>万${((m.sell_rate||0)*1e4).toFixed(3)}</b>
+                  <i>已含印花税</i></div>
+                <div class="frd"><span>单笔最低</span><b>${m.flat_min||0} 元</b>
+                  <i>${m.flat_min?'':'无最低'}</i></div>`
+              :`
+                <div class="frd"><span>净佣金率</span><b>万${((m.commission||0)*1e4).toFixed(3)}</b>
+                  <i>券商那部分，可谈</i></div>
+                <div class="frd"><span>规费率</span><b>万${(((m.commission_incl_reg?0:m.regulatory)||0)*1e4).toFixed(3)}</b>
+                  <i>${m.commission_incl_reg?'已含在佣金率里':'法定：证管费万0.2 + 经手费万0.341'}</i></div>
+                <div class="frd"><span>过户费率</span><b>万${((m.transfer||0)*1e4).toFixed(3)}</b>
+                  <i>法定：中登，沪深都收</i></div>
+                <div class="frd"><span>卖出印花税</span><b>${esc(String(m.stamp))}</b>
+                  <i>${m.stamp==='auto'?'按日期分段：2023-08-28 起万5，之前千1':'固定'}；仅卖出</i></div>
+                <div class="frd"><span>单笔最低佣金</span><b>${m.min_commission||0} 元</b>
+                  <i>${m.min_commission?'':'无最低'}</i></div>`}
+              <div class="frd"><span>10 万一笔</span>
+                <b>买 ${num(rt.buy_fee,2)} / 卖 ${num(rt.sell_fee,2)}</b>
+                <i>元</i></div>
+            </div>
+            ${r.note?`<div class="lvwhy" style="margin-top:6px">备注：${esc(r.note)}</div>`:''}
+            <div class="lvwhy">录入于 ${esc((r.ts||'').slice(0,16).replace('T',' '))}</div>
+          </td></tr>`;}).join('')}</table>`
+        :'<div class="lvwhy">还没配过费率 —— 点右上「+ 新增费率」。未配置时按默认费率估（偏保守）。</div>'}
+      <div class="lvwhy" style="margin:6px 0 0">
+        <b>只能新增，不能改已有的。</b>新一档生效，上一档自动在前一天结束。<br>
         ★ <b>补录历史成交会用那笔成交【当时】的费率</b> ——
         换过券商之后拿今天的费率去算三个月前那笔，数字看着正常，只是错的。
         ${H.length?'（'+esc(H[0].from)+' 之前没有配置，按默认费率估）':''}
       </div>
 
+      <div id="fpanel" style="display:none;margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
       <div class="frow"><label>生效日</label>
         <input id="ffrom" size="12" value="${new Date().toISOString().slice(0,10)}">
         <span class="lvwhy">这一档从哪天开始算</span></div>
@@ -736,7 +765,6 @@ function openSettings(aid, a, ro){
         <span class="lvwhy">前两种最后存的是同一套【逐项费率】；
           总费率是"不想拆项"时用的</span></div>
 
-      <!-- ① 照账单填：每一项对着券商账单抄一遍，实时折成费率 -->
       <div id="fbill">
         <div class="frow"><label>成交金额</label>
           <input id="c0" size="12" class="ci" placeholder="66110">
@@ -763,7 +791,6 @@ function openSettings(aid, a, ro){
           填上面几格，这里会显示合计与折算出的总费率</span></div>
       </div>
 
-      <!-- ② 直接填费率：知道自己费率的人用 -->
       <div id="frate" style="display:none">
         <div class="frow"><label>净佣金率</label>
           <input id="fr1" size="12" value="${F.commission}">
@@ -785,7 +812,6 @@ function openSettings(aid, a, ro){
           <span class="lvwhy">元。<b>0 = 没有最低</b></span></div>
       </div>
 
-      <!-- ③ 只填总费率 -->
       <div id="fflat" style="display:none">
         <div class="frow"><label>买入总费率</label>
           <input id="fb1" size="12" value="${F.buy_rate}">
@@ -801,20 +827,21 @@ function openSettings(aid, a, ro){
           <button class="btn" id="ffill">按当前逐项折算填入</button>
           <span class="lvwhy">填了总费率就<b>不再拆项、也不另加印花税</b></span></div>
       </div>
+
       <div class="frow" style="margin-top:10px"><label>备注</label>
         <input id="fnote" placeholder="为什么改（如：换券商 / 谈到万0.5 / 上一档填错了）"
                style="flex:1;min-width:200px"></div>
       <div class="frow"><label></label>
         <label class="lvwhy" style="flex:0 0 auto;text-align:left">
-          <input type="checkbox" id="fsup"> 更正上一档（用同一生效日把它盖掉）</label>
+          <input type="checkbox" id="fsup"> 更正上一档（同一生效日，把它替换掉）</label>
         <button class="btn" id="fsave" ${ro?'disabled':''}>新增这一档</button>
         <span class="lvwhy">不勾：生效日必须晚于上一档（费率变了）。<br>
-          勾上：允许同一生效日 —— <b>上一档填错了</b>时用。
-          错的那条仍然列在历史里、标「已作废」，因为改写账本就没法回答
-          "当时用的是哪档"。<br>
+          勾上：允许同一生效日 —— <b>上一档填错了</b>时用，那一档会被
+          <b>直接删掉</b>（它有效区间是零长度，从来没有成交按它算过）。<br>
           ⚠ 只解决填错。若已按错费率算过成交，那些费用已落在流水里 ——
           要去流水页「冲正 + 重录」让它重算。</span></div>
       <div class="lvmsg" id="emsg2"></div>
+      </div>
       <div class="lvwhy">id <code>${esc(a.id)}</code> 不可改 —— 它决定 live/&lt;id&gt;/
         目录名，改了等于换账户、流水与版本历史全断。<br>
         <b>初始资金 = 开户那一刻的余额。</b>后来的入金请走「✎ 记一笔 › 现金」——
@@ -841,6 +868,19 @@ function openSettings(aid, a, ro){
       $('#frate').style.display=w==='rate'?'':'none';
       $('#fflat').style.display=w==='flat'?'':'none'; };
     $('#fway').onchange=syncWay; syncWay();
+    $('#fadd').onclick=()=>{ const e=$('#fpanel');
+      e.style.display=(e.style.display==='none'?'':'none');
+      if(e.style.display==='') e.scrollIntoView({block:'nearest'}); };
+    /* 点费率那一行展开逐项明细 —— 原来这些信息挤在"备注"里，
+       而备注是给人写"为什么改"的，不该塞规格。 */
+    document.querySelectorAll('tr.frhead').forEach(tr=>tr.onclick=()=>{
+      const i=tr.dataset.i;
+      const b=document.querySelector('tr.frbody[data-i="'+i+'"]');
+      if(!b) return;
+      const open=b.style.display==='none';
+      b.style.display=open?'':'none';
+      tr.querySelector('td:last-child').textContent=open?'▾ 收起':'▸ 明细';
+    });
     const bill=()=>{
       const g=id=>parseFloat($('#'+id).value)||0;
       const amt=g('c0');

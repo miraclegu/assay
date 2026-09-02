@@ -1932,6 +1932,25 @@ def t_live_core():
                 raise AssertionError('%s 应被拒' % why)
             except lv.LiveError:
                 pass
+        # ★ supersede = **物理删除**被盖掉那档，不留"已作废"的行。
+        #   它的有效区间是零长度（to < from），也就是从来没有任何成交按它
+        #   算过 —— 删掉不丢"当时用的是哪档"的信息，只是去掉噪声。
+        n0 = len(lv.fee_rates('t_rate'))
+        sp = lv.add_fee_rate('t_rate', '2026-10-01',
+                             {'mode': 'flat', 'buy_rate': 0.00005,
+                              'sell_rate': 0.00055, 'flat_min': 0},
+                             note='更正', supersede=True)
+        assert sp.get('replaced') == 1, '应删掉 1 条被盖的档，实得 %s' % sp.get('replaced')
+        h2 = lv.fee_rates('t_rate')
+        assert len(h2) == n0, '档数不该变（一删一加），实得 %d -> %d' % (n0, len(h2))
+        assert not any(x.get('superseded') for x in h2), \
+            '不该再有"已作废"的行 —— supersede 是物理删除'
+        assert abs(h2[-1]['model']['buy_rate'] - 0.00005) < 1e-9, '生效的应是新那档'
+        # 每档都要带【总费率】—— 页面显示的是总费率而不是佣金率
+        for x in h2:
+            assert x.get('rates') and x['rates'].get('buy_rate') is not None, \
+                '每档要带总费率（页面显示总费率而不是佣金）：%s' % x.get('rates')
+            assert x.get('model'), '每档要带合并后的完整费率模型（供展开明细）'
         # 迁移：老的单份 acct['fee'] -> 第一档
         lv.upsert_account('t_mig', name='mig', init_cash=100000, fee=fm)
         assert lv.fee_rates('t_mig') == []
@@ -2267,6 +2286,8 @@ def t_live_ui():
             #     另收算 9.53，差 60%，而两种都不报错。现在规费自己一行，
             #     填 0 就表示已含在佣金里，少一个概念。
             pg.click('#lvset')
+            pg.wait_for_selector('#fadd', timeout=8000)
+            pg.click('#fadd')
             pg.wait_for_selector('#c0', timeout=8000)
             pg.wait_for_timeout(300)
             # 设置里一个 undefined 都不许有（旧进程/字段缺失都会露出来）
@@ -2308,9 +2329,31 @@ def t_live_ui():
                 abs(bd0['transfer'] - 0.66) < 0.011, \
                 '逐项应各自对上账单：%s' % bd0
 
-            # 同一生效日：不勾「更正」要被拒，勾上则把上一档标为已作废
+            # 同一生效日：不勾「更正」要被拒，勾上则把上一档【删掉】
             pg.click('#lvset')
-            pg.wait_for_selector('#c0', timeout=8000)
+            pg.wait_for_selector('#fadd', timeout=8000)
+            # ★ 新增面板平时收起 —— 它有十来个输入框，常驻会把设置页撑满
+            assert not pg.locator('#fpanel').is_visible(), '新增面板应默认收起'
+            pg.click('#fadd')
+            pg.wait_for_timeout(250)
+            assert pg.locator('#fpanel').is_visible(), '点「+ 新增费率」应展开'
+            # 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
+            # 看"佣金万0.26"完全说明不了实付万0.9
+            th = pg.locator('table.lvfr th').all_inner_texts()
+            assert '买入总费率' in th and '卖出总费率' in th, \
+                '费率表应显示买/卖总费率：%s' % th
+            row = [x.strip() for x in pg.locator('tr.frhead td').all_inner_texts()]
+            assert '万0.90' in row and '万5.90' in row, \
+                '总费率应是买万0.90 / 卖万5.90：%s' % row
+            # 逐项明细【点开才看】，且不是塞在备注里
+            assert not pg.locator('tr.frbody').first.is_visible(), '明细应默认收起'
+            pg.locator('tr.frhead').first.click()
+            pg.wait_for_timeout(300)
+            det = ' | '.join(pg.locator('tr.frbody .frd').all_inner_texts())
+            for need in ('净佣金率', '规费率', '过户费率', '卖出印花税', '单笔最低佣金'):
+                assert need in det, '明细缺「%s」：%s' % (need, det[:160])
+            assert '万0.260' in det and '万0.540' in det and '万0.100' in det, \
+                '明细里各项费率不对：%s' % det[:160]
             pg.select_option('#fway', 'rate')
             pg.wait_for_timeout(200)
             assert pg.locator('#frate').is_visible() and \
@@ -2326,12 +2369,14 @@ def t_live_ui():
             pg.click('#fsave')
             pg.wait_for_timeout(1700)
             pg.click('#lvset')
-            pg.wait_for_selector('#c0', timeout=8000)
-            hh = ' '.join(' '.join(
-                pg.locator('.stbox table.lvt tr').all_inner_texts()).split())
-            assert '已作废' in hh, '被更正的那档应标「已作废」并仍列在历史里：%s' % hh[:150]
+            pg.wait_for_selector('#fadd', timeout=8000)
+            assert pg.locator('tr.frhead').count() == 1, \
+                '更正是物理删除 —— 不该留下"已作废"的行，实得 %d 行' \
+                % pg.locator('tr.frhead').count()
 
             # 再新增一档更晚生效的（总费率方式），上一档应在前一天结束
+            pg.click('#fadd')
+            pg.wait_for_timeout(250)
             pg.select_option('#fway', 'flat')
             pg.wait_for_timeout(200)
             pg.fill('#ffrom', '2026-10-01')
@@ -2343,9 +2388,9 @@ def t_live_ui():
             pg.click('#fsave')
             pg.wait_for_timeout(1700)
             pg.click('#lvset')
-            pg.wait_for_selector('#c0', timeout=8000)
+            pg.wait_for_selector('#fadd', timeout=8000)
             hh2 = ' '.join(' '.join(
-                pg.locator('.stbox table.lvt tr').all_inner_texts()).split())
+                pg.locator('table.lvfr tr').all_inner_texts()).split())
             assert '2026-09-30' in hh2, \
                 '上一档应显示结束于 2026-09-30：%s' % hh2[:150]
             pg.locator('#mclose').click()
@@ -2431,8 +2476,8 @@ def t_live_ui():
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
-                    '费率(照账单逐项 5.95 逐项对上/更正标已作废/新档旧档接续/'
-                    '按成交日取档/手填优先)；'
+                    '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
+                    '更正物理删除/新档旧档接续/按成交日取档/手填优先)；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

@@ -111,6 +111,24 @@ def _append_jsonl(path, obj):
         f.write(json.dumps(obj, ensure_ascii=False, sort_keys=True) + '\n')
 
 
+def _write_jsonl(path, rows):
+    """整文件重写 jsonl（先 tmp 再 rename）。
+
+    ★ 这个模块的账本原则是**只追加**，所以这个函数【只给一处用】：
+      `add_fee_rate(supersede=True)` 删掉被同日盖掉的那档。
+      为什么那种情况可以删：被盖掉的记录有效区间是**零长度**
+      （to = 下一档 from − 1 天 < from），也就是**从来没有任何一笔成交
+      按它算过** —— 删掉它不丢任何"当时用的是哪档"的信息，只是去掉噪声。
+      成交流水、策略版本、现金流水一律不用这个函数。
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + '\n')
+    os.replace(tmp, path)
+
+
 def _read_jsonl(path):
     out = []
     if not os.path.exists(path):
@@ -564,11 +582,14 @@ def fee_rates(aid):
         # to < from 说明有一条【同日】的记录把它盖掉了（更正），
         # 有效区间零长度 —— 标成已作废，页面上照样列出来。
         dead = bool(to and _d(to) < _d(r['from']))
-        # ★ 被同日那条盖掉时，推出来的 to 会早于 from（如 09-01 ~ 08-31）——
-        #   那是"零长度有效区间"的数学结果，但显示出来像个笔误。
-        #   置 None 并靠 superseded 标记表达"从没生效过"。
+        # ★ 每档带上【总费率】—— 页面要显示的是总费率而不是佣金率：
+        #   佣金只是其中一项，看佣金万0.26 完全说明不了实付万0.9。
+        #   印花税按【该档生效日】算分段，不是今天。
+        full = _merge_fee(r.get('fee'))
         out.append(dict(r, to=(None if dead else to),
-                        active=(to is None), superseded=dead))
+                        active=(to is None), superseded=dead,
+                        model=full,
+                        rates=effective_rates(full, 100000.0, r['from'])))
     return out
 
 
@@ -652,9 +673,17 @@ def add_fee_rate(aid, from_date, model, note='', supersede=False):
                 % cur[-1]['from'])
     rec = {'ts': _now(), 'uid': _uid(), 'from': d.isoformat(),
            'fee': m, 'note': note or ''}
+    path = os.path.join(acct_dir(aid), 'fee_rates.jsonl')
     if supersede:
-        rec['supersede'] = True
-    _append_jsonl(os.path.join(acct_dir(aid), 'fee_rates.jsonl'), rec)
+        # ★ 被同日盖掉的那档【物理删除】，不留"已作废"的行。
+        #   它的有效区间是零长度 —— 从来没有任何成交按它算过，
+        #   留着只是噪声。见 _write_jsonl 的说明。
+        keep = [r for r in _read_jsonl(path) if r.get('from') != d.isoformat()]
+        n = len(_read_jsonl(path)) - len(keep)
+        _write_jsonl(path, keep + [rec])
+        rec['replaced'] = n
+    else:
+        _append_jsonl(path, rec)
     return dict(rec, to=None, active=True)
 
 
