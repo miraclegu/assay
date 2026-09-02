@@ -1951,6 +1951,30 @@ def t_live_core():
             assert x.get('rates') and x['rates'].get('buy_rate') is not None, \
                 '每档要带总费率（页面显示总费率而不是佣金）：%s' % x.get('rates')
             assert x.get('model'), '每档要带合并后的完整费率模型（供展开明细）'
+        # ★ 费率必须【每账户独立】—— 存在 live/<id>/fee_rates.jsonl，
+        #   一个文件一个账户。共享一份是很容易顺手写出来的（"费率不都一样吗"），
+        #   而串了之后的表现是：另一个账户的历史成交被按新费率重算，
+        #   现金和权益全变，且**不报错**。
+        lv.upsert_account('t_iso', name='iso', init_cash=100000)
+        lv.add_fee_rate('t_iso', '2026-09-01', dict(fm), note='A 的费率')
+        _b4 = lv.fee_model_at('t_fee', '2027-01-02')['commission']
+        lv.add_fee_rate('t_iso', '2027-01-01',
+                        {'mode': 'parts', 'commission': 0.001, 'regulatory': 0,
+                         'transfer': 0, 'min_commission': 0}, note='只该影响 t_iso')
+        assert abs(lv.fee_model_at('t_iso', '2027-01-02')['commission'] - 0.001) < 1e-12
+        assert abs(lv.fee_model_at('t_fee', '2027-01-02')['commission'] - _b4) < 1e-12, \
+            '改一个账户的费率影响到了别的账户'
+        assert os.path.dirname(os.path.abspath(
+            os.path.join(lv.acct_dir('t_iso'), 'fee_rates.jsonl'))) != \
+            os.path.dirname(os.path.abspath(
+                os.path.join(lv.acct_dir('t_fee'), 'fee_rates.jsonl'))), \
+            '两个账户的费率文件在同一个目录 —— 迟早会共用同一份'
+        lv.upsert_account('t_never', name='从没配过费率', init_cash=100000)
+        assert lv.fee_rates('t_never') == [] and \
+            abs(lv.fee_model_at('t_never', '2026-09-01')['commission']
+                - lv.FEE_DEFAULT['commission']) < 1e-12, \
+            '没配过费率的账户应落到 FEE_DEFAULT，而不是捡别的账户的'
+
         # 迁移：老的单份 acct['fee'] -> 第一档
         lv.upsert_account('t_mig', name='mig', init_cash=100000, fee=fm)
         assert lv.fee_rates('t_mig') == []
@@ -2391,6 +2415,12 @@ def t_live_ui():
             pg.click('#fadd')
             pg.wait_for_timeout(250)
             assert pg.locator('#fpanel').is_visible(), '点「+ 新增费率」应展开'
+            # 每一档的【来源】要在行上看得见，不能只藏在展开的明细里 ——
+            # "照账单核过的"和"照报价推定的"在表里长得一模一样
+            _fr = pg.locator('table.lvfr tr.frhead td:first-child')
+            for _i in range(_fr.count()):
+                assert len(_fr.nth(_i).inner_text().split('\n')) >= 2, \
+                    '费率行第 %d 档没显示来源/备注' % (_i + 1)
             # 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
             # 看"佣金万0.26"完全说明不了实付万0.9
             th = pg.locator('table.lvfr th').all_inner_texts()
@@ -2606,7 +2636,7 @@ def t_live_ui():
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
-                    '按成交日取档/手填优先)；'
+                    '按成交日取档/手填优先/每账户独立/来源写在行上)；'
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)

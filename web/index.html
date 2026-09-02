@@ -716,8 +716,15 @@ function openSettings(aid, a, ro){
           const m=r.model||{}, rt=r.rates||{};
           /* ★ 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
              看"佣金万0.26"完全说明不了实付万0.9。 */
+          /* ★ 备注在【行上】就能看见，不能只藏在展开的明细里 ——
+             "照账单核过的" 和 "照报价推定的" 在表里长得一模一样，
+             而后者可能整体差 60%（同一个万0.8，含规费/另收两种口径）。
+             来源不明确的费率看着最像对的。 */
+          const nt=(r.note||'').trim();
           return `<tr class="frhead" data-i="${i}" style="cursor:pointer">
-            <td>${esc(r.from)} ~ ${r.to?esc(r.to):'<b>至今</b>'}</td>
+            <td>${esc(r.from)} ~ ${r.to?esc(r.to):'<b>至今</b>'}${
+              nt?'<div class="lvwhy">'+esc(nt.length>52?nt.slice(0,52)+'…':nt)+'</div>':
+                 '<div class="lvwhy">（没写来源）</div>'}</td>
             <td>${m.mode==='flat'?'总费率':'按项'}</td>
             <td><b>万${((rt.buy_rate||0)*1e4).toFixed(2)}</b></td>
             <td><b>万${((rt.sell_rate||0)*1e4).toFixed(2)}</b></td>
