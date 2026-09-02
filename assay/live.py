@@ -367,8 +367,9 @@ def fills(aid):
     return _read_jsonl(os.path.join(acct_dir(aid), 'fills.jsonl'))
 
 
-def add_fill(aid, trade_date, code, side, shares, price, fee=0.0,
-             name='', source='manual', note='', reverse_of=None):
+def add_fill(aid, trade_date, code, side, shares, price, fee=None,
+             name='', source='manual', note='', reverse_of=None,
+             fee_estimated=False):
     """录一笔成交。**只追加**。
 
     校验在这里做而不是页面上 —— 页面能绕过，这里是唯一入口。
@@ -382,9 +383,29 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=0.0,
     try:
         shares = int(shares)
         price = float(price)
-        fee = float(fee or 0)
     except Exception:                                       # noqa: BLE001
-        raise LiveError('数量/价格/费用必须是数字')
+        raise LiveError('数量/价格必须是数字')
+    # ★ fee=None（没填）与 fee=0（明确说没有费用）是**两件事**。
+    #   没填就按引擎口径估一个并标 fee_estimated —— 默认 0 会让现金越算越多，
+    #   而"多出来的钱"不会报错，只会让权益悄悄虚高（年换手 4.5 次的话，
+    #   一年约 0.5% 的费用凭空消失）。
+    if fee is None or fee == '':
+        # 冲正不估费用 —— 见下面对负费用的说明。调用方应传 -原费用。
+        fee = 0.0 if reverse_of else estimate_fee(side, shares, price, d)
+        fee_estimated = not reverse_of
+    else:
+        try:
+            fee = float(fee)
+        except Exception:                                   # noqa: BLE001
+            raise LiveError('费用必须是数字（不填则按引擎口径估算）')
+    # ★ 只有【冲正】记录允许负费用。
+    #   冲正的语义是"这笔交易没发生"，所以原记录的费用也要退掉：
+    #     原买入   cash -= 11420 + 5
+    #     冲正卖出 cash += 11420 - (-5)      -> 净影响 0，精确抵消
+    #   若冲正记录照常估一笔费用（+10.71），净影响就是 -15.71 —— 一笔
+    #   没发生的交易凭空吃掉两次费用，而且不报错。
+    if fee < 0 and not reverse_of:
+        raise LiveError('费用不能为负（只有冲正记录可以，用来退掉原费用）')
     if shares <= 0 or price <= 0:
         raise LiveError('数量与价格必须为正（撤销请用反向冲正，不要填负数）')
     if side == 'buy' and shares % LOT_SIZE:
@@ -400,10 +421,35 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=0.0,
     rec = {'ts': _now(), 'trade_date': d.isoformat(), 'code': code,
            'name': name, 'side': side, 'shares': shares, 'price': price,
            'fee': fee, 'source': source, 'note': note}
+    if fee_estimated:
+        rec['fee_estimated'] = True
     if reverse_of:
         rec['reverse_of'] = reverse_of
     _append_jsonl(os.path.join(acct_dir(aid), 'fills.jsonl'), rec)
     return rec
+
+
+def estimate_fee(side, shares, price, trade_date, cost=None):
+    """按【引擎同一套成本口径】估算费用。
+
+    ★ 不在这里重写费率 —— 直接用 `broker.Cost`，公式也照抄 broker 的两个
+      成交出口（_fill_sell / _fill_buy）：
+          买：max(额 × commission, min_commission) + 额 × open_tax
+          卖：max(额 × commission, min_commission) + 额 × close_tax_at(日期)
+      印花税按日期分段（2023-08-28 起 千1 -> 万5），所以要传成交日。
+      费率写两份的话，实盘现金和回测成本会慢慢分叉而没人发现。
+
+    这是**估算**。券商实际扣费有过户费、规费等零碎，且各家不同 ——
+    所以入账时会标 fee_estimated=True，对完账单再改成实际值。
+    """
+    c = cost or Cost()
+    amt = float(shares) * float(price)
+    fee = max(amt * c.commission, c.min_commission)
+    if side == 'sell':
+        fee += amt * c.close_tax_at(_d(trade_date))
+    else:
+        fee += amt * c.open_tax
+    return round(fee, 2)
 
 
 def fifo_lots(rows):

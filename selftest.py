@@ -1709,6 +1709,72 @@ def t_live_core():
                                 lv.cashflows('t_cash')) - 150000) < 1e-6, \
             'cash_asof 没按日期截断现金流水'
 
+        # ---- 3d) 成交费用三态：留空=估算 / 填值=按填的 / 填 0=真的 0 ----
+        #     ★ `fee=None`（没填）与 `fee=0`（明确说没有费用）是两件事。
+        #       默认 0 会让现金越算越多，而"多出来的钱"不报错，只是让权益
+        #       悄悄虚高 —— 年换手 4.5 次的话一年约 0.5%。
+        from assay.broker import Cost as _C
+        lv.upsert_account('t_fee', name='fee', init_cash=100000)
+        lv.bind_version('t_fee', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        r1 = lv.add_fill('t_fee', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42)
+        assert r1['fee_estimated'] is True, '不填费用应标 fee_estimated'
+        assert r1['fee'] == lv.estimate_fee('buy', 1000, 11.42, '2026-08-20')
+        r2 = lv.add_fill('t_fee', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78,
+                         fee=3.21)
+        assert r2['fee'] == 3.21 and not r2.get('fee_estimated')
+        r3 = lv.add_fill('t_fee', '2026-08-22', '600012.XSHG', 'buy', 200, 16.69,
+                         fee=0)
+        assert r3['fee'] == 0 and not r3.get('fee_estimated'), \
+            '明确填 0 不该被当成"没填"而去估算'
+        exp = 100000 - (1000 * 11.42 + r1['fee']) - (100 * 48.78 + 3.21) \
+            - (200 * 16.69)
+        assert abs(lv.cash('t_fee') - exp) < 1e-6, \
+            '现金没把费用扣进去：%.2f vs %.2f' % (lv.cash('t_fee'), exp)
+        # 估算口径必须与引擎一致（同一个 Cost，公式抄 broker 的两个成交出口）
+        c = _C()
+        for side, sh, px, d in (('buy', 1000, 11.42, '2023-08-25'),
+                                ('sell', 1000, 11.42, '2023-08-25'),
+                                ('sell', 1000, 11.42, '2023-08-28')):
+            amt = sh * px
+            want = max(amt * c.commission, c.min_commission) + (
+                amt * c.close_tax_at(lv._d(d)) if side == 'sell'
+                else amt * c.open_tax)
+            assert abs(lv.estimate_fee(side, sh, px, d) - round(want, 2)) < 1e-9, \
+                '%s %s 的估算与引擎口径不一致' % (side, d)
+        # 印花税分段必须生效（2023-08-28 起 千1 -> 万5）
+        assert lv.estimate_fee('sell', 1000, 11.42, '2023-08-25') > \
+            lv.estimate_fee('sell', 1000, 11.42, '2023-08-28'), \
+            '印花税没按日期分段'
+        try:
+            lv.add_fill('t_fee', '2026-08-23', '601857.XSHG', 'sell', 100,
+                        11.0, fee=-1)
+            raise AssertionError('非冲正记录的负费用应被拒')
+        except lv.LiveError:
+            pass
+
+        # ---- 3e) 冲正必须【精确抵消】，含费用 ----
+        #     冲正的语义是"这笔交易没发生"，所以原费用也要退掉。若冲正记录
+        #     照常估一笔费用，一笔没发生的交易会净吃【两次】费用而不报错。
+        lv.upsert_account('t_rev', name='rev', init_cash=100000)
+        lv.bind_version('t_rev', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        c_before = lv.cash('t_rev')
+        rb = lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42)
+        assert rb['fee'] > 0, '买入应估出费用'
+        lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'sell', 1000, 11.42,
+                    fee=-rb['fee'], reverse_of=rb['ts'])
+        assert abs(lv.cash('t_rev') - c_before) < 1e-9, \
+            '冲正后现金应精确回到 %.2f，实得 %.2f（差 %.2f = 多吃的费用）' \
+            % (c_before, lv.cash('t_rev'), lv.cash('t_rev') - c_before)
+        assert not lv.positions('t_rev'), '冲正后应空仓'
+        # 冲正不填费用时不该去估算（估了就抵消不掉）
+        rb2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78)
+        rv2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'sell', 100, 48.78,
+                          reverse_of=rb2['ts'])
+        assert rv2['fee'] == 0 and not rv2.get('fee_estimated'), \
+            '冲正不填费用时应记 0 而不是估算，实得 %s' % rv2['fee']
+
         # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
         v = lv.versions('t_hit')
         assert len(v) == 1 and v[0]['files'], 'versions.jsonl 没记文件清单'
@@ -1742,7 +1808,7 @@ def t_live_core():
             c, _f, _n = lv.version_code('t_hit', row['code_sha256'])
             assert c, '历史版本 %s 读不出来' % row['code_sha']
 
-        return ('FIFO 剩 500@20.0；现金账务(入/出金+成交+as-of)对；'
+        return ('FIFO 剩 500@20.0；现金账务(入/出金+成交+费用三态+as-of)对；'
                 '止损两侧 %.1f%%→stop / %.1f%%→非stop；'
                 '红利 %s %s 买入 %d 只；快照含 %d 个文件、删 runs/ 仍可读、'
                 '改依赖后哈希变 %s→%s'
@@ -1821,8 +1887,14 @@ def t_live_ui():
             #   调仓日 —— 否则没有买入表，用例会随日期时好时坏（实测：
             #   数据同步推进到 09-01 后，下一个交易日 09-02 不是红利的
             #   月频调仓日，硬等 table.lvbuy 直接超时）。
+            # ★ 基准日要从【数据】取，不是从 today 取 —— 引擎用的是
+            #   feed.trading_days[-1]（最新有行情的一天）。实测踩到：
+            #   今天 09-02 而数据到 09-01，按 today 算出的 weekday 是给
+            #   09-03 的，于是 09-02 不是调仓日、买入表永远等不出来。
+            from assay.feed import PanelFeed
             days = lv.calendar_days()
-            t1 = max(d for d in days if d <= datetime.date.today())
+            t1 = PanelFeed('2026-01-01', datetime.date.today().isoformat()
+                           ).trading_days[-1]
             nxt = min(d for d in days if d > t1)
             wk = [d for d in days if d.isocalendar()[:2] == nxt.isocalendar()[:2]]
             wd = wk.index(nxt) + 1
@@ -1908,6 +1980,41 @@ def t_live_ui():
             assert nrev >= 2, '冲正后原记录与冲正记录都该划掉，实得 %d 行' % nrev
             assert pg.locator('a.lvrv').count() == 0, '已冲正的记录不该再有冲正入口'
 
+            # ---- 费用：三个录入路径都要能填，且"留空"≠"0" ----
+            assert pg.locator('#ff').count() == 1, '逐笔表单缺费用输入框'
+            assert pg.input_value('#fd'), \
+                '日期框不该是空的 —— 空了会让第二笔起静默失败（实测踩到）'
+
+            def _c():
+                t = pg.locator('.lvtag').first.inner_text()
+                return float(t.replace('现金', '').replace(',', '').strip())
+
+            for code, q, px, fv, amt, want in (
+                    ('601857.XSHG', '1000', '11.42', '', 11420.0, None),
+                    ('601088.XSHG', '100', '48.78', '3.21', 4878.0, 3.21),
+                    ('600012.XSHG', '200', '16.69', '0', 3338.0, 0.0)):
+                b4 = _c()
+                pg.fill('#fc', code)
+                pg.fill('#fq', q)
+                pg.fill('#fp', px)
+                pg.fill('#ff', fv)
+                pg.click('#fb')
+                pg.wait_for_timeout(1000)
+                msg = (pg.locator('#fmsg').inner_text()
+                       if pg.locator('#fmsg').count() else '')
+                assert not msg, '录入 %s 失败：%s' % (code, msg)
+                got = round(b4 - _c() - amt, 2)
+                if want is None:
+                    assert got > 0, '费用留空应估算出正数，实得 %.2f' % got
+                else:
+                    assert abs(got - want) < 0.011, \
+                        '费用应为 %.2f，实得 %.2f' % (want, got)
+            # 流水标题要报费用合计与估算笔数
+            h = pg.locator('.lvsec.wide h3').last.inner_text()
+            assert '费用合计' in h and '估算' in h, '流水标题没报费用合计/估算笔数：%s' % h
+            assert pg.locator('.lvfill').inner_text().count('估') >= 1, \
+                '估算的那笔没标「估」'
+
             # ---- 归档：从列表隐去，但数据必须还在 ----
             # ★ 刻意没有「删除账户」—— 实盘流水与版本快照是决策证据。
             aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
@@ -1930,7 +2037,7 @@ def t_live_ui():
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('建账户(id 自动)/绑版本(weekday=%d 使 %s 成调仓日)/出信号(买入 %d 行)/'
-                    '批量录入/超卖被拒/改名/改初始资金/入金/版本表不溢出/'
+                    '批量录入/超卖被拒/改名/改初始资金/入金/费用三态/版本表不溢出/'
                     '策略详情(源码+参数+关联回测)/冲正/归档(数据仍在) 均正常，0 个 JS 错误'
                     % (wd, nxt, nbuy))
     finally:
@@ -2117,6 +2224,87 @@ def t_sync_ui():
     finally:
         httpd.shutdown()
         sv.ALLOW_LIVE = old
+
+
+@case('业绩预告 CSV：修读 / 内容校验 / 多解析器分歧', tag='fast')
+def t_forcast_csv():
+    """★ 这条用例存在的理由：三个解析器给三个答案，其中**两个不报错**。
+
+    `stk_fin_forcast.csv` 的 content 是大段中文正文，含换行、含千分位逗号，
+    且有 10 条记录引号未闭合（上游写坏的）：
+        csv.reader   50,650 行（从未闭合处开始串行）
+        pandas      124,094 行（不报错，含 11 行垃圾）
+        DuckDB      直接报 state machine invalid
+        修读        124,083 行（权威）
+
+    那 11 行垃圾曾静默进 parquet 并存活一周 —— 因为当初只校验
+    「落盘行数 == 读入行数」，**两边一样错，检查照样通过**。
+    """
+    import sys as _s
+    dl = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'datalake')
+    csvp = os.path.join(dl, 'raw', 'jq', '_ingest', 'downloads',
+                        'stk_fin_forcast.csv')
+    if not os.path.exists(csvp):
+        return '跳过（没有 stk_fin_forcast.csv）'
+    _s.path.insert(0, os.path.join(dl, 'build'))
+    from csv_repair import read_forcast_df, read_repaired, split_records
+    import duckdb
+
+    # ---- 1) 修读：内容校验在函数内，读得出来就说明全过 ----
+    df, st = read_forcast_df(csvp, verbose=False)
+    n_fix = len(df)
+    assert n_fix > 100000, '修读只得到 %d 行，太少' % n_fix
+    assert df['id'].str.fullmatch(r'\d+').all(), 'id 有非数字'
+    assert df['code'].str.fullmatch(r'\d{6}\.XSH[EG]').all(), 'code 有不合法'
+
+    # ---- 2) 与裸 pandas 对照：必须【不一样】，且差值全是垃圾行 ----
+    import pandas as pd
+    naive = pd.read_csv(csvp, dtype=str, encoding='utf-8-sig')
+    n_bad = int((~naive['id'].fillna('').str.fullmatch(r'\d+')).sum())
+    assert n_bad > 0, \
+        '裸 pandas 居然没产生垃圾行 —— 上游可能修好了 CSV，那这层修读可以简化'
+    assert len(naive) - n_bad == n_fix, \
+        ('裸读 %d 行 − 垃圾 %d 行 应等于修读 %d 行，实际不等 —— '
+         '说明修读多吞或少吞了记录' % (len(naive), n_bad, n_fix))
+
+    # ---- 3) DuckDB 必须仍然读不了（如果它能读了，这层修读就该退役）----
+    try:
+        duckdb.connect().execute(
+            "SELECT count(*) FROM read_csv_auto('%s', all_varchar=true)" % csvp
+        ).fetchone()
+        duck_ok = True
+    except Exception:                                       # noqa: BLE001
+        duck_ok = False
+    assert not duck_ok, \
+        'DuckDB 现在能直接读这个 CSV 了 —— 上游修好了？那 csv_repair 可以简化'
+
+    # ---- 4) 记录头判据不能退化成 ^\d+, ----
+    #     content 里有千分位逗号（633,969.04元），松判据会把续行当新记录
+    import re as _re
+    _, recs_ok, _ = split_records(csvp)
+    _, recs_loose, _ = split_records(csvp, start_re=_re.compile(r'^\d+,'))
+    assert len(recs_loose) > len(recs_ok), \
+        ('松判据 ^\\d+, 应该切出【更多】记录（把千分位续行误判成新记录），'
+         '实得 %d vs 严判据 %d —— 如果一样，说明这个文件里已经没有'
+         '千分位逗号续行，判据可以放松' % (len(recs_loose), len(recs_ok)))
+
+    # ---- 5) 落盘的 parquet 必须没有垃圾行 ----
+    pq = os.path.join(dl, 'raw', 'jq', 'stk_fin_forcast.parquet')
+    if os.path.exists(pq):
+        con = duckdb.connect()
+        n_pq, n_junk = con.execute(
+            "SELECT count(*), count(*) FILTER ("
+            "  try_cast(id AS BIGINT) IS NULL"
+            "  OR NOT regexp_matches(code, '^[0-9]{6}[.]XSH[EG]$'))"
+            " FROM read_parquet('%s')" % pq).fetchone()
+        assert n_junk == 0, 'parquet 里还有 %d 行垃圾' % n_junk
+        assert n_pq == n_fix, 'parquet %d 行 != 修读 %d 行' % (n_pq, n_fix)
+
+    return ('修读 %s 行（裸 pandas %s 行含 %d 行垃圾，DuckDB 仍报错，'
+            '松判据多切 %d 条）；parquet 无垃圾行'
+            % (format(n_fix, ','), format(len(naive), ','), n_bad,
+               len(recs_loose) - len(recs_ok)))
 
 
 def main():

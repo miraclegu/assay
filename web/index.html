@@ -617,19 +617,23 @@ async function loadLive(aid){
       </div>
       <div class="lvmsg" id="bmsg"></div>
     </div>
-    <div class="lvsec wide"><h3>成交流水（${(o.fills||[]).length} 笔）</h3>
+    <div class="lvsec wide"><h3>成交流水（${(o.fills||[]).length} 笔，费用合计 ${num(o.fee_total,2)}${
+      o.fee_estimated_n?'，其中 '+o.fee_estimated_n+' 笔是估算':''}）</h3>
       <div class="lvfill">${(o.fills||[]).length?`<table class="lvt">
-        <tr><th>日期</th><th>代码</th><th>方向</th><th>股数</th><th>价格</th><th>来源</th><th></th></tr>
+        <tr><th>日期</th><th>代码</th><th>方向</th><th>股数</th><th>价格</th><th>费用</th><th>来源</th><th></th></tr>
         ${o.fills.map(f=>{
           const rev=!!f.reverse_of, dead=REVED.has(f.ts);
           return `<tr class="${rev||dead?'lvrev':''}">
           <td>${esc(f.trade_date)}</td><td>${esc(f.code)} ${esc(f.name||'')}</td>
           <td>${f.side==='buy'?'买':'卖'}</td><td>${num(f.shares)}</td>
           <td>${num(f.price,3)}</td>
+          <td title="${f.fee_estimated?'估算值，对完账单请改成实际':''}">${num(f.fee,2)}${
+            f.fee_estimated?'<span class="lvwhy">估</span>':''}</td>
           <td class="lvwhy">${rev?'冲正':esc(f.source||'')}</td>
           <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(f.ts)}"
             data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
             data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name||'')}"
+            data-f="${f.fee||0}"
             title="录一条反方向的记录冲掉它。原记录保留 —— 账本只追加。">冲正</a>`}</td>
           </tr>`;}).join('')}</table>`
         :'<div class="none">还没录过</div>'}</div>
@@ -682,12 +686,16 @@ async function loadLive(aid){
   });
   b.querySelectorAll('a.lvrv').forEach(e=>e.onclick=async ev=>{
     ev.preventDefault(); const d=e.dataset;
-    if(!confirm(`冲正：${d.d} ${d.c} ${d.s==='buy'?'买':'卖'} ${d.q} @${d.p}\n`
-      +`会追加一条反方向记录（${d.s==='buy'?'卖':'买'} ${d.q}），原记录保留并划掉。`)) return;
+    const of=parseFloat(d.f||'0')||0;
+    if(!confirm(`冲正：${d.d} ${d.c} ${d.s==='buy'?'买':'卖'} ${d.q} @${d.p}（费用 ${of.toFixed(2)}）\n`
+      +`会追加一条反方向记录（${d.s==='buy'?'卖':'买'} ${d.q}，费用 ${(-of).toFixed(2)}），\n`
+      +`原记录保留并划掉。净现金影响为 0。`)) return;
     try{
+      /* ★ 费用传【负的原费用】—— 冲正的语义是"这笔交易没发生"，
+         原来那笔手续费也要退掉，否则一笔没发生的交易会净吃两笔费用。 */
       await post('/api/live/fill',{id:aid, rows:[{trade_date:d.d, code:d.c,
         side:d.s==='buy'?'sell':'buy', shares:parseInt(d.q,10), price:parseFloat(d.p),
-        name:d.n, source:'reverse', reverse_of:d.ts, note:'冲正'}]});
+        fee:-of, name:d.n, source:'reverse', reverse_of:d.ts, note:'冲正'}]});
       loadLive(aid);
     }catch(e){ alert(String(e)); }
   });
@@ -804,13 +812,18 @@ function fillFormHtml(sig,ro){
   const rows=[].concat((sig&&sig.sell)||[],(sig&&sig.buy)||[]);
   return `<div class="lvsec"><h3>录入成交</h3>
     <div class="lvform">
-      <input id="fd" size="6" placeholder="YYYY-MM-DD" value="${sig?esc(sig.for_date):''}">
+      <input id="fd" size="6" placeholder="YYYY-MM-DD"
+        value="${sig&&!sig.error?esc(sig.for_date):new Date().toISOString().slice(0,10)}">
       <input id="fc" size="6" placeholder="代码">
       <select id="fs"><option value="buy">买</option><option value="sell">卖</option></select>
       <input id="fq" size="6" placeholder="股数">
       <input id="fp" size="6" placeholder="价格">
+      <input id="ff" size="7" placeholder="费用(留空=估算)">
       <button class="btn" id="fb" ${ro?'disabled':''}>录一笔</button>
     </div>
+    <div class="lvwhy">费用留空 = 按引擎同一套口径估算（佣金万2.5 最低 5 元 +
+      卖出印花税按日期分段），入账标「估」，对完券商账单再改成实际值。
+      <b>留空不等于 0</b> —— 年换手 4.5 次的话，费用当 0 算一年会让权益虚高约 0.5%。</div>
     <div class="lvform"><textarea id="ft" placeholder="批量粘贴：每行「日期 代码 买/卖 股数 价格」，逗号/制表符/空格分隔皆可"></textarea>
       <button class="btn" id="fbulk" ${ro?'disabled':''}>解析并录入</button>
       ${rows.length?`<button class="btn" id="fauto" ${ro?'disabled':''}>按信号全部成交（价格用参考价，可再改）</button>`:''}
@@ -823,10 +836,13 @@ function parseBulk(txt){
   txt.split(/\n/).forEach((ln,i)=>{
     ln=ln.trim(); if(!ln) return;
     const p=ln.split(/[\s,\t]+/).filter(Boolean);
-    if(p.length<5){ bad.push('第'+(i+1)+'行字段不足5个'); return; }
+    if(p.length<5){ bad.push('第'+(i+1)+'行字段不足5个（日期 代码 买卖 股数 价格 [费用]）'); return; }
     const side=/买|buy|b/i.test(p[2])&&!/卖/.test(p[2])?'buy':'sell';
+    /* 第 6 列是可选费用。★ 省略时传 null 而不是 0 —— 服务端据此估算；
+       传 0 等于"明确说没有费用"，两者语义不同。 */
     out.push({trade_date:p[0], code:p[1].toUpperCase(), side:side,
-              shares:parseInt(p[3],10), price:parseFloat(p[4]), source:'bulk'});
+              shares:parseInt(p[3],10), price:parseFloat(p[4]),
+              fee:(p.length>=6&&p[5]!=='')?parseFloat(p[5]):null, source:'bulk'});
   });
   return {rows:out, bad:bad};
 }
@@ -840,11 +856,16 @@ function wireFills(aid, sig, ro){
       if(r.errors&&r.errors.length){
         m().className='lvmsg bad';
         m().innerHTML='录入 '+r.added+' 笔，以下失败：<br>'+r.errors.map(esc).join('<br>');
+        m().scrollIntoView({block:'center'});
       }else{ loadLive(aid); }
     }catch(e){ m().className='lvmsg bad'; m().textContent=String(e); }
   };
-  $('#fb').onclick=()=>done([{trade_date:$('#fd').value.trim(), code:$('#fc').value.trim().toUpperCase(),
-    side:$('#fs').value, shares:parseInt($('#fq').value,10), price:parseFloat($('#fp').value)}]);
+  $('#fb').onclick=()=>{
+    const fv=$('#ff').value.trim();
+    done([{trade_date:$('#fd').value.trim(), code:$('#fc').value.trim().toUpperCase(),
+      side:$('#fs').value, shares:parseInt($('#fq').value,10),
+      price:parseFloat($('#fp').value), fee:(fv===''?null:parseFloat(fv))}]);
+  };
   $('#fbulk').onclick=()=>{
     const r=parseBulk($('#ft').value);
     if(r.bad.length){ m().className='lvmsg bad'; m().innerHTML=r.bad.map(esc).join('<br>'); return; }
@@ -855,9 +876,9 @@ function wireFills(aid, sig, ro){
   if(fa) fa.onclick=()=>{
     const rows=[].concat(
       (sig.sell||[]).map(x=>({trade_date:sig.for_date, code:x.code, side:'sell',
-        shares:x.shares, price:x.ref_price, name:x.name, source:'signal'})),
+        shares:x.shares, price:x.ref_price, name:x.name, source:'signal', fee:null})),
       (sig.buy||[]).map(x=>({trade_date:sig.for_date, code:x.code, side:'buy',
-        shares:x.shares, price:x.ref_price, name:x.name, source:'signal'})));
+        shares:x.shares, price:x.ref_price, name:x.name, source:'signal', fee:null})));
     if(!confirm('按信号录入 '+rows.length+' 笔？价格用的是 T-1 参考价，成交后请逐笔改成实际价（录反向冲正 + 重录）。')) return;
     done(rows);
   };

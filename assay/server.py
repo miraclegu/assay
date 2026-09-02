@@ -1018,6 +1018,8 @@ def api_live_account(q):
         'versions': m.versions(aid),
         'fills': list(reversed(m.fills(aid))),
         'cashflows': list(reversed(m.cashflows(aid))),
+        'fee_total': round(sum(float(f.get('fee') or 0) for f in m.fills(aid)), 2),
+        'fee_estimated_n': sum(1 for f in m.fills(aid) if f.get('fee_estimated')),
         'signal': m.latest_signal(aid),
     })
 
@@ -1211,12 +1213,16 @@ def api_live_fill(_q, body):
     ok, errs = [], []
     for i, r in enumerate(rows):
         try:
+            # ★ fee 原样透传（含 None/''）—— 不要 `or 0`。
+            #   `r.get('fee') or 0` 会把"没填"变成"明确说 0 元"，
+            #   于是费用永远是 0、现金越算越多，而且不报错。
             ok.append(m.add_fill(
                 aid, r.get('trade_date'), (r.get('code') or '').strip().upper(),
                 (r.get('side') or '').strip(), r.get('shares'), r.get('price'),
-                fee=r.get('fee') or 0, name=r.get('name') or '',
+                fee=r.get('fee'), name=r.get('name') or '',
                 source=r.get('source') or 'manual', note=r.get('note') or '',
-                reverse_of=r.get('reverse_of')))
+                reverse_of=r.get('reverse_of'),
+                fee_estimated=bool(r.get('fee_estimated'))))
         except m.LiveError as e:
             errs.append('第 %d 行：%s' % (i + 1, e))
     return {'added': len(ok), 'errors': errs,
