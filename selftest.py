@@ -2108,6 +2108,55 @@ def t_live_core():
             except lv.LiveError:
                 pass
 
+        # ---- 3d2b) 代码写法归一：券商/QMT/通达信各写一套 ----
+        #   ★ 券商和 QMT 导出的都是 301126.SZ，粘贴批量成交时一整批都是。
+        #     让人手工改 11 行没必要，而且改的时候容易改错市场 ——
+        #     而市场现在**影响费用**（银河的过户费只有沪市另收万0.1）。
+        for raw, want in (('301126.SZ', '301126.XSHE'),
+                          ('603506.SH', '603506.XSHG'),
+                          ('601857.XSHG', '601857.XSHG'),
+                          ('000001.xshe', '000001.XSHE'),
+                          ('sz000001', '000001.XSHE'),      # 通达信/面板 symbol
+                          ('SH600000', '600000.XSHG'),
+                          ('601857.SS', '601857.XSHG'),     # Yahoo
+                          ('601857-SH', '601857.XSHG'),
+                          (' 301126.sz ', '301126.XSHE'),
+                          ('301126', '301126.XSHE'),        # 裸六位按前缀
+                          ('600000', '600000.XSHG')):
+            got = lv.normalize_code(raw)
+            assert got == want, '%r 应归一成 %s，实得 %s' % (raw, want, got)
+        # 🔴 前缀与标记冲突要【拒绝】：A 股前缀与市场一一对应，冲突说明有一个
+        #   是错的，放行等于用错市场算费用（差万0.1，且不报错）
+        for bad, why in (('600000.SZ', '沪市代码标了深市'),
+                         ('301126.HK', '不是 A 股市场'),
+                         ('12345', '不足六位'),
+                         ('', '空'),
+                         ('abc', '没有数字')):
+            try:
+                lv.normalize_code(bad)
+                raise AssertionError('%s（%r）应被拒' % (why, bad))
+            except lv.LiveError:
+                pass
+        # market_of 也要认 —— 算费用的入口不止 add_fill 一个，直接拿
+        # 301126.SZ 调 fee_breakdown 时若按原样取后缀会得到 'SZ'、
+        # 判成"沪市另收"，每笔多算万0.1
+        assert lv.market_of('301126.SZ') == 'XSHE' and \
+            lv.market_of('sz301126') == 'XSHE' and \
+            lv.market_of('603506.SH') == 'XSHG', '市场判定不认别家写法'
+        assert lv.fee_breakdown('buy', 100, 1305.40, '2026-09-01',
+                                GALAXY, '301292.SZ')['transfer'] == 0, \
+            '拿 .SZ 写法调 fee_breakdown 时过户费被算成"另收"了'
+        # 落盘的是【归一化后】的代码 —— 否则同一只票会有两种身份，
+        # FIFO 批次分成两堆、持仓看起来是两行
+        lv.upsert_account('t_norm', name='norm', init_cash=500000)
+        r1 = lv.add_fill('t_norm', '2026-09-01', '301126.SZ', 'buy', 100, 10.42)
+        r2 = lv.add_fill('t_norm', '2026-09-01', 'sz301126', 'buy', 100, 10.42)
+        assert r1['code'] == r2['code'] == '301126.XSHE', \
+            '落盘应是聚宽口径：%s / %s' % (r1['code'], r2['code'])
+        _pn = lv.positions('t_norm')
+        assert list(_pn) == ['301126.XSHE'] and _pn['301126.XSHE']['shares'] == 200, \
+            '两种写法应合成同一只票的持仓：%s' % _pn
+
         # ---- 3d3) 价格留空 = 成交日【开盘价】（竞价买入） ----
         #   ★ A 股开盘价就是 09:15-09:25 集合竞价的成交价，所以挂竞价的单子
         #     价格留空取开盘价不是近似而是**恰好相等**。用真实那笔钉住：
@@ -2154,12 +2203,24 @@ def t_live_core():
                 '报错要说清原因和出路：%s' % m
             assert 'None' not in m.split('\n')[1], \
                 '"本地最新数据日"不能是 None —— 那行是判断有没有同步的唯一依据'
-        # 代码格式错时，报错要指向【代码】而不是"取不到行情"
+        # 🔴 报错必须指向【真正的】原因。实测踩过：粘的是 301126.SZ（券商
+        #   写法），报的却是"当天行情还没同步"，而那天的行情本地明明有 ——
+        #   人会照着那句话去等晚上重试，白等。
         try:
-            lv.add_fill('t_px', '2026-09-01', '603889', 'buy', 100)
-            raise AssertionError('无后缀代码应被拒')
+            lv.day_price('999999.XSHE', '2026-09-01')
+            raise AssertionError('面板里没有的代码应报错')
         except lv.LiveError as e:
-            assert '市场后缀' in str(e), \
+            m = str(e)
+            assert '不是】没同步' in m or '不是没同步' in m, \
+                '这天行情本地有，就不该说"还没同步"：%s' % m
+            assert '没有 999999.XSHE 这个代码' in m, \
+                '要点明是代码在面板里找不到：%s' % m
+        # 无法判定市场的代码：报错要指向【代码】，而不是"取不到行情"
+        try:
+            lv.add_fill('t_px', '2026-09-01', '123456', 'buy', 100)
+            raise AssertionError('判不出市场的代码应被拒')
+        except lv.LiveError as e:
+            assert '判不出是哪个市场' in str(e), \
                 '便宜的格式校验要排在取行情之前，否则报错指向错的原因：%s' % e
 
         # ---- 3e) 冲正必须【精确抵消】，含费用 ----

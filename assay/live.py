@@ -49,6 +49,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import uuid
 
 from . import api
@@ -441,11 +442,10 @@ def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
         shares = int(shares)
     except Exception:                                       # noqa: BLE001
         raise LiveError('数量必须是整数')
-    # ★ 便宜的格式校验放在【取行情之前】—— 代码写错时该直接说"代码格式不对"，
-    #   而不是让它先去查行情、然后报"取不到 60185.XSHG 的开盘价"。
-    #   失败信息要指向真正的原因。
-    if '.' not in code:
-        raise LiveError('代码要带市场后缀，如 601857.XSHG，收到 %r' % code)
+    # ★ 先把代码归一到聚宽口径（券商/QMT 导出的是 301126.SZ），再做别的 ——
+    #   归一化本身就是格式校验，且失败信息指向【代码】而不是"取不到行情"。
+    #   便宜的校验一律排在取行情之前。
+    code = normalize_code(code)
     if shares <= 0:
         raise LiveError('数量必须为正（撤销请用反向冲正，不要填负数）')
     if side == 'buy' and shares % LOT_SIZE:
@@ -599,13 +599,82 @@ FEE_DEFAULT = {
 FEE_USER_FIELDS = ('commission', 'min_commission', 'commission_incl_reg')
 
 
-def market_of(code):
-    """从代码后缀判市场。`601315.XSHG` -> 'XSHG'、`300375.XSHE` -> 'XSHE'。
+# 六位数前缀 -> 市场。面板实测只有这四种前缀（2026-09-01：00/30 深、60/68 沪）。
+_PREFIX_MK = {'60': 'XSHG', '68': 'XSHG', '90': 'XSHG',
+              '00': 'XSHE', '30': 'XSHE', '20': 'XSHE'}
+# 各家的市场标记 -> 聚宽后缀。券商/QMT 用 SH/SZ，通达信/面板 symbol 用
+# 前置的 sh/sz，Yahoo 用 .SS。
+_MK_TOKEN = {'SH': 'XSHG', 'SS': 'XSHG', 'XSHG': 'XSHG', 'SSE': 'XSHG',
+             'SZ': 'XSHE', 'XSHE': 'XSHE', 'SZSE': 'XSHE'}
+_RE_DIGITS = re.compile(r'\d{6}')
+_RE_TOKEN = re.compile(r'[A-Z]+')
 
-    ★ 只在费率上用得着（过户费是否另收分市场）。判不出来时返回后缀原文，
-      让调用方按"另收"处理 —— 保守方向，估高不估低。
+
+def normalize_code(code):
+    """把各种写法的代码归一到【聚宽口径】`601857.XSHG` / `000001.XSHE`。
+
+    认这些（大小写随意，分隔符 `.`/`-`/`_`/空格/没有 都行）：
+
+        601857.XSHG   000001.XSHE     聚宽（本项目口径）
+        601857.SH     000001.SZ       券商 / QMT / 迅投
+        sh601857      sz000001        通达信 / 面板 symbol 列
+        601857.SS                     Yahoo
+        601857        000001          裸六位，按前缀判市场
+
+    ★ 做法是【把数字和市场标记分别抽出来】，而不是枚举布局 —— 枚举的话
+      每见到一种新写法就得改一次，而漏掉的那种表现为"取不到行情"。
+
+    ★ 判不出市场就报错，**不瞎给一个**：市场决定过户费收不收，
+      猜错每笔差万0.1、一年几百块，且从不报错。
+
+    🔴 前缀与标记**冲突时拒绝**（如 `600000.SZ`）：A 股前缀与市场是一一
+      对应的，冲突说明有一个是错的。放行等于用错市场算费用。
     """
-    return (str(code).rsplit('.', 1)[-1] or '').upper()
+    raw = str(code or '').strip()
+    if not raw:
+        raise LiveError('代码不能为空')
+    c = raw.upper()
+    dg = _RE_DIGITS.search(c)
+    if not dg:
+        raise LiveError('代码里找不到六位数字，收到 %r' % raw)
+    num = dg.group(0)
+    # 数字之外只允许是市场标记和分隔符
+    rest = (c[:dg.start()] + c[dg.end():]).strip(' .-_')
+    toks = [t for t in _RE_TOKEN.findall(rest) if t]
+    mk = None
+    if toks:
+        if len(toks) > 1 or toks[0] not in _MK_TOKEN:
+            raise LiveError(
+                '认不出市场标记 %r。支持 SH/SS/XSHG（沪）、SZ/XSHE（深），'
+                '写在前面或后面都行；也可以只写六位数字' % rest)
+        mk = _MK_TOKEN[toks[0]]
+    by_prefix = _PREFIX_MK.get(num[:2])
+    if mk and by_prefix and mk != by_prefix:
+        raise LiveError(
+            '%r 自相矛盾：%s 开头的是%s股票，而标记写的是%s。'
+            '有一个是错的 —— 不替你选，因为市场决定过户费收不收（万0.1）'
+            % (raw, num[:2], '沪市' if by_prefix == 'XSHG' else '深市',
+               '沪市' if mk == 'XSHG' else '深市'))
+    mk = mk or by_prefix
+    if not mk:
+        raise LiveError(
+            '从 %r 判不出是哪个市场 —— 请带上标记，如 %s.XSHG / %s.XSHE。\n'
+            '（不替你猜：市场决定过户费收不收，猜错每笔差万0.1 且不报错）'
+            % (raw, num, num))
+    return '%s.%s' % (num, mk)
+
+
+def market_of(code):
+    """代码 -> 市场（`'XSHG'` / `'XSHE'`）。各种写法都认，见 normalize_code。
+
+    ★ 这里也走归一化：算费用的入口不止 add_fill 一个，
+      直接拿 `301126.SZ` 调 fee_breakdown 时若按原样取后缀，
+      会得到 'SZ'、判成"沪市另收"，每笔多算万0.1 且不报错。
+    """
+    try:
+        return normalize_code(code).rsplit('.', 1)[1]
+    except LiveError:
+        return (str(code).rsplit('.', 1)[-1] or '').upper()
 
 
 def transfer_is_extra(model, code):
@@ -968,6 +1037,22 @@ def day_price(code, date, which='open', datalake=None):
         #   的唯一依据，绝不能出现 None。
         mx = con.execute('SELECT MAX(date) FROM %s' % panel).fetchone()
         last = mx[0] if mx else None
+        what = PRICE_FIELDS.get(which, which)
+        # 🔴 报错必须指向【真正的】原因。这天的面板明明在（last >= d）却说
+        #   "还没同步"是自相矛盾的，而人会照着这句去等晚上重试 —— 白等。
+        #   实测踩过：粘的是 301126.SZ（券商写法），报的却是"行情还没同步"。
+        if last is not None and last >= d:
+            has = con.execute(
+                "SELECT count(*) FROM %s WHERE date = DATE '%s' AND jq_code = ?"
+                % (panel, d), [code]).fetchone()[0]
+            raise LiveError(
+                '取不到 %s 在 %s 的%s —— 但这天的行情本地是有的（最新到 %s），'
+                '所以【不是】没同步。\n%s'
+                % (code, d, what, last,
+                   ('这只票当天没有成交（停牌），也就没有%s。请手填价格。' % what)
+                   if has else
+                   ('面板里没有 %s 这个代码：可能当天还没上市 / 已退市，'
+                    '或者代码写错了。' % code)))
         raise LiveError(
             '取不到 %s 在 %s 的%s。\n'
             '最常见的原因是【当天行情还没同步】—— 本地最新数据日是 %s，'
@@ -975,8 +1060,7 @@ def day_price(code, date, which='open', datalake=None):
             '现在就要录的话请**手填价格**；或者等晚上同步完再录，'
             '那时价格留空就会自动取%s。\n'
             '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
-            % (code, d, PRICE_FIELDS.get(which, which), last,
-               PRICE_FIELDS.get(which, which), PRICE_FIELDS.get(which, which)))
+            % (code, d, what, last, what, what))
     return round(float(row[0]), 3)
 
 

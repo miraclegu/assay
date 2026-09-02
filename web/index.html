@@ -1077,7 +1077,7 @@ function openRecord(aid, sig, ro, tab){
       <h3>逐笔录入</h3>
       <div class="lvform">
         <input id="fd" size="10" placeholder="YYYY-MM-DD" value="${esc(d0)}">
-        <input id="fc" size="12" placeholder="代码">
+        <input id="fc" size="14" placeholder="代码 301126.SZ / sz301126">
         <select id="fs"><option value="buy">买</option><option value="sell">卖</option></select>
         <input id="fq" size="7" placeholder="股数">
         <input id="fp" size="9" placeholder="价格(留空=开盘价)">
@@ -1095,6 +1095,12 @@ function openRecord(aid, sig, ro, tab){
       <h3 style="margin-top:12px">批量粘贴</h3>
       <div class="lvform">
         <textarea id="ft" placeholder="每行「日期 代码 买/卖 股数 价格 [费用]」，逗号/制表符/空格分隔皆可。价格填 - 表示按当日开盘价"></textarea>
+        <div class="lvwhy">代码<b>各家写法都认</b>，不用改：
+          <code>301126.SZ</code>（券商/QMT）、<code>sz301126</code>（通达信）、
+          <code>301126.XSHE</code>（聚宽）、<code>301126</code>（裸六位按前缀判市场）。
+          落盘统一成聚宽口径。<br>
+          ⚠ 前缀与标记<b>冲突会拒</b>（如 <code>600000.SZ</code>）——
+          市场决定过户费收不收（万0.1），有一个写错了就不替你选。</div>
         <button class="btn" id="fbulk" ${ro?'disabled':''}>解析并录入</button>
         ${sig&&!sig.error&&((sig.sell||[]).length+(sig.buy||[]).length)?
           `<button class="btn" id="fauto" ${ro?'disabled':''}>按今日信号全部成交</button>
