@@ -37,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(os.path.dirname(HERE), 'web')
 RUN_ID_RE = re.compile(r'^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}(-[0-9]+)?$')
 
+_BOOT_TS = __import__('time').time()
 _lock = threading.Lock()
 _index = {}          # run_id -> 归档目录（唯一可信的路径来源）
 _cache = {}          # (run_id, what) -> DataFrame，避免每次请求都读 parquet
@@ -985,6 +986,22 @@ def _live_err(fn, *a, **kw):
         return {'error': str(e)}
 
 
+# ★ 代码指纹：**web/index.html 每次请求都从磁盘读，而 Python 模块只在进程
+#   启动时加载一次**。所以长时间开着的 serve.py 会出现「新页面 + 旧 API」——
+#   页面去读 API 还没有的字段，渲染出一堆 undefined，而没有任何报错。
+#   实测踩到：11:49 启动的服务配 12:53 改的页面，账户设置里全是 undefined。
+#   这里把服务端代码的 mtime 暴露出去，页面自己比对并明说"请重启"。
+def _code_stamp():
+    out = []
+    for f in ('server.py', 'live.py'):
+        p = os.path.join(HERE, f)
+        try:
+            out.append(int(os.path.getmtime(p)))
+        except OSError:
+            out.append(0)
+    return {'loaded_at': int(_BOOT_TS), 'code_mtime': max(out)}
+
+
 def api_live_accounts(_q):
     """GET /api/live/accounts[?all=1] —— 默认隐去已归档的账户。"""
     m = _live()
@@ -1004,6 +1021,7 @@ def api_live_accounts(_q):
     #   每次打开实盘页都弹一条假告警。假告警看多了就不看告警了。
     cal = dict(cal, authoritative=(cal.get('source') in m.AUTHORITATIVE_CAL))
     return {'accounts': out, 'readonly': not ALLOW_LIVE,
+            'code': _code_stamp(),
             # ★ 两个开关是独立的：--live 管账户/成交/信号，--allow-backtest 管
             #   起子进程跑回测。前端要分别置灰，否则按钮点了才知道被拒。
             'can_backtest': bool(ALLOW_BACKTEST and ALLOW_LIVE),

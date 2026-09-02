@@ -2264,6 +2264,21 @@ def t_live_ui():
             #   合计 5.95。★ App 的"佣金费率万0.8"是【含规费】口径。
             pg.click('#lvset')
             pg.wait_for_selector('#ffrom', timeout=8000)
+            pg.wait_for_timeout(300)
+            # ★ 设置浮层里【一个 undefined 都不许有】。实测踩过一次：
+            #   serve.py 是旧进程（Python 模块只在启动时加载，而
+            #   web/index.html 每次请求都从磁盘读），页面去读 API 还没有的
+            #   字段，整屏渲染成 undefined 而**不报错**。
+            stxt = pg.locator('.stbox').inner_text()
+            assert 'undefined' not in stxt.lower(), \
+                '设置里出现了 undefined —— 某个字段取不到值：%s' \
+                % [x for x in stxt.split('\n') if 'undefined' in x.lower()][:3]
+            assert 'NaN' not in stxt, '设置里出现了 NaN'
+            # 每一项都要有标签，不能只靠 placeholder（空框看不出要填什么）
+            labels = [x.strip() for x in
+                      pg.locator('.frow > label').all_inner_texts() if x.strip()]
+            for need in ('生效日', '计费方式', '佣金费率', '单笔最低佣金', '备注'):
+                assert need in labels, '费率表单缺「%s」标签：%s' % (need, labels)
             pg.fill('#fi1', '66110')
             pg.fill('#fi2', '1.72')
             pg.fill('#fi3', '3.57')
@@ -2310,7 +2325,9 @@ def t_live_ui():
             pg.fill('#ffrom', '2026-09-15')
             pg.click('#fsave')
             pg.wait_for_timeout(900)
-            em2 = pg.locator('#emsg').inner_text()
+            # ★ 费率块的提示在 #emsg2（自己的消息位），不是账户信息那块的
+            #   #emsg —— 提示放错位置比没提示更糟，用户会以为保存成功了。
+            em2 = pg.locator('#emsg2').inner_text()
             assert '生效日' in em2, '生效日倒退应被拒：%s' % em2
             pg.locator('#mclose').click()
             pg.wait_for_timeout(400)
@@ -2364,6 +2381,22 @@ def t_live_ui():
             pg.wait_for_timeout(1000)
             assert pg.locator('#lvrec').count() == 1, '没回到账户页'
 
+            # ---- 旧进程要有醒目横幅，而不是默默渲染 undefined ----
+            #   index.html 每次请求都从磁盘读，Python 模块只在进程启动时
+            #   加载一次 —— 长时间开着的 serve.py 会出现"新页面 + 旧 API"。
+            _bt = sv._BOOT_TS
+            try:
+                sv._BOOT_TS = _bt - 100000        # 假装进程启动得很早
+                pg.goto(base + '#/live', wait_until='networkidle')
+                pg.wait_for_timeout(800)
+                wtxt = ' '.join(pg.locator('.lvwarn').all_inner_texts())
+                assert '旧进程' in wtxt and 'serve.py' in wtxt, \
+                    '代码比进程新时应提示重启，实得：%s' % wtxt[:120]
+            finally:
+                sv._BOOT_TS = _bt
+            pg.goto(base + '#/live/%s' % aid, wait_until='networkidle')
+            pg.wait_for_timeout(900)
+
             # ---- 归档：从列表隐去，但数据必须还在 ----
             pg.click('#lvset')
             pg.wait_for_selector('#earch', timeout=8000)
@@ -2381,7 +2414,8 @@ def t_live_ui():
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
                     '费率(反推真实账单 5.95/两档版本/按成交日取档/手填优先)；'
-                    '改名；冲正追加并划掉；归档后数据仍在；0 个 JS 错误' % n_pos)
+                    '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
+                    '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
         httpd.shutdown()
         lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow

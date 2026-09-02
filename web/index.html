@@ -354,6 +354,11 @@ table.lvt td{overflow-wrap:anywhere}
   border:1px solid var(--line);border-radius:10px;padding:16px 18px}
 /* 「记一笔」的 tab 高亮 */
 .btn.rtab.on{color:var(--accent);border-color:var(--accent)}
+/* 费率表单：每项一行、左侧固定宽度的标签 —— 原来只有 placeholder，
+   一旦某个字段拿不到值就是个空框，用户不知道要填什么。 */
+.frow{display:flex;gap:8px;align-items:baseline;margin:0 0 6px;flex-wrap:wrap}
+.frow>label{flex:0 0 96px;text-align:right;color:var(--dim);font-size:12px}
+.frow>.lvwhy{flex:1;min-width:180px}
 /* 调仓日提示条 + 未来交易日历条 */
 .lvrb{border:1px solid var(--line);border-left:3px solid var(--accent);
   border-radius:5px;padding:7px 11px;margin:0 0 8px;font-size:12px;background:var(--bg)}
@@ -491,6 +496,17 @@ async function showLive(aid){
      前端硬编码过一次，把 tdx.raw_holidays 误报成不权威，每次打开都弹假告警。 */
   else if(cal.authoritative===false)
     head+=`<div class="lvwarn"><b>交易日历不是权威来源（${esc(cal.source)}）</b><br>${esc(cal.warn||'')}</div>`;
+  /* ★ 新页面 + 旧 API 的组合会渲染出一堆 undefined 而不报错：
+     index.html 每次请求都从磁盘读，而 Python 模块只在进程启动时加载一次。
+     实测踩过 —— 11:49 启动的服务配 12:53 改的页面，设置里全是 undefined。 */
+  const CO=o.code||{};
+  if(CO.code_mtime && CO.loaded_at && CO.code_mtime > CO.loaded_at + 2)
+    head+=`<div class="lvwarn"><b>服务端是旧进程 —— 请重启 serve.py</b><br>
+      页面是新的（每次请求都从磁盘读），但 Python 模块还是进程启动时那份
+      （启动于 ${esc(new Date(CO.loaded_at*1000).toLocaleString('zh-CN'))}，
+       代码已于 ${esc(new Date(CO.code_mtime*1000).toLocaleString('zh-CN'))} 更新）。<br>
+      这种组合下页面会去读 API 还没有的字段，<b>渲染成一堆 undefined 而不报错</b>。
+      <code>Ctrl-C</code> 后重新 <code>python3 serve.py --live</code> 即可。</div>`;
   if(o.readonly) head+=`<div class="lvwarn">服务以只读模式启动 —— 可以看，不能录入 / 建账户 / 重算。
      用 <code>python3 serve.py --live</code> 开启。</div>`;
   const tabs=o.accounts.map(a=>`<a class="ditem${a.id===LVSEL?' on':''}${a.archived?' miss':''}"
@@ -569,7 +585,7 @@ async function loadLive(aid){
     <span style="flex:1"></span>
     <button class="btn" id="lvtick" ${ro?'disabled':''}>立即重算</button>
     <button class="btn" id="lvrec" ${ro?'disabled':''}>✎ 记一笔</button>
-    <a class="btn" href="#/live/${a.id}/fills">流水 ${o.n_fills}</a>
+    <a class="btn" href="#/live/${a.id}/fills">流水${o.n_fills==null?'':' '+o.n_fills}</a>
     <button class="btn" id="lvset">⚙</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
@@ -644,24 +660,41 @@ function openSettings(aid, a, ro){
   /* ★ 费率的【完整取值】由后端给（fee_effective = FEE_DEFAULT + 账户覆盖）。
      前端不再维护第二份默认值 —— 实测漏了 regulatory 一项，输入框读出
      undefined，保存被后端拒，而错误提示藏在浮层里不容易发现。 */
-  const F=(LVO&&LVO.fee_effective)||{};
+  /* ★ 费率取值优先用后端给的 fee_effective（= FEE_DEFAULT + 账户覆盖）。
+     兜一层【硬编码的最后防线】：万一后端是旧进程、没这个字段，
+     也要填出可读的数字而不是 undefined。旧进程本身另有横幅提示。
+     这两个值只是"不至于空白"的兜底，真正的权威在后端。 */
+  const FB={mode:'parts', buy_rate:0.00031, sell_rate:0.00081, flat_min:5,
+            commission:0.00025, min_commission:5, commission_incl_reg:false,
+            regulatory:0.0000541, transfer:0.00001, stamp:'auto'};
+  const F=Object.assign({}, FB, (LVO&&LVO.fee_default)||{},
+                        (LVO&&LVO.fee_effective)||{});
   const H=(LVO&&LVO.fee_history)||[];
   modal(`<div class="lvhead" style="margin-bottom:10px">
       <h2>账户设置</h2><span class="lvtag">id ${esc(a.id)}</span>
       <span style="flex:1"></span><button class="btn" id="mclose">关闭</button></div>
     <div class="lvsec">
-      <div class="lvform">
-        <input id="ename" placeholder="名称" value="${esc(a.name||'')}" style="flex:1;min-width:160px">
-        <input id="ecash" size="8" placeholder="初始资金" value="${a.init_cash||0}">
-      </div>
-      <div class="lvform">
-        <input id="etick" size="7" placeholder="兜底 HH:MM" value="${esc(a.tick_time||'')}">
-        <input id="ewarm" size="9" placeholder="预热起点" value="${esc(a.warmup_start||'')}">
-        <input id="enote" placeholder="券商备注" value="${esc(a.broker_note||'')}" style="flex:1;min-width:120px">
-        <button class="btn" id="esave" ${ro?'disabled':''}>保存</button>
+      <div class="frow"><label>账户名称</label>
+        <input id="ename" value="${esc(a.name||'')}" style="flex:1;min-width:200px">
+        <span class="lvwhy">随时可改；与策略解耦，换策略不用新建账户</span></div>
+      <div class="frow"><label>初始资金</label>
+        <input id="ecash" size="12" value="${a.init_cash||0}">
+        <span class="lvwhy">元。<b>开户那一刻的余额</b> —— 后来的入金走「✎ 记一笔 › 现金」</span></div>
+      <div class="frow"><label>兜底出信号</label>
+        <input id="etick" size="12" value="${esc(a.tick_time||'')}">
+        <span class="lvwhy">HH:MM。只在数据同步压根没跑时才用；
+          主路径是 <code>sync_daily.sh</code> 跑完直接触发</span></div>
+      <div class="frow"><label>预热起点</label>
+        <input id="ewarm" size="12" value="${esc(a.warmup_start||'')}">
+        <span class="lvwhy">出信号时引擎从这天开始跑，要够策略建仓与滚动</span></div>
+      <div class="frow"><label>券商备注</label>
+        <input id="enote" value="${esc(a.broker_note||'')}" style="flex:1;min-width:200px">
+        <span class="lvwhy">给自己看的，如"华泰 · 主账户"</span></div>
+      <div class="frow"><label></label>
+        <button class="btn" id="esave" ${ro?'disabled':''}>保存账户信息</button>
         <button class="btn" id="earch" ${ro?'disabled':''}
           title="只从列表隐去，不删任何数据">${a.archived?'取消归档':'归档'}</button>
-      </div>
+        <span class="lvwhy">归档只是从列表隐去，<b>不删任何数据</b>（流水与版本快照是决策证据）</span></div>
       <div class="lvmsg" id="emsg"></div>
       <h3 style="margin-top:14px">费率（按【成交日】取当时生效的那一档）</h3>
       ${H.length?`<table class="lvt" style="margin-bottom:8px">
@@ -678,87 +711,95 @@ function openSettings(aid, a, ro){
             <td>${esc(r.from)} ~ ${r.to?esc(r.to):'<b>至今</b>'}</td>
             <td>${m.mode==='flat'?'总费率':'按项'}</td>
             <td>${esc(desc)}</td>
-            <td class="lvwhy">${esc(r.note||'')}</td></tr>`;}).join('')}</table>
-        <div class="lvwhy" style="margin-bottom:8px">
-          <b>只能新增，不能改已有的。</b>新一档生效，上一档自动在前一天结束
-          —— 结束时间是<b>推导</b>出来的（下一档生效日减一天），账本本身只追加。
-          填错了就再新增一档更晚生效的盖掉它，历史仍然看得见改过。<br>
-          ★ <b>补录历史成交会用那笔成交【当时】的费率</b> ——
-          换过券商之后拿今天的费率去算三个月前那笔，数字看着正常，只是错的。
-          ${H.length?'（'+esc(H[0].from)+' 之前没有配置，按默认费率估）':''}
-        </div>`
+            <td class="lvwhy">${esc(r.note||'')}</td></tr>`;}).join('')}</table>`
         :'<div class="lvwhy" style="margin-bottom:8px">还没配过费率 —— 下面填一档。未配置时按默认费率估（偏保守）。</div>'}
-      <div class="lvform">
-        <input id="ffrom" size="11" placeholder="生效日 YYYY-MM-DD"
-               value="${new Date().toISOString().slice(0,10)}">
-        <select id="fmode">
-          <option value="flat" ${F.mode==='flat'?'selected':''}>直接填总费率（填了就按它算，不再拆项）</option>
-          <option value="parts" ${F.mode==='flat'?'':'selected'}>按项算（佣金 + 法定规费/过户费/印花税）</option>
-        </select>
-        <input id="fnote" placeholder="备注（为什么改）" style="flex:1;min-width:110px">
-        <button class="btn" id="fsave" ${ro?'disabled':''}>新增这一档</button>
+      <div class="lvwhy" style="margin-bottom:10px">
+        <b>只能新增，不能改已有的。</b>新一档生效，上一档自动在前一天结束
+        （结束时间是<b>推导</b>的：下一档生效日减一天，账本本身只追加）。
+        填错了就再新增一档更晚生效的盖掉，历史仍然看得见改过。<br>
+        ★ <b>补录历史成交会用那笔成交【当时】的费率</b> ——
+        换过券商之后拿今天的费率去算三个月前那笔，数字看着正常，只是错的。
+        ${H.length?'（'+esc(H[0].from)+' 之前没有配置，按默认费率估）':''}
       </div>
 
+      <div class="frow"><label>生效日</label>
+        <input id="ffrom" size="12" value="${new Date().toISOString().slice(0,10)}">
+        <span class="lvwhy">这一档从哪天开始算</span></div>
+      <div class="frow"><label>计费方式</label>
+        <select id="fmode">
+          <option value="flat" ${F.mode==='flat'?'selected':''}>直接填总费率（简单，填了就按它算）</option>
+          <option value="parts" ${F.mode==='flat'?'':'selected'}>按项算（佣金 + 法定规费/过户费/印花税）</option>
+        </select></div>
+
       <div id="fflat" style="${F.mode==='flat'?'':'display:none'}">
-        <div class="lvform">
-          <input id="fb1" size="11" placeholder="买入总费率" value="${F.buy_rate}">
-          <input id="fb2" size="11" placeholder="卖出总费率" value="${F.sell_rate}">
-          <input id="fb3" size="9" placeholder="单笔最低 0=无" value="${F.flat_min}">
+        <div class="frow"><label>买入总费率</label>
+          <input id="fb1" size="12" value="${F.buy_rate}">
+          <span class="lvwhy">= 万${(F.buy_rate*1e4).toFixed(2)}。你的账户实测 <b>0.00009</b>（万0.9）</span></div>
+        <div class="frow"><label>卖出总费率</label>
+          <input id="fb2" size="12" value="${F.sell_rate}">
+          <span class="lvwhy">= 万${(F.sell_rate*1e4).toFixed(2)}。<b>要把印花税万5 算进去</b> ——
+            你的账户 <b>0.00059</b>（万0.9 + 万5）</span></div>
+        <div class="frow"><label>单笔最低</label>
+          <input id="fb3" size="12" value="${F.flat_min}">
+          <span class="lvwhy">元。<b>0 = 没有最低</b>；你的账户是 0（净佣金 1.72 也没被抬到 5）</span></div>
+        <div class="frow"><label></label>
           <button class="btn" id="ffill">按当前拆项填入</button>
-        </div>
-        <div class="lvwhy">
-          <b>填了就以它为准</b> —— 不再拆佣金/规费/过户费，也不另加印花税
-          （卖出费率里就应该已经含了）。<br>
-          当前 ≈ 买入 万${(F.buy_rate*10000).toFixed(2)} / 卖出 万${(F.sell_rate*10000).toFixed(2)}；
-          你的账户实测是 <b>买入万0.9 / 卖出万5.9</b>（万0.9 + 印花税万5）。<br>
+          <span class="lvwhy">把「按项算」折出来的总费率填进上面两格</span></div>
+        <div class="lvwhy" style="margin:4px 0 10px">
+          填了总费率就<b>不再拆项、也不另加印花税</b>（卖出费率里就该已含）。<br>
           注意：<b>录入成交时直接填费用金额，永远优先于这里</b> —— 三态是
-          留空=按费率算 / 填值=用填的 / 填 0 = 真的没有费用。
+          留空 = 按费率算 / 填值 = 用填的 / 填 0 = 真的没有费用。
         </div>
       </div>
 
       <div id="fparts" style="${F.mode==='flat'?'display:none':''}">
-        <div class="lvwhy" style="margin-bottom:6px">
-          <b>只有净佣金是可谈的</b>，规费/过户费/印花税都是法定、所有人一样、
-          券商只是代收代缴 —— 所以只需填两项，法定部分不配也能用。
-        </div>
-        <div class="lvform">
-          <input id="fr1" size="10" placeholder="佣金率 如 0.00008" value="${F.commission}">
-          <input id="fr2" size="9" placeholder="最低佣金 0=无" value="${F.min_commission}">
+        <div class="frow"><label>佣金费率</label>
+          <input id="fr1" size="12" value="${F.commission}">
+          <span class="lvwhy">= 万${(F.commission*1e4).toFixed(3)}。<b>照券商 App 上那个数填</b>，
+            如万0.8 就填 <code>0.00008</code></span></div>
+        <div class="frow"><label>这个率的口径</label>
           <select id="fr5">
-            <option value="1" ${F.commission_incl_reg?'selected':''}>上面这个率【已含规费】</option>
-            <option value="0" ${F.commission_incl_reg?'':'selected'}>上面是净佣金，规费另收</option>
+            <option value="1" ${F.commission_incl_reg?'selected':''}>已含规费（App 上多是这种）</option>
+            <option value="0" ${F.commission_incl_reg?'':'selected'}>净佣金，规费另收</option>
           </select>
+          <span class="lvwhy"><b>必须问清</b>：两家都说"万2.5 最低5元"，5 万成交
+            一家付 13.00、一家付 15.71</span></div>
+        <div class="frow"><label>单笔最低佣金</label>
+          <input id="fr2" size="12" value="${F.min_commission}">
+          <span class="lvwhy">元。<b>0 = 没有最低</b></span></div>
+        <div class="lvwhy" style="margin:4px 0 8px">
+          怎么判口径：拿一笔<b>小额</b>成交（金额 &lt; 2 万，最低会 binding），
+          看账单佣金那行是 <code>5.00</code> 且规费另列（= 净佣金口径），
+          还是 <code>佣金+规费 = 5.00</code>（= 已含规费）。大额单测不出来。
         </div>
-        <div class="lvwhy">
-          <b>口径这一项必须问清</b>：两家都说"万2.5 最低5元"，实付可能差很多 ——
-          含规费口径下最低 5 元<b>覆盖</b>规费（5 万成交付 13.00），
-          规费另收则加在 5 元<b>之外</b>（付 15.71）。<br>
-          怎么测：拿一笔<b>小额</b>成交（金额 &lt; 2 万，最低会 binding），
-          看账单佣金那行是 5.00 且规费另列（另收），还是 佣金+规费 = 5.00（含规费）。
-        </div>
-        <details style="margin-top:8px">
-          <summary class="lvwhy" style="cursor:pointer">法定费率（一般不用改，政策变了才动）</summary>
-          <div class="lvform" style="margin-top:6px">
-            <input id="fr6" size="11" placeholder="规费率" value="${F.regulatory}">
-            <input id="fr3" size="10" placeholder="过户费率" value="${F.transfer}">
-            <input id="fr4" size="9" placeholder="印花税/auto" value="${esc(String(F.stamp))}">
-          </div>
-          <div class="lvwhy">规费 万${(F.regulatory*10000).toFixed(3)}
-            = 证管费万0.2（证监会）+ 经手费万0.341（交易所），双边；
-            过户费 万${(F.transfer*10000).toFixed(2)}（中登，沪深都收）；
-            印花税 <code>auto</code> = 按日期分段（2023-08-28 起千1 减半为万5），
-            <b>仅卖出</b>。这条分段规则与回测引擎共用一份实现。</div>
+        <details>
+          <summary class="lvwhy" style="cursor:pointer">法定费率（所有人一样，一般不用改）</summary>
+          <div class="frow" style="margin-top:6px"><label>规费率</label>
+            <input id="fr6" size="12" value="${F.regulatory}">
+            <span class="lvwhy">= 万${(F.regulatory*1e4).toFixed(3)}
+              = 证管费万0.2（证监会）+ 经手费万0.341（交易所），双边</span></div>
+          <div class="frow"><label>过户费率</label>
+            <input id="fr3" size="12" value="${F.transfer}">
+            <span class="lvwhy">= 万${(F.transfer*1e4).toFixed(2)}（中登，沪深都收）</span></div>
+          <div class="frow"><label>卖出印花税</label>
+            <input id="fr4" size="12" value="${esc(String(F.stamp))}">
+            <span class="lvwhy"><code>auto</code> = 按日期分段（2023-08-28 起千1 减半为万5），
+              <b>仅卖出</b>；与回测引擎共用一份实现</span></div>
         </details>
-        <div class="lvform" style="margin-top:10px">
-          <span class="lvwhy">不确定就从一笔真实账单反推 →</span>
+        <div class="frow" style="margin-top:10px"><label>从账单反推</label>
           <input id="fi1" size="9" placeholder="成交金额">
           <input id="fi2" size="7" placeholder="佣金">
           <input id="fi3" size="7" placeholder="规费">
           <input id="fi4" size="7" placeholder="过户费">
-          <button class="btn" id="finfer">反推</button>
-        </div>
+          <button class="btn" id="finfer">反推</button></div>
+        <div class="lvwhy">不确定就照券商账单填这四个数，它会算出费率并<b>当场复算这一笔</b>核对</div>
         <div class="lvmsg" id="fimsg"></div>
       </div>
+
+      <div class="frow" style="margin-top:10px"><label>备注</label>
+        <input id="fnote" placeholder="为什么改（如：换券商 / 谈到万0.5）" style="flex:1;min-width:200px">
+        <button class="btn" id="fsave" ${ro?'disabled':''}>新增这一档</button></div>
+      <div class="lvmsg" id="emsg2"></div>
       <div class="lvwhy">id <code>${esc(a.id)}</code> 不可改 —— 它决定 live/&lt;id&gt;/
         目录名，改了等于换账户、流水与版本历史全断。<br>
         <b>初始资金 = 开户那一刻的余额。</b>后来的入金请走「✎ 记一笔 › 现金」——
@@ -785,12 +826,14 @@ function openSettings(aid, a, ro){
          前端不再自己拆一遍。 */
       const r=(LVO||{}).fee_rates||{};
       if(r.buy_rate!=null){ $('#fb1').value=r.buy_rate; $('#fb2').value=r.sell_rate;
-        $('#emsg').className='lvmsg ok';
-        $('#emsg').textContent='已按当前拆项填入：买入 万'+(r.buy_rate*1e4).toFixed(2)
-          +' / 卖出 万'+(r.sell_rate*1e4).toFixed(2)+'（按 '+num(r.amount,0)+' 元一笔折算）'; }
+        $('#emsg2').className='lvmsg ok';
+        $('#emsg2').textContent='已按当前拆项填入：买入 万'+(r.buy_rate*1e4).toFixed(2)
+          +' / 卖出 万'+(r.sell_rate*1e4).toFixed(2)+'（按 '+num(r.amount,0)+' 元一笔折算）';
+      }else{ $('#emsg2').className='lvmsg bad';
+        $('#emsg2').textContent='拿不到折算结果 —— 服务端可能是旧进程，重启 serve.py'; }
     };
     $('#fsave').onclick=async()=>{
-      const m=$('#emsg');
+      const m=$('#emsg2');
       try{
         await post('/api/live/fee_rate',{id:aid,
           from:$('#ffrom').value.trim(), note:$('#fnote').value, fee:{
