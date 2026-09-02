@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>行业板块 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script>
+/* ============ 行业 / 板块 ============
+   ★ 两个来源：申万一级（随面板每日同步、带 PIT）与通达信板块
+     （926 个：概念 269 / 风格 158 / 地区 32 / 研究 467，每日同步）。
+   🔴 **不用** raw/hf/ 那份同花顺概念 —— last_fetched 停在 2026-04-28、
+     没接进 sync_daily.sh，用它会给出四个月前的成分而页面上看着像今天的。 */
+let KIND = qs('kind') || 'sw', CODE = qs('code') || '', DATE = qs('date') || '';
+
+pageHead('sector', '🏭 行业板块');
+load();
+
+async function load() {
+  const pg = $('#pg');
+  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    const [ks, ls] = await Promise.all([
+      j('/api/sector/kinds'),
+      j('/api/sector/list?kind=' + encodeURIComponent(KIND)
+        + (DATE ? '&date=' + encodeURIComponent(DATE) : '')),
+    ]);
+    let mem = null;
+    if (CODE) {
+      mem = await j('/api/sector/members?kind=' + encodeURIComponent(KIND)
+        + '&code=' + encodeURIComponent(CODE)
+        + (DATE ? '&date=' + encodeURIComponent(DATE) : ''))
+        .catch(e => ({error: String(e)}));
+    }
+    pg.innerHTML = head(ls, ks) + list(ls) + members(mem);
+    wireStarsAll();
+    $$('.kd').forEach(e => e.onclick = ev => {
+      ev.preventDefault(); KIND = e.dataset.k; CODE = ''; nav(); });
+    $$('.pick').forEach(e => e.onclick = ev => {
+      ev.preventDefault(); CODE = e.dataset.c; nav(); });
+    if ($('#sdate')) $('#sdate').onchange = () => { DATE = $('#sdate').value; nav(); };
+  } catch (e) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+function nav() {
+  const u = new URL(location.href);
+  u.searchParams.set('kind', KIND);
+  if (CODE) u.searchParams.set('code', CODE); else u.searchParams.delete('code');
+  if (DATE) u.searchParams.set('date', DATE); else u.searchParams.delete('date');
+  history.replaceState(null, '', u); load();
+}
+
+function head(ls, ks) {
+  return `<div class="lvhead">
+    <h2 style="font-size:17px">${esc(ls.kind_name)}</h2>
+    <span class="lvtag">${esc(ls.date)}</span>
+    <span style="flex:1"></span>
+    ${(ks.kinds || []).map(k => `<a href="#" class="lvtag kd${KIND === k.kind ? ' on' : ''}"
+      data-k="${esc(k.kind)}" title="${esc(k.note || '')}">${esc(k.name)}${k.n ? ' ' + k.n : ''}</a>`).join('')}
+    <input id="sdate" type="date" value="${esc(ls.date)}"
+      style="background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+      border-radius:5px;padding:3px 6px;font-size:11px">
+  </div>
+  <div class="lvwhy" style="margin:2px 0 8px">
+    涨幅是成分股<b>等权平均</b>（不是市值加权，也不是板块指数点位 —— 本地没有
+    板块指数）。等权更能反映"这个板块里多数票怎么样"。
+    ${KIND === 'sw' ? '申万一级随面板每日同步，带 PIT。'
+      : '通达信板块每日同步 + PIT 快照。🔴 不用 raw/hf/ 那份同花顺概念（停在 2026-04-28）。'}
+  </div>`;
+}
+
+function list(ls) {
+  const rows = ls.rows || [];
+  return `<div class="lvsec"><h3>板块涨幅榜 <span class="lvwhy">${rows.length} 个</span></h3>
+    <div class="pw" style="max-height:420px;overflow:auto"><table class="pkt">
+      <tr><th class="tx">板块</th><th class="rt">平均涨幅</th><th class="rt">中位</th>
+        <th class="rt">成分</th><th class="rt">上涨</th><th class="rt">涨停</th>
+        <th class="rt">成交额</th><th class="tx"></th></tr>
+      ${rows.map(r => `<tr${r.code === CODE ? ' style="background:var(--panel2)"' : ''}>
+        <td class="tx"><a href="#" class="pick" data-c="${esc(r.code)}"
+          style="color:${r.code === CODE ? 'var(--accent)' : 'inherit'}">${esc(r.name)}</a></td>
+        <td class="rt"><b style="color:${upc(r.avg_change)}">${pctv(r.avg_change)}</b></td>
+        <td class="rt" style="color:${upc(r.median_change)}">${pctv(r.median_change)}</td>
+        <td class="rt">${r.n}</td><td class="rt">${r.up}</td>
+        <td class="rt">${r.limit_up || ''}</td><td class="rt">${yiv(r.amount)}</td>
+        <td class="tx"><a href="#" class="chip pick" data-c="${esc(r.code)}">看成分 ›</a></td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function members(mem) {
+  if (!mem) return `<div class="none" style="margin-top:14px">点左边任一板块看成分股</div>`;
+  if (mem.error) return `<div class="lvmsg bad">${esc(mem.error)}</div>`;
+  const rows = mem.rows || [];
+  return `<div class="lvsec" style="margin-top:14px"><h3>${esc(mem.name)} 成分
+    <span class="lvwhy">${mem.n} 只 · 等权涨幅 ${pctv(mem.avg_change)}</span>
+    <span style="flex:1"></span>
+    <a class="chip" href="/compare.html?codes=${encodeURIComponent(rows.slice(0,6).map(x=>x.code).join(','))}"
+      title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a></h3>
+    <div class="pw"><table class="pkt">
+      <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
+        <th class="rt">振幅</th><th class="rt">成交额</th><th class="rt">流通市值</th>
+        <th class="rt">PE</th><th class="rt">PB</th><th class="tx">行业</th></tr>
+      ${rows.map(x => `<tr>
+        <td class="tx">${starHtml(x.code, false)}</td>
+        <td class="tx"><a href="${stockHref(x.code)}"
+          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0,6))}</a></td>
+        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+          ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
+          ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
+        <td class="rt">${fmtN(x.close)}</td>
+        <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+        <td class="rt">${pctn(x.turnover)}</td><td class="rt">${pctn(x.amplitude)}</td>
+        <td class="rt">${yiv(x.amount)}</td><td class="rt">${yiv(x.floatmv)}</td>
+        <td class="rt">${fmtN(x.pe_ttm)}</td><td class="rt">${fmtN(x.pb)}</td>
+        <td class="tx lvwhy">${esc(x.industry || '')}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+</script>

@@ -1541,8 +1541,9 @@ def _():
                 # 目录页顶部那条只列关键几列；这一页是完整视图，且必须显式列出
                 # 【成本口径】—— 本项目两次因为拿滑点 0 的数字去比含滑点的基准
                 # 而得出错误结论（FROEC 与 v0b 各一次）。
-                assert pg.locator('#gopicks').count() == 1, '顶栏缺少「★ 选中的规则」入口'
-                pg.click('#gopicks'); pg.wait_for_timeout(600)
+                assert pg.locator('#top a[href="#/picks"]').count() == 1, \
+                    '顶栏缺少「★ 选中的规则」入口'
+                pg.click('#top a[href="#/picks"]'); pg.wait_for_timeout(600)
                 assert pg.url.endswith('#/picks'), '点入口没进 #/picks: %s' % pg.url
                 assert pg.locator('#pk').count() == 1, '索引页没渲染'
                 # ★ 一行一条规则的【对比表】，不是一条一张卡。
@@ -3568,7 +3569,9 @@ def t_favicon():
     xml.dom.minidom.parseString(raw)          # 合法 XML（注释里不能有 --）
 
     html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
-    head = html[:html.index('<style>')]
+    # 样式已搬到 common.css（多个独立页面共用），所以 head 到 <link> 为止、
+    # 配色从 common.css 里读 —— 原来两者都在 index.html 的 <style> 里
+    head = html[:html.index('<div id="app">')]
     assert 'rel="icon"' in head and '/favicon.svg' in head, \
         'index.html 的 <head> 里没有指向 favicon.svg 的 <link rel=icon>'
     # 兜底 data URI 也要是有效 SVG（Safari 16 以下不认 SVG favicon 文件）
@@ -3578,7 +3581,7 @@ def t_favicon():
     xml.dom.minidom.parseString(urllib.parse.unquote(m.group(1)))
 
     # 配色必须与 :root 一致 —— 改主题时最容易漏掉图标
-    css = html[html.index('<style>'):html.index('</style>')]
+    css = open(os.path.join(web, 'common.css'), encoding='utf-8').read()
     for name in ('--accent', '--up'):
         mm = re.search(re.escape(name) + r':\s*(#[0-9a-fA-F]{3,8})', css)
         assert mm, 'CSS 里找不到 %s' % name
@@ -3736,11 +3739,13 @@ def t_stock():
 
 @case('个股页面真实渲染（playwright）', tag='web')
 def t_stock_ui():
-    """搜索 → 选中 → K 线真的画出来 → 十字光标读数 → 切区间/复权。
+    """独立页 /stock.html：搜索 → K 线 → 副图 → 事件 → 联动 → 同业 → 板块。
 
     ★ 「Canvas 画出来了」不能只看 DOM 有没有 <canvas> —— 那永远都在。
       判据是**画布上有非透明像素**，且切换后像素分布确实变了。
       画崩了（尺寸算错、坐标 NaN）的表现就是一张空白画布，而它不报错。
+    ★ 旧的 hash 链接 `/#/stock/xxx` 必须还能用（跳到新页）——
+      书签和别处的链接不该失效，而"点了没反应"是最难查的那种坏。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -3750,10 +3755,12 @@ def t_stock_ui():
     from http.server import ThreadingHTTPServer
 
     from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True                 # 自选星要能点
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    NZ = ("() => { const c=document.querySelector('#skcv');"
+    NZ = ("() => { const c=document.querySelector('#kcv');"
           " const g=c.getContext('2d');"
           " const d=g.getImageData(0,0,c.width,c.height).data;"
           " let n=0; for(let i=3;i<d.length;i+=4) if(d[i]>0) n++; return n; }")
@@ -3763,90 +3770,123 @@ def t_stock_ui():
                 br = p.chromium.launch()
             except Exception as e:                          # noqa: BLE001
                 return '跳过（浏览器不可用: %s）' % type(e).__name__
-            pg = br.new_page(viewport={'width': 1500, 'height': 1000})
+            pg = br.new_page(viewport={'width': 1600, 'height': 1100})
             errs = []
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console',
                   lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
-            pg.goto('http://127.0.0.1:%d/#/stock' % port, wait_until='networkidle')
-            pg.wait_for_selector('#skq', timeout=30000)
-            # ★ 这一页上【不该出现 SQL 输入框】—— 要写任意查询去 #/query
+            pg.goto('http://127.0.0.1:%d/stock.html' % port, wait_until='networkidle')
+            pg.wait_for_selector('#sbox input', timeout=30000)
+            # ★ 这一页上【不该出现 SQL 输入框】—— 要写任意查询去 /#/query
             assert pg.locator('#qsql').count() == 0, '个股页不该有 SQL 输入框'
+            # 顶栏导航：一处定义，当前页高亮
+            assert pg.locator('#top .btn.nav').count() >= 8, '顶栏导航没渲染'
+            assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '当前页没高亮'
 
             # ---- 搜索：打字 → 下拉 → 键盘选中 ----
-            pg.fill('#skq', '中国石油')
+            pg.fill('#sbox input', '中国石油')
             pg.wait_for_selector('.skit', timeout=15000)
             first = pg.locator('.skit').first.inner_text()
             assert '601857' in first and '中国石油' in first, \
                 '下拉里没有代码或名称：%s' % first
             pg.keyboard.press('Enter')
-            pg.wait_for_selector('#skcv', timeout=30000)
-            pg.wait_for_timeout(1200)
+            pg.wait_for_selector('#kcv', timeout=30000)
+            pg.wait_for_timeout(1500)
             assert '601857' in pg.url, '没跳到个股页：%s' % pg.url
 
-            head = ' '.join(pg.locator('#sk .lvhead').nth(1).inner_text().split())
+            head = ' '.join(pg.locator('#body .lvhead').first.inner_text().split())
             assert '中国石油' in head and '601857.XSHG' in head, '头部不对：%s' % head
             assert '沪深300' in head, '指数标签没渲染：%s' % head
 
-            kp = ' | '.join(pg.locator('#sk .kpi .k').all_inner_texts())
+            kp = ' | '.join(pg.locator('#body .kpi .k').all_inner_texts())
             for kk in ('今开 / 昨收', '最高 / 最低', '涨停 / 跌停', '成交额',
                        'PE(TTM)', 'PB', 'ROE(TTM)', '52 周区间', '区间涨幅'):
                 assert kk in kp, 'KPI 缺「%s」：%s' % (kk, kp)
-            body = pg.locator('#sk').inner_text()
+            body = pg.locator('#pg').inner_text()
             assert 'undefined' not in body and 'NaN' not in body, \
                 '页面上有 undefined/NaN'
-            # 换手/振幅不该带 + 号（它们不会为负，带符号读着像涨跌）
             assert '换手 +' not in body and '振幅 +' not in body, \
-                '换手/振幅带了 + 号'
+                '换手/振幅带了 + 号（它们不会为负）'
 
-            # ---- K 线真的画出来了 ----
+            # ---- 各个板块都在 ----
+            secs = [x.split('\n')[0] for x in
+                    pg.locator('#body .lvsec h3').all_inner_texts()]
+            for kk in ('日 K', '实盘持仓', '回测买过它', '所属板块', '同行业',
+                       '最近 20 个交易日', '事件', '财务（按报告期）'):
+                assert any(kk in x for x in secs), '缺「%s」这一节：%s' % (kk, secs)
+            # 所属板块要能点去板块页
+            assert pg.locator('#body a.chip[href*="/sector.html"]').count() >= 1, \
+                '板块 chip 没链到板块页'
+
+            # ---- K 线真的画出来了（含 MACD 副图）----
             nz1 = pg.evaluate(NZ)
             assert nz1 > 5000, 'Canvas 上几乎没有像素（画崩了）：%d' % nz1
-            # 图例四条均线
-            assert 'MA5' in pg.locator('#sk .lvsec').first.inner_text() or True
-            # 十字光标 + 读数
-            bb = pg.locator('#skcv').bounding_box()
-            pg.mouse.move(bb['x'] + bb['width'] * 0.7, bb['y'] + bb['height'] * 0.4)
+            bb = pg.locator('#kcv').bounding_box()
+            pg.mouse.move(bb['x'] + bb['width'] * 0.7, bb['y'] + bb['height'] * 0.3)
             pg.wait_for_timeout(500)
-            assert pg.locator('#sktip').is_visible(), '十字光标没出读数'
-            tip = pg.locator('#sktip').inner_text()
-            for kk in ('开', '高', '低', '收', 'MA20', 'MA60'):
+            assert pg.locator('#ktip').is_visible(), '十字光标没出读数'
+            tip = pg.locator('#ktip').inner_text()
+            for kk in ('开', '高', '低', '收', 'MA20', 'MA60', 'DIF'):
                 assert kk in tip, '读数缺「%s」：%s' % (kk, tip.replace('\n', ' '))
             assert 'undefined' not in tip and 'NaN' not in tip, \
                 '读数里有 undefined/NaN：%s' % tip
 
-            # ---- 切区间：根数变了，画布也重画了 ----
-            pg.locator('#sk .skr').first.click()      # 3 月
+            # ---- 切副图 KDJ：读数跟着换 ----
+            pg.locator('#body .sb[data-s="kdj"]').click()
             pg.wait_for_timeout(1800)
-            n_short = pg.evaluate('() => (drawK._geo||{}).n')
-            assert n_short and n_short <= 60, '切 3 月没生效：n=%s' % n_short
+            pg.mouse.move(bb['x'] + bb['width'] * 0.6, bb['y'] + bb['height'] * 0.3)
+            pg.wait_for_timeout(400)
+            tip2 = pg.locator('#ktip').inner_text()
+            assert 'K ' in tip2 and 'DIF' not in tip2, \
+                '切 KDJ 后读数没换：%s' % tip2.replace('\n', ' ')
+
+            # ---- 切区间：根数变了，画布也重画了 ----
+            pg.locator('#body .rg').first.click()      # 3 月
+            pg.wait_for_timeout(2000)
             nz2 = pg.evaluate(NZ)
             assert nz2 > 3000 and nz2 != nz1, \
                 '切区间后画布没变（%d -> %d）' % (nz1, nz2)
 
-            # ---- 切复权：价格真的不一样了 ----
-            pg.locator('#sk .skfq[data-f="hfq"]').click()
-            pg.wait_for_timeout(1800)
-            assert pg.evaluate('() => SKFQ') == 'hfq', '复权没切'
-            note = pg.locator('#sk .lvsec').first.inner_text()
+            # ---- 切复权：说明也要跟着换 ----
+            pg.locator('#body .fq[data-f="hfq"]').click()
+            pg.wait_for_timeout(2000)
+            note = pg.locator('#body .lvsec').first.inner_text()
             assert '后复权' in note and '跨期' in note, \
                 '没说明两种复权的区别（除权日假跌幅）：%s' % note[-160:]
 
-            # ---- 直接进 URL 也要能打开（可分享）----
+            # ---- 自选星：点了要真进自选 ----
+            import json as _json
+            import urllib.request
+            st = pg.locator('#body .lvhead .star').first
+            st.click()
+            pg.wait_for_timeout(1200)
+            wl = _json.loads(urllib.request.urlopen(
+                'http://127.0.0.1:%d/api/watchlist' % port, timeout=30).read())
+            assert any(x['code'] == '601857.XSHG' for x in wl.get('rows') or []), \
+                '点了星但没进自选：%s' % wl
+            st.click()                                  # 点回去，别留脏数据
+            pg.wait_for_timeout(1000)
+
+            # ---- 旧 hash 链接要还能用（跳到新页）----
             pg.goto('http://127.0.0.1:%d/#/stock/600519.XSHG' % port,
                     wait_until='networkidle')
-            pg.wait_for_selector('#skcv', timeout=30000)
-            pg.wait_for_timeout(1200)
-            assert '贵州茅台' in pg.locator('#sk').inner_text(), \
-                '直接用 URL 打开个股失败'
+            pg.wait_for_selector('#kcv', timeout=30000)
+            pg.wait_for_timeout(1500)
+            assert '/stock.html' in pg.url and '600519' in pg.url, \
+                '旧 hash 链接没跳到独立页：%s' % pg.url
+            assert '贵州茅台' in pg.locator('#pg').inner_text(), '第二只票没渲染'
             assert pg.evaluate(NZ) > 5000, '第二只票的 K 线没画出来'
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('搜索→键盘选中→跳转；头部含指数标签；KPI 13 格无 undefined；'
-                    'Canvas 真的有 %d 个像素；十字光标读出 OHLC+MA；'
-                    '切 3 月（n=%d）与切后复权都生效；URL 直达可用' % (nz1, n_short))
+            return ('独立页 /stock.html：顶栏导航高亮、页上无 SQL 框、'
+                    '搜索→键盘选中→跳转、8 个分区齐全、板块 chip 链到板块页、'
+                    'Canvas 真有 %d 个像素、十字光标读出 OHLC+MA+MACD、'
+                    '切 KDJ 后读数跟着换、切区间画布变、切后复权有说明、'
+                    '点星真进自选、旧 hash 链接跳新页' % nz1)
     finally:
+        sv.ALLOW_LIVE = old_live
         httpd.shutdown()
 
 
@@ -4067,6 +4107,526 @@ def t_query_ui():
         httpd.shutdown()
 
 
+@case('盘面：涨跌家数自洽 / 分档不重不漏 / 回看任意一天', tag='fast')
+def t_market():
+    """盘面的口径错了不报错，只是数不对。三处自证：
+
+    1. **涨 + 跌 + 平 == 总数**，且分档家数之和也等于总数 —— 分档边界
+       写重叠或留缝隙，总数就对不上，而页面上看着一切正常。
+    2. **只算正常上市 / ST / *ST** —— 把退市整理期和状态为空的混进来，
+       涨跌家数就偏。用"直接数一遍"独立复算。
+    3. **周末要落到最近的有数据日**，并把实际用的日期回给页面 ——
+       直接按等号查会返回空，而"空"看起来像"那天全市场没成交"。
+    """
+    import duckdb
+
+    from assay import market as mk
+    o = mk.overview()
+    assert o['up'] + o['down'] + o['flat'] == o['n'], \
+        '涨跌平之和 %d 不等于总数 %d' % (o['up'] + o['down'] + o['flat'], o['n'])
+    tot = sum(b['n'] for b in o['buckets'])
+    assert tot == o['n'], \
+        ('分档之和 %d ≠ 总数 %d —— 档位边界重叠或留了缝隙' % (tot, o['n']))
+    # 档位必须单调、首尾覆盖到 ±100
+    lo = [a for a, _b, _l in mk.BUCKETS]
+    hi = [b for _a, b, _l in mk.BUCKETS]
+    assert lo == sorted(lo) and hi == sorted(hi), '档位没排序'
+    assert lo[0] <= -100 and hi[-1] >= 100, '首尾档没覆盖极值'
+    for i in range(len(lo) - 1):
+        assert hi[i] == lo[i + 1], \
+            '第 %d 档与下一档不衔接（%s vs %s）—— 会漏或重复' % (i, hi[i], lo[i + 1])
+
+    # 独立复算：直接数一遍，口径必须一致
+    c = duckdb.connect(':memory:')
+    p = mk.panel()
+    n2, up2, lu2 = c.execute("""
+        SELECT count(*), sum(CASE WHEN change_pct>0 THEN 1 ELSE 0 END),
+               sum(CASE WHEN is_limit_up THEN 1 ELSE 0 END)
+        FROM %s WHERE date = DATE '%s'
+          AND public_status IN ('正常上市','ST','*ST') AND close_bfq IS NOT NULL"""
+        % (p, o['date'])).fetchone()
+    assert (n2, up2, lu2) == (o['n'], o['up'], o['limit_up']), \
+        '独立复算不一致：%s vs %s' % ((n2, up2, lu2), (o['n'], o['up'], o['limit_up']))
+    # 把状态放开会变多 —— 证明筛选真的在起作用（不是恒等式）
+    n3 = c.execute("SELECT count(*) FROM %s WHERE date = DATE '%s'"
+                   " AND close_bfq IS NOT NULL" % (p, o['date'])).fetchone()[0]
+    assert n3 > o['n'], \
+        '放开 public_status 后家数没变多（%d vs %d）—— 筛选没生效？' % (n3, o['n'])
+
+    # 榜单：涨幅榜必须降序、跌幅榜升序，且每行都有代码与名称
+    g = o['ranks']['gainers']['rows']
+    l_ = o['ranks']['losers']['rows']
+    assert g and l_, '榜单是空的'
+    gv = [x['change_pct'] for x in g]
+    lv = [x['change_pct'] for x in l_]
+    assert gv == sorted(gv, reverse=True), '涨幅榜没降序'
+    assert lv == sorted(lv), '跌幅榜没升序'
+    assert gv[0] > lv[0], '涨幅榜第一名居然不比跌幅榜第一名高'
+    for x in g:
+        assert x['code'] and '.' in x['code'], '榜单行缺代码'
+    # 行业榜等权平均要按降序，且家数之和 <= 总数（有些票没有行业）
+    inds = o['industries']
+    av = [x['avg_change'] for x in inds]
+    assert av == sorted(av, reverse=True), '行业榜没按平均涨幅降序'
+    assert sum(x['n'] for x in inds) <= o['n'], '行业家数之和超过总数'
+
+    # ---- 回看任意一天：周末落到最近的有数据日，并说出来 ----
+    import datetime as _dt
+    d = _dt.date.fromisoformat(o['date'])
+    sat = d
+    while sat.weekday() != 5:                 # 找一个周六
+        sat -= _dt.timedelta(days=1)
+    o2 = mk.overview(sat.isoformat())
+    assert o2['date'] != sat.isoformat(), '周六居然有行情？'
+    assert o2['asked'] == sat.isoformat(), \
+        '没把"你选的那天"回给页面 —— 人会以为看的是自己选的那天'
+    assert o2['date'] < sat.isoformat(), '没落到更早的有数据日'
+    assert o2['n'] > 1000, '历史某天的家数不对：%d' % o2['n']
+    try:
+        mk.overview('1990-01-01')
+        raise AssertionError('远早于所有数据的日期应报错')
+    except mk.MarketError:
+        pass
+    return ('涨跌平之和 == 总数 %d；12 档首尾衔接且之和相等；'
+            '独立复算一致（放开状态后 %d > %d，证明筛选生效）；'
+            '涨幅榜降序 / 跌幅榜升序 / 行业榜按等权降序；'
+            '周六 %s 自动落到 %s 并回报 asked'
+            % (o['n'], n3, o['n'], sat, o2['date']))
+
+
+@case('板块：申万与通达信两源 / 成分等权自洽 / 个股归属', tag='fast')
+def t_sector():
+    """★ 只用【每日同步】的两个源：申万一级（随面板，带 PIT）与通达信板块。
+
+    🔴 `raw/hf/` 下那份同花顺概念**不用** —— `last_fetched` 停在 2026-04-28、
+      没接进 `sync_daily.sh`。用它会给出四个月前的成分，而页面上看着像今天的。
+      这条用例顺手钉住"代码里没有引用那份数据"。
+    """
+    import os
+
+    from assay import market as mk
+    ks = {k['kind'] for k in (
+        __import__('assay.server', fromlist=['x']).api_sector_kinds({})['kinds'])}
+    assert 'sw' in ks, '缺申万'
+    assert 'concept' in ks, '缺通达信概念板块'
+
+    sw = mk.sector_list(kind='sw')
+    assert 25 <= len(sw['rows']) <= 40, '申万一级应是 31 个左右：%d' % len(sw['rows'])
+    av = [x['avg_change'] for x in sw['rows']]
+    assert av == sorted(av, reverse=True), '板块榜没按等权涨幅降序'
+
+    cc = mk.sector_list(kind='concept')
+    assert len(cc['rows']) > 100, '通达信概念板块太少：%d' % len(cc['rows'])
+    # 成分等权涨幅要能独立复算
+    top = cc['rows'][0]
+    m = mk.sector_members(top['code'], kind='concept')
+    assert m['n'] == top['n'], \
+        '榜上写 %d 只，成分表却是 %d 只' % (top['n'], m['n'])
+    cps = [x['change_pct'] for x in m['rows'] if x['change_pct'] is not None]
+    calc = sum(cps) / len(cps)
+    assert abs(calc - top['avg_change']) < 0.02, \
+        '等权涨幅复算不一致：%s vs %s' % (calc, top['avg_change'])
+    # 成分表按涨跌幅降序
+    assert cps == sorted(cps, reverse=True), '成分表没按涨跌幅降序'
+
+    # 申万成分：数量要和榜上一致
+    m2 = mk.sector_members(sw['rows'][0]['code'], kind='sw')
+    assert m2['n'] == sw['rows'][0]['n'], \
+        '申万成分数不一致：%d vs %d' % (m2['n'], sw['rows'][0]['n'])
+
+    # 个股归属：代码几种写法都要认（不归一就查不到，报"面板里没有"）
+    for raw in ('601857', '601857.SH', 'sh601857', '601857.XSHG'):
+        ss = mk.stock_sectors(raw)
+        assert ss['code'] == '601857.XSHG', '%r 没归一：%s' % (raw, ss['code'])
+        assert ss['sw'] and ss['sw']['name'], '没给申万归属'
+        assert ss['blocks'], '一只大盘股不可能不属于任何板块'
+    try:
+        mk.stock_sectors('99')
+        raise AssertionError('认不出的代码应报错')
+    except mk.MarketError:
+        pass
+
+    # 🔴 代码里不许引用 raw/hf/ 那份不同步的概念数据
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'assay', 'market.py'), encoding='utf-8').read()
+    code_only = '\n'.join(ln for ln in src.split('\n')
+                          if not ln.strip().startswith('#'))
+    assert 'concept_ths' not in code_only, \
+        ('market.py 引用了 raw/hf 的同花顺概念 —— 它 last_fetched 停在 '
+         '2026-04-28、没接进每日同步，会给出四个月前的成分而页面上看着像今天的')
+    return ('两源：申万 %d 个 + 通达信 %d 类（概念 %d 个）；'
+            '成分等权涨幅复算一致（%s：榜 %.2f%% / 复算 %.2f%%）；'
+            '成分数一致；个股归属 4 种写法都认；代码里没引用不同步的同花顺概念'
+            % (len(sw['rows']), len(ks) - 1, len(cc['rows']),
+               top['name'], top['avg_change'], calc))
+
+
+@case('副图指标 / 事件 / 同业 / 联动 / 对比', tag='fast')
+def t_stock_ext():
+    """指标算错不报错，只是曲线不对 —— 所以每个都要能独立复算。
+
+    ★ KDJ / BOLL 刻意用**行情软件口径**（KDJ 通用平滑、BOLL 总体标准差），
+      不是教科书口径 —— 与通达信/同花顺对不上会让人以为数据错了。
+    """
+    from assay import stock as st
+
+    # ---- 指标：预热 + 独立复算 ----
+    ind = st.indicators('601857.SH', n=120)
+    rows = ind['rows']
+    assert len(rows) == 120
+    assert ind['warmup_dropped'] == st.IND_WARM, \
+        '预热应丢掉 %d 根：%s' % (st.IND_WARM, ind['warmup_dropped'])
+    # ★ 第一根就该有值 —— 这正是预热的意义。没预热的话头部全是 None，
+    #   而那不报错，只是曲线前面缺一截。
+    for k in ('dif', 'dea', 'macd', 'k', 'd', 'jj', 'rsi6', 'rsi24', 'mb', 'ub'):
+        assert rows[0][k] is not None, '第一根的 %s 是空的 —— 预热没生效' % k
+    last = rows[-1]
+    # MACD = (DIF − DEA) × 2（国内行情软件口径，不是 DIF−DEA）
+    assert abs(last['macd'] - (last['dif'] - last['dea']) * 2) < 0.01, \
+        'MACD 不是 (DIF−DEA)×2：%s' % last
+    # J = 3K − 2D
+    assert abs(last['jj'] - (3 * last['k'] - 2 * last['d'])) < 0.02, 'J 算错'
+    for k in ('k', 'd', 'rsi6', 'rsi12', 'rsi24'):
+        assert 0 <= last[k] <= 100, '%s 越界：%s' % (k, last[k])
+    # BOLL：中轨 == 20 日均值；上下轨对称
+    cl = [r['close'] for r in rows[-20:]]
+    assert abs(last['mb'] - sum(cl) / 20) < 0.02, 'BOLL 中轨不是 20 日均值'
+    assert abs((last['ub'] - last['mb']) - (last['mb'] - last['lb'])) < 0.01, \
+        'BOLL 上下轨不对称'
+    assert last['lb'] < last['mb'] < last['ub'], 'BOLL 轨道顺序不对'
+    # 总体标准差（除 N）而不是样本标准差（除 N−1）—— 与行情软件一致
+    mu = sum(cl) / 20
+    sd_pop = (sum((x - mu) ** 2 for x in cl) / 20) ** 0.5
+    sd_smp = (sum((x - mu) ** 2 for x in cl) / 19) ** 0.5
+    assert abs((last['ub'] - mu) / 2 - sd_pop) < 0.01, 'BOLL 没用总体标准差'
+    assert abs(sd_pop - sd_smp) > 1e-9, '两种标准差恰好相等，这条断言无效'
+
+    # ---- 事件：日期倒序，单位对 ----
+    ev = st.events('601088.SH')
+    ds = [e['date'] for e in ev['events']]
+    assert ds == sorted(ds, reverse=True), '事件没按日期倒序'
+    kinds = {e['kind'] for e in ev['events']}
+    assert {'xr', 'fin'} <= kinds, '缺除权或财报事件：%s' % kinds
+    # 股本单位是万股 —— 换算后应是【亿】级（神华 216 亿股）
+    sh = [e for e in ev['events'] if e['kind'] == 'share' and e.get('share_total')]
+    if sh:
+        assert sh[0]['share_total'] > 1e9, \
+            ('总股本换算错了（share_change.share_total 单位是万股）：%s'
+             % sh[0]['share_total'])
+        assert '亿' in sh[0]['detail'], '没换算成人看得懂的量级'
+    # 解禁比例常为 NULL —— 必须不显示成 "占 0%"
+    unl = [e for e in ev['events'] if e['kind'] == 'unlock']
+    for e in unl:
+        if e.get('ratio') is None:
+            assert '占 0' not in e['detail'], \
+                ('缺值显示成了"占 0%%"—— 那不是"占比很小"，是根本没有这个数：%s'
+                 % e['detail'])
+
+    # ---- 同业 ----
+    pe = st.peers('601857.SH', n=10)
+    assert pe['industry']['name'], '没给行业'
+    mv = [x['floatmv'] or 0 for x in pe['rows']]
+    assert mv == sorted(mv, reverse=True), '同业没按流通市值降序'
+    assert pe['rank'] == 1, '中国石油在石油石化里流通市值应排第一：%s' % pe['rank']
+    assert any(x['code'] == '601857.XSHG' for x in pe['rows']), '同业里没有它自己'
+
+    # ---- 联动 ----
+    lk = st.links('601857.SH')
+    assert 'positions' in lk and 'runs' in lk
+    assert lk['runs'], '红利策略买过中国石油，回测联动不该是空的'
+    r0 = lk['runs'][0]
+    for k in ('run_id', 'strategy', 'n_trades', 'avg_ret'):
+        assert k in r0, '回测联动缺 %s' % k
+    assert r0['n_trades'] > 0
+
+    # ---- 多股对比：一律后复权 + 并集对齐 ----
+    cp = st.compare(['601857.SH', '601088.SH'], n=120)
+    assert cp['fq'] == 'hfq', '对比必须后复权 —— 不复权跨除权日有假跌幅'
+    assert len(cp['series']) == 2 and len(cp['dates']) == cp['n']
+    for s in cp['series']:
+        assert len(s['ret']) == cp['n'], '曲线长度与日期数不一致'
+        v = [x for x in s['ret'] if x is not None]
+        assert v and abs(v[0]) < 1e-9, '起点没归零：%s' % v[0]
+    # 后复权的区间涨幅要高于不复权（分红被除掉了）
+    kb = st.kline('601088.SH', n=120, fq='bfq')['bars']
+    rb = kb[-1]['close'] / kb[0]['close'] - 1
+    rh = [s for s in cp['series'] if s['code'] == '601088.XSHG'][0]['ret'][-1]
+    assert rh > rb, '对比用的不是后复权（%.4f vs 不复权 %.4f）' % (rh, rb)
+    try:
+        st.compare(['1', '2', '3', '4', '5', '6', '7'])
+        raise AssertionError('超过 6 只应被拒')
+    except st.StockError:
+        pass
+    try:
+        st.compare([])
+        raise AssertionError('空列表应被拒')
+    except st.StockError:
+        pass
+    return ('指标预热 %d 根、第一根就有全部值；MACD=(DIF−DEA)×2、J=3K−2D、'
+            'BOLL 中轨=20日均值且用总体标准差（与行情软件一致）；'
+            '事件倒序且股本按万股换算成 %s、解禁缺值不显示成 0%%；'
+            '同业按市值降序且它排第 1；回测联动 %d 次；'
+            '对比后复权 %.2f%% > 不复权 %.2f%% 且起点归零'
+            % (ind['warmup_dropped'], (sh[0]['detail'].split('总股本 ')[-1]
+                                       if sh else '—'),
+               len(lk['runs']), rh * 100, rb * 100))
+
+
+@case('自选：append-only / 重放出当前池 / 只读拦写', tag='fast')
+def t_watchlist():
+    """★ 与实盘账本同一套纪律：加/移出/改分组/改备注都是**追加一条**，
+    当前状态由**重放**得出。删一条就把"我什么时候加的、为什么"抹掉了。
+    """
+    import shutil
+    import tempfile
+
+    from assay import server as sv
+    from assay import watchlist as wl
+    old_live, old_dir = sv.ALLOW_LIVE, wl.LIVE
+    tmp = tempfile.mkdtemp()
+    wl.LIVE = tmp
+    try:
+        assert wl.current() == [] and wl.log() == [], '新目录应是空的'
+        wl.act('add', '601857.SH', group='观察', note='页岩气')
+        wl.act('add', '600519')
+        assert len(wl.current()) == 2
+        # 幂等：重复加不报错也不重复追加
+        r = wl.act('add', '601857')
+        assert r.get('skipped'), '重复加应被跳过（页面上那个星是幂等的）'
+        assert len(wl.log()) == 2, '重复加不该追加记录'
+        # 改分组 / 备注 都是追加
+        wl.act('group', '601857.SH', group='核心')
+        wl.act('note', '601857.SH', note='看它的天然气占比')
+        cur = {x['code']: x for x in wl.current()}
+        assert cur['601857.XSHG']['group'] == '核心', '重放后的分组不对'
+        assert '天然气' in cur['601857.XSHG']['note'], '重放后的备注不对'
+        assert len(wl.log()) == 4, '应有 4 条日志'
+        # 移出：当前池少一个，**日志还在**
+        wl.act('remove', '601857.SH')
+        assert len(wl.current()) == 1, '移出后当前池应剩 1'
+        assert len(wl.log()) == 5, \
+            '移出必须是【追加一条 remove】，不是删记录 —— 删了就没法复盘'
+        assert any(x['act'] == 'add' and x['code'] == '601857.XSHG'
+                   for x in wl.log()), '原来的 add 记录不该消失'
+        # 移出后再改会报错（不在池子里）
+        for a in ('remove', 'group', 'note'):
+            try:
+                wl.act(a, '601857.SH')
+                raise AssertionError('%s 一个不在池子里的票应报错' % a)
+            except wl.WatchError:
+                pass
+        # 分组统计
+        wl.act('add', '000001', group='银行')
+        gs = {g['name']: g['n'] for g in wl.groups()}
+        assert gs.get('银行') == 1 and gs.get(wl.DEFAULT_GROUP) == 1, gs
+        assert len(wl.current('银行')) == 1, '按分组过滤没生效'
+        # 带行情：查不到的不静默丢掉
+        wl.act('add', '000003')          # 早已退市的代码
+        v = wl.valued()
+        codes = {x['code'] for x in v['rows']}
+        assert '000003.XSHE' in codes, \
+            '面板里查不到的票被静默丢掉了 —— "我加过的票不见了"'
+        miss = [x for x in v['rows'] if x['code'] == '000003.XSHE'][0]
+        assert miss.get('missing'), '查不到的那行没标出来'
+        assert [x for x in v['rows'] if x['code'] == '600519.XSHG'][0]['name'], \
+            '正常的票应该有名称与行情'
+        # 非法输入
+        for bad in (('add', '99'), ('nope', '600519'), ('add', '')):
+            try:
+                wl.act(bad[0], bad[1])
+                raise AssertionError('%r 应被拒' % (bad,))
+            except wl.WatchError:
+                pass
+        # 只读模式：接口层要拒（不能只靠页面）
+        sv.ALLOW_LIVE = False
+        assert (sv.api_watchlist_act({}, {'act': 'add', 'code': '601857'})
+                or {}).get('error'), '只读模式下应拒绝改自选'
+        n_before = len(wl.log())
+        sv.ALLOW_LIVE = True
+        assert sv.api_watchlist_act({}, {'act': 'add', 'code': '601988'}).get('ok')
+        assert len(wl.log()) == n_before + 1
+        return ('append-only：4 次改动 + 移出后日志 5 条且 add 记录仍在；'
+                '重复加幂等不追加；重放出的分组/备注正确；'
+                '分组过滤；退市代码不静默丢掉而是标 missing；'
+                '3 类非法输入被拒；只读模式接口层拒写')
+    finally:
+        sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('新页面真实渲染：盘面 / 板块 / 自选 / 对比（playwright）', tag='web')
+def t_new_pages_ui():
+    """四个独立页面都真渲染一遍，并验证【页面之间能互相走到】。
+
+    ★ 独立页面的风险不是单页坏，是**页面之间断链** —— 从盘面点不到个股、
+      从板块点不到成分。所以这里逐个点过去。
+    ★ Canvas 的判据同样是"画布上有非透明像素"，不是 DOM 里有 <canvas>。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    from assay import watchlist as wl
+    old_live, old_dir = sv.ALLOW_LIVE, wl.LIVE
+    sv.ALLOW_LIVE = True
+    tmp = tempfile.mkdtemp()
+    wl.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    NZ = lambda sel: ("() => { const c=document.querySelector('%s');"
+                      " if(!c) return -1; const g=c.getContext('2d');"
+                      " const d=g.getImageData(0,0,c.width,c.height).data;"
+                      " let n=0; for(let i=3;i<d.length;i+=4) if(d[i]>0) n++;"
+                      " return n; }" % sel)
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1600, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console',
+                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+
+            def clean(sel='#pg'):
+                t = pg.locator(sel).inner_text()
+                assert 'undefined' not in t and 'NaN' not in t, \
+                    '%s 里有 undefined/NaN' % sel
+                return t
+
+            # ================= 盘面 =================
+            pg.goto(base + '/market.html', wait_until='networkidle')
+            pg.wait_for_selector('#dcv', timeout=40000)
+            pg.wait_for_timeout(1200)
+            assert '盘面' in pg.locator('#top .btn.nav.on').inner_text(), '当前页没高亮'
+            kp = ' | '.join(pg.locator('.kpi .k').all_inner_texts())
+            for k in ('涨 / 跌 / 平', '涨停 / 跌停', '全市场成交额', '中位涨幅'):
+                assert k in kp, '盘面 KPI 缺「%s」：%s' % (k, kp)
+            nz = pg.evaluate(NZ('#dcv'))
+            assert nz > 3000, '涨跌分布图没画出来：%d' % nz
+            clean()
+            n_ranks = pg.locator('.pgrid.c2 .lvsec').count()
+            assert n_ranks >= 5, '榜单块只有 %d 个' % n_ranks
+            # 前后翻日：日期真的变了
+            d0 = pg.locator('#mdate').input_value()
+            pg.locator('.mshift[data-d="-1"]').click()
+            pg.wait_for_timeout(2500)
+            d1 = pg.locator('#mdate').input_value()
+            assert d1 < d0, '「前一日」没生效（%s -> %s）' % (d0, d1)
+            # 盘面 → 个股（断链是独立页面最大的风险）
+            pg.locator('.pgrid.c2 a[href*="/stock.html"]').first.click()
+            pg.wait_for_selector('#kcv', timeout=40000)
+            assert '/stock.html' in pg.url, '从盘面点不到个股页'
+
+            # ================= 板块 =================
+            pg.goto(base + '/sector.html', wait_until='networkidle')
+            pg.wait_for_selector('table.pkt', timeout=40000)
+            pg.wait_for_timeout(800)
+            assert '行业板块' in pg.locator('#top .btn.nav.on').inner_text()
+            kinds = pg.locator('.lvhead .kd').count()
+            assert kinds >= 4, '板块分类入口只有 %d 个' % kinds
+            n_sw = pg.locator('.lvsec table.pkt tr').count() - 1
+            assert n_sw >= 25, '申万板块行数不对：%d' % n_sw
+            clean()
+            # 点一个板块 → 出成分
+            pg.locator('a.pick').first.click()
+            pg.wait_for_timeout(2500)
+            secs = [x.split('\n')[0] for x in pg.locator('.lvsec h3').all_inner_texts()]
+            assert any('成分' in x for x in secs), '点板块没出成分表：%s' % secs
+            clean()
+            # 切到概念板块
+            pg.locator('.lvhead .kd[data-k="concept"]').click()
+            pg.wait_for_timeout(2500)
+            assert '概念' in pg.locator('.lvhead h2').inner_text(), '切概念没生效'
+            n_cc = pg.locator('.lvsec table.pkt tr').count() - 1
+            assert n_cc > 100, '概念板块行数不对：%d' % n_cc
+            # 板块 → 个股
+            pg.locator('.lvsec a.pick').first.click()
+            pg.wait_for_timeout(2500)
+            pg.locator('a[href*="/stock.html"]').first.click()
+            pg.wait_for_selector('#kcv', timeout=40000)
+            assert '/stock.html' in pg.url, '从板块成分点不到个股页'
+
+            # ================= 自选 =================
+            pg.goto(base + '/watchlist.html', wait_until='networkidle')
+            pg.wait_for_selector('#wadd input', timeout=40000)
+            assert '自选' in pg.locator('#top .btn.nav.on').inner_text()
+            assert '空的' in pg.locator('#pg').inner_text(), '空自选没给空态提示'
+            pg.fill('#wadd input', '601857')
+            pg.wait_for_selector('.skit', timeout=20000)
+            pg.locator('.skit').first.click()
+            pg.wait_for_timeout(2500)
+            t = clean()
+            assert '中国石油' in t, '加进自选后没渲染出来：%s' % t[:200]
+            assert '变更历史' in t, '没有 append-only 的变更历史'
+            assert pg.locator('.lvsec table.pkt tr').count() >= 2, '盯盘表没行'
+            # 自选 → 个股
+            pg.locator('.lvsec a[href*="/stock.html"]').first.click()
+            pg.wait_for_selector('#kcv', timeout=40000)
+            assert '601857' in pg.url, '从自选点不到个股页'
+
+            # ================= 对比 =================
+            pg.goto(base + '/compare.html?codes=601857.XSHG,601088.XSHG',
+                    wait_until='networkidle')
+            pg.wait_for_selector('#ccv', timeout=40000)
+            pg.wait_for_timeout(1500)
+            assert '对比' in pg.locator('#top .btn.nav.on').inner_text()
+            nz2 = pg.evaluate(NZ('#ccv'))
+            assert nz2 > 3000, '对比曲线没画出来：%d' % nz2
+            t = clean()
+            assert '后复权' in t, '没说明一律后复权（不复权跨除权日有假跌幅）'
+            assert '中国石油' in t and '中国神华' in t, '两只票没都渲染'
+            bb = pg.locator('#ccv').bounding_box()
+            pg.mouse.move(bb['x'] + bb['width'] * 0.6, bb['y'] + bb['height'] * 0.5)
+            pg.wait_for_timeout(400)
+            assert pg.locator('#ctip').is_visible(), '对比图没出读数'
+            tip = pg.locator('#ctip').inner_text()
+            assert '中国石油' in tip and '%' in tip, '读数不对：%s' % tip
+            # 加一只 / 减一只
+            pg.fill('#cadd input', '600519')
+            pg.wait_for_selector('.skit', timeout=20000)
+            pg.locator('.skit').first.click()
+            pg.wait_for_timeout(2500)
+            assert pg.locator('.rmc.chip').count() == 3, '加第三只没生效'
+            pg.locator('.rmc.chip').first.click()
+            pg.wait_for_timeout(2500)
+            assert pg.locator('.rmc.chip').count() == 2, '移除没生效'
+            # 对比 → 个股
+            pg.locator('.lvsec a[href*="/stock.html"]').first.click()
+            pg.wait_for_selector('#kcv', timeout=40000)
+            assert '/stock.html' in pg.url, '从对比点不到个股页'
+
+            # ================= 顶栏导航：每页都能走到每页 =================
+            for href in ('/market.html', '/sector.html', '/watchlist.html',
+                         '/compare.html', '/stock.html'):
+                assert pg.locator('#top a.nav[href="%s"]' % href).count() == 1, \
+                    '顶栏缺 %s 的入口' % href
+            assert pg.locator('#top a.nav[href="/#/live"]').count() == 1, \
+                '顶栏缺实盘入口'
+
+            br.close()
+            assert not errs, '页面有运行时错误：%s' % errs[:3]
+            return ('四页真渲染：盘面（KPI 齐 + 分布图 %d 像素 + 翻日 %s→%s + '
+                    '%d 个榜单）、板块（%d 类 / 申万 %d 行 / 概念 %d 行 / 点出成分）、'
+                    '自选（加入后渲染 + 变更历史）、对比（曲线 %d 像素 + 读数 + '
+                    '加减只数）；四页都能点到个股页；顶栏 6 个入口齐'
+                    % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, nz2))
+    finally:
+        sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+        httpd.shutdown()
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
@@ -4085,6 +4645,34 @@ def t_page_inventory():
     web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
     html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
     js = html[html.index('<script>'):]
+
+    # 🔴 共享资源与页面内联脚本【顶层重名 = 整页 SyntaxError】。
+    #    两个 <script> 的顶层 const/let/function 共享同一个全局词法环境，
+    #    重名直接 "Identifier 'x' has already been declared"，
+    #    表现是**整页白屏、所有功能一起没了**。
+    #    实测踩过：把 num() 搬进 common.js 时忘了删 index.html 那份，
+    #    8 个 web 用例一起挂。
+    top = lambda t: set(re.findall(
+        r'^(?:const|let|var|function|async function)\s+([A-Za-z_$][\w$]*)',
+        t, re.M))
+    shared = open(os.path.join(web, 'common.js'), encoding='utf-8').read()
+    pages = ['index.html'] + sorted(
+        f for f in os.listdir(web)
+        if f.endswith('.html') and f != 'index.html')
+    for fn in pages:
+        src = open(os.path.join(web, fn), encoding='utf-8').read()
+        inline = '\n'.join(re.findall(r'<script>(.*?)</script>', src, re.S))
+        dup = sorted(top(shared) & top(inline))
+        assert not dup, \
+            ('%s 与 common.js 顶层重名 %s —— 会 SyntaxError 导致整页白屏'
+             % (fn, dup))
+    # 每个独立页面都必须引用共享资源，不能各带一份样式/辅助函数
+    for fn in pages:
+        src = open(os.path.join(web, fn), encoding='utf-8').read()
+        assert '/common.css' in src, '%s 没引用 common.css' % fn
+        assert '/common.js' in src, '%s 没引用 common.js' % fn
+        assert '<style>' not in src, \
+            '%s 里还有内联 <style> —— 样式应集中在 common.css' % fn
 
     # route() 里出现的每个 showXxx()，都必须有对应的 function 定义
     called = set(re.findall(r'\b(show[A-Z]\w*)\s*\(', js))
@@ -4105,8 +4693,8 @@ def t_page_inventory():
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 47, \
-        ('用例只剩 %d 条，少于已知的 47 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 52, \
+        ('用例只剩 %d 条，少于已知的 52 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))

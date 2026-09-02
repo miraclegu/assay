@@ -1,0 +1,375 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>个股 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script src="/kchart.js"></script>
+<script>
+/* ============ 个股 ============
+   ★ 这一页【不出现 SQL】—— 它回答固定的几个问题，接口也是固定形状的。
+     要写任意查询去 /#/query。
+   ★ 一次并发拉 7 个接口，任何一个失败只让它那一块显示错误，
+     不拖垮整页 —— 看 K 线的时候不该因为"解禁表读不了"整页白屏。 */
+let CODE = qs('code') || localStorage.getItem('skcode') || '';
+let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq', SUB = qs('sub') || 'macd';
+let BARS = null, IND = null, EVS = null, HOVER = null, SHOWEV = true;
+const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
+const SUBS = [['macd','MACD'],['kdj','KDJ'],['rsi','RSI'],['','无副图']];
+
+pageHead('stock', '📈 个股');
+$('#pg').innerHTML = `<div class="lvhead">
+    <div id="sbox" style="flex:0 0 320px"></div>
+    <span style="flex:1"></span>
+    <a class="lvtag" href="/compare.html" title="2~6 只叠加后复权涨幅">⚖ 拉去对比</a>
+    <a class="lvtag" href="/watchlist.html">⭐ 自选</a>
+  </div><div id="body"></div>`;
+mountSearch($('#sbox'), {onPick: r => { location.href = stockHref(r.code); }});
+if (CODE) load(); else $('#body').innerHTML =
+  '<div class="none">搜代码或名称开始 —— 支持 601857 / 601857.SH / sh601857 / 中国石油</div>';
+
+async function load() {
+  const b = $('#body');
+  b.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  const one = u => j(u).catch(e => ({error: String(e)}));
+  const [p, k, ind, f, ev, pe, sc, lk] = await Promise.all([
+    one('/api/stock/profile?code=' + encodeURIComponent(CODE)),
+    one(`/api/stock/kline?n=${N}&fq=${FQ}&code=` + encodeURIComponent(CODE)),
+    SUB ? one(`/api/stock/indicators?n=${N}&fq=${FQ}&code=` + encodeURIComponent(CODE))
+        : Promise.resolve({rows: []}),
+    one('/api/stock/finance?n=12&code=' + encodeURIComponent(CODE)),
+    one('/api/stock/events?code=' + encodeURIComponent(CODE)),
+    one('/api/stock/peers?n=12&code=' + encodeURIComponent(CODE)),
+    one('/api/stock/sectors?code=' + encodeURIComponent(CODE)),
+    one('/api/stock/links?code=' + encodeURIComponent(CODE)),
+  ]);
+  if (p.error) { b.innerHTML = '<div class="lvmsg bad">' + esc(p.error) + '</div>'; return; }
+  CODE = p.jq_code; localStorage.setItem('skcode', CODE);
+  BARS = k.error ? null : k.bars;
+  IND = (ind && !ind.error) ? ind.rows : null;
+  EVS = (ev && !ev.error) ? ev.events : [];
+  b.innerHTML = head(p, lk) + kpiBox(p) + chartBox(k, ind)
+    + linkBox(lk) + sectorBox(sc, pe) + tables(p, f, ev);
+  wire();
+}
+
+function head(p, lk) {
+  const [bt, bc] = boardTag(p.jq_code);
+  const starred = !!(lk && lk.watch);
+  return `<div class="lvhead" style="margin-top:6px">
+    ${starHtml(p.jq_code, starred)}
+    <h2 style="font-size:20px">${esc(p.sec_name || p.jq_code)}</h2>
+    <span class="lvtag">${esc(p.jq_code)}</span>
+    <span class="lvtag" style="color:${bc};border-color:${bc}">${bt}</span>
+    ${p.is_st ? '<span class="stale">ST</span>' : ''}
+    ${p.public_status && p.public_status !== '正常上市'
+      ? `<span class="stale">${esc(p.public_status)}</span>` : ''}
+    ${p.sw_l1_name ? `<span class="lvtag">${esc(p.sw_l1_name)}</span>` : ''}
+    ${(p.indexes || []).map(x => `<span class="lvtag on">${esc(x)}</span>`).join('')}
+    <span style="flex:1"></span>
+    <span style="font-family:'SF Mono',Menlo,monospace;font-size:22px;
+      color:${upc(p.change_pct)}">${p.close_bfq == null ? '—' : (+p.close_bfq).toFixed(2)}</span>
+    <span style="color:${upc(p.change_pct)};font-size:13px">${pctv(p.change_pct)}</span>
+    <span class="lvtag">数据日 ${esc(String(p.date).slice(0, 10))}</span>
+  </div>`;
+}
+
+function kpiBox(p) {
+  const lim = (p.limit_up != null && p.limit_down != null)
+    ? (+p.limit_up).toFixed(2) + ' / ' + (+p.limit_down).toFixed(2) : '—';
+  return `<div class="kpi">
+    ${cell('今开 / 昨收',
+      (p.open == null ? '—' : (+p.open).toFixed(2)) + ' / ' + (p.preclose == null ? '—' : (+p.preclose).toFixed(2)),
+      p.is_limit_up ? '<b style="color:var(--up)">涨停</b>'
+        : (p.is_limit_down ? '<b style="color:var(--down)">跌停</b>' : ''))}
+    ${cell('最高 / 最低',
+      (p.high == null ? '—' : (+p.high).toFixed(2)) + ' / ' + (p.low == null ? '—' : (+p.low).toFixed(2)),
+      '振幅 ' + pctn(p.amplitude))}
+    ${cell('涨停 / 跌停', lim, p.limit_pct != null ? '限幅 ' + pctn(p.limit_pct, 0) : '')}
+    ${cell('成交额', yiv(p.amount), '换手 ' + pctn(p.turnover) + ' · 量 ' + yiv(p.volume_shares) + '股')}
+    ${cell('流通 / 总市值', yiv(p.floatmv) + ' / ' + yiv(p.totalmv), '')}
+  </div>
+  <div class="kpi">
+    ${cell('PE(TTM)', fmtN(p.pe_ttm), 'PEG ' + fmtN(p.peg))}
+    ${cell('PB', fmtN(p.pb), 'PS ' + fmtN(p.ps_ttm))}
+    ${cell('ROE(TTM)', ratv(p.roe_ttm), '单季 ' + ratv(p.roe_q))}
+    ${cell('营收同比', ratv(p.rev_yoy), '单季 ' + ratv(p.rev_q_yoy))}
+    ${cell('净利同比', ratv(p.np_yoy), '单季 ' + ratv(p.np_q_yoy))}
+    ${cell('52 周区间',
+      (p.low_52w == null ? '—' : (+p.low_52w).toFixed(2)) + ' ~ ' + (p.high_52w == null ? '—' : (+p.high_52w).toFixed(2)),
+      '不复权价')}
+    ${cell('区间涨幅',
+      `<span style="color:${upc(p.ret_20d)}">${ratv(p.ret_20d)}</span>`,
+      '20日 · 5日 ' + ratv(p.ret_5d) + ' · 60日 ' + ratv(p.ret_60d)
+      + ' · 250日 ' + ratv(p.ret_250d)
+      + '　<span title="跨除权日不复权会出现假跌幅，所以区间涨幅一律用后复权算">（后复权）</span>')}
+    ${cell('上市', p.listed_days == null ? '—' : p.listed_days + ' 天',
+      p.list_date ? String(p.list_date).slice(0, 10) : '')}
+  </div>`;
+}
+
+function chartBox(k, ind) {
+  if (k.error) return '<div class="lvmsg bad">K 线：' + esc(k.error) + '</div>';
+  const ie = ind && ind.error;
+  return `<div class="lvsec" style="margin-bottom:14px"><h3>日 K
+      <span style="flex:1"></span>
+      ${RANGES.map(([n, t]) => `<a href="#" class="lvtag rg${N === n ? ' on' : ''}" data-n="${n}">${t}</a>`).join('')}
+      <span class="lvwhy">|</span>
+      <a href="#" class="lvtag fq${FQ === 'bfq' ? ' on' : ''}" data-f="bfq"
+        title="券商软件看到的价；open 就是当日集合竞价成交价">不复权</a>
+      <a href="#" class="lvtag fq${FQ === 'hfq' ? ' on' : ''}" data-f="hfq"
+        title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
+      <span class="lvwhy">|</span>
+      ${SUBS.map(([s, t]) => `<a href="#" class="lvtag sb${SUB === s ? ' on' : ''}" data-s="${s}">${t}</a>`).join('')}
+      <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
+    </h3>
+    <div class="cvbox" id="cbox">
+      <canvas id="kcv" style="width:100%;height:${SUB ? 500 : 420}px;display:block"></canvas>
+      <div class="cvtip" id="ktip"></div>
+    </div>
+    <div class="lvwhy" style="margin-top:4px">
+      MA 与副图指标都由<b>服务端</b>算（多取预热再切掉）—— 前端自己算就得多取，
+      而"少取了导致头部值是错的"不报错，只是曲线不对。
+      ${ie ? '<b style="color:var(--warn)">　副图取失败：' + esc(ind.error) + '</b>' : ''}
+      ${FQ === 'bfq' ? '当前<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切后复权。'
+                     : '当前<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'}
+      <br>事件三角：<span style="color:#e0a33c">▲除权除息</span>
+      <span style="color:#5b9cf0">▲财报公告</span>
+      <span style="color:#a06bf0">▲解禁</span>
+      <span style="color:#3ec8d8">▲股本变动</span>
+      —— 分红用<b>除权日</b>定位（那天价格才跳），财报用<b>公告日</b>（报告期那天市场还不知道）。
+    </div>
+  </div>`;
+}
+
+function linkBox(lk) {
+  if (!lk || lk.error) return '';
+  const ps = lk.positions || [], rs = lk.runs || [];
+  if (!ps.length && !rs.length) return `<div class="lvsec" style="margin-bottom:14px">
+    <h3>我和它的关系</h3><div class="none">没持仓，也没有回测买过它</div></div>`;
+  return `<div class="pgrid c2" style="margin-bottom:14px">
+    <div class="lvsec"><h3>实盘持仓 <span class="lvwhy">${ps.length} 个账户</span></h3>
+      ${ps.length ? `<div class="pw"><table class="pkt">
+        <tr><th class="tx">账户</th><th class="rt">股数</th><th class="rt">摊薄成本</th>
+          <th class="rt">现价</th><th class="rt">市值</th><th class="rt">浮盈</th>
+          <th class="rt">仓位</th><th class="tx">建仓</th></tr>
+        ${ps.map(x => `<tr>
+          <td class="tx"><a href="/#/live/${esc(x.account)}" style="color:inherit">${esc(x.account_name)}</a></td>
+          <td class="rt">${num(x.shares)}</td>
+          <td class="rt" title="成交均价 ${fmtN(x.cost, 4)}（引擎 entry_price 用它）">${fmtN(x.cost_net, 3)}</td>
+          <td class="rt">${fmtN(x.price)}</td>
+          <td class="rt">${num(x.value, 2)}</td>
+          <td class="rt" style="color:${upc(x.pnl)}">${x.pnl == null ? '—' : (x.pnl >= 0 ? '+' : '') + num(x.pnl, 2)}
+            <span class="lvwhy">${ratv(x.pnl_pct)}</span></td>
+          <td class="rt">${x.weight == null ? '—' : (x.weight * 100).toFixed(1) + '%'}</td>
+          <td class="tx lvwhy">${esc(x.entry || '')}</td></tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">浮盈按<b>摊薄成本</b>（含买入费）算。
+        保本价与估算卖出费见实盘页。</div>`
+        : '<div class="none">没持仓</div>'}
+    </div>
+    <div class="lvsec"><h3>回测买过它 <span class="lvwhy">${rs.length} 次归档</span></h3>
+      ${rs.length ? `<div class="pw"><table class="pkt">
+        <tr><th class="tx">策略</th><th class="rt">笔数</th><th class="rt">均收益</th>
+          <th class="rt">合计盈亏</th><th class="tx">区间</th><th class="tx"></th></tr>
+        ${rs.slice(0, 12).map(x => `<tr>
+          <td class="tx">${esc(x.strategy)}
+            <div class="lvwhy">${Object.entries(x.params || {}).slice(0, 4)
+              .map(([a, v]) => esc(a + '=' + v)).join(' ') || '默认参数'}</div></td>
+          <td class="rt">${x.n_trades}</td>
+          <td class="rt" style="color:${upc(x.avg_ret)}">${ratv(x.avg_ret)}</td>
+          <td class="rt" style="color:${upc(x.pnl)}">${num(x.pnl, 0)}</td>
+          <td class="tx lvwhy">${esc(x.first)}<br>~ ${esc(x.last)}</td>
+          <td class="tx"><a class="chip" href="/#/run/${encodeURIComponent(x.run_id)}">看回测 ›</a></td>
+        </tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">读的是<b>归档里的 trades</b>，不重跑回测
+        （重跑要几十秒）。均收益是这只票在那次回测里每笔的平均。</div>`
+        : '<div class="none">没有回测买过它</div>'}
+    </div>
+  </div>`;
+}
+
+function sectorBox(sc, pe) {
+  const blocks = (sc && !sc.error) ? (sc.blocks || []) : [];
+  const peers = (pe && !pe.error) ? (pe.rows || []) : [];
+  return `<div class="pgrid c2" style="margin-bottom:14px">
+    <div class="lvsec"><h3>所属板块 <span class="lvwhy">${blocks.length} 个（通达信，每日同步）</span></h3>
+      ${sc && sc.sw ? `<div style="margin-bottom:6px">申万一级：
+        <a class="chip on" href="${sectorHref(sc.sw.code, 'sw')}">${esc(sc.sw.name)}</a></div>` : ''}
+      ${blocks.length ? blocks.map(x =>
+        `<a class="chip" href="${sectorHref(x.code, x.kind)}"
+           title="${esc(x.kind_name)}　${x.n} 只成分">${esc(x.name)}
+           <span class="lvwhy">${x.n}</span></a>`).join('')
+        : '<div class="none">没有板块归属</div>'}
+      <div class="lvwhy" style="margin-top:6px">
+        🔴 用的是 <code>tdx.db</code> 的板块（每日同步 + PIT 快照），
+        <b>不是</b> <code>raw/hf/</code> 那份同花顺概念 —— 后者
+        <code>last_fetched</code> 停在 2026-04-28、没接进每日同步，
+        用它会给出四个月前的成分而页面上看着像今天的。
+      </div>
+    </div>
+    <div class="lvsec"><h3>同行业
+      ${pe && pe.industry ? `<span class="lvwhy">${esc(pe.industry.name)}　共 ${pe.total} 只，它按流通市值排第 <b>${pe.rank || '?'}</b></span>` : ''}
+      </h3>
+      ${peers.length ? `<div class="pw"><table class="pkt">
+        <tr><th class="tx"></th><th class="tx">名称</th><th class="rt">现价</th>
+          <th class="rt">涨跌</th><th class="rt">流通市值</th><th class="rt">PE</th>
+          <th class="rt">PB</th><th class="rt">ROE</th></tr>
+        ${peers.map(x => `<tr${x.code === CODE ? ' style="background:var(--panel2)"' : ''}>
+          <td class="tx">${starHtml(x.code, false)}</td>
+          <td class="tx"><a href="${stockHref(x.code)}" style="color:${x.code === CODE ? 'var(--accent)' : 'inherit'}">${esc(x.name || x.code)}</a></td>
+          <td class="rt">${fmtN(x.close)}</td>
+          <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+          <td class="rt">${yiv(x.floatmv)}</td>
+          <td class="rt">${fmtN(x.pe_ttm)}</td>
+          <td class="rt">${fmtN(x.pb)}</td>
+          <td class="rt">${ratv(x.roe_ttm)}</td></tr>`).join('')}
+      </table></div>` : '<div class="none">没有同业数据</div>'}
+    </div>
+  </div>`;
+}
+
+function tables(p, f, ev) {
+  const bars = (BARS || []).slice(-20).reverse();
+  const fr = (f && f.rows) || [];
+  const evs = (ev && ev.events) || [];
+  return `<div class="pgrid c2">
+    <div class="lvsec"><h3>最近 20 个交易日</h3>
+      <div class="pw"><table class="pkt">
+        <tr><th class="tx">日期</th><th class="rt">开</th><th class="rt">高</th>
+          <th class="rt">低</th><th class="rt">收</th><th class="rt">涨跌</th>
+          <th class="rt">换手</th><th class="rt">成交额</th><th class="tx">标记</th></tr>
+        ${bars.map(b => `<tr>
+          <td class="tx">${esc(b.date)}</td>
+          <td class="rt">${b.open ?? '—'}</td><td class="rt">${b.high ?? '—'}</td>
+          <td class="rt">${b.low ?? '—'}</td><td class="rt">${b.close ?? '—'}</td>
+          <td class="rt" style="color:${upc(b.change_pct)}">${pctv(b.change_pct)}</td>
+          <td class="rt">${pctn(b.turnover)}</td><td class="rt">${yiv(b.amount)}</td>
+          <td class="tx lvwhy">${b.limit_up ? '涨停' : b.limit_down ? '跌停' : ''}</td>
+        </tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">价格随上面的复权口径切换。</div>
+    </div>
+    <div class="lvsec"><h3>事件 <span class="lvwhy">${evs.length} 条</span></h3>
+      ${evs.length ? `<div class="pw" style="max-height:340px;overflow:auto"><table class="pkt">
+        <tr><th class="tx">日期</th><th class="tx">类型</th><th class="tx">明细</th></tr>
+        ${evs.slice(0, 60).map(e => `<tr>
+          <td class="tx">${esc(e.date)}</td>
+          <td class="tx">${esc(e.label)}</td>
+          <td class="tx lvwhy">${esc(e.detail || '')}</td></tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">
+        股本单位是<b>万股</b>（已换算成股显示）；解禁比例常为空，显示"—"而不是 0%
+        —— 那不是"占比很小"，是根本没有这个数。
+      </div>` : '<div class="none">没有事件</div>'}
+    </div>
+    <div class="lvsec wide"><h3>财务（按报告期）</h3>
+      ${fr.length ? `<div class="pw"><table class="pkt">
+        <tr><th class="tx">报告期</th><th class="tx">公告日</th>
+          <th class="rt">营收</th><th class="rt">归母净利</th>
+          <th class="rt">单季净利</th><th class="rt">单季同比</th>
+          <th class="rt">EPS</th><th class="rt">ROE</th><th class="rt">每股净资产</th></tr>
+        ${fr.map(r => `<tr>
+          <td class="tx">${esc(String(r.report_date).slice(0, 10))}</td>
+          <td class="tx lvwhy">${esc(String(r.pub_date || '').slice(0, 10))}</td>
+          <td class="rt">${yiv(r.revenue)}</td>
+          <td class="rt">${yiv(r.net_profit_parent)}</td>
+          <td class="rt">${yiv(r.np_q)}</td>
+          <td class="rt" style="color:${upc(r.np_q_yoy)}">${ratv(r.np_q_yoy)}</td>
+          <td class="rt">${r.eps_basic == null ? '—' : (+r.eps_basic).toFixed(3)}</td>
+          <td class="rt">${ratv(r.roe_parent)}</td>
+          <td class="rt">${r.bps == null ? '—' : (+r.bps).toFixed(2)}</td></tr>`).join('')}
+      </table></div>
+      <div class="lvwhy" style="margin-top:4px">
+        🔴 <b>报告期 ≠ 公告日</b>。防未来函数一律用<b>公告日</b>做可见性判断
+        —— 用报告期当可见日就是未来函数（回测会凭空领先一两个月）。
+      </div>` : '<div class="none">没有财务数据</div>'}
+    </div>
+  </div>`;
+}
+
+/* ---- 交互 ---- */
+function nav(over) {
+  const u = new URL(location.href);
+  u.searchParams.set('code', CODE);
+  Object.entries(over || {}).forEach(([k, v]) => {
+    if (v === '' || v == null) u.searchParams.delete(k); else u.searchParams.set(k, v);
+  });
+  history.replaceState(null, '', u);
+}
+function wire() {
+  wireStarsAll();
+  /* ★ 这些是 <a href="#">，必须 preventDefault —— 不拦的话会把 hash 改成 '#'，
+     在独立页面上表现为滚到顶部 + URL 变脏。 */
+  $$('#body .rg').forEach(e => e.onclick = ev => {
+    ev.preventDefault(); N = +e.dataset.n; nav({n: N}); load(); });
+  $$('#body .fq').forEach(e => e.onclick = ev => {
+    ev.preventDefault(); FQ = e.dataset.f; nav({fq: FQ}); load(); });
+  $$('#body .sb').forEach(e => e.onclick = ev => {
+    ev.preventDefault(); SUB = e.dataset.s; nav({sub: SUB}); load(); });
+  const ck = $('#evck');
+  if (ck) ck.onchange = () => { SHOWEV = ck.checked; redraw(); };
+  redraw();
+  const cv = $('#kcv');
+  if (!cv) return;
+  const tip = $('#ktip');
+  let geo = null;
+  const hit = ev => {
+    if (!geo) return null;
+    const r = cv.getBoundingClientRect();
+    const i = Math.round((ev.clientX - r.left - geo.PADL) / geo.step - 0.5);
+    return (i >= 0 && i < geo.n) ? i : null;
+  };
+  cv.onmousemove = ev => {
+    const i = hit(ev);
+    if (i === HOVER && i != null) { posTip(ev); return; }
+    HOVER = i; geo = redraw();
+    if (i == null) { tip.style.display = 'none'; return; }
+    const b = BARS[i], q = IND ? IND[i] : null;
+    tip.style.display = 'block';
+    const ln = [
+      b.date + (b.limit_up ? '  涨停' : '') + (b.limit_down ? '  跌停' : ''),
+      '开 ' + b.open + '   高 ' + b.high,
+      '低 ' + b.low + '   收 ' + b.close,
+      '涨跌 ' + pctv(b.change_pct) + '   换手 ' + pctn(b.turnover),
+      '量 ' + yiv(b.volume) + '股  额 ' + yiv(b.amount),
+      'MA5 ' + (b.ma5 ?? '—') + '  MA10 ' + (b.ma10 ?? '—'),
+      'MA20 ' + (b.ma20 ?? '—') + '  MA60 ' + (b.ma60 ?? '—'),
+    ];
+    if (q && SUB === 'macd') ln.push('DIF ' + (q.dif ?? '—') + '  DEA ' + (q.dea ?? '—') + '  MACD ' + (q.macd ?? '—'));
+    if (q && SUB === 'kdj') ln.push('K ' + (q.k ?? '—') + '  D ' + (q.d ?? '—') + '  J ' + (q.jj ?? '—'));
+    if (q && SUB === 'rsi') ln.push('RSI6 ' + (q.rsi6 ?? '—') + '  12 ' + (q.rsi12 ?? '—') + '  24 ' + (q.rsi24 ?? '—'));
+    if (q && q.mb != null) ln.push('BOLL ' + q.lb + ' / ' + q.mb + ' / ' + q.ub);
+    const hitEv = (EVS || []).filter(x => x.date === b.date);
+    hitEv.forEach(x => ln.push('◆ ' + x.label + ' ' + (x.detail || '').slice(0, 30)));
+    tip.textContent = ln.join('\n');
+    posTip(ev);
+  };
+  const posTip = ev => {
+    const box = $('#cbox').getBoundingClientRect();
+    let x = ev.clientX - box.left + 12, y = ev.clientY - box.top + 12;
+    if (x + 210 > box.width) x = ev.clientX - box.left - 210;
+    tip.style.left = x + 'px';
+    tip.style.top = Math.min(y, box.height - 170) + 'px';
+  };
+  cv.onmouseleave = () => { HOVER = null; tip.style.display = 'none'; geo = redraw(); };
+  if (!wire._rs) { wire._rs = true; window.addEventListener('resize', () => redraw()); }
+  geo = redraw();
+}
+function redraw() {
+  const cv = $('#kcv');
+  if (!cv || !BARS) return null;
+  /* 主图叠 BOLL：把指标行的 ub/mb/lb 合进 bars —— 它们是同一条时间轴。 */
+  const bars = BARS.map((b, i) => (IND && IND[i]) ? Object.assign({}, b, {
+    ub: IND[i].ub, mb: IND[i].mb, lb: IND[i].lb}) : b);
+  return drawKChart(cv, {bars: bars, events: SHOWEV ? EVS : [],
+    sub: SUB ? IND : null, subKind: SUB, hover: HOVER});
+}
+</script>

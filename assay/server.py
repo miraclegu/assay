@@ -1649,6 +1649,142 @@ def api_stock_finance(q):
                                         n=q.get('n') or 16))
 
 
+def api_stock_indicators(q):
+    """GET /api/stock/indicators?code=&n=&fq= —— MACD/KDJ/RSI/BOLL。"""
+    m = _stock()
+    return _stock_err(lambda: m.indicators(q.get('code') or '',
+                                           n=q.get('n') or 250,
+                                           fq=(q.get('fq') or 'bfq')))
+
+
+def api_stock_events(q):
+    """GET /api/stock/events?code=&since= —— 除权/财报/解禁/股本变动。"""
+    m = _stock()
+    return _stock_err(lambda: m.events(q.get('code') or '', q.get('since')))
+
+
+def api_stock_peers(q):
+    """GET /api/stock/peers?code=&n= —— 同申万一级行业。"""
+    m = _stock()
+    return _stock_err(lambda: m.peers(q.get('code') or '', n=q.get('n') or 20))
+
+
+def api_stock_links(q):
+    """GET /api/stock/links?code= —— 实盘持仓 / 自选 / 回测选过它。"""
+    m = _stock()
+    return _stock_err(lambda: m.links(q.get('code') or ''))
+
+
+def api_stock_sectors(q):
+    """GET /api/stock/sectors?code= —— 所属申万行业与通达信板块。"""
+    mk = _market()
+    return _market_err(lambda: mk.stock_sectors(q.get('code') or ''))
+
+
+def api_compare(q):
+    """GET /api/compare?codes=a,b,c&n= —— 多股【后复权】归一涨幅。"""
+    m = _stock()
+    cs = [x for x in (q.get('codes') or '').replace(' ', ',').split(',') if x]
+    return _stock_err(lambda: m.compare(cs, n=q.get('n') or 250))
+
+
+# ==================== 盘面 / 行业板块 ====================
+def _market():
+    from assay import market as m
+    return m
+
+
+def _market_err(fn):
+    mk = _market()
+    try:
+        return fn()
+    except mk.MarketError as e:
+        return {'error': str(e)}
+
+
+def api_market_overview(q):
+    """GET /api/market/overview?date=&top= —— 某天的全市场。"""
+    mk = _market()
+    return _market_err(lambda: mk.overview(q.get('date'), top=q.get('top') or 15))
+
+
+def api_sector_list(q):
+    """GET /api/sector/list?kind=sw|concept|style|region|tdx_research&date="""
+    mk = _market()
+    return _market_err(lambda: mk.sector_list(q.get('date'),
+                                              kind=(q.get('kind') or 'sw')))
+
+
+def api_sector_members(q):
+    """GET /api/sector/members?code=&kind=&date="""
+    mk = _market()
+    return _market_err(lambda: mk.sector_members(q.get('code') or '',
+                                                 q.get('date'),
+                                                 kind=(q.get('kind') or 'sw'),
+                                                 limit=q.get('limit') or 300))
+
+
+def api_sector_kinds(_q):
+    """GET /api/sector/kinds —— 有哪几类板块（含每类的个数）。"""
+    mk = _market()
+
+    def _go():
+        blk = mk.blocks()
+        cnt = {}
+        for _c, (_n, kind, _s) in blk.items():
+            cnt[kind] = cnt.get(kind, 0) + 1
+        out = [{'kind': 'sw', 'name': '申万一级', 'n': None,
+                'note': '随面板每日同步，带 PIT'}]
+        for k, nm in mk.BLOCK_TYPE.items():
+            if cnt.get(k):
+                out.append({'kind': k, 'name': nm, 'n': cnt[k],
+                            'note': '通达信，每日同步'})
+        return {'kinds': out}
+    return _market_err(_go)
+
+
+# ==================== 自选 ====================
+def _watch():
+    from assay import watchlist as w
+    return w
+
+
+def api_watchlist(q):
+    """GET /api/watchlist?group= —— 当前自选 + 行情。"""
+    w = _watch()
+    try:
+        return w.valued(q.get('group'))
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_watchlist_log(_q):
+    """GET /api/watchlist/log —— 全部历史（含已移出的）。append-only。"""
+    w = _watch()
+    try:
+        return {'rows': list(reversed(w.log()))}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_watchlist_act(_q, body):
+    """POST /api/watchlist —— 追加一条（add / remove / group / note）。
+
+    ★ 归 --live 管：它写 live/ 下的账本。只读模式下不许改。
+    """
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    w = _watch()
+    b = body or {}
+    try:
+        r = w.act((b.get('act') or '').strip(), b.get('code') or '',
+                  group=b.get('group'), note=b.get('note') or '')
+        return {'ok': True, 'rec': r, 'rows': w.valued().get('rows'),
+                'groups': w.groups()}
+    except w.WatchError as e:
+        return {'error': str(e)}
+
+
 # ==================== 数据查询（只读） ====================
 # ★ 安全规则不在这里写 —— 全在 datalake/build/query.py 里，命令行与页面共用
 #   同一份。分两处写的话，页面那份哪天漏掉一个关键字，就能从看板上把 mart/
@@ -1943,6 +2079,18 @@ ROUTES = {
     '/api/stock/profile': api_stock_profile,
     '/api/stock/kline': api_stock_kline,
     '/api/stock/finance': api_stock_finance,
+    '/api/stock/indicators': api_stock_indicators,
+    '/api/stock/events': api_stock_events,
+    '/api/stock/peers': api_stock_peers,
+    '/api/stock/links': api_stock_links,
+    '/api/stock/sectors': api_stock_sectors,
+    '/api/compare': api_compare,
+    '/api/market/overview': api_market_overview,
+    '/api/sector/kinds': api_sector_kinds,
+    '/api/sector/list': api_sector_list,
+    '/api/sector/members': api_sector_members,
+    '/api/watchlist': api_watchlist,
+    '/api/watchlist/log': api_watchlist_log,
     '/api/sync/log': api_sync_log,
 }
 
@@ -1973,6 +2121,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
                  '/api/query': api_query,
+                 '/api/watchlist': api_watchlist_act,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再

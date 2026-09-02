@@ -1,0 +1,181 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>盘面 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script>
+/* ============ 盘面（某天的全市场） ============
+   ★ 所有接口都带 date —— "今天涨了多少家"只在盘后有意义，而复盘要看的
+     往往是上一个调仓日或某次大跌那天。
+   ★ 传进来的日期可能是周末：服务端落到 <= 该日的最后一个有数据日，
+     并把【实际用的日期】回给页面。页面必须显示它，否则人以为看的是
+     自己选的那天。 */
+let MDATE = qs('date') || '';
+let MTOP = 15;
+
+pageHead('market', '🌡 盘面');
+load();
+
+async function load() {
+  const pg = $('#pg');
+  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    const o = await j('/api/market/overview?top=' + MTOP
+      + (MDATE ? '&date=' + encodeURIComponent(MDATE) : ''));
+    pg.innerHTML = head(o) + kpi(o) + dist(o) + inds(o) + ranks(o);
+    wireStarsAll();
+    $('#mdate').onchange = () => { MDATE = $('#mdate').value; go(); };
+    $('#mgo').onclick = () => { MDATE = $('#mdate').value; go(); };
+    $$('.mshift').forEach(e => e.onclick = ev => {
+      ev.preventDefault(); shift(+e.dataset.d, o.date);
+    });
+    drawDist(o);
+    window.addEventListener('resize', () => drawDist(o));
+  } catch (e) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+function go() { const u = new URL(location.href);
+  if (MDATE) u.searchParams.set('date', MDATE); else u.searchParams.delete('date');
+  history.replaceState(null, '', u); load(); }
+function shift(d, from) {
+  /* 前后翻一天：日历日 ±1，服务端会落到最近的有数据日 ——
+     前端不算交易日（那要日历，而前端硬编码判据在这个项目里坑过一次）。 */
+  const dt = new Date(from + 'T00:00:00');
+  dt.setDate(dt.getDate() + d);
+  MDATE = dt.toISOString().slice(0, 10); go();
+}
+
+function head(o) {
+  return `<div class="lvhead">
+    <h2 style="font-size:17px">${esc(o.date)} 盘面</h2>
+    ${o.asked && o.asked !== o.date
+      ? `<span class="lvtag warn" title="你选的是 ${esc(o.asked)}，那天没有行情（周末/节假日），已落到最近的有数据日">你选 ${esc(o.asked)} → 实际 ${esc(o.date)}</span>`
+      : ''}
+    <span style="flex:1"></span>
+    <a href="#" class="lvtag mshift" data-d="-1">‹ 前一日</a>
+    <input id="mdate" type="date" value="${esc(o.date)}"
+      style="background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+      border-radius:5px;padding:3px 6px;font-size:11px">
+    <button class="btn" id="mgo">看这天</button>
+    <a href="#" class="lvtag mshift" data-d="1">后一日 ›</a>
+  </div>`;
+}
+
+function kpi(o) {
+  const rate = o.n ? (o.up / o.n * 100) : null;
+  return `<div class="kpi">
+    ${cell('涨 / 跌 / 平',
+      `<span style="color:var(--up)">${num(o.up)}</span> / <span style="color:var(--down)">${num(o.down)}</span> / ${num(o.flat)}`,
+      (rate == null ? '' : '上涨占比 ' + rate.toFixed(1) + '%') + '　共 ' + num(o.n) + ' 只', 'big')}
+    ${cell('涨停 / 跌停',
+      `<span style="color:var(--up)">${num(o.limit_up)}</span> / <span style="color:var(--down)">${num(o.limit_down)}</span>`,
+      '炸板 ' + num(o.open_limit_up) + ' 只')}
+    ${cell('全市场成交额', yiv(o.amount), '中位换手 ' + pctn(o.median_turnover))}
+    ${cell('中位涨幅',
+      `<span style="color:${upc(o.median_change)}">${pctv(o.median_change)}</span>`,
+      '均值 ' + pctv(o.avg_change) + '　★ 中位数比均值更能代表"多数票"')}
+    ${(o.index_equal || []).slice(0, 3).map(x => cell(x.name + ' <span class="lvwhy">等权</span>',
+      `<span style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</span>`,
+      x.n + ' 只成分')).join('')}
+  </div>
+  <div class="lvwhy" style="margin:-6px 0 10px">
+    只算【正常上市 / ST / *ST】的 A 股 —— 把退市整理期和状态为空的混进来，
+    涨跌家数就不对。指数那几格是<b>成分等权涨幅</b>，不是真指数点位
+    （本地没有指数点位数据，等权更能反映"成分股平均怎么样"）。
+  </div>`;
+}
+
+function dist(o) {
+  return `<div class="lvsec"><h3>涨跌分布</h3>
+    <div class="cvbox"><canvas id="dcv" style="width:100%;height:150px;display:block"></canvas></div>
+    <div class="lvwhy">按 <code>change_pct</code>（<b>百分数</b>）分档。
+      两端那两档是"涨/跌停附近"（±9.5% 以外）—— 主板 10%、创业/科创 20%、
+      ST 5%，限幅不同所以不按绝对档位切。</div>
+  </div>`;
+}
+function drawDist(o) {
+  const cv = $('#dcv'); if (!cv) return;
+  const bs = o.buckets || []; if (!bs.length) return;
+  const {g, W, H} = cvPrep(cv);
+  const UP = cssv('--up', '#f05b5b'), DN = cssv('--down', '#2fb87a'),
+        DIM = cssv('--dim', '#8b97a6');
+  const PADB = 30, PADT = 14, w = W - 8, n = bs.length;
+  const mx = Math.max(...bs.map(x => x.n)) || 1;
+  const step = w / n, bw = step * 0.72;
+  g.font = '9px ui-monospace,Menlo,monospace'; g.textAlign = 'center';
+  bs.forEach((b, i) => {
+    const x = 4 + step * (i + 0.5);
+    const h = (H - PADT - PADB) * (b.n / mx);
+    /* 前 6 档是跌、后 6 档是涨 —— 用颜色分开，不用读标签就能看出偏向 */
+    g.fillStyle = i < n / 2 ? DN : UP;
+    g.globalAlpha = .8;
+    g.fillRect(x - bw / 2, H - PADB - h, bw, Math.max(1, h));
+    g.globalAlpha = 1;
+    g.fillStyle = DIM;
+    g.fillText(String(b.n), x, H - PADB - h - 3);
+    g.save();
+    g.translate(x, H - PADB + 12); g.rotate(-Math.PI / 4);
+    g.textAlign = 'right'; g.fillText(b.label, 0, 0);
+    g.restore();
+    g.textAlign = 'center';
+  });
+}
+
+function inds(o) {
+  const rows = o.industries || [];
+  return `<div class="lvsec" style="margin-top:14px"><h3>行业涨幅（申万一级，等权）
+    <span class="lvwhy">${rows.length} 个</span></h3>
+    <div class="pw"><table class="pkt">
+      <tr><th class="tx">行业</th><th class="rt">平均涨幅</th><th class="rt">中位</th>
+        <th class="rt">家数</th><th class="rt">上涨</th><th class="rt">涨停</th>
+        <th class="rt">成交额</th><th class="tx"></th></tr>
+      ${rows.map(r => `<tr>
+        <td class="tx"><a href="${sectorHref(r.code || '', 'sw')}"
+          style="color:inherit">${esc(r.name)}</a></td>
+        <td class="rt"><b style="color:${upc(r.avg_change)}">${pctv(r.avg_change)}</b></td>
+        <td class="rt" style="color:${upc(r.median_change)}">${pctv(r.median_change)}</td>
+        <td class="rt">${r.n}</td>
+        <td class="rt">${r.up}</td>
+        <td class="rt">${r.limit_up || ''}</td>
+        <td class="rt">${yiv(r.amount)}</td>
+        <td class="tx"><a class="chip" href="${sectorHref(r.code || '', 'sw')}">看成分 ›</a></td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function ranks(o) {
+  const rs = o.ranks || {};
+  return `<div class="pgrid c2">${Object.keys(rs).map(k => {
+    const r = rs[k];
+    return `<div class="lvsec"><h3>${esc(r.title)}
+      ${r.note ? `<span class="lvwhy">${esc(r.note)}</span>` : ''}</h3>
+      <div class="pw"><table class="pkt">
+        <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
+          <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
+          <th class="rt">成交额</th><th class="tx">行业</th></tr>
+        ${(r.rows || []).map(x => `<tr>
+          <td class="tx">${starHtml(x.code, false)}</td>
+          <td class="tx"><a href="${stockHref(x.code)}"
+            style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0, 6))}</a></td>
+          <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+            ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
+            ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
+          <td class="rt">${fmtN(x.close)}</td>
+          <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+          <td class="rt">${pctn(x.turnover)}</td>
+          <td class="rt">${yiv(x.amount)}</td>
+          <td class="tx lvwhy">${esc(x.industry || '')}</td>
+        </tr>`).join('')}
+      </table></div></div>`;
+  }).join('')}</div>`;
+}
+</script>

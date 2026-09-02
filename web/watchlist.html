@@ -1,0 +1,152 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自选 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script>
+/* ============ 自选 ============
+   ★ 账本 **append-only**（live/watchlist.jsonl），与实盘同一套纪律：
+     加 / 移出 / 改分组 / 改备注 都是追加一条，当前状态由**重放**得出。
+     删一条就把"我什么时候把它加进来的、为什么"抹掉了 —— 那本身是决策记录。
+   ★ 面板里查不到的（退市/未上市）**不静默丢掉**，那一行必须还在并标出来，
+     否则"我加过的票不见了"。 */
+let GROUP = qs('group') || '';
+
+pageHead('watch', '⭐ 自选');
+load();
+
+async function load() {
+  const pg = $('#pg');
+  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    const [w, lg] = await Promise.all([
+      j('/api/watchlist' + (GROUP ? '?group=' + encodeURIComponent(GROUP) : '')),
+      j('/api/watchlist/log').catch(e => ({rows: [], error: String(e)})),
+    ]);
+    pg.innerHTML = head(w) + table(w) + logBox(lg);
+    mountSearch($('#wadd'), {onPick: async r => {
+      try {
+        await post('/api/watchlist', {act: 'add', code: r.code,
+          group: GROUP || undefined});
+        load();
+      } catch (e) { alert(String(e)); }
+    }, placeholder: '加自选：代码或名称'});
+    $$('.gf').forEach(e => e.onclick = ev => {
+      ev.preventDefault(); GROUP = e.dataset.g;
+      const u = new URL(location.href);
+      if (GROUP) u.searchParams.set('group', GROUP); else u.searchParams.delete('group');
+      history.replaceState(null, '', u); load(); });
+    $$('.wrm').forEach(e => e.onclick = async ev => {
+      ev.preventDefault();
+      if (!confirm('把 ' + e.dataset.c + ' 移出自选？\n\n账本是 append-only 的 —— '
+        + '会追加一条 remove，历史记录仍然保留。')) return;
+      try { await post('/api/watchlist', {act: 'remove', code: e.dataset.c}); load(); }
+      catch (err) { alert(String(err)); } });
+    $$('.wgr').forEach(e => e.onclick = async ev => {
+      ev.preventDefault();
+      const g = prompt('改分组（当前 ' + e.dataset.g + '）', e.dataset.g);
+      if (g == null) return;
+      try { await post('/api/watchlist', {act: 'group', code: e.dataset.c, group: g}); load(); }
+      catch (err) { alert(String(err)); } });
+    $$('.wnt').forEach(e => e.onclick = async ev => {
+      ev.preventDefault();
+      const n = prompt('备注（为什么关注它）', e.dataset.n || '');
+      if (n == null) return;
+      try { await post('/api/watchlist', {act: 'note', code: e.dataset.c, note: n}); load(); }
+      catch (err) { alert(String(err)); } });
+  } catch (e) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+
+function head(w) {
+  const gs = w.groups || [];
+  const codes = (w.rows || []).map(x => x.code).slice(0, 6).join(',');
+  return `<div class="lvhead">
+    <h2 style="font-size:17px">自选 <span class="lvwhy">${(w.rows || []).length} 只</span></h2>
+    ${w.date ? `<span class="lvtag">数据日 ${esc(w.date)}</span>` : ''}
+    <a href="#" class="lvtag gf${GROUP === '' ? ' on' : ''}" data-g="">全部</a>
+    ${gs.map(g => `<a href="#" class="lvtag gf${GROUP === g.name ? ' on' : ''}"
+      data-g="${esc(g.name)}">${esc(g.name)} ${g.n}</a>`).join('')}
+    <span style="flex:1"></span>
+    ${codes ? `<a class="chip" href="/compare.html?codes=${encodeURIComponent(codes)}"
+      title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a>` : ''}
+    <div id="wadd" style="flex:0 0 260px"></div>
+  </div>`;
+}
+
+function table(w) {
+  const rows = w.rows || [];
+  if (!rows.length) return '<div class="none">自选是空的 —— 右上角搜代码或名称加进来，'
+    + '或者在个股页/盘面榜单里点 ★</div>';
+  return `<div class="lvsec"><h3>盯盘</h3>
+    <div class="pw"><table class="pkt">
+      <tr><th class="tx">分组</th><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
+        <th class="rt">成交额</th><th class="rt">流通市值</th><th class="rt">PE</th>
+        <th class="rt">PB</th><th class="rt">ROE</th><th class="tx">行业</th>
+        <th class="tx">备注</th><th class="tx">加入</th><th class="tx"></th></tr>
+      ${rows.map(x => `<tr>
+        <td class="tx"><a href="#" class="chip wgr" data-c="${esc(x.code)}"
+          data-g="${esc(x.group)}" title="点击改分组">${esc(x.group)}</a></td>
+        <td class="tx"><a href="${stockHref(x.code)}"
+          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0,6))}</a></td>
+        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+          ${x.missing ? '<span class="stale" title="面板里查不到 —— 可能已退市或还没上市。这一行刻意留着，不静默丢掉">查不到行情</span>' : ''}
+          ${x.is_st ? '<span class="stale">ST</span>' : ''}
+          ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
+          ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
+        <td class="rt">${fmtN(x.close)}</td>
+        <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+        <td class="rt">${pctn(x.turnover)}</td>
+        <td class="rt">${yiv(x.amount)}</td>
+        <td class="rt">${yiv(x.floatmv)}</td>
+        <td class="rt">${fmtN(x.pe_ttm)}</td>
+        <td class="rt">${fmtN(x.pb)}</td>
+        <td class="rt">${ratv(x.roe_ttm)}</td>
+        <td class="tx lvwhy">${esc(x.industry || '')}</td>
+        <td class="tx lvwhy"><a href="#" class="wnt" data-c="${esc(x.code)}"
+          data-n="${esc(x.note || '')}" style="color:inherit"
+          title="点击改备注">${esc(x.note || '（写点什么）')}</a></td>
+        <td class="tx lvwhy">${esc(String(x.added || '').slice(0, 10))}</td>
+        <td class="tx"><a href="#" class="wrm" data-c="${esc(x.code)}"
+          class="lvwhy">移出</a></td>
+      </tr>`).join('')}
+    </table></div>
+    <div class="lvwhy" style="margin-top:6px">
+      账本 <b>append-only</b>（<code>live/watchlist.jsonl</code>）——
+      移出是追加一条 <code>remove</code>，历史仍然保留（见下面的变更历史）。
+      当前池子由**重放**得出，不单独存一份：存两份就会分叉，
+      而"页面显示的和日志对不上"没法复盘。
+    </div>
+  </div>`;
+}
+
+function logBox(lg) {
+  const rows = lg.rows || [];
+  if (!rows.length) return '';
+  const ACT = {add: '加入', remove: '移出', group: '改分组', note: '改备注'};
+  return `<div class="lvsec" style="margin-top:14px"><h3>变更历史
+    <span class="lvwhy">${rows.length} 条 · append-only</span></h3>
+    <div class="pw" style="max-height:280px;overflow:auto"><table class="pkt">
+      <tr><th class="tx">时间</th><th class="tx">动作</th><th class="tx">代码</th>
+        <th class="tx">分组</th><th class="tx">备注</th></tr>
+      ${rows.slice(0, 200).map(r => `<tr>
+        <td class="tx lvwhy">${esc(String(r.ts || '').replace('T', ' '))}</td>
+        <td class="tx">${esc(ACT[r.act] || r.act || '')}</td>
+        <td class="tx"><a href="${stockHref(r.code || '')}"
+          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc((r.code || '').slice(0,6))}</a></td>
+        <td class="tx lvwhy">${esc(r.group || '')}</td>
+        <td class="tx lvwhy">${esc(r.note || '')}</td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+</script>

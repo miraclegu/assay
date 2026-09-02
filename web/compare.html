@@ -1,0 +1,159 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>对比 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script src="/kchart.js"></script>
+<script>
+/* ============ 多股对比 ============
+   🔴 一律**后复权**：不复权跨除权日有假跌幅，对比图上会看成"这只票那天崩了"。
+   ★ 交易日对齐用【并集】而不是交集：某只票停牌几天，用交集会把所有票那几天
+     一起丢掉，曲线变短且看不出是谁停的。缺的那几天补 null，画图时**断开**。 */
+let CODES = (qs('codes') || '').split(',').filter(Boolean);
+let N = +(qs('n') || 250), HOVER = null, DATA = null;
+const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
+const PAL = ['#5b9cf0','#f05b5b','#2fb87a','#e0a33c','#a06bf0','#3ec8d8'];
+
+pageHead('compare', '⚖ 对比');
+render();
+
+function nav() {
+  const u = new URL(location.href);
+  if (CODES.length) u.searchParams.set('codes', CODES.join(','));
+  else u.searchParams.delete('codes');
+  u.searchParams.set('n', N);
+  history.replaceState(null, '', u); render();
+}
+
+function wireRemove() {
+  $$('.rmc').forEach(e => e.onclick = ev => {
+    ev.preventDefault(); CODES = CODES.filter(c => c !== e.dataset.c); nav(); });
+}
+
+async function render() {
+  const pg = $('#pg');
+  pg.innerHTML = head() + '<div id="cb"></div>';
+  mountSearch($('#cadd'), {onPick: r => {
+    if (CODES.includes(r.code)) return;
+    if (CODES.length >= 6) { alert('一次最多 6 只 —— 再多曲线就分不清了'); return; }
+    CODES.push(r.code); nav();
+  }, placeholder: '加一只：代码或名称'});
+  $$('.rg').forEach(e => e.onclick = ev => { ev.preventDefault(); N = +e.dataset.n; nav(); });
+  wireRemove();
+  if (!CODES.length) {
+    $('#cb').innerHTML = '<div class="none">加 2~6 只票开始对比 —— '
+      + '也可以从个股页、板块成分、自选列表一键带过来</div>';
+    return;
+  }
+  $('#cb').innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    DATA = await j('/api/compare?n=' + N + '&codes=' + encodeURIComponent(CODES.join(',')));
+    $('#cb').innerHTML = chart() + table();
+    /* ★ 表格里的「移除」在 #cb 填充【之后】才存在 —— 必须重绑一次。
+       只在 render() 开头绑的话，那时 #cb 还是空的，表格里那些永远没有
+       handler：表现是"点了没反应"，而没有任何报错。 */
+    wireRemove();
+    wireStarsAll();
+    wireChart();
+  } catch (e) {
+    $('#cb').innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+
+function head() {
+  return `<div class="lvhead">
+    <h2 style="font-size:17px">对比 <span class="lvwhy">${CODES.length}/6 只</span></h2>
+    ${CODES.map((c, i) => `<span class="lvtag" style="border-color:${PAL[i % PAL.length]};color:${PAL[i % PAL.length]}">
+      ${esc(c.slice(0,6))} <a href="#" class="rmc" data-c="${esc(c)}"
+        style="color:inherit" title="移除">×</a></span>`).join('')}
+    <div id="cadd" style="flex:0 0 240px"></div>
+    <span style="flex:1"></span>
+    ${RANGES.map(([n, t]) => `<a href="#" class="lvtag rg${N === n ? ' on' : ''}" data-n="${n}">${t}</a>`).join('')}
+  </div>`;
+}
+
+function chart() {
+  return `<div class="lvsec"><h3>归一涨幅 <span class="lvwhy">后复权 · ${DATA.n} 个交易日</span></h3>
+    <div class="cvbox" id="cbox">
+      <canvas id="ccv" style="width:100%;height:430px;display:block"></canvas>
+      <div class="cvtip" id="ctip"></div>
+    </div>
+    <div class="lvwhy" style="margin-top:4px">
+      🔴 <b>一律后复权</b> —— 不复权跨除权日有假跌幅，图上会看成"这只票那天崩了"。
+      起点各自归零（每只用它自己在这个区间里第一个有效价做基准）。<br>
+      停牌那几天曲线<b>断开</b>而不是连直线：交易日用并集对齐，
+      用交集会把所有票那几天一起丢掉，且看不出是谁停的。
+    </div>
+  </div>`;
+}
+
+function table() {
+  const ss = DATA.series || [];
+  return `<div class="lvsec" style="margin-top:14px"><h3>区间表现</h3>
+    <div class="pw"><table class="pkt">
+      <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">区间涨幅</th><th class="rt">最大回撤</th>
+        <th class="rt">最好</th><th class="rt">最差</th>
+        <th class="rt">有效天数</th><th class="tx"></th></tr>
+      ${ss.map((s, i) => {
+        const v = (s.ret || []).filter(x => x != null);
+        let peak = -1e9, mdd = 0;
+        v.forEach(x => { peak = Math.max(peak, x); mdd = Math.max(mdd, (peak - x) / (1 + peak)); });
+        return `<tr>
+          <td class="tx"><span style="color:${PAL[i % PAL.length]}">━</span> ${starHtml(s.code, false)}</td>
+          <td class="tx"><a href="${stockHref(s.code)}"
+            style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(s.code.slice(0,6))}</a></td>
+          <td class="tx"><a href="${stockHref(s.code)}" style="color:inherit">${esc(s.name || '')}</a></td>
+          <td class="rt"><b style="color:${upc(v.length ? v[v.length-1] : null)}">${ratv(v.length ? v[v.length-1] : null)}</b></td>
+          <td class="rt" style="color:var(--down)">${v.length ? '−' + (mdd*100).toFixed(2) + '%' : '—'}</td>
+          <td class="rt" style="color:var(--up)">${ratv(v.length ? Math.max(...v) : null)}</td>
+          <td class="rt" style="color:var(--down)">${ratv(v.length ? Math.min(...v) : null)}</td>
+          <td class="rt">${v.length}${v.length < DATA.n ? `<span class="lvwhy" title="有 ${DATA.n - v.length} 天没有行情（停牌 / 还没上市）">缺${DATA.n - v.length}</span>` : ''}</td>
+          <td class="tx"><a href="#" class="rmc chip" data-c="${esc(s.code)}">移除</a></td>
+        </tr>`;
+      }).join('')}
+    </table></div>
+    <div class="lvwhy" style="margin-top:4px">
+      最大回撤是在<b>归一涨幅曲线</b>上算的（(峰值−当前)/(1+峰值)），
+      与回测的最大回撤同口径。有效天数少于总天数说明那几天没行情。
+    </div>
+  </div>`;
+}
+
+function wireChart() {
+  const cv = $('#ccv'), tip = $('#ctip');
+  if (!cv) return;
+  let geo = drawLines(cv, DATA.dates, DATA.series, HOVER);
+  const hit = ev => {
+    if (!geo) return null;
+    const r = cv.getBoundingClientRect();
+    const i = Math.round((ev.clientX - r.left - geo.PADL) / geo.step);
+    return (i >= 0 && i < geo.n) ? i : null;
+  };
+  cv.onmousemove = ev => {
+    const i = hit(ev);
+    if (i !== HOVER) { HOVER = i; geo = drawLines(cv, DATA.dates, DATA.series, HOVER); }
+    if (i == null) { tip.style.display = 'none'; return; }
+    tip.style.display = 'block';
+    tip.textContent = [DATA.dates[i]].concat(DATA.series.map(s =>
+      (s.name || s.code.slice(0,6)) + ' ' + ratv((s.ret || [])[i]))).join('\n');
+    const box = $('#cbox').getBoundingClientRect();
+    let x = ev.clientX - box.left + 12;
+    if (x + 170 > box.width) x = ev.clientX - box.left - 170;
+    tip.style.left = x + 'px';
+    tip.style.top = Math.min(ev.clientY - box.top + 12, box.height - 130) + 'px';
+  };
+  cv.onmouseleave = () => { HOVER = null; tip.style.display = 'none';
+    geo = drawLines(cv, DATA.dates, DATA.series, null); };
+  if (!wireChart._rs) { wireChart._rs = true;
+    window.addEventListener('resize', () => {
+      if ($('#ccv') && DATA) drawLines($('#ccv'), DATA.dates, DATA.series, HOVER); }); }
+}
+</script>
