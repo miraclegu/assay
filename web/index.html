@@ -310,6 +310,8 @@ table.dt td:first-child{color:var(--fg)}
 .lvhead h2{margin:0;font-size:15px}
 .lvtag{font-family:"SF Mono",Menlo,monospace;font-size:11px;color:var(--dim);
   background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+/* 数据日落后时标出来 —— 单独给个位置还不够，得能一眼看出新不新。 */
+.lvtag.warn{color:var(--warn);border-color:var(--warn)}
 .lvtag.on{color:var(--accent);border-color:var(--accent)}
 .lvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}
 /* 表多列的两节给双倍宽度 —— 版本表 3 列挤在 230px 里，参数 chip 会一个一行 */
@@ -321,6 +323,10 @@ table.lvt{width:100%;border-collapse:collapse;font-size:12px}
 table.lvt th{text-align:right;color:var(--dim);font-weight:500;padding:3px 6px;
   border-bottom:1px solid var(--line);font-size:11px}
 table.lvt th:first-child,table.lvt td:first-child{text-align:left}
+/* .tx = 文本列（左对齐）；.rt = 数字列（右对齐 + 等宽数字，位数才对得齐）。
+   表格默认右对齐，所以要标的是【文本列】。 */
+table.lvt th.tx,table.lvt td.tx{text-align:left}
+table.lvt th.rt,table.lvt td.rt{text-align:right;font-variant-numeric:tabular-nums}
 table.lvt td{text-align:right;padding:3px 6px;border-bottom:1px solid rgba(42,49,58,.5);
   font-variant-numeric:tabular-nums}
 table.lvt tr:last-child td{border-bottom:0}
@@ -586,6 +592,7 @@ async function loadLive(aid){
   b.innerHTML=`
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
+    ${dataDayTag(o)}
     <span class="lvtag">权益 ${num(P.equity,2)}</span>
     <span class="lvtag">现金 ${num(P.cash,2)}</span>
     <span class="lvtag" id="lveq">收益 …</span>
@@ -607,18 +614,21 @@ async function loadLive(aid){
         ${P.pnl_pct!=null?'（'+sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%）':''}</b>
         · 估值日 ${esc(P.asof||'—')}</span>`:''}</h3>
     ${it.length?`<table class="lvt lvpos">
-      <tr><th>代码</th><th>股数</th><th>成本</th><th>现价</th><th>市值</th>
-          <th>浮盈</th><th>幅度</th><th>仓位</th><th>建仓</th></tr>
+      <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th><th class="rt">成本</th>
+          <th class="rt">现价</th><th class="rt">市值</th>
+          <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
+          <th>建仓</th></tr>
       ${it.map(x=>`<tr>
-        <td>${esc(x.code)} ${esc(x.name||'')}</td>
-        <td>${num(x.shares)}</td><td>${num(x.cost,3)}</td>
-        <td>${x.price==null?'—':num(x.price,2)}${x.stale?
+        <td>${esc(x.code)}</td>
+        <td class="tx">${esc(x.name||'')}</td>
+        <td class="rt">${num(x.shares)}</td><td class="rt">${num(x.cost,3)}</td>
+        <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
             `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}</td>
-        <td>${x.value==null?'—':num(x.value,2)}</td>
-        <td style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
-        <td style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
-        <td>${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
-        <td class="lvwhy">${esc(x.entry)}</td></tr>`).join('')}
+        <td class="rt">${x.value==null?'—':num(x.value,2)}</td>
+        <td class="rt" style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
+        <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
+        <td class="rt">${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
+        <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
       </table>
       <div class="lvwhy" style="margin-top:6px">浮盈只算<b>价差</b>，不含已收分红
         —— 与引擎 trades 的 ret 口径一致。现金不含分红到账，要记就在
@@ -957,7 +967,7 @@ function openSettings(aid, a, ro){
       $('#bsum').innerHTML=!(amt>0)
         ? '填上面几格，这里会显示合计与折算出的总费率'
         : (pinned
-            ? '<b style="color:var(--bad)">⚠ 这笔的佣金正好等于最低 '+mc.toFixed(2)
+            ? '<b style="color:var(--warn)">⚠ 这笔的佣金正好等于最低 '+mc.toFixed(2)
               +' 元 —— 它被【最低】顶住了，除出来的 万'
               +((g('c1')+g('c2'))/amt*1e4).toFixed(2)+' 不是真实费率。</b><br>'
               +'请换一笔【金额更大】的账单：要大于约 '
@@ -1231,26 +1241,32 @@ async function showFills(aid, off){
       o.fee_estimated_n?'（'+o.fee_estimated_n+' 笔估算）':''}</span>
   </div>
   ${n?`<div class="lvsec"><table class="lvt">
-    <tr><th>成交日</th><th>录入时间</th><th>代码</th><th>方向</th><th>股数</th>
-        <th>价格</th><th>金额</th><th>费用</th><th>来源</th><th></th></tr>
+    <!-- 列序按【看的顺序】排：哪天、买还是卖、哪只票、什么价、多少股、
+         多少钱。录入时间与来源是审计信息，平时不看，挪到最后并压暗。
+         数字列右对齐 + tabular-nums，位数才对得齐（.rt / .lvt td.rt）。 -->
+    <tr><th>成交日</th><th class="tx">方向</th><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">价格</th><th class="rt">股数</th><th class="rt">金额</th>
+        <th class="rt">费用</th><th></th>
+        <th class="lvwhy tx">录入时间</th><th class="lvwhy tx">来源</th></tr>
     ${o.rows.map(f=>{
       const rev=!!f.reverse_of, dead=!!f._dead, fid=f.uid||f.ts;
       return `<tr class="${rev||dead?'lvrev':''}">
       <td>${esc(f.trade_date)}</td>
-      <td class="lvwhy">${esc(f.ts.slice(5,16).replace('T',' '))}</td>
-      <td>${esc(f.code)} ${esc(f.name||'')}</td>
-      <td style="color:${f.side==='buy'?'var(--up)':'var(--down)'}">${f.side==='buy'?'买':'卖'}</td>
-      <td>${num(f.shares)}</td>
-      <td title="${f.price_from?'取的成交日'+(f.price_from==='open'?'开盘价':'收盘价')+'，不是券商回报':''}">${num(f.price,3)}${
+      <td class="tx" style="color:${f.side==='buy'?'var(--up)':'var(--down)'}">${f.side==='buy'?'买':'卖'}</td>
+      <td class="tx">${esc(f.code)}</td>
+      <td class="tx">${esc(f.name||'')}</td>
+      <td class="rt" title="${f.price_from?'取的成交日'+(f.price_from==='open'?'开盘价':'收盘价')+'，不是券商回报':''}">${num(f.price,3)}${
         f.price_from?'<span class="lvwhy">'+(f.price_from==='open'?'开':'收')+'</span>':''}</td>
-      <td>${num(f.shares*f.price,2)}</td>
-      <td title="${f.fee_estimated?'估算值，对完账单请冲正改成实际':''}">${num(f.fee,2)}${
+      <td class="rt">${num(f.shares)}</td>
+      <td class="rt">${num(f.shares*f.price,2)}</td>
+      <td class="rt" title="${f.fee_estimated?'估算值，对完账单请冲正改成实际':''}">${num(f.fee,2)}${
         f.fee_estimated?'<span class="lvwhy">估</span>':''}</td>
-      <td class="lvwhy">${rev?'冲正':esc(f.source||'')}</td>
       <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(fid)}"
         data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
         data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name||'')}"
-        data-f="${f.fee||0}">冲正</a>`}</td></tr>`;}).join('')}
+        data-f="${f.fee||0}">冲正</a>`}</td>
+      <td class="lvwhy tx">${esc(f.ts.slice(5,16).replace('T',' '))}</td>
+      <td class="lvwhy tx">${rev?'冲正':esc(f.source||'')}</td></tr>`;}).join('')}
     </table>
     <div class="lvform" style="margin-top:10px;align-items:baseline">
       <button class="btn" id="pprev" ${o.offset<=0?'disabled':''}>‹ 上一页</button>
@@ -1405,6 +1421,23 @@ async function openStrat(aid, sha){
   };
 }
 
+/* ★ 数据日期【单独一个位置】，不塞在"（用 xx 收盘数据算）"的括号里。
+   它是判断"信号新不新"的第一依据，而括号里的东西看着像脚注。
+
+   ★ 光放一个日期不够 —— 得能一眼看出**落后没有**，否则单独放也白放。
+     判据交给服务端（data_day = 面板 MAX(date)），前端只比对信号用的
+     data_asof：两者不等说明信号是用更早的数据算的（该重算了）。
+     🔴 不在前端判"落后几个交易日" —— 那要交易日历，而前端硬编码过
+     一次判据就误报过一整页假告警。 */
+function dataDayTag(o){
+  const dd=o.data_day, sg=o.signal||{}, asof=sg.data_asof;
+  if(!dd) return '<span class="lvtag" title="拿不到面板最新日 —— serve.py 可能是旧进程">数据日 —</span>';
+  const behind=asof&&asof<dd;
+  return `<span class="lvtag${behind?' warn':''}"
+    title="本地行情最新到 ${dd}${behind?'，而当前信号是用 '+asof+' 的数据算的 —— 点「立即重算」':''}"
+    >数据日 ${dd}${behind?' · 信号用的是 '+asof:''}</span>`;
+}
+
 function sigHtml(s){
   if(!s) return '<div class="lvsec" style="margin-bottom:14px"><h3>今日待办</h3><div class="none">还没有信号 —— 点「立即重算」</div></div>';
   if(s.error) return `<div class="lvwarn"><b>出信号失败</b><br>${esc(s.error).replace(/\n/g,'<br>')}</div>`;
@@ -1434,18 +1467,23 @@ function sigHtml(s){
     }</div>`:'';
   return w+`<div class="lvsec" style="margin-bottom:14px">
     <h3>${esc(s.for_date)} 待办 ${s.is_rebalance_day?'· 调仓日':'· 非调仓日'}
-        <span class="lvwhy">（用 ${esc(s.data_asof)} 收盘数据算，版本 ${esc(s.code_sha)}）</span></h3>
+        <span class="lvtag">数据 ${esc(s.data_asof)} 收盘</span>
+        <span class="lvwhy">版本 ${esc(s.code_sha)}</span></h3>
     ${banner}${strip}
     <div class="lvgrid">
       <div><b style="color:var(--up)">卖出 ${(s.sell||[]).length} 只</b>
-        ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th>代码</th><th>股数</th><th>参考价</th><th>原因</th></tr>
-          ${s.sell.map(x=>`<tr><td>${esc(x.code)} ${esc(x.name)}</td><td>${num(x.shares)}</td>
-            <td>${num(x.ref_price,2)}</td><td class="lvwhy">${esc(why[x.reason]||x.reason)}</td></tr>`).join('')}</table>`
+        ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th>代码</th><th class="tx">名称</th>
+            <th class="rt">股数</th><th class="rt">参考价</th><th class="tx">原因</th></tr>
+          ${s.sell.map(x=>`<tr><td>${esc(x.code)}</td><td class="tx">${esc(x.name)}</td>
+            <td class="rt">${num(x.shares)}</td>
+            <td class="rt">${num(x.ref_price,2)}</td><td class="lvwhy tx">${esc(why[x.reason]||x.reason)}</td></tr>`).join('')}</table>`
           :'<div class="none">无</div>'}</div>
       <div><b style="color:var(--down)">买入 ${(s.buy||[]).length} 只</b>
-        ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th>代码</th><th>股数</th><th>限价</th><th>金额</th></tr>
-          ${s.buy.map(x=>`<tr><td>${esc(x.code)} ${esc(x.name)}</td><td>${num(x.shares)}</td>
-            <td>${num(x.limit,2)}</td><td>${num(x.amount)}</td></tr>`).join('')}</table>
+        ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th>代码</th><th class="tx">名称</th>
+            <th class="rt">股数</th><th class="rt">限价</th><th class="rt">金额</th></tr>
+          ${s.buy.map(x=>`<tr><td>${esc(x.code)}</td><td class="tx">${esc(x.name)}</td>
+            <td class="rt">${num(x.shares)}</td>
+            <td class="rt">${num(x.limit,2)}</td><td class="rt">${num(x.amount)}</td></tr>`).join('')}</table>
           <div class="lvwhy">限价 = T-1 收盘 × 1.05（防高开买不进）；twopass 分配，估余 ${num(s.left_est)}</div>`
           :'<div class="none">无</div>'}</div>
       <div><b>持有不动 ${(s.hold||[]).length} 只</b>

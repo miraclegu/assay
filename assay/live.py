@@ -1104,6 +1104,42 @@ ROUNDINGS = ('round', 'floor', 'ceil')
 #   能证的是下面这条：成交价必须落在当日 high/low 区间内。
 
 
+def latest_data_day(datalake=None):
+    """本地行情最新到哪天。取不到返回 None。
+
+    ★ 单独一个函数、页面上单独一个位置 —— 这是判断"信号新不新"的第一依据。
+      原来它挤在"（用 2026-09-01 收盘数据算，版本 xxx）"的括号里，
+      看着像个脚注，而它恰恰是最该先看的那个数。
+    """
+    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
+    row = duckdb.connect(':memory:').execute(
+        'SELECT MAX(date) FROM %s' % panel).fetchone()
+    return row[0].isoformat() if row and row[0] else None
+
+
+def names_of(codes, day=None, datalake=None):
+    """代码 -> 名称。批量粘贴的成交没有名称，流水页要靠这个补。
+
+    ★ 取 <= day 的最后一个非空 sec_name（400 天内）：退市/改名的票也能显示，
+      而不是留个空白让人对着代码猜。
+    """
+    codes = sorted({normalize_code(c) for c in (codes or [])})
+    if not codes:
+        return {}
+    d = _d(day) if day else (latest_data_day(datalake) or
+                             datetime.date.today().isoformat())
+    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
+    rows = duckdb.connect(':memory:').execute("""
+        SELECT code, sec_name FROM (
+          SELECT jq_code AS code, sec_name,
+                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
+          FROM %s
+          WHERE jq_code IN ('%s') AND date <= DATE '%s'
+            AND date > DATE '%s' - INTERVAL 400 DAY
+        ) WHERE rn = 1""" % (panel, "','".join(codes), d, d)).fetchall()
+    return {c: n for c, n in rows if n}
+
+
 def day_range(code, date, datalake=None):
     """当日 high/low（不复权）。取不到返回 None —— 不报错，这是个可选校验。"""
     d = _d(date)

@@ -2580,9 +2580,27 @@ def t_live_ui():
             # ---- 持仓表：盈亏汇总 + 逐只估值 ----
             # ★ 限定 .lvpos —— 待办里的买入/卖出表也是 .lvt，不限定会选串
             #   （实测：持仓 3 只被数成 14 行）
-            th = pg.locator('#lvbody table.lvpos th').all_inner_texts()
+            th = [x.strip() for x in
+                  pg.locator('#lvbody table.lvpos th').all_inner_texts()]
             for k in ('成本', '现价', '市值', '浮盈', '仓位'):
                 assert k in th, '持仓表缺「%s」列：%s' % (k, th)
+            # 代码与名称【各占一列】—— 挤在一格里没法按名称扫
+            assert th[:2] == ['代码', '名称'], '持仓表前两列应是代码/名称：%s' % th
+            _pc = [x.strip() for x in
+                   pg.locator('#lvbody table.lvpos tr td:nth-child(1)').all_inner_texts()]
+            _pn = [x.strip() for x in
+                   pg.locator('#lvbody table.lvpos tr td:nth-child(2)').all_inner_texts()]
+            assert all('.' in x for x in _pc if x), '第一列应只有代码：%s' % _pc
+            assert any(_pn), '第二列（名称）全空'
+            # ★ 数据日期要有【自己的位置】，不是塞在"（用 xx 收盘数据算）"括号里
+            _tags = ' '.join(pg.locator('#lvbody .lvhead .lvtag').all_inner_texts())
+            assert '数据日' in _tags, '顶栏缺独立的「数据日」：%s' % _tags
+            import re as _re
+            assert _re.search(r'数据日\s*\d{4}-\d{2}-\d{2}', _tags), \
+                '「数据日」后面要跟真的日期：%s' % _tags
+            # 待办标题里也不该再有"（用…收盘数据算，版本…）"这种括号脚注
+            _sh = pg.locator('#lvbody .lvsec h3').first.inner_text()
+            assert '（用' not in _sh, '数据日期又被塞回括号里了：%s' % _sh
             head = ' '.join(pg.locator('#lvbody .lvsec h3').last.inner_text().split())
             for k in ('市值', '成本', '浮盈'):
                 assert k in head, '持仓汇总缺「%s」：%s' % (k, head)
@@ -2831,6 +2849,20 @@ def t_live_ui():
             pg.click('a[href*="/fills"]')
             pg.wait_for_timeout(1200)
             assert '成交流水' in pg.locator('.lvhead').inner_text(), '没跳到流水页'
+            # 列序按【看的顺序】：哪天、买还是卖、哪只票、什么价、多少股、多少钱。
+            # 录入时间与来源是审计信息，平时不看，排在最后。
+            _fh = [x.strip() for x in pg.locator('#main table.lvt th').all_inner_texts()]
+            _want = ['成交日', '方向', '代码', '名称', '价格', '股数', '金额', '费用']
+            assert _fh[:len(_want)] == _want, '流水列序不对：%s' % _fh
+            assert _fh.index('录入时间') > _fh.index('费用') and \
+                _fh.index('来源') > _fh.index('费用'), \
+                '录入时间/来源应排在最后：%s' % _fh
+            # 名称必须真的填上 —— 批量粘贴的成交只有代码，得服务端补
+            _nm = [x.strip() for x in
+                   pg.locator('#main table.lvt tr td:nth-child(4)').all_inner_texts()]
+            assert _nm and any(_nm), '流水的「名称」列全空 —— 服务端没补名称'
+            assert not any(x.isdigit() for x in ''.join(_nm)), \
+                '名称列里出现数字，可能列错位了：%s' % _nm[:4]
             assert '第 1/1 页' in pg.locator('#main').inner_text(), '分页控件没渲染'
             assert pg.locator('#pprev').is_disabled(), '第一页的「上一页」应置灰'
             n_before = len(lv.fills(aid))
@@ -2884,6 +2916,8 @@ def t_live_ui():
                     '按成交日取档/手填优先/每账户独立/来源写在行上)；'
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
                     '价格区间校验有逃生口；'
+                    '排版：流水列序(日/方向/代码/名称/价/量/额/费,录入时间与来源置尾)、'
+                    '持仓代码与名称分列、数据日独立成标签；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

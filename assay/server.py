@@ -1050,6 +1050,9 @@ def api_live_account(q):
             # ★ 选项表由服务端给 —— 前端抄过一次费率默认值，抄漏一个键就
             #   读成 undefined、保存被拒而错误藏在浮层里（见 fee_effective）
             'transfer_extra_opts': m.TRANSFER_EXTRA,
+            # ★ 行情最新数据日【单独给】—— 判断信号新不新的第一依据，
+            #   页面上要有自己的位置，不是塞在括号里当脚注
+            'data_day': _live_quiet(m.latest_data_day),
             # 当前配置折成的总费率（按 10 万一笔算；最低佣金 binding 时会更高）
             'fee_rates': m.effective_rates(m.fee_model(m.get_account(aid))),
             'pos': m.positions_valued(aid),
@@ -1062,6 +1065,14 @@ def api_live_account(q):
             'signal': m.latest_signal(aid),
         }
     return _live_err(_go)
+
+
+def _live_quiet(fn, *a):
+    """取不到就返回 None —— 这类"锦上添花"的字段不该拖垮整个账户页。"""
+    try:
+        return fn(*a)
+    except Exception:                                       # noqa: BLE001
+        return None
 
 
 def api_live_fills(q):
@@ -1091,8 +1102,16 @@ def api_live_fills(q):
         # 免得前端为了判断这个把全量流水都拉一遍
         reved = {f.get('reverse_of') for f in m.fills(aid) if f.get('reverse_of')}
         page = []
-        for f in rows[off:off + lim]:
-            page.append(dict(f, _dead=((f.get('uid') or f['ts']) in reved)))
+        # ★ 名称在【服务端】补：批量粘贴的成交只有代码。前端补不了 ——
+        #   它没有面板。留空的话流水页只剩代码，得对着代码猜是哪只票。
+        pg_rows = rows[off:off + lim]
+        try:
+            nm = m.names_of([f['code'] for f in pg_rows])
+        except Exception:                                   # noqa: BLE001
+            nm = {}
+        for f in pg_rows:
+            page.append(dict(f, _dead=((f.get('uid') or f['ts']) in reved),
+                             name=(f.get('name') or nm.get(f['code'], ''))))
         return {'total': total, 'offset': off, 'limit': lim, 'rows': page,
                 'fee_total': round(sum(float(f.get('fee') or 0)
                                        for f in rows), 2),
