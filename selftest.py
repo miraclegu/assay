@@ -1977,6 +1977,60 @@ def t_live_core():
             except lv.LiveError:
                 pass
 
+        # ---- 3d3) 价格留空 = 成交日【开盘价】（竞价买入） ----
+        #   ★ A 股开盘价就是 09:15-09:25 集合竞价的成交价，所以挂竞价的单子
+        #     价格留空取开盘价不是近似而是**恰好相等**。用真实那笔钉住：
+        #     新澳股份 2026-09-01 开盘 6.01 == 账单成交价 6.010。
+        px = lv.day_price('603889.XSHG', '2026-09-01')
+        assert abs(px - 6.010) < 1e-9, \
+            '新澳股份 09-01 开盘价应是 6.010（=你那笔的成交价），实得 %s' % px
+        # 独立复算一遍：day_price 取的必须是【不复权】open 列本身
+        import duckdb                                  # noqa: PLC0415
+        _c = duckdb.connect(':memory:')
+        _t = _c.execute(
+            "SELECT open, close_bfq FROM read_parquet('%s/mart/panel_daily/"
+            "panel_*.parquet') WHERE jq_code='603889.XSHG' AND date=DATE "
+            "'2026-09-01'" % lv._lake()).fetchone()
+        assert abs(px - _t[0]) < 1e-9, 'day_price(open) 应等于面板 open 列'
+        assert abs(lv.day_price('603889.XSHG', '2026-09-01', 'close') - _t[1]) < 1e-9, \
+            "which='close' 应取不复权收盘（close_bfq）"
+        lv.upsert_account('t_px', name='px', init_cash=100000)
+        lv.add_fee_rate('t_px', '2026-09-01', fm, note='真实账单反推')
+        # 留空 / '' / '-' 三种写法都算"没填"
+        for i, blank in enumerate((None, '', '-')):
+            r = lv.add_fill('t_px', '2026-09-01', '603889.XSHG', 'buy', 100,
+                            price=blank)
+            assert abs(r['price'] - 6.010) < 1e-9, \
+                'price=%r 应取开盘价 6.010，实得 %s' % (blank, r['price'])
+            assert r.get('price_from') == 'open', \
+                '取的价要标 price_from（与 fee_estimated 同理）：%s' % r.get('price_from')
+        # 费用要按【解析后的价格】算，不是按 0
+        assert r['fee'] > 0 and r['fee_estimated'] is True, \
+            '留空价格后费用仍要按费率估出来，实得 %s' % r['fee']
+        # 明确填了价格 -> 以填的为准，且不标 price_from
+        r2 = lv.add_fill('t_px', '2026-09-01', '603889.XSHG', 'buy', 100, 6.088)
+        assert abs(r2['price'] - 6.088) < 1e-9 and not r2.get('price_from'), \
+            '填了价格就该用填的那个，且不标"取的价"'
+        # ★ 取不到价必须【响亮报错】，不能退回"最近一个交易日"——
+        #   那会把 8 月的价当成 9 月的用，数字看着正常但是错的。
+        #   最常见的触发场景：调仓日早上就要录，而当天行情要等晚上才同步。
+        try:
+            lv.add_fill('t_px', '2028-01-03', '603889.XSHG', 'buy', 100)
+            raise AssertionError('取不到当日行情时不该放行（更不该用旧价顶上）')
+        except lv.LiveError as e:
+            m = str(e)
+            assert '还没同步' in m and '手填价格' in m, \
+                '报错要说清原因和出路：%s' % m
+            assert 'None' not in m.split('\n')[1], \
+                '"本地最新数据日"不能是 None —— 那行是判断有没有同步的唯一依据'
+        # 代码格式错时，报错要指向【代码】而不是"取不到行情"
+        try:
+            lv.add_fill('t_px', '2026-09-01', '603889', 'buy', 100)
+            raise AssertionError('无后缀代码应被拒')
+        except lv.LiveError as e:
+            assert '市场后缀' in str(e), \
+                '便宜的格式校验要排在取行情之前，否则报错指向错的原因：%s' % e
+
         # ---- 3e) 冲正必须【精确抵消】，含费用 ----
         #     冲正的语义是"这笔交易没发生"，所以原费用也要退掉。若冲正记录
         #     照常估一笔费用，一笔没发生的交易会净吃【两次】费用而不报错。
@@ -2432,6 +2486,62 @@ def t_live_ui():
             assert abs(paid - 7.77) < 0.011, \
                 '手填费用应优先于费率：填 7.77 实得 %.2f' % paid
 
+            # ---- 价格留空 = 成交日开盘价（竞价买入）----
+            #   ★ 很多策略是集合竞价买入，而 A 股开盘价就是竞价成交价，
+            #     所以留空取开盘价是**恰好相等**而非近似。
+            #     用真实那笔钉住：新澳股份 2026-09-01 开盘 6.01。
+            b4 = _cash()
+            pg.click('#lvrec')
+            pg.wait_for_selector('#rfill', timeout=8000)
+            assert '留空' in (pg.get_attribute('#fp', 'placeholder') or ''), \
+                '价格框要写明"留空=开盘价"，否则没人知道能留空'
+            # ★ 「按信号成交时用开盘价」只该在成交日行情【已同步】时默认勾上。
+            #   调仓日早上录入时那天的行情还不存在，勾着会让整批全部失败；
+            #   signal 自带 data_asof，能提前知道的事不要留到报错时才说。
+            if pg.locator('#fopen').count():
+                # 直接问页面自己拿到的那份 signal（LVO），别再打一次 API ——
+                # 重算信号要跑一遍策略，而且可能和页面上渲染的不是同一份
+                _sg = pg.evaluate('() => (LVO && LVO.signal) || {}')
+                _synced = (_sg.get('data_asof') or '') >= (_sg.get('for_date') or 'z')
+                assert pg.locator('#fopen').is_checked() == _synced, \
+                    '开盘价默认勾选状态应随"成交日行情是否已同步"（asof %s / for %s）' \
+                    % (_sg.get('data_asof'), _sg.get('for_date'))
+                if not _synced:
+                    assert '还没同步' in pg.locator('#fopen').evaluate(
+                        'e => e.parentElement.innerText'), '没勾上要说明为什么'
+            pg.fill('#fd', '2026-09-01')
+            pg.fill('#fc', '603889.XSHG')
+            pg.fill('#fq', '100')
+            pg.fill('#fp', '')                       # ← 留空
+            pg.fill('#ff', '')
+            pg.click('#fb')
+            pg.wait_for_timeout(1500)
+            _px = [f for f in lv.fills(aid0) if f['trade_date'] == '2026-09-01'
+                   and f['shares'] == 100]
+            assert _px, '留空价格那笔没落盘（页面报错被吞了？）'
+            assert abs(_px[-1]['price'] - 6.010) < 1e-9, \
+                '留空应取 09-01 开盘价 6.010，实得 %s' % _px[-1]['price']
+            assert _px[-1].get('price_from') == 'open', '要标明这个价是取的开盘价'
+            # 现金要按解析出的价格 + 估出的费用扣，不是按 0
+            _spent = round(b4 - _cash(), 2)
+            assert _spent > 601, '现金应扣掉 601 元本金加费用，实得 %.2f' % _spent
+            # 当天行情还没同步 -> 页面要报错并说清原因，不能用旧价顶上
+            pg.click('#lvrec')
+            pg.wait_for_selector('#rfill', timeout=8000)
+            pg.fill('#fd', '2028-01-03')
+            pg.fill('#fc', '603889.XSHG')
+            pg.fill('#fq', '100')
+            pg.fill('#fp', '')
+            pg.click('#fb')
+            pg.wait_for_timeout(1500)
+            _m = pg.locator('#rfill').inner_text()
+            assert '还没同步' in _m or '取不到' in _m, \
+                '取不到当日行情时页面要说清原因，实得：%s' % _m[:200]
+            assert not [f for f in lv.fills(aid0) if f['trade_date'] == '2028-01-03'], \
+                '取不到价的那笔不该落盘'
+            pg.keyboard.press('Escape')
+            pg.wait_for_timeout(400)
+
             # ---- 设置进浮层 ----
             assert pg.locator('#ename').count() == 0, '设置不该常驻主视图'
             pg.click('#lvset')
@@ -2453,6 +2563,9 @@ def t_live_ui():
             pg.wait_for_timeout(1500)
             assert len(lv.fills(aid)) == n_before + 1, '冲正应【追加】一条'
             assert pg.locator('.lvrev').count() >= 2, '原记录与冲正记录都该划掉'
+            # 取的开盘价要在流水里看得出来（与"估"的费用同理，别混成券商回报）
+            assert pg.locator('#main table.lvt td span.lvwhy').count() >= 1, \
+                '流水里"取的开盘价"应有标记，否则分不清是券商回报还是本地取的'
 
             # 回账户
             pg.click('a[href="#/live/%s"]' % aid)
@@ -2494,6 +2607,7 @@ def t_live_ui():
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
                     '按成交日取档/手填优先)；'
+                    '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

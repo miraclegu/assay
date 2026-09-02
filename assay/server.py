@@ -1353,16 +1353,18 @@ def api_live_fill(_q, body):
     ok, errs = [], []
     for i, r in enumerate(rows):
         try:
-            # ★ fee 原样透传（含 None/''）—— 不要 `or 0`。
-            #   `r.get('fee') or 0` 会把"没填"变成"明确说 0 元"，
-            #   于是费用永远是 0、现金越算越多，而且不报错。
+            # ★ price / fee 都【原样透传】（含 None/''）—— 不要 `or 0`。
+            #   `r.get('fee') or 0` 会把"没填"变成"明确说 0 元"；
+            #   price 同理，留空的语义是"按当日开盘价取"，不是 0。
             ok.append(m.add_fill(
                 aid, r.get('trade_date'), (r.get('code') or '').strip().upper(),
-                (r.get('side') or '').strip(), r.get('shares'), r.get('price'),
-                fee=r.get('fee'), name=r.get('name') or '',
+                (r.get('side') or '').strip(), r.get('shares'),
+                price=r.get('price'), fee=r.get('fee'),
+                name=r.get('name') or '',
                 source=r.get('source') or 'manual', note=r.get('note') or '',
                 reverse_of=r.get('reverse_of'),
-                fee_estimated=bool(r.get('fee_estimated'))))
+                fee_estimated=bool(r.get('fee_estimated')),
+                price_from=r.get('price_from')))
         except m.LiveError as e:
             errs.append('第 %d 行：%s' % (i + 1, e))
     return {'added': len(ok), 'errors': errs,

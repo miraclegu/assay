@@ -226,9 +226,9 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 /* 独立索引页：目录页顶部那条只列关键几列，这里是完整视图 */
 #pk{padding:4px 0}
 #pk h2{font-size:15px;margin:0 0 4px;color:#f2c744}
-#pk .pg{border:1px solid var(--bd);border-radius:6px;margin:14px 0;overflow:hidden}
+#pk .pg{border:1px solid var(--line);border-radius:6px;margin:14px 0;overflow:hidden}
 #pk .pgh{background:#1b2331;padding:7px 12px;font-size:12.5px;font-weight:600;
-         border-bottom:1px solid var(--bd)}
+         border-bottom:1px solid var(--line)}
 #pk .card2{padding:11px 12px;border-bottom:1px solid #202836;cursor:pointer}
 #pk .card2:last-child{border-bottom:none}
 #pk .card2:hover{background:rgba(242,199,68,.06)}
@@ -982,6 +982,12 @@ function openRecord(aid, sig, ro, tab){
   const cf=(o.cashflows||[]);
   const today=new Date().toISOString().slice(0,10);
   const d0=(sig&&!sig.error)?sig.for_date:today;
+  /* ★ 「用开盘价」只在成交日的行情【已经同步到本地】时才默认勾上。
+     调仓日早上录入是最常见的场景，那时 for_date 的行情还不存在，
+     勾着会让整批十几笔全部失败 —— 信号自己带着 data_asof，
+     能提前知道的事不要留到报错时才说。 */
+  const sigOpen=!!(sig&&!sig.error&&sig.data_asof&&sig.for_date
+                   &&sig.data_asof>=sig.for_date);
   modal(`<div class="lvhead" style="margin-bottom:10px">
       <h2>记一笔</h2>
       <button class="btn rtab" data-t="fill">成交</button>
@@ -994,19 +1000,28 @@ function openRecord(aid, sig, ro, tab){
         <input id="fc" size="12" placeholder="代码">
         <select id="fs"><option value="buy">买</option><option value="sell">卖</option></select>
         <input id="fq" size="7" placeholder="股数">
-        <input id="fp" size="7" placeholder="价格">
-        <input id="ff" size="9" placeholder="费用(留空=估算)">
+        <input id="fp" size="9" placeholder="价格(留空=开盘价)">
+        <input id="ff" size="9" placeholder="费用(留空=按费率)">
         <button class="btn" id="fb" ${ro?'disabled':''}>录一笔</button>
       </div>
-      <div class="lvwhy">费用留空 = 按引擎同一套口径估算（佣金万2.5 最低 5 元 +
-        卖出印花税按日期分段），入账标「估」。<b>留空不等于 0</b> ——
-        年换手 4.5 次的话，费用当 0 算一年会让权益虚高约 0.5%。</div>
+      <div class="lvwhy">
+        <b>价格留空 = 按成交日的【开盘价】</b> —— A 股开盘价就是 09:15-09:25
+        集合竞价的成交价，所以竞价买入的单子留空就对。<br>
+        ⚠ 需要<b>当天行情已同步</b>（datalake 要等当晚 sync_daily.sh 跑完）。
+        调仓日早上就要录的话请手填价格，或等晚上再录。<br>
+        <b>费用留空 = 按这个账户的费率算</b>（见 ⚙ 里的费率），入账标「估」。
+        <b>留空不等于 0</b> —— 年换手 4.5 次的话，费用当 0 算一年会让权益虚高约 0.5%。
+      </div>
       <h3 style="margin-top:12px">批量粘贴</h3>
       <div class="lvform">
-        <textarea id="ft" placeholder="每行「日期 代码 买/卖 股数 价格 [费用]」，逗号/制表符/空格分隔皆可"></textarea>
+        <textarea id="ft" placeholder="每行「日期 代码 买/卖 股数 价格 [费用]」，逗号/制表符/空格分隔皆可。价格填 - 表示按当日开盘价"></textarea>
         <button class="btn" id="fbulk" ${ro?'disabled':''}>解析并录入</button>
         ${sig&&!sig.error&&((sig.sell||[]).length+(sig.buy||[]).length)?
-          `<button class="btn" id="fauto" ${ro?'disabled':''}>按今日信号全部成交</button>`:''}
+          `<button class="btn" id="fauto" ${ro?'disabled':''}>按今日信号全部成交</button>
+           <label class="lvwhy" style="flex:0 0 auto">
+             <input type="checkbox" id="fopen" ${sigOpen?'checked':''}>
+             用 ${esc(d0)} 的开盘价${sigOpen?'':
+               '（该日行情还没同步，本地只到 '+esc(sig.data_asof||'?')+'）'}</label>`:''}
       </div>
       <div class="lvmsg" id="fmsg"></div>
     </div>
@@ -1044,29 +1059,52 @@ function openRecord(aid, sig, ro, tab){
       try{
         const r=await post('/api/live/fill',{id:aid, rows:rows});
         if(r.errors&&r.errors.length){
+          /* ★ 批量失败时同一条原因会重复十几遍（比如"当天行情还没同步"
+             会对每一行各报一次），按原因折叠，只在前面列出行号。
+             刷屏的提示等于没有提示。 */
+          const g={};
+          r.errors.forEach(e=>{
+            const mm=String(e).match(/^第 (\d+) 行：([\s\S]*)$/);
+            const ln=mm?mm[1]:'', why=mm?mm[2]:String(e);
+            (g[why]=g[why]||[]).push(ln);
+          });
           m().className='lvmsg bad';
-          m().innerHTML='录入 '+r.added+' 笔，以下失败：<br>'+r.errors.map(esc).join('<br>');
+          m().innerHTML='录入 '+r.added+' 笔，'+r.errors.length+' 笔失败：<br>'
+            + Object.keys(g).map(why=>{
+                const ls=g[why].filter(Boolean);
+                return (ls.length?'<b>第 '+(ls.length>4
+                        ? ls.slice(0,4).join('/')+' 等 '+ls.length+' 行'
+                        : ls.join('/')+' 行')+'</b>：':'')
+                       + esc(why).replace(/\n/g,'<br>');
+              }).join('<hr style="border:0;border-top:1px solid var(--line);margin:6px 0">');
           m().scrollIntoView({block:'center'});
         }else{ close(); showLive(aid); }
       }catch(e){ m().className='lvmsg bad'; m().textContent=String(e); }
     };
-    $('#fb').onclick=()=>{ const fv=$('#ff').value.trim();
+    $('#fb').onclick=()=>{ const fv=$('#ff').value.trim(), pv=$('#fp').value.trim();
       done([{trade_date:$('#fd').value.trim(), code:$('#fc').value.trim().toUpperCase(),
         side:$('#fs').value, shares:parseInt($('#fq').value,10),
-        price:parseFloat($('#fp').value), fee:(fv===''?null:parseFloat(fv))}]); };
+        price:(pv===''||pv==='-'?null:parseFloat(pv)),
+        fee:(fv===''?null:parseFloat(fv))}]); };
     $('#fbulk').onclick=()=>{ const r=parseBulk($('#ft').value);
       if(r.bad.length){ m().className='lvmsg bad'; m().innerHTML=r.bad.map(esc).join('<br>'); return; }
       if(!r.rows.length){ m().className='lvmsg bad'; m().textContent='没解析出任何一行'; return; }
       done(r.rows); };
     const fa=$('#fauto');
     if(fa) fa.onclick=()=>{
+      /* 勾上「用当日开盘价」-> price 传 null，由服务端取成交日开盘价（=集合竞价价）。
+         不勾 -> 用信号里的 T-1 参考价，那只是个估算。 */
+      const useOpen=$('#fopen') && $('#fopen').checked;
+      const px=x=>useOpen?null:x.ref_price;
       const rows=[].concat(
         (sig.sell||[]).map(x=>({trade_date:sig.for_date, code:x.code, side:'sell',
-          shares:x.shares, price:x.ref_price, name:x.name, source:'signal', fee:null})),
+          shares:x.shares, price:px(x), name:x.name, source:'signal', fee:null})),
         (sig.buy||[]).map(x=>({trade_date:sig.for_date, code:x.code, side:'buy',
-          shares:x.shares, price:x.ref_price, name:x.name, source:'signal', fee:null})));
-      if(!confirm('按信号录入 '+rows.length+' 笔？价格用的是 T-1 参考价，'
-        +'成交后请到流水页逐笔冲正改成实际价。')) return;
+          shares:x.shares, price:px(x), name:x.name, source:'signal', fee:null})));
+      if(!confirm('按信号录入 '+rows.length+' 笔？\n'
+        +(useOpen?'价格取 '+sig.for_date+' 的【开盘价】（集合竞价成交价）——'
+                 +'需当天行情已同步，否则会报错并告诉你原因。'
+                 :'价格用的是 T-1 参考价（估算），成交后请到流水页冲正改成实际价。'))) return;
       done(rows); };
     $('#cfb').onclick=async()=>{
       try{
@@ -1108,7 +1146,9 @@ async function showFills(aid, off){
       <td class="lvwhy">${esc(f.ts.slice(5,16).replace('T',' '))}</td>
       <td>${esc(f.code)} ${esc(f.name||'')}</td>
       <td style="color:${f.side==='buy'?'var(--up)':'var(--down)'}">${f.side==='buy'?'买':'卖'}</td>
-      <td>${num(f.shares)}</td><td>${num(f.price,3)}</td>
+      <td>${num(f.shares)}</td>
+      <td title="${f.price_from?'取的成交日'+(f.price_from==='open'?'开盘价':'收盘价')+'，不是券商回报':''}">${num(f.price,3)}${
+        f.price_from?'<span class="lvwhy">'+(f.price_from==='open'?'开':'收')+'</span>':''}</td>
       <td>${num(f.shares*f.price,2)}</td>
       <td title="${f.fee_estimated?'估算值，对完账单请冲正改成实际':''}">${num(f.fee,2)}${
         f.fee_estimated?'<span class="lvwhy">估</span>':''}</td>
@@ -1328,8 +1368,10 @@ function parseBulk(txt){
     const side=/买|buy|b/i.test(p[2])&&!/卖/.test(p[2])?'buy':'sell';
     /* 第 6 列是可选费用。★ 省略时传 null 而不是 0 —— 服务端据此估算；
        传 0 等于"明确说没有费用"，两者语义不同。 */
+    /* 价格位填 '-' = 按当日开盘价（批量里没法"留空"，位置会错乱）。 */
     out.push({trade_date:p[0], code:p[1].toUpperCase(), side:side,
-              shares:parseInt(p[3],10), price:parseFloat(p[4]),
+              shares:parseInt(p[3],10),
+              price:(p[4]==='-'?null:parseFloat(p[4])),
               fee:(p.length>=6&&p[5]!=='')?parseFloat(p[5]):null, source:'bulk'});
   });
   return {rows:out, bad:bad};

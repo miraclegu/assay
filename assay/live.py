@@ -55,6 +55,8 @@ from . import api
 from .broker import Cost, RecordingBroker
 from .context import Lot, Position
 from .engine import Engine
+import duckdb
+
 from .feed import PanelFeed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -422,9 +424,9 @@ def fills(aid):
     return _read_jsonl(os.path.join(acct_dir(aid), 'fills.jsonl'))
 
 
-def add_fill(aid, trade_date, code, side, shares, price, fee=None,
+def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
              name='', source='manual', note='', reverse_of=None,
-             fee_estimated=False):
+             fee_estimated=False, price_from=None, datalake=None):
     """录一笔成交。**只追加**。
 
     校验在这里做而不是页面上 —— 页面能绕过，这里是唯一入口。
@@ -437,9 +439,33 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
         raise LiveError('成交日期格式应为 YYYY-MM-DD，收到 %r' % trade_date)
     try:
         shares = int(shares)
-        price = float(price)
     except Exception:                                       # noqa: BLE001
-        raise LiveError('数量/价格必须是数字')
+        raise LiveError('数量必须是整数')
+    # ★ 便宜的格式校验放在【取行情之前】—— 代码写错时该直接说"代码格式不对"，
+    #   而不是让它先去查行情、然后报"取不到 60185.XSHG 的开盘价"。
+    #   失败信息要指向真正的原因。
+    if '.' not in code:
+        raise LiveError('代码要带市场后缀，如 601857.XSHG，收到 %r' % code)
+    if shares <= 0:
+        raise LiveError('数量必须为正（撤销请用反向冲正，不要填负数）')
+    if side == 'buy' and shares % LOT_SIZE:
+        raise LiveError('买入数量必须是 %d 的整数倍，收到 %d' % (LOT_SIZE, shares))
+    # ★ 价格留空 = 按当日【开盘价】—— 很多策略是集合竞价买入，
+    #   而开盘价就是 09:15-09:25 集合竞价的成交价。
+    #   与"费用留空则估算"同一个模式：留空不等于 0，而是"照当日行情取"。
+    #   取不到就报错，**不退回最近一个交易日** —— 那会静默给出错的价格。
+    if price is None or price == '' or str(price).strip() == '-':
+        which = price_from or 'open'
+        if which not in PRICE_FIELDS:
+            raise LiveError('price_from 只能是 %s' % '/'.join(PRICE_FIELDS))
+        price = day_price(code, d, which, datalake)
+        price_src = which
+    else:
+        try:
+            price = float(price)
+        except Exception:                                   # noqa: BLE001
+            raise LiveError('价格必须是数字（留空或填 - 表示按当日开盘价）')
+        price_src = None
     # ★ fee=None（没填）与 fee=0（明确说没有费用）是**两件事**。
     #   没填就按引擎口径估一个并标 fee_estimated —— 默认 0 会让现金越算越多，
     #   而"多出来的钱"不会报错，只会让权益悄悄虚高（年换手 4.5 次的话，
@@ -464,15 +490,15 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
     #   没发生的交易凭空吃掉两次费用，而且不报错。
     if fee < 0 and not reverse_of:
         raise LiveError('费用不能为负（只有冲正记录可以，用来退掉原费用）')
-    if shares <= 0 or price <= 0:
-        raise LiveError('数量与价格必须为正（撤销请用反向冲正，不要填负数）')
-    if side == 'buy' and shares % LOT_SIZE:
-        raise LiveError('买入数量必须是 %d 的整数倍，收到 %d' % (LOT_SIZE, shares))
-    if '.' not in code:
-        raise LiveError('代码要带市场后缀，如 601857.XSHG，收到 %r' % code)
+    if price <= 0:
+        raise LiveError('价格必须为正')
     rec = {'uid': _uid(), 'ts': _now(), 'trade_date': d.isoformat(),
            'code': code, 'name': name, 'side': side, 'shares': shares,
            'price': price, 'fee': fee, 'source': source, 'note': note}
+    if price_src:
+        # 记下"这个价是取的当日开盘价"，不是券商回报 —— 与 fee_estimated 同理。
+        # 部分成交、或你实际成交在别的价位时，可以「冲正 + 重录」填实际价。
+        rec['price_from'] = price_src
     if fee_estimated:
         rec['fee_estimated'] = True
     if reverse_of:
@@ -797,6 +823,56 @@ def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
     if stamp:
         out['stamp'] = round(float(stamp) / amount, 8)
     return out
+
+
+def _lake(root=None):
+    """datalake 根目录。与 PanelFeed 同一套解析规则（含 ASSAY_DATALAKE）。"""
+    r = root or os.environ.get('ASSAY_DATALAKE') or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '..', 'datalake')
+    r = os.path.normpath(r)
+    if not os.path.isdir(r):
+        raise LiveError('找不到 datalake：%s（用 ASSAY_DATALAKE 指定）' % r)
+    return r
+
+
+PRICE_FIELDS = {'open': '开盘价', 'close': '收盘价'}
+
+
+def day_price(code, date, which='open', datalake=None):
+    """取某只票某天的【不复权】价。`which` = 'open' / 'close'。
+
+    ★ 为什么 open 正好是"竞价买入"的成交价：A 股开盘价就是 09:15-09:25
+      集合竞价的成交价。挂在竞价里成交，成交价必然是它。
+
+    ★ 拿不到就**响亮报错**，不退回"最近一个交易日"—— 那会静默给出错的价格。
+      最常见的情形是【当天行情还没同步】：调仓日早上下单，而 datalake 要等
+      当晚 sync_daily.sh 跑完才有当天的行情。那时候只能手填价格，或等晚上再录。
+    """
+    d = _d(date)
+    col = 'open' if which == 'open' else 'close_bfq'
+    # ★ 不走 PanelFeed：它会把整个区间物化成 bars 表（取一个价付不起），
+    #   而且 start/end 传 None 会拼成 `DATE 'None'`（踩过的坑）。
+    #   这里只要一行，直接对 parquet 点查。
+    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
+    con = duckdb.connect(':memory:')
+    row = con.execute(
+        "SELECT %s FROM %s WHERE jq_code = ? AND date = DATE '%s'"
+        % (col, panel, d), [code]).fetchone()
+    if row is None or row[0] is None:
+        # ★ "本地最新数据日"要独立查面板 —— 这一行是给人判断"是不是没同步"
+        #   的唯一依据，绝不能出现 None。
+        mx = con.execute('SELECT MAX(date) FROM %s' % panel).fetchone()
+        last = mx[0] if mx else None
+        raise LiveError(
+            '取不到 %s 在 %s 的%s。\n'
+            '最常见的原因是【当天行情还没同步】—— 本地最新数据日是 %s，'
+            '而 datalake 要等当晚 sync_daily.sh 跑完才有当天行情。\n'
+            '现在就要录的话请**手填价格**；或者等晚上同步完再录，'
+            '那时价格留空就会自动取%s。\n'
+            '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
+            % (code, d, PRICE_FIELDS.get(which, which), last,
+               PRICE_FIELDS.get(which, which), PRICE_FIELDS.get(which, which)))
+    return round(float(row[0]), 3)
 
 
 def fifo_lots(rows):
