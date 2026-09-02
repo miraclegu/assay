@@ -1558,10 +1558,40 @@ def _():
                 assert '滑点' in txt, '索引页没有列出成本口径（滑点）'
                 # 🔴 表头列数必须等于每行的单元格数 —— 表头 8 列配 9 个数据
                 #    是横排改表格时最典型的错，而它不报错，只是所有列错位一格
+                # 🔴 **一张表**装所有分组 —— 一组一张 table 时列宽各算各的，
+                #    上下两个表的"年化"列对不齐，而这一页存在的唯一理由就是
+                #    纵向比较。分组是表内的一条带子行。
+                assert pg.locator('#pk table.pkt').count() == 1, \
+                    '有 %d 张表 —— 分组各一张时列宽各算各的，上下对不齐' \
+                    % pg.locator('#pk table.pkt').count()
+                assert pg.locator('#pk tr.grp').count() >= 1, \
+                    '分组没渲染成表内的带子行'
+                # 列宽真的一致：同一列在不同分组下的左边界必须相同
+                _x = pg.evaluate(
+                    "() => [...document.querySelectorAll('#pk tr.rw')]"
+                    ".map(tr => Math.round("
+                    "tr.children[2].getBoundingClientRect().left))")
+                assert len(set(_x)) == 1, \
+                    '同一列在不同行的左边界不一致 %s —— 列没对齐' % sorted(set(_x))
                 _th = pg.locator('#pk table.pkt tr').first.locator('th').count()
                 _td = pg.locator('#pk table.pkt tr.rw').first.locator('td').count()
                 assert _th == _td, '表头 %d 列 vs 每行 %d 格 —— 会整表错位' % (_th, _td)
-                assert _th >= 11, '列太少，指标没列全：%d' % _th
+                assert _th == 10, '列数应是 策略·参数 + 区间 + 8 个指标：%d' % _th
+                _thz = ' '.join(pg.locator('#pk table.pkt th').all_inner_texts())
+                # 本金与成本口径不占列（太挤）—— 它们进行的 tooltip
+                assert '本金' not in _thz and '成本' not in _thz, \
+                    '本金/成本口径不该再占列：%s' % _thz
+                _tip = pg.locator('#pk tr.rw').first.get_attribute('title') or ''
+                assert '本金' in _tip and '滑点' in _tip, \
+                    '本金与成本口径要进 tooltip，不能直接丢掉：%r' % _tip
+                # 参数要能【换行】：第一列有宽度上限且不 nowrap，
+                # 否则十几个参数横着排会把指标列挤到屏幕外
+                _ws = pg.evaluate(
+                    "() => { const e=document.querySelector('#pk tr.rw td.nmc');"
+                    " const s=getComputedStyle(e);"
+                    " return [s.whiteSpace, s.maxWidth]; }")
+                assert _ws[0] != 'nowrap', '参数列还是 nowrap —— 不会换行'
+                assert _ws[1] != 'none', '参数列没有宽度上限，会被参数撑爆'
                 # 数字列要能纵向对齐（等宽数字），否则位数一错开就没法扫
                 _tn = pg.evaluate(
                     "() => getComputedStyle(document.querySelector("
@@ -1623,8 +1653,9 @@ def _():
         finally:
             httpd.shutdown()
         return ('服务端 5 项 + 浏览器 11 项通过；%d 条选中规则，星标冒泡到顶层，'
-                '独立索引页 #/picks 是对比表（表头与行等宽 %d 列、等宽数字、'
-                '宽表自滚、点表头排序且回撤默认升序）' % (npick, _th))
+                '独立索引页 #/picks 是对比表（单表 %d 列、分组为带子行、'
+                '同列左边界一致、参数可换行、本金与成本入 tooltip、'
+                '等宽数字、宽表自滚、点表头排序且回撤默认升序）' % (npick, _th))
     finally:
         if had:
             shutil.move(bak, sv.MARKS_FILE)

@@ -226,15 +226,23 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 /* 独立索引页：目录页顶部那条只列关键几列，这里是完整视图 */
 #pk{padding:4px 0}
 #pk h2{font-size:15px;margin:0 0 4px;color:#f2c744}
-#pk .pg{border:1px solid var(--line);border-radius:6px;margin:14px 0;overflow:hidden}
-#pk .pgh{background:#1b2331;padding:7px 12px;font-size:12.5px;font-weight:600;
-         border-bottom:1px solid var(--line)}
+/* 🔴 【一张表】装所有分组，不是一组一张。
+   分组各用一张 table 时列宽各算各的 —— 上下两个表的"年化"列对不齐，
+   而这一页存在的唯一理由就是纵向比较。分组改成表内的一条带子行。 */
+#pk .pw{border:1px solid var(--line);border-radius:6px;margin:14px 0;overflow-x:auto}
+#pk tr.grp td{background:#1b2331;padding:6px 10px;
+  border-bottom:1px solid var(--line);border-top:1px solid var(--line)}
+#pk tr.grp .gb{font-size:12.5px;font-weight:600;color:var(--fg)}
 /* ★ 一行一条规则的【对比表】，不是一条一张卡。
    卡片式横排的毛病不是挤，是**没法纵向扫**：每张卡各自排版，
    同一个指标在不同卡里横坐标都不一样，10 条规则根本比不了。
    表格才对得齐 —— 数字列右对齐 + 等宽数字 + 可点表头排序。 */
-#pk .pw{overflow-x:auto}                 /* 宽表自己横向滚，页面 body 不滚 */
 #pk table.pkt{width:100%;border-collapse:collapse;font-size:11.5px}
+/* 第一列装策略名 + 参数：给个宽度区间，参数 pill 才会【换行】而不是
+   把这一列越撑越宽（一行十几个参数横着排，看着累且把指标列挤到屏幕外）。 */
+#pk table.pkt td.nmc,#pk table.pkt th.nmc{min-width:230px;max-width:340px;
+  white-space:normal}
+#pk table.pkt td.nmc .pill{display:inline-block;margin:1px 4px 1px 0}
 /* ★ top:0 而不是 52px。`.pw` 有 overflow-x:auto —— 按 CSS 规范，一个轴不是
    visible 时另一个轴的 visible 会算成 auto，于是这个容器在【两个轴】上都成了
    滚动容器，sticky 就相对它定位。写 52px 会把表头压在第一行上面（实测：
@@ -2319,6 +2327,15 @@ function showPicks(){
     {k:'n_trades',      t:'交易',   f:r=>r.n_trades??'—'},
     {k:'win_rate',      t:'胜率',   f:r=>pct(r.win_rate,1)},
   ];
+  const NCOL=2+COLS.length;
+  /* 成本口径那一【列】按要求去掉了（太挤），但保护不能丢：本项目两次因为
+     "拿滑点 0 的数字去比含滑点的基准"得出错误结论（FROEC 与 v0b 各一次）。
+     改成只给【与多数行不同】的那几行挂一个「口径不同」标记 + 顶部那条总提示；
+     完整口径进行的 tooltip。少一列噪声，但异常仍然看得见。 */
+  const slipCnt={};
+  ms.forEach(r=>{ const k=String(r.slippage); slipCnt[k]=(slipCnt[k]||0)+1; });
+  const major=Object.keys(slipCnt).sort((a,b)=>slipCnt[b]-slipCnt[a])[0];
+  const odd=r=>Object.keys(slipCnt).length>1&&String(r.slippage)!==major;
   const sk=PKSORT.k, sd=PKSORT.desc;
   const cmp=(a,b)=>{
     if(sk==='name') return String(a._st).localeCompare(String(b._st))*(sd?-1:1);
@@ -2335,31 +2352,35 @@ function showPicks(){
     <h2>★ 选中的规则（${ms.length}）</h2>
     <div class="note">★ 标在【单次回测】上 —— run 记录了策略 + 参数 + 区间 + 成本口径
       + 数据指纹，才是完整的一条规则；同一策略换个参数就是另一条规则。
-      点<b>行</b>进入该次回测详情；点<b>表头</b>排序。${nDiff>1?
-      ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致，跨条比较年化前先看每行的成本。</b>':''}</div>
-    ${Object.keys(by).sort().map(g=>{
-      /* 组内展平再排序 —— 分组保留（业务域是有意义的归拢），
-         排序只在组内做，跨组比较本来就不该发生（区间/基准都可能不同）。 */
-      const rows=[];
-      Object.keys(by[g]).sort().forEach(st=>by[g][st].forEach(r=>
-        rows.push(Object.assign({_st:st}, r))));
-      rows.sort(cmp);
-      return `<div class="pg"><div class="pgh">${esc(g)}　<span class="lvwhy">${rows.length} 条</span></div>
-      <div class="pw"><table class="pkt">
-        <tr>${th('name','策略 · 参数','tx')}<th class="tx">区间</th>
-          ${COLS.map(c=>th(c.k,c.t)).join('')}
-          <th class="tx">成本口径</th></tr>
-        ${rows.map(r=>`<tr class="rw" data-go="${esc(r.run_id)}">
-          <td class="tx"><span class="nm2">${esc(r._st)}</span>
-            ${Object.entries(r.params||{}).map(([k,v])=>
-              `<span class="pill">${esc(k)}=${esc(String(v))}</span>`).join('')||
-              '<span class="pill">默认参数</span>'}
-            ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
-            ${r.mark_note?`<div class="why">${esc(r.mark_note)}</div>`:''}</td>
-          <td class="tx cost">${esc(r.start)}<br>${esc(r.end)}<br>本金 ${(+r.cash).toLocaleString()}</td>
-          ${COLS.map(c=>`<td><b class="${c.c?c.c(r):''}">${c.f(r)}</b></td>`).join('')}
-          <td class="tx cost">${costTxt(r)}<br>${esc(r.run_id)}</td></tr>`).join('')}
-      </table></div></div>`;}).join('')}
+      点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。${nDiff>1?
+      ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致 —— 与多数行不同的那几行标了「口径不同」，'
+      +'跨行比年化前先看清（本项目两次栽在拿滑点 0 的数字比含滑点的基准上）。</b>':''}</div>
+    <div class="pw"><table class="pkt">
+      <tr>${th('name','策略 · 参数','tx nmc')}<th class="tx">区间</th>
+        ${COLS.map(c=>th(c.k,c.t)).join('')}</tr>
+      ${Object.keys(by).sort().map(g=>{
+        /* 组内展平再排序 —— 分组保留（业务域是有意义的归拢），
+           排序只在组内做，跨组比较本来就不该发生（区间/基准都可能不同）。 */
+        const rows=[];
+        Object.keys(by[g]).sort().forEach(st=>by[g][st].forEach(r=>
+          rows.push(Object.assign({_st:st}, r))));
+        rows.sort(cmp);
+        return `<tr class="grp"><td colspan="${NCOL}">
+            <span class="gb">${esc(g)}</span>
+            <span class="lvwhy">　${rows.length} 条</span></td></tr>
+          ${rows.map(r=>`<tr class="rw" data-go="${esc(r.run_id)}"
+            title="${esc(r.run_id)}　本金 ${(+r.cash).toLocaleString()}　${esc(costTxt(r))}">
+            <td class="tx nmc"><span class="nm2">${esc(r._st)}</span>${
+              odd(r)?`<span class="stale" title="这一行的成本口径与多数行不同：${esc(costTxt(r))}　跨行比年化前先看清">口径不同</span>`:''}
+              ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
+              <div style="margin-top:2px">${Object.entries(r.params||{}).map(([k,v])=>
+                `<span class="pill">${esc(k)}=${esc(String(v))}</span>`).join('')||
+                '<span class="pill">默认参数</span>'}</div>
+              ${r.mark_note?`<div class="why">${esc(r.mark_note)}</div>`:''}</td>
+            <td class="tx cost">${esc(r.start)}<br>${esc(r.end)}</td>
+            ${COLS.map(c=>`<td><b class="${c.c?c.c(r):''}">${c.f(r)}</b></td>`).join('')}
+            </tr>`).join('')}`;}).join('')}
+    </table></div>
   </div>`;
   document.querySelectorAll('#pk tr.rw[data-go]').forEach(e=>
     e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
