@@ -1951,13 +1951,16 @@ def t_live_core():
             assert x.get('rates') and x['rates'].get('buy_rate') is not None, \
                 '每档要带总费率（页面显示总费率而不是佣金）：%s' % x.get('rates')
             assert x.get('model'), '每档要带合并后的完整费率模型（供展开明细）'
-        # ---- 3d3d) 浮盈是【纯价差】，费用不在里面 ----
-        #   ★ 成本取成交价、不含买入费，也不预留卖出费 —— 与引擎 trades 的
-        #     ret 口径一致（broker 里 entry_price 除权时不缩就是为了这个）。
-        #     改了它实盘就没法和回测比。
-        #   ★ 但"现在全平能落袋多少"是真问题 -> exit_fee_est / pnl_net。
-        #   🔴 已付买入费**不在** pnl_net 里：它已从现金扣过、已体现在权益与
-        #     账户 TWR 里，再减一次就是重复计费。
+        # ---- 3d3d) 浮盈按【摊薄成本】算，含买入费 ----
+        #   ★ 券商 App 的"摊薄成本价"就是这个口径。费用是真金白银出去了，
+        #     不算进成本等于把浮盈报高。
+        #   ★ 三个价各答一个问题，不能只留一个：
+        #       cost      成交均价 —— 喂给引擎 entry_price（止损/吊灯/红利税
+        #                 档位读它），**不含费、不能动**；也是与回测
+        #                 trades.ret 对照的口径（引擎 ret 只含滑点不含佣金）
+        #       cost_net  摊薄成本 = (成交额+买入费)/股数 —— 浮盈的基准
+        #       breakeven 保本价 = 摊薄成本/(1−卖出费率)
+        #   ★ 部分卖出时买入费按【剩余股数比例】留在成本里。
         lv.upsert_account('t_pnl', name='pnl', init_cash=500000)
         # 费率就地定义 —— 不依赖后面 3d4 里那个 GALAXY 的声明顺序
         lv.add_fee_rate('t_pnl', '2026-09-01',
@@ -1970,22 +1973,54 @@ def t_live_core():
         assert _r['fee'] > 0, '买入应估出费用'
         _P = lv.positions_valued('t_pnl')
         _it = _P['items'][0]
-        # 成本 == 成交价（不含买入费）。含了的话 3300 股会摊出 +0.0016
+        # 成交均价【不含费】—— 它要喂给引擎 entry_price，动了实盘就不是
+        # 走策略自己的代码路径了
         assert abs(_it['cost'] - 11.350) < 1e-6, \
-            '成本应等于成交价、不含买入费，实得 %s' % _it['cost']
-        assert abs(_it['pnl'] - (_it['price'] - 11.350) * 3300) < 0.02, \
-            '浮盈应是纯价差'
+            '成交均价应等于成交价、不含买入费，实得 %s' % _it['cost']
+        # 摊薄成本 = (成交额 + 买入费)/股数
+        # 落盘保留 4 位小数，容差按它给
+        assert abs(_it['cost_net'] - (3300 * 11.350 + _r['fee']) / 3300) < 1e-4, \
+            '摊薄成本算错：%s' % _it['cost_net']
+        assert _it['cost_net'] > _it['cost'], '摊薄成本必须高于成交均价'
+        assert abs(_it['buy_fee'] - _r['fee']) < 0.005, '这批摊的买入费不对'
+        # 🔴 浮盈按【摊薄成本】算 —— 往返账实必须相符：
+        #    浮盈 == 现值 − (本金 + 买入费) == 现值 − 现金减少额
+        _paid = 3300 * 11.350 + _r['fee']
+        assert abs(_P['pnl'] - (_it['value'] - _paid)) < 0.02, \
+            '浮盈应等于 现值 − (本金+买入费)：%s vs %s' \
+            % (_P['pnl'], _it['value'] - _paid)
+        assert abs((500000 - lv.cash('t_pnl')) - _paid) < 0.02, \
+            '现金减少额应等于 本金+买入费'
+        # 与回测对照的那个仍在（只含滑点不含佣金）
+        assert abs(_P['pnl_gross'] - (_it['value'] - 3300 * 11.350)) < 0.02, \
+            'pnl_gross 应是不含费的口径（与回测 trades.ret 对照用）'
+        assert _P['pnl_gross'] > _P['pnl'], '不含费的口径必然更好看'
         # 估算卖出费：含印花税万5，所以一定比买入费大得多
         assert _it['exit_fee_est'] > _r['fee'] * 3, \
             '卖出费该含印花税万5（比买入费大一截）：卖 %s / 买 %s' \
             % (_it['exit_fee_est'], _r['fee'])
+        # 保本价：卖到它才不亏 —— 高于摊薄成本，且落在摊薄成本上方一个
+        # 卖出费率的位置
+        assert _it['breakeven'] > _it['cost_net'], '保本价必须高于摊薄成本'
+        assert abs(_it['breakeven'] * _it['shares']
+                   - (_paid + _it['exit_fee_est'])) < 1.5, \
+            '按保本价卖出应刚好覆盖 投入+卖出费：%s' % _it['breakeven']
         assert abs(_P['pnl_net'] - (_P['pnl'] - _P['exit_fee_est'])) < 0.02, \
-            'pnl_net 应等于 浮盈 − 估算卖出费'
+            'pnl_net 应等于 浮盈 − 估算卖出费（买入费不重复）'
         assert _P['pnl_net'] < _P['pnl'], '全平落袋必须小于浮盈'
-        # 已付买入费只体现在现金/权益，不在 pnl 也不在 pnl_net 里
         assert abs(_P['equity'] - (lv.cash('t_pnl') + _P['market_value'])) < 0.02
-        assert abs((500000 - lv.cash('t_pnl')) - (3300 * 11.350 + _r['fee'])) < 0.02, \
-            '现金应扣掉本金 + 买入费'
+        # ★ 部分卖出：那一批的买入费按【剩余股数比例】留在成本里
+        lv.add_fill('t_pnl', '2026-09-01', '603506.SH', 'sell', 1100, 11.500)
+        _i2 = lv.positions_valued('t_pnl')['items'][0]
+        assert _i2['shares'] == 2200, '剩余股数不对'
+        assert abs(_i2['buy_fee'] - _r['fee'] * 2200 / 3300) < 0.01, \
+            '买入费该按比例消耗：剩 %s，应是 %s' \
+            % (_i2['buy_fee'], _r['fee'] * 2200 / 3300)
+        assert abs(_i2['cost'] - 11.350) < 1e-6, '成交均价不该被卖出影响'
+        # 引擎口径那个价【绝不能】被摊薄污染 —— 它决定止损在哪触发
+        _lots = lv.fifo_lots(lv.fills('t_pnl'))['603506.XSHG']
+        assert all(abs(l['price'] - 11.350) < 1e-9 for l in _lots), \
+            'lot.price 被改成摊薄成本了 —— 那会让止损在错的位置触发'
 
         # ---- 3d4) 过户费【分市场】另收：银河四张真实账单逐笔对到分 ----
         #   ★ 银河的"万0.86 最低5元"是个【打包价】：里面已含经手费+证管费，
@@ -2600,7 +2635,8 @@ def t_live_ui():
                 # 还没成交 -> 不编数字，说明为什么没有
                 assert '业绩' in _kp2, '没有权益曲线时也要有一格说明：%s' % _kp2
             # 浮盈那格要写明"纯价差"，并且另有一格"全平落袋"
-            assert '纯价差' in _kp, 'KPI 没写明浮盈是纯价差：%s' % _kp
+            assert '含买入费' in _kp, \
+                'KPI 要写明浮盈是按摊薄成本（含买入费）算的：%s' % _kp
             assert '全平落袋' in _kp, 'KPI 缺「全平落袋」（扣估算卖出费）：%s' % _kp
             _kpv = pg.locator('#lvbody .kpi').first.inner_text()
             assert 'undefined' not in _kpv and 'NaN' not in _kpv, \
@@ -2717,8 +2753,11 @@ def t_live_ui():
             #   （实测：持仓 3 只被数成 14 行）
             th = [x.strip() for x in
                   pg.locator('#lvbody table.lvpos th').all_inner_texts()]
-            for k in ('成本', '现价', '市值', '浮盈', '仓位', '估卖出费'):
-                assert k in th, '持仓表缺「%s」列：%s' % (k, th)
+            _thz = ' '.join(th)
+            for k in ('摊薄成本', '保本价', '现价', '市值', '浮盈', '仓位',
+                      '估卖出费'):
+                assert k in _thz, '持仓表缺「%s」列：%s' % (k, th)
+            assert '含买入费' in _thz, '摊薄成本那列要注明含买入费：%s' % th
             # 代码与名称【各占一列】—— 挤在一格里没法按名称扫
             assert th[:2] == ['代码', '名称'], '持仓表前两列应是代码/名称：%s' % th
             _pc = [x.strip() for x in
@@ -3045,7 +3084,8 @@ def t_live_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
-                    '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
+                    '持仓 %d 只全部取到现价 + 盈亏汇总（浮盈按摊薄成本含买入费 + 保本价 + '
+                    '全平落袋）；费用三态；入金；'
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
                     '按成交日取档/手填优先/每账户独立/来源写在行上)；'

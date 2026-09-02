@@ -1229,10 +1229,19 @@ def check_price_in_range(code, date, price, datalake=None):
 
 
 def fifo_lots(rows):
-    """成交流水 -> {code: [ {shares, date, price} ]}，FIFO 冲减。
+    """成交流水 -> {code: [ {shares, date, price, fee} ]}，FIFO 冲减。
 
     ★ 用 FIFO 而不是平均成本：引擎本身就是分批 FIFO（红利税按持有期分档、
       T+1 只锁当日买入那批），平均成本会让重建出来的持仓与引擎语义不一致。
+
+    ★ `fee` 是这一批**还没卖掉那部分**摊到的买入费 —— 部分卖出时按股数
+      比例消耗。摊薄成本要用它。
+      卖出的费用**不进这里**：那是已实现成本，已经从现金里扣了，
+      算进持仓成本会重复。
+
+    ★ `price` 仍是**成交价**（不含费）—— 它要喂给引擎的 `entry_price`
+      （止损、吊灯、红利税档位都读它）。**这个不能动**：动了实盘走的就
+      不是策略自己的代码路径了。摊薄成本是另算一个数，不是改这个。
     """
     book = {}
     # ★ 同一天同一秒的多笔要有确定顺序，否则 FIFO 批次不可复现。
@@ -1245,7 +1254,8 @@ def fifo_lots(rows):
         lots = book.setdefault(c, [])
         if r['side'] == 'buy':
             lots.append({'shares': int(r['shares']), 'date': _d(r['trade_date']),
-                         'price': float(r['price'])})
+                         'price': float(r['price']),
+                         'fee': float(r.get('fee') or 0)})
         else:
             left = int(r['shares'])
             while left > 0 and lots:
@@ -1253,7 +1263,12 @@ def fifo_lots(rows):
                     left -= lots[0]['shares']
                     lots.pop(0)
                 else:
-                    lots[0]['shares'] -= left
+                    # ★ 买入费按【剩余股数比例】消耗：卖掉一半，这批的
+                    #   买入费也只剩一半算在成本里。整批卖掉时连费用一起
+                    #   出账（pop）—— 那部分已经变成已实现盈亏的一部分。
+                    keep = lots[0]['shares'] - left
+                    lots[0]['fee'] = lots[0].get('fee', 0.0) * keep / lots[0]['shares']
+                    lots[0]['shares'] = keep
                     left = 0
     return {c: v for c, v in book.items() if v}
 
@@ -1450,8 +1465,21 @@ def positions_valued(aid, datalake=None):
       不在信号里的持仓就没有价格（原页面那一版正是这样，浮盈显示 —）。
       这里按最新数据日独立取价，覆盖全部持仓。
 
-    浮盈只算【价差】，不含已收分红 —— 与引擎 trades 的 ret 口径一致
-    （broker 里 entry_price 在除权时不缩，就是为了让 pnl 只反映价差）。
+    ★ 成本给【三个】，因为它们回答的是三个不同问题：
+        · `cost`       成交均价 —— 喂给引擎 entry_price 的那个数（止损/吊灯
+                       /红利税档位读它）。也是能与回测 trades.ret 对照的口径
+                       （引擎的 ret 只含滑点、不含佣金）。
+        · `cost_net`   **摊薄成本** = (成交额 + 买入费) / 股数。
+                       券商 App 说的"摊薄成本价"就是这个，**浮盈按它算** ——
+                       费用是真金白银出去了，不算进成本等于把浮盈报高。
+        · `breakeven`  保本价 = 摊薄成本 / (1 − 卖出费率)。卖到这个价才不亏。
+
+    ★ 浮盈（`pnl`）按**摊薄成本**算，含买入费；再扣估算卖出费就是
+      `pnl_net`（全平落袋）。两者相减不会重复计费 —— 买入费只在成本里出现
+      一次，卖出费只在 pnl_net 里出现一次。
+
+    ★ 都不含【已收分红】：broker 里 entry_price 在除权时不缩，就是为了让
+      价差与分红分开记。分红到账走 cashflows。
     """
     book = fifo_lots(fills(aid))
     money = cash(aid)
@@ -1465,24 +1493,32 @@ def positions_valued(aid, datalake=None):
     out['asof'] = day.isoformat()
     px = _last_px(feed, list(book), day)
     nm = _names(feed, list(book), day)
-    mv = cst = 0.0
+    mv = cst = cst_net = 0.0
     for c, lots in sorted(book.items()):
         sh = sum(l['shares'] for l in lots)
         avg = sum(l['shares'] * l['price'] for l in lots) / sh
+        buy_fee = sum(l.get('fee') or 0 for l in lots)
+        avg_net = (sh * avg + buy_fee) / sh          # 摊薄成本
         p, pd_ = px.get(c, (None, None))
         v = (sh * p) if p else None
-        pnl = (v - sh * avg) if v is not None else None
+        pnl = (v - sh * avg_net) if v is not None else None
         out['items'].append({
             'code': c, 'name': nm.get(c, ''), 'shares': sh,
-            'cost': round(avg, 4), 'price': (round(p, 3) if p else None),
+            'cost': round(avg, 4),                  # 成交均价（引擎口径）
+            'cost_net': round(avg_net, 4),          # 摊薄成本（含买入费）
+            'buy_fee': round(buy_fee, 2),
+            'price': (round(p, 3) if p else None),
             'px_date': (pd_.isoformat() if pd_ else None),
             'stale': bool(pd_ and pd_ != day),          # 停牌：价格不是当日的
             'value': (round(v, 2) if v is not None else None),
             'pnl': (round(pnl, 2) if pnl is not None else None),
-            'pnl_pct': (round(p / avg - 1, 6) if p and avg else None),
+            'pnl_pct': (round(p / avg_net - 1, 6) if p and avg_net else None),
+            # 与回测 trades.ret 对照用的那个（只含滑点、不含佣金）
+            'ret_gross': (round(p / avg - 1, 6) if p and avg else None),
             'entry': min(l['date'] for l in lots).isoformat(),
         })
         cst += sh * avg
+        cst_net += sh * avg_net
         if v is not None:
             mv += v
     for it in out['items']:
@@ -1499,6 +1535,7 @@ def positions_valued(aid, datalake=None):
     exit_fee = 0.0
     for it in out['items']:
         if it['price'] is None:
+            it['exit_fee_est'] = it['breakeven'] = None
             continue
         try:
             f = estimate_fee('sell', it['shares'], it['price'], day, fee_m,
@@ -1506,15 +1543,30 @@ def positions_valued(aid, datalake=None):
         except LiveError:
             f = None
         it['exit_fee_est'] = (round(f, 2) if f is not None else None)
+        # 保本价：卖出费率按【当前市值】折算（最低佣金 binding 时费率更高，
+        # 所以这个数随价格变 —— 它是估算，不是常数）
+        rate = (f / (it['shares'] * it['price'])) if f else 0.0
+        it['breakeven'] = (round(it['cost_net'] / (1 - rate), 3)
+                           if rate < 0.5 else None)
         if f:
             exit_fee += f
     out['exit_fee_est'] = round(exit_fee, 2)
     out['market_value'] = round(mv, 2)
-    out['cost'] = round(cst, 2)
-    out['pnl'] = round(mv - cst, 2)
-    out['pnl_pct'] = round(mv / cst - 1, 6) if cst else None
-    # 全平后落袋的价差（扣估算卖出费）。不扣买入费 —— 见上面的说明。
-    out['pnl_net'] = round(mv - cst - exit_fee, 2)
+    out['cost'] = round(cst, 2)                 # 成交额（不含费）
+    out['cost_net'] = round(cst_net, 2)         # 摊薄成本额（含买入费）
+    out['buy_fee'] = round(cst_net - cst, 2)
+    # ★ 浮盈按【摊薄成本】算 —— 含买入费。这是券商 App 的口径，也是
+    #   "我到底赚没赚"的口径。原来按成交额算，等于把浮盈报高了买入费那么多。
+    out['pnl'] = round(mv - cst_net, 2)
+    out['pnl_pct'] = round(mv / cst_net - 1, 6) if cst_net else None
+    # 与回测 trades.ret 对照用的（只含滑点、不含佣金）
+    out['pnl_gross'] = round(mv - cst, 2)
+    # 全平落袋 = 浮盈 − 估算卖出费。买入费已在浮盈里，不会重复。
+    out['pnl_net'] = round(mv - cst_net - exit_fee, 2)
+    # 买入费里有多少是【估算】的 —— 摊薄成本跟着就是估算，要标出来
+    out['fee_estimated_n'] = sum(
+        1 for r in active_fills(fills(aid))
+        if r['side'] == 'buy' and r.get('fee_estimated'))
     out['equity'] = round(mv + money, 2)
     return out
 

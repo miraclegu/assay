@@ -670,14 +670,18 @@ async function loadLive(aid){
         ${P.pnl_pct!=null?'（'+sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%）':''}</b>
         · 估值日 ${esc(P.asof||'—')}</span>`:''}</h3>
     ${it.length?`<table class="lvt lvpos">
-      <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th><th class="rt">成本</th>
+      <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
+          <th class="rt">摊薄成本<div class="lvwhy">含买入费</div></th>
+          <th class="rt">保本价</th>
           <th class="rt">现价</th><th class="rt">市值</th>
           <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
           <th class="rt">估卖出费</th><th class="tx">建仓</th></tr>
       ${it.map(x=>`<tr>
         <td>${esc(x.code)}</td>
         <td class="tx">${esc(x.name||'')}</td>
-        <td class="rt">${num(x.shares)}</td><td class="rt">${num(x.cost,3)}</td>
+        <td class="rt">${num(x.shares)}</td>
+        <td class="rt" title="成交均价 ${num(x.cost,4)}（引擎 entry_price 用它）＋买入费 ${num(x.buy_fee,2)}">${num(x.cost_net,3)}</td>
+        <td class="rt lvwhy" title="卖到这个价才不亏（含估算卖出费）">${x.breakeven==null?'—':num(x.breakeven,3)}</td>
         <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
             `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}</td>
         <td class="rt">${x.value==null?'—':num(x.value,2)}</td>
@@ -688,12 +692,21 @@ async function loadLive(aid){
         <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
       </table>
       <div class="lvwhy" style="margin-top:6px">
-        <b>浮盈是纯价差</b>：成本取<b>成交价</b>，<b>不含买入费</b>，也没预留卖出费
-        —— 与引擎 trades 的 ret 口径一致（改了它实盘就没法和回测比）。<br>
-        费用在别处体现：已付的买入费<b>已从现金里扣过</b>，所以
-        <b>总资产与「累计收益（TWR）」是含费的</b>；要卖才付的那部分见
-        「全平落袋」。<b>别把两处相减</b> —— 那会把买入费减两次。<br>
-        浮盈也不含<b>已收分红</b>；分红到账请在「✎ 记一笔 › 现金」里录一条。</div>`
+        <b>浮盈按「摊薄成本」算，已含买入费</b>（券商 App 的口径）——
+        费用是真金白银出去了，不算进成本等于把浮盈报高。部分卖出时，
+        那一批的买入费按<b>剩余股数比例</b>留在成本里。<br>
+        三个价各答一个问题：<b>成交均价</b>是喂给引擎 <code>entry_price</code>
+        的那个数（<b>止损、吊灯、红利税档位都读它</b>，所以它不含费、不能动），
+        也是能与回测 <code>trades.ret</code> 对照的口径（引擎的 ret 只含滑点
+        不含佣金）；<b>摊薄成本</b>是浮盈的基准；<b>保本价</b> =
+        摊薄成本 ÷(1−卖出费率)，卖到它才不亏。<br>
+        <b>浮盈 − 估卖出费 = 全平落袋</b>，不会重复计费：买入费只在成本里出现
+        一次，卖出费只在这一步出现一次。<br>
+        都不含<b>已收分红</b>（<code>entry_price</code> 除权时不缩，就为了把
+        价差与分红分开记）；分红到账请在「✎ 记一笔 › 现金」里录一条。
+        ${P.fee_estimated_n?'<br>⚠ 有 <b>'+P.fee_estimated_n
+          +'</b> 笔买入的费用是<b>估算</b>的，摊薄成本跟着也是估算 ——'
+          +'对完账单可在流水页「冲正 + 重录」填实际值。':''}</div>`
       :`<div class="none">空仓${o.n_fills?'':' —— 还没录过成交，点「✎ 记一笔」'}</div>`}
   </div>`;
   liveEquityTag(aid);
@@ -735,15 +748,16 @@ function kpiHtml(o){
            (P.items||[]).length+' 只 · 成本 '+num(P.cost,2))}
     ${cell('可用现金', num(P.cash,2),
            wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%')}
-    ${cell('持仓浮盈 <span class="lvwhy">纯价差</span>',
+    ${cell('持仓浮盈 <span class="lvwhy">含买入费</span>',
            `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
            (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':'')
+           +(P.buy_fee?'　按摊薄成本（已含买入费 '+num(P.buy_fee,2)+'）':'')
            +' · 估值日 '+esc(P.asof||'—'))}
     ${cell('全平落袋',
            P.pnl_net==null?'—':
            `<span style="color:${col(P.pnl_net)}">${sgn(P.pnl_net)}${num(P.pnl_net,2)}</span>`,
-           P.exit_fee_est?'扣估算卖出费 '+num(P.exit_fee_est,2)+'（含印花税万5）'
-             :'扣估算卖出费')}
+           P.exit_fee_est?'再扣估算卖出费 '+num(P.exit_fee_est,2)+'（含印花税万5）'
+             :'再扣估算卖出费')}
     <div id="kperf" style="display:none"></div>
   </div>
   <div class="kpi" id="kperf2">
