@@ -1951,6 +1951,100 @@ def t_live_core():
             assert x.get('rates') and x['rates'].get('buy_rate') is not None, \
                 '每档要带总费率（页面显示总费率而不是佣金）：%s' % x.get('rates')
             assert x.get('model'), '每档要带合并后的完整费率模型（供展开明细）'
+        # ---- 3d4) 过户费【分市场】另收：银河四张真实账单逐笔对到分 ----
+        #   ★ 银河的"万0.86 最低5元"是个【打包价】：里面已含经手费+证管费，
+        #     深市连过户费也在里面，沪市的过户费万0.1 另收。所以同一个账户
+        #     两个市场的费率不同 —— 沪 万0.96 / 深 万0.86（大额时）。
+        #     取个平均在两边都错，且**不报错**，所以必须建模。
+        #   ★ 而且"这个账户的费率"根本不是一个数：5 元最低在成交额低于
+        #     约 5.81 万时 binding，那时深市实付恒 5.00、沪市 5.00+万0.1。
+        GALAXY = {'mode': 'parts', 'commission': 0.000086, 'min_commission': 5.0,
+                  'commission_incl_reg': False, 'regulatory': 0.0,
+                  'transfer': lv.TRANSFER_RATE, 'transfer_extra': 'xshg',
+                  'stamp': 'auto'}
+        # (名称, 代码, 成交金额, 账单佣金行, 账单过户费行, 账单实付)
+        BILLS = (('南都物业', '603506.XSHG', 37455, 5.00, 0.37, 5.37),
+                 ('鹏翎股份', '300375.XSHE', 38302, 5.00, 0.33, 5.00),
+                 ('锐科激光', '300747.XSHE', 107118, 9.21, 1.08, 9.21),
+                 ('大唐发电', '601991.XSHG', 106856, 9.19, 1.06, 10.25))
+        for nm, code, amt, comm, ghf, tot in BILLS:
+            bd = lv.fee_breakdown('buy', 100, amt / 100.0, '2026-09-01',
+                                  GALAXY, code)
+            assert abs(bd['commission'] - comm) < 0.011, \
+                '%s 佣金应 %.2f（=max(5, 额×万0.86)），实得 %.2f' \
+                % (nm, comm, bd['commission'])
+            # 券商是逐项截尾、我们四舍五入，容许 1 分
+            assert abs(bd['total'] - tot) <= 0.011, \
+                '%s 实付应 %.2f，实得 %.2f' % (nm, tot, bd['total'])
+            want_extra = code.endswith('XSHG')
+            assert bd['transfer_extra'] is want_extra, \
+                '%s 的过户费该%s' % (nm, '另收' if want_extra else '已含在佣金里')
+            if not want_extra:
+                assert bd['transfer'] == 0, \
+                    ('%s 是深市，过户费已含在佣金里，不该再加一次'
+                     '（会把 5.00 算成 5.33）' % nm)
+        # 分市场时【总费率必须给两套】—— 一个数会让另一个市场对不上账
+        er = lv.effective_rates(GALAXY, 106856)
+        assert not er['same'] and er['worst_market'] == 'XSHG', \
+            '沪深不同价时要标出来，且顶层取高的那个（保守）：%s' % er
+        assert abs(er['by_market']['XSHG']['buy_rate'] - 0.000096) < 1e-7 and \
+            abs(er['by_market']['XSHE']['buy_rate'] - 0.000086) < 1e-7, \
+            '10.7 万一笔应是 沪万0.96 / 深万0.86：%s' % er['by_market']
+        # 最低 binding 时是【常数 + 沪市的万0.1】，不是那个费率
+        lo = lv.effective_rates(GALAXY, 37455)
+        assert abs(lo['by_market']['XSHE']['buy_fee'] - 5.00) < 0.011 and \
+            abs(lo['by_market']['XSHG']['buy_fee'] - 5.37) < 0.011, \
+            '3.7 万一笔（最低 binding）应是 深 5.00 / 沪 5.37：%s' % lo['by_market']
+        assert lo['by_market']['XSHE']['buy_rate'] > \
+            er['by_market']['XSHE']['buy_rate'], \
+            '最低 binding 时折成的费率应【更高】—— 只报大额那个数会让小额单' \
+            '看着便宜'
+        # 设成分市场却不给代码 -> 报错，不替它猜方向（猜错差万0.1 且不报错）
+        try:
+            lv.fee_breakdown('buy', 100, 1000, '2026-09-01', GALAXY)
+            raise AssertionError('分市场费率不给代码时应报错')
+        except lv.LiveError as e:
+            assert '哪个市场' in str(e), '报错要说清缺什么：%s' % e
+        # 'both'（默认）与 'none' 不需要代码
+        for te, want in (('both', 0.00001 * 100000), ('none', 0.0)):
+            g2 = dict(GALAXY, transfer_extra=te, min_commission=0.0)
+            assert abs(lv.fee_breakdown('buy', 100, 1000, '2026-09-01',
+                                        g2)['transfer'] - want) < 0.011, \
+                'transfer_extra=%s 不该需要代码，且过户费应为 %.2f' % (te, want)
+        # add_fill 要把代码传下去 —— 否则分市场费率在录入时就报错
+        lv.upsert_account('t_gal', name='银河', init_cash=500000)
+        lv.add_fee_rate('t_gal', '2026-09-01', GALAXY, note='银河四张账单')
+        for nm, code, amt, _c, _g, tot in BILLS:
+            r = lv.add_fill('t_gal', '2026-09-01', code, 'buy', 100, amt / 100.0)
+            assert abs(r['fee'] - tot) <= 0.011, \
+                '%s 录入时估的费用应 %.2f，实得 %.2f' % (nm, tot, r['fee'])
+        # 🔴 反推费率不能用【触及最低】那笔账单：南都物业反推万1.34 vs 真值万0.86
+        try:
+            lv.infer_fee_model(37455, 5.00, transfer=0.37, min_commission=5.0)
+            raise AssertionError('用最低 binding 的账单反推应被拒')
+        except lv.LiveError as e:
+            assert '最低' in str(e) and '更大' in str(e), \
+                '要说清为什么不行、以及要多大的账单：%s' % e
+        m_ok = lv.infer_fee_model(106856, 9.19, regulatory=0.0, transfer=1.06,
+                                  min_commission=5.0)
+        assert abs(m_ok['commission'] - 0.000086) < 1e-7, \
+            '大唐那笔应反推出万0.86：万%.3f' % (m_ok['commission'] * 1e4)
+        # 🔴 反推必须【显式给出 regulatory】。省掉这个键会被 FEE_DEFAULT 的
+        #   万0.541 顶回来再加一遍：实测那笔 10.25 会算成 16.03（高 56%）。
+        assert 'regulatory' in m_ok and m_ok['regulatory'] == 0.0, \
+            '账单没有规费行（已含在佣金里）时要显式写 regulatory=0：%s' % m_ok
+        _f = lv._merge_fee(dict(m_ok, transfer_extra='xshg'))
+        assert abs(lv.fee_breakdown('buy', 100, 1068.56, '2026-09-01', _f,
+                                    '601991.XSHG')['total'] - 10.25) <= 0.011, \
+            '按反推结果复算大唐那笔应回到 10.25'
+        for bad in ('nope', '', 'XSHG'):
+            try:
+                lv.add_fee_rate('t_gal', '2027-06-01',
+                                dict(GALAXY, transfer_extra=bad))
+                raise AssertionError('transfer_extra=%r 应被拒' % bad)
+            except lv.LiveError:
+                pass
+
         # ★ 费率必须【每账户独立】—— 存在 live/<id>/fee_rates.jsonl，
         #   一个文件一个账户。共享一份是很容易顺手写出来的（"费率不都一样吗"），
         #   而串了之后的表现是：另一个账户的历史成交被按新费率重算，
@@ -2179,7 +2273,9 @@ def t_live_core():
             assert c, '历史版本 %s 读不出来' % row['code_sha']
 
         return ('FIFO 剩 500@20.0；现金账务(入/出金+成交+费用三态+as-of)对；'
-                'uid 唯一 + 冲正还原批次 + 重放拦负持仓 + TWR 排除入金；'
+                '银河四张账单逐笔对到分(沪万0.96/深万0.86，最低5元 binding 时'
+                '深5.00/沪5.37)；uid 唯一 + 冲正还原批次 + 重放拦负持仓 + '
+                'TWR 排除入金；'
                 '止损两侧 %.1f%%→stop / %.1f%%→非stop；'
                 '红利 %s %s 买入 %d 只；快照含 %d 个文件、删 runs/ 仍可读、'
                 '改依赖后哈希变 %s→%s'
@@ -2424,8 +2520,12 @@ def t_live_ui():
             # 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
             # 看"佣金万0.26"完全说明不了实付万0.9
             th = pg.locator('table.lvfr th').all_inner_texts()
-            assert '买入总费率' in th and '卖出总费率' in th, \
+            _hz = ' '.join(th)
+            assert '买入总费率' in _hz and '卖出总费率' in _hz, \
                 '费率表应显示买/卖总费率：%s' % th
+            # 折算基准要写在表头上 —— 有最低佣金时"这个账户的费率"不是一个数，
+            # 只标一个数会让小额单看着比实际便宜
+            assert '10 万' in _hz, '总费率列没说明是按多大金额折算的：%s' % th
             row = [x.strip() for x in pg.locator('tr.frhead td').all_inner_texts()]
             assert '万0.90' in row and '万5.90' in row, \
                 '总费率应是买万0.90 / 卖万5.90：%s' % row

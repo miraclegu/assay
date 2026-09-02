@@ -475,7 +475,7 @@ def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
         # ★ 按【成交日】取费率，不是"当前费率" —— 补录三个月前那笔时，
         #   拿今天的费率去算，数字看着很正常，只是错的。
         fee = 0.0 if reverse_of else estimate_fee(
-            side, shares, price, d, fee_model_at(aid, d))
+            side, shares, price, d, fee_model_at(aid, d), code)
         fee_estimated = not reverse_of
     else:
         try:
@@ -554,9 +554,28 @@ TRANSFER_RATE = 0.00001     # 过户费 万0.1
 #   再拆成佣金/规费/过户费只是多几个能配错的地方（含规费 vs 净佣金那条
 #   口径差就坑过一次）。想省事就用 flat。
 FEE_MODES = ('parts', 'flat')
+
+# ★ 过户费【另收还是已含在佣金里】，取决于券商，而且**分市场不一样**。
+#   银河实测（四张账单逐笔对到分）：万0.86 最低5元 是个**打包价**，
+#   里面已含经手费+证管费；深市连过户费也在里面，沪市的过户费另收。
+#     深A 107,118 → 佣金 9.21 = 2.35净+3.65经手+2.13证管+1.08过户  实付 9.21
+#     沪A 106,856 → 佣金 9.19 = 3.43净+3.64经手+2.12证管         实付 10.25（+1.06 过户）
+#   折成全含费率：深A 万0.86 / 沪A 万0.96 —— 差一个过户费万0.10。
+#   这件事必须建模而不能取个平均：同一个账户里两个市场的费率就是不同的，
+#   取平均在两边都错，且**不报错**。
+TRANSFER_EXTRA = {
+    'both': '沪深都另收（常见）',
+    'xshg': '只有沪市另收，深市已含在佣金里（银河）',
+    'none': '沪深都已含在佣金里',
+}
+# 'xshg' 的"已含"集合刻意只写【深市】一个：账单原文是
+# "过户费（沪A、股转A、北交所、行权）"，也就是除深A之外都另收。
+# 这样写还顺带保守 —— 遇到没见过的后缀会按【另收】算（估高不估低）。
+TRANSFER_INCLUDED = {'both': set(), 'xshg': {'XSHE'}, 'none': None}
+
 FEE_FIELDS = ('mode', 'buy_rate', 'sell_rate', 'flat_min',
               'commission', 'min_commission', 'commission_incl_reg',
-              'regulatory', 'transfer', 'stamp')
+              'regulatory', 'transfer', 'transfer_extra', 'stamp')
 # 默认取【常见零售报价】：万2.5 + 最低 5 元 + 规费另收。
 # 刻意偏保守（估高不估低）：估低会让现金虚高，而"多出来的钱"不报错。
 # 也正好与回测默认口径同量级，便于实盘与回测对照。
@@ -573,10 +592,41 @@ FEE_DEFAULT = {
     # ---- 以下法定，一般不用配；留字段是为了政策变动时能改 ----
     'regulatory': REG_RATE,
     'transfer': TRANSFER_RATE,
+    'transfer_extra': 'both',     # 过户费另收的范围，见 TRANSFER_EXTRA
     'stamp': 'auto',              # 'auto' = 按日期分段（复用 broker.Cost）
 }
 # 只有这三项需要用户填，其余留空即用法定默认
 FEE_USER_FIELDS = ('commission', 'min_commission', 'commission_incl_reg')
+
+
+def market_of(code):
+    """从代码后缀判市场。`601315.XSHG` -> 'XSHG'、`300375.XSHE` -> 'XSHE'。
+
+    ★ 只在费率上用得着（过户费是否另收分市场）。判不出来时返回后缀原文，
+      让调用方按"另收"处理 —— 保守方向，估高不估低。
+    """
+    return (str(code).rsplit('.', 1)[-1] or '').upper()
+
+
+def transfer_is_extra(model, code):
+    """这笔的过户费是【另收】还是【已含在佣金里】。
+
+    ★ 需要 code 才能判 —— 所以 fee_breakdown / estimate_fee 都要带上代码。
+      设成分市场却不给代码时**直接报错**，不替它猜一个方向：
+      猜错的表现是费用差万0.10，一年下来几百块，而且从不报错。
+    """
+    inc = TRANSFER_INCLUDED.get((model or {}).get('transfer_extra') or 'both',
+                                set())
+    if inc is None:                                 # 'none'：都已含
+        return False
+    if not inc:                                     # 'both'：都另收
+        return True
+    if not code:
+        raise LiveError(
+            '这档费率设的是「%s」，算费用时必须知道是哪个市场 —— 请带上代码'
+            % TRANSFER_EXTRA.get(model.get('transfer_extra'),
+                                 model.get('transfer_extra')))
+    return market_of(code) not in inc
 
 
 def _merge_fee(raw):
@@ -687,6 +737,8 @@ def add_fee_rate(aid, from_date, model, note='', supersede=False):
             raise LiveError('stamp 必须是数字或 "auto"')
     if 'commission_incl_reg' in m:
         m['commission_incl_reg'] = bool(m['commission_incl_reg'])
+    if 'transfer_extra' in m and m['transfer_extra'] not in TRANSFER_EXTRA:
+        raise LiveError('transfer_extra 只能是 %s' % '/'.join(TRANSFER_EXTRA))
     cur = fee_rates(aid)
     if cur:
         last = _d(cur[-1]['from'])
@@ -732,7 +784,7 @@ def _stamp_rate(m, d):
     return float(v or 0)
 
 
-def fee_breakdown(side, shares, price, trade_date, model=None):
+def fee_breakdown(side, shares, price, trade_date, model=None, code=None):
     """算一笔的费用明细。
 
     mode='flat'：`max(额 × 买/卖总费率, 最低)` —— **不拆项，填多少算多少**。
@@ -740,8 +792,13 @@ def fee_breakdown(side, shares, price, trade_date, model=None):
 
         佣金部分 = max(额 × 佣金率, 最低佣金)
                    若报价【不含】规费，再加 额 × 规费率
-        + 过户费 = 额 × 过户费率
+        + 过户费 = 额 × 过户费率  ← 仅当这个市场【另收】（见 transfer_extra）
         + 印花税 = 额 × 印花税率（仅卖出）
+
+    ★ 最低佣金是压在【佣金那一行】上的，而那一行按券商口径可能已含规费、
+      甚至已含过户费。所以"最低5元"到底盖住多少东西，取决于 
+      commission_incl_reg 与 transfer_extra —— 银河的 5.00 在深市盖住了
+      净佣金+经手费+证管费+过户费四项，在沪市只盖住前三项。
 
     ★ 印花税分段规则复用 `broker.Cost.close_tax_at`，不在这里重写 ——
       写两份的话，实盘现金与回测成本会在 2023-08-28 前后分叉。
@@ -753,28 +810,37 @@ def fee_breakdown(side, shares, price, trade_date, model=None):
         tot = max(amt * rate, float(m.get('flat_min') or 0))
         return {'mode': 'flat', 'amount': round(amt, 2), 'rate': rate,
                 'commission': None, 'regulatory': None, 'transfer': None,
+                'transfer_extra': False, 'market': market_of(code) if code else None,
                 'stamp': None, 'total': round(tot, 2)}
     comm = max(amt * float(m['commission']), float(m['min_commission'] or 0))
     reg = 0.0
     if not m.get('commission_incl_reg'):
         reg = amt * float(m.get('regulatory') or 0)
-    trf = amt * float(m.get('transfer') or 0)
+    extra = transfer_is_extra(m, code)
+    trf = amt * float(m.get('transfer') or 0) if extra else 0.0
     stamp = amt * _stamp_rate(m, trade_date) if side == 'sell' else 0.0
     out = {'mode': 'parts', 'amount': round(amt, 2),
            'commission': round(comm, 2),
            'regulatory': round(reg, 2), 'transfer': round(trf, 2),
+           'transfer_extra': extra, 'market': market_of(code) if code else None,
            'stamp': round(stamp, 2)}
     out['total'] = round(comm + reg + trf + stamp, 2)
     return out
 
 
-def estimate_fee(side, shares, price, trade_date, model=None):
+def estimate_fee(side, shares, price, trade_date, model=None, code=None):
     """一笔成交的估算费用（分）。明细见 fee_breakdown。
 
     这是**估算**：券商是逐项截尾/进位后相加，可能差 ±0.01。
     对完账单用「冲正 + 重录」填实际值即可（入账已标 fee_estimated）。
+
+    ★ 要 code：过户费是否另收分市场（见 transfer_is_extra）。
     """
-    return fee_breakdown(side, shares, price, trade_date, model)['total']
+    return fee_breakdown(side, shares, price, trade_date, model, code)['total']
+
+
+# 折算总费率时用的样板代码，只为了给出市场（后缀）
+_SAMPLE = {'XSHG': '600000.XSHG', 'XSHE': '000001.XSHE'}
 
 
 def effective_rates(model, amount=100000.0, trade_date=None):
@@ -782,16 +848,29 @@ def effective_rates(model, amount=100000.0, trade_date=None):
 
     parts 模式下总费率随金额变（最低佣金 binding 时更高），所以要给金额。
     页面用它做两件事：显示"当前 ≈ 买入万X"，以及一键把它填进 flat 模式。
+
+    ★ 过户费可能只有一个市场另收（银河：沪市另收、深市已含），这时**沪深
+      的总费率不同**（万0.96 vs 万0.86）。所以这里按市场各给一套，放在
+      `by_market` 里；顶层那对取【两者中高的那个】并在 `worst_market`
+      里标出是哪个市场 —— 取平均会在两边都错，而取高的至少方向保守。
     """
     d = trade_date or datetime.date.today().isoformat()
     n = 100
     px = float(amount) / n
-    b = fee_breakdown('buy', n, px, d, model)['total']
-    s_ = fee_breakdown('sell', n, px, d, model)['total']
-    return {'amount': float(amount),
-            'buy_rate': round(b / float(amount), 8),
-            'sell_rate': round(s_ / float(amount), 8),
-            'buy_fee': b, 'sell_fee': s_}
+    by = {}
+    for mk, sample in _SAMPLE.items():
+        b = fee_breakdown('buy', n, px, d, model, sample)['total']
+        s_ = fee_breakdown('sell', n, px, d, model, sample)['total']
+        by[mk] = {'buy_rate': round(b / float(amount), 8),
+                  'sell_rate': round(s_ / float(amount), 8),
+                  'buy_fee': b, 'sell_fee': s_}
+    worst = max(by, key=lambda k: (by[k]['buy_rate'], by[k]['sell_rate']))
+    out = {'amount': float(amount), 'by_market': by,
+           'worst_market': worst,
+           # 沪深是否同价 —— 页面据此决定显示一个数还是两个
+           'same': by['XSHG'] == by['XSHE']}
+    out.update(by[worst])
+    return out
 
 
 def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
@@ -805,6 +884,13 @@ def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
 
     ★ 这里定不出「最低佣金含不含规费」—— 那需要一笔【小额】成交
       （最低会 binding）。返回里带 need_small_bill 提醒。
+
+    🔴 **不能拿触及最低佣金的那笔账单来反推费率。** 那笔的佣金是被最低
+      顶上去的常数，除以金额得到的"费率"与真实费率无关。实测银河：
+      南都物业 37,455 佣金 5.00（最低 binding）→ 反推万1.34；
+      大唐发电 106,856 佣金 9.19（未 binding）→ 反推万0.86（真值）。
+      差 56%，而两个都是"能算出来的数"。所以这里**直接拒绝**并告诉你
+      需要多大金额的账单。
     """
     amount = float(amount)
     if amount <= 0:
@@ -812,17 +898,36 @@ def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
     commission = float(commission or 0)
     regulatory = float(regulatory or 0)
     incl = regulatory > 0
-    rate = (commission + regulatory) / amount if incl else commission / amount
+    mc = float(min_commission or 0)
+    # 佣金那行恰好等于最低 -> 这笔被最低支配，费率无从反推
+    if mc > 0 and abs(commission + (regulatory if incl else 0) - mc) < 0.005:
+        raise LiveError(
+            '这笔的佣金正好等于最低佣金 %.2f 元 —— 说明它被【最低】顶住了，'
+            '反推不出真实费率（除出来的 万%.2f 只是 最低/金额）。\n'
+            '请换一笔【金额更大】的账单：按常见的万0.86 算，要大于约 %s 元'
+            '最低才不 binding。'
+            % (mc, (commission + (regulatory if incl else 0)) / amount * 1e4,
+               format(int(mc / 0.000086), ',')))
     out = {
-        'commission': round(rate, 8),
-        'min_commission': float(min_commission or 0),
+        'commission': round(rate_of(commission, regulatory, amount, incl), 8),
+        'min_commission': mc,
         'commission_incl_reg': incl,
+        # 🔴 `regulatory` 必须【显式给出】，不能省。约定是"规费填 0 表示
+        #   已含在佣金里"，而省掉这个键会让 _merge_fee 用默认 REG_RATE
+        #   万0.541 顶回来、再加一遍：实测大唐发电那笔 10.25 会算成 16.03
+        #   （高 56%）。省一个键的代价是整档费率错，且复算才看得出来。
+        'regulatory': round(float(regulatory) / amount, 8) if regulatory else 0.0,
         'transfer': (round(float(transfer) / amount, 8) if transfer
                      else TRANSFER_RATE),
     }
     if stamp:
         out['stamp'] = round(float(stamp) / amount, 8)
     return out
+
+
+def rate_of(commission, regulatory, amount, incl):
+    """账单上那两行折成佣金率。incl=True 时(佣金+规费)才是 App 上的那个率。"""
+    return ((commission + regulatory) / amount) if incl else (commission / amount)
 
 
 def _lake(root=None):

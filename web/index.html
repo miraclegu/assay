@@ -681,6 +681,23 @@ function openSettings(aid, a, ro){
   const F=Object.assign({}, FB, (LVO&&LVO.fee_default)||{},
                         (LVO&&LVO.fee_effective)||{});
   const H=(LVO&&LVO.fee_history)||[];
+  /* 过户费另收范围的选项表【由服务端给】——
+     前端抄过一次费率默认值，抄漏一个键就读成 undefined。 */
+  const TEO=(LVO&&LVO.transfer_extra_opts)||{both:'沪深都另收'};
+  /* ★ 沪深不同价时【两个数都要显示】。银河这档就是沪 万0.96 / 深 万0.86 ——
+     只显示一个数（哪怕标了是"较高的那个"）会让另一个市场的成交对不上账，
+     而对不上的时候人第一反应是"系统算错了"。 */
+  const frRate=(rt,k)=>{
+    const bm=rt&&rt.by_market;
+    if(!bm||rt.same) return '万'+(((rt||{})[k]||0)*1e4).toFixed(2);
+    return '沪 万'+((bm.XSHG[k]||0)*1e4).toFixed(2)
+         + ' / 深 万'+((bm.XSHE[k]||0)*1e4).toFixed(2);
+  };
+  const frFee=(rt,k)=>{
+    const bm=rt&&rt.by_market;
+    if(!bm||rt.same) return num((rt||{})[k],2)+' 元';
+    return '沪 '+num(bm.XSHG[k],2)+' / 深 '+num(bm.XSHE[k],2)+' 元';
+  };
   modal(`<div class="lvhead" style="margin-bottom:10px">
       <h2>账户设置</h2><span class="lvtag">id ${esc(a.id)}</span>
       <span style="flex:1"></span><button class="btn" id="mclose">关闭</button></div>
@@ -711,7 +728,9 @@ function openSettings(aid, a, ro){
         <button class="btn" id="fadd" ${ro?'disabled':''}
           style="float:right;margin-top:-3px">+ 新增费率</button></h3>
       ${H.length?`<table class="lvt lvfr">
-        <tr><th>生效期间</th><th>方式</th><th>买入总费率</th><th>卖出总费率</th><th></th></tr>
+        <tr><th>生效期间</th><th>方式</th>
+          <th>买入总费率<div class="lvwhy">10 万一笔</div></th>
+          <th>卖出总费率<div class="lvwhy">10 万一笔</div></th><th></th></tr>
         ${H.slice().reverse().map((r,i)=>{
           const m=r.model||{}, rt=r.rates||{};
           /* ★ 表里显示【总费率】而不是佣金率 —— 佣金只是其中一项，
@@ -726,8 +745,8 @@ function openSettings(aid, a, ro){
               nt?'<div class="lvwhy">'+esc(nt.length>52?nt.slice(0,52)+'…':nt)+'</div>':
                  '<div class="lvwhy">（没写来源）</div>'}</td>
             <td>${m.mode==='flat'?'总费率':'按项'}</td>
-            <td><b>万${((rt.buy_rate||0)*1e4).toFixed(2)}</b></td>
-            <td><b>万${((rt.sell_rate||0)*1e4).toFixed(2)}</b></td>
+            <td><b>${frRate(rt,'buy_rate')}</b></td>
+            <td><b>${frRate(rt,'sell_rate')}</b></td>
             <td class="lvwhy">▸ 明细</td></tr>
           <tr class="frbody" data-i="${i}" style="display:none"><td colspan="5">
             <!-- 竖排三列：费用名称 / 费率 / 说明 —— 一眼从上往下扫完，
@@ -750,17 +769,32 @@ function openSettings(aid, a, ro){
                      ? '已含在上面的佣金里（本档填 0）'
                      : '<b>法定</b>：证管费万0.2（证监会）+ 经手费万0.341（交易所），双边'],
                   ['过户费', '万'+((m.transfer||0)*1e4).toFixed(3),
-                   '<b>法定</b>：中登，沪深都收，双边'],
+                   '<b>法定</b>：中登，沪深都收、双边。此档口径：<b>'
+                     + (TEO[m.transfer_extra||'both']||m.transfer_extra) + '</b>'
+                     + (m.transfer_extra==='xshg'
+                        ? '（所以沪市那笔比深市多付万'+((m.transfer||0)*1e4).toFixed(2)+'）':'')],
                   ['印花税', (m.stamp==='auto'?'万5':'万'+((m.stamp||0)*1e4).toFixed(3)),
                    '<b>法定，仅卖出</b>'+(m.stamp==='auto'
                      ? '。<code>auto</code> = 按日期分段：2023-08-28 起万5，之前千1'
                      : '（此档写死，不随日期分段）')],
                   ['单笔最低佣金', (m.min_commission||0)+' 元',
                    (m.min_commission?'佣金不足这个数时按它收':'<b>没有最低</b>')],
-                  ['— 买入合计', '万'+((rt.buy_rate||0)*1e4).toFixed(2),
-                   '净佣金 + 规费 + 过户费。10 万一笔 '+num(rt.buy_fee,2)+' 元'],
-                  ['— 卖出合计', '万'+((rt.sell_rate||0)*1e4).toFixed(2),
-                   '买入合计 + 印花税。10 万一笔 '+num(rt.sell_fee,2)+' 元'],
+                  /* ★ 有最低佣金时，"这个账户的费率"根本不是一个数：
+                     分界点以下实付是常数（折成率反而更高），以上才是那个费率。
+                     只显示 10 万一笔的总费率会让小额单看着比实际便宜。 */
+                  ...(m.min_commission&&m.commission ? [[
+                    '最低的分界点', num(Math.round(m.min_commission/m.commission),0)+' 元',
+                    '<b>成交额低于这个数，最低佣金就会顶上来</b>：实付 = '
+                      + (m.min_commission||0) + ' 元'
+                      + (m.transfer_extra==='xshg'
+                         ? '（沪市再加过户费万'+((m.transfer||0)*1e4).toFixed(2)+'，深市不加）'
+                         : (m.transfer? '＋过户费万'+((m.transfer||0)*1e4).toFixed(2):''))
+                      + '，折成费率会比上面那个<b>高</b>'
+                  ]] : []),
+                  ['— 买入合计', frRate(rt,'buy_rate'),
+                   '净佣金 + 规费 + 过户费。10 万一笔 '+frFee(rt,'buy_fee')],
+                  ['— 卖出合计', frRate(rt,'sell_rate'),
+                   '买入合计 + 印花税。10 万一笔 '+frFee(rt,'sell_fee')],
                 ]).map(x=>`<tr><td>${x[0]}</td><td class="frv">${x[1]}</td>
                   <td class="lvwhy">${x[2]}</td></tr>`).join('')}
             </table>
@@ -802,6 +836,13 @@ function openSettings(aid, a, ro){
         <div class="frow"><label>过户费</label>
           <input id="c3" size="12" class="ci" placeholder="0.66">
           <span class="lvwhy" id="r3">元 → 法定：中登，沪深都收</span></div>
+        <div class="frow"><label>这笔是哪个市场</label>
+          <select id="cmk" class="ci">
+            <option value="600000.XSHG">沪市（60/68 开头）</option>
+            <option value="000001.XSHE">深市（00/30 开头）</option>
+          </select>
+          <span class="lvwhy">复算这张账单要用 —— 过户费按下面那项的口径
+            可能只有一个市场另收</span></div>
         <div class="frow"><label>印花税</label>
           <input id="c4" size="12" class="ci" placeholder="留空 = 法定万5">
           <span class="lvwhy" id="r4">元 → <b>仅卖出</b>。买入的账单上没有这行，
@@ -851,6 +892,14 @@ function openSettings(aid, a, ro){
           <span class="lvwhy">填了总费率就<b>不再拆项、也不另加印花税</b></span></div>
       </div>
 
+      <div class="frow" id="fterow"><label>过户费另收范围</label>
+        <select id="fte">${Object.keys(TEO).map(k=>
+          `<option value="${k}" ${(F.transfer_extra||'both')===k?'selected':''}
+            >${esc(TEO[k])}</option>`).join('')}</select>
+        <span class="lvwhy">★ <b>分市场</b>：券商的"万X 最低5元"常是个打包价，
+          可能已经含了过户费。实测银河 —— 深市的过户费在打包价里、沪市另收，
+          所以同一账户 沪 万0.96 / 深 万0.86。<b>一张账单定不出这一项</b>，
+          要沪深各一张对着看</span></div>
       <div class="frow" style="margin-top:10px"><label>备注</label>
         <input id="fnote" placeholder="为什么改（如：换券商 / 谈到万0.5 / 上一档填错了）"
                style="flex:1;min-width:200px"></div>
@@ -886,10 +935,48 @@ function openSettings(aid, a, ro){
        ★ 刻意去掉了原来的"这个率含不含规费"开关 —— 它是最容易填错的一处：
          同一个万0.8，含规费口径算 5.95、另收算 9.53，差 60%。
          现在改成【规费自己一行】：填 0 就表示已含在佣金里，少一个概念。 */
+    const bill=()=>{
+      const g=id=>parseFloat($('#'+id).value)||0;
+      const amt=g('c0');
+      const put=(id,v)=>{ const e=$('#'+id); if(!e) return;
+        e.dataset.base=e.dataset.base||e.innerHTML;
+        e.innerHTML=(amt>0?'= 万'+(v/amt*1e4).toFixed(3)+'　':'')+e.dataset.base; };
+      put('r1',g('c1')); put('r2',g('c2')); put('r3',g('c3')); put('r4',g('c4'));
+      /* ★ 这张账单的过户费到底算不算进合计，取决于「过户费另收范围」+
+         这笔是哪个市场。银河的深市账单里，过户费是【含在佣金里】的，
+         照单相加会把它算两次（5.00 的账单显示成 5.33）。 */
+      const te=($('#fte')||{}).value||'both';
+      const mk=(($('#cmk')||{}).value||'').split('.')[1]||'XSHG';
+      const trExtra=(te==='both')||(te==='xshg'&&mk!=='XSHE');
+      const buy=g('c1')+g('c2')+(trExtra?g('c3'):0);
+      const sell=buy+(g('c4')||(amt*0.0005));
+      /* 🔴 佣金那行正好等于最低佣金 -> 这笔被最低顶住了，反推不出真实费率。
+         实测银河：南都物业 37,455 佣金5.00 反推万1.34，而真值万0.86（大唐
+         106,856 佣金9.19）—— 差 56%，两个都是"能算出来的数"。 */
+      const mc=g('c5'), pinned=mc>0&&Math.abs(g('c1')+g('c2')-mc)<0.005;
+      $('#bsum').innerHTML=!(amt>0)
+        ? '填上面几格，这里会显示合计与折算出的总费率'
+        : (pinned
+            ? '<b style="color:var(--bad)">⚠ 这笔的佣金正好等于最低 '+mc.toFixed(2)
+              +' 元 —— 它被【最低】顶住了，除出来的 万'
+              +((g('c1')+g('c2'))/amt*1e4).toFixed(2)+' 不是真实费率。</b><br>'
+              +'请换一笔【金额更大】的账单：要大于约 '
+              +num(Math.round(mc/0.000086),0)+' 元（按万0.86 估）最低才不 binding。<br>'
+            : '')
+          + '账单这一笔（买入口径）合计 <b>'+buy.toFixed(2)+'</b> 元 = 万'
+          +(buy/amt*1e4).toFixed(2)
+          +(trExtra?'':'（过户费按当前口径<b>已含在佣金里</b>，没有重复计入）')
+          +'；卖出再加印花税 → 万'+(sell/amt*1e4).toFixed(2)
+          +'<br>保存后系统复算这一笔，若与账单差 0.01 是券商逐项截尾，正常';
+    };
     const syncWay=()=>{ const w=$('#fway').value;
       $('#fbill').style.display=w==='bill'?'':'none';
       $('#frate').style.display=w==='rate'?'':'none';
-      $('#fflat').style.display=w==='flat'?'':'none'; };
+      $('#fflat').style.display=w==='flat'?'':'none';
+      /* 总费率模式里没有"过户费"这个概念（总费率里就该已含），
+         留着这一项只会让人以为还要另配 */
+      $('#fterow').style.display=w==='flat'?'none':'';
+      bill(); };
     $('#fway').onchange=syncWay; syncWay();
     $('#fadd').onclick=()=>{ const e=$('#fpanel');
       e.style.display=(e.style.display==='none'?'':'none');
@@ -904,21 +991,6 @@ function openSettings(aid, a, ro){
       b.style.display=open?'':'none';
       tr.querySelector('td:last-child').textContent=open?'▾ 收起':'▸ 明细';
     });
-    const bill=()=>{
-      const g=id=>parseFloat($('#'+id).value)||0;
-      const amt=g('c0');
-      const put=(id,v)=>{ const e=$('#'+id); if(!e) return;
-        e.dataset.base=e.dataset.base||e.innerHTML;
-        e.innerHTML=(amt>0?'= 万'+(v/amt*1e4).toFixed(3)+'　':'')+e.dataset.base; };
-      put('r1',g('c1')); put('r2',g('c2')); put('r3',g('c3')); put('r4',g('c4'));
-      const buy=g('c1')+g('c2')+g('c3');
-      const sell=buy+(g('c4')||(amt*0.0005));
-      $('#bsum').innerHTML=amt>0
-        ? '账单这一笔（买入口径）合计 <b>'+buy.toFixed(2)+'</b> 元 = 万'
-          +(buy/amt*1e4).toFixed(2)+'；卖出再加印花税 → 万'+(sell/amt*1e4).toFixed(2)
-          +'<br>保存后系统复算这一笔，若与账单差 0.01 是券商逐项截尾，正常'
-        : '填上面几格，这里会显示合计与折算出的总费率';
-    };
     document.querySelectorAll('.ci').forEach(e=>e.oninput=bill);
     bill();
     $('#ffill').onclick=()=>{
@@ -951,7 +1023,7 @@ function openSettings(aid, a, ro){
           const st=$('#c4').value.trim();
           fee={mode:'parts', commission_incl_reg:false,
                commission:g('c1')/amt, regulatory:g('c2')/amt,
-               transfer:g('c3')/amt,
+               transfer:g('c3')/amt, transfer_extra:$('#fte').value,
                stamp:(st===''?'auto':g('c4')/amt),
                min_commission:g('c5')};
         }else{
@@ -959,6 +1031,7 @@ function openSettings(aid, a, ro){
                commission:parseFloat($('#fr1').value),
                regulatory:parseFloat($('#fr6').value||'0'),
                transfer:parseFloat($('#fr3').value||'0'),
+               transfer_extra:$('#fte').value,
                min_commission:parseFloat($('#fr2').value||'0'),
                stamp:($('#fr4').value.trim()==='auto'?'auto':parseFloat($('#fr4').value))};
         }

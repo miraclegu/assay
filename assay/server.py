@@ -1047,6 +1047,9 @@ def api_live_account(q):
             'fee_effective': m.fee_model(m.get_account(aid)),
             'fee_default': dict(m.FEE_DEFAULT),
             'fee_history': m.fee_rates(aid),
+            # ★ 选项表由服务端给 —— 前端抄过一次费率默认值，抄漏一个键就
+            #   读成 undefined、保存被拒而错误藏在浮层里（见 fee_effective）
+            'transfer_extra_opts': m.TRANSFER_EXTRA,
             # 当前配置折成的总费率（按 10 万一笔算；最低佣金 binding 时会更高）
             'fee_rates': m.effective_rates(m.fee_model(m.get_account(aid))),
             'pos': m.positions_valued(aid),
@@ -1274,7 +1277,11 @@ def api_live_fee_infer(_q, body):
         n = int(b.get('shares') or 0) or 100
         full = dict(m.FEE_DEFAULT)
         full.update(mod)
-        bd = m.fee_breakdown('buy', n, amt / n, b.get('date') or '2026-01-01', full)
+        # ★ 复算要带【代码】：过户费是否另收分市场。账单是哪只票就用哪只，
+        #   没给就按沪市样板（另收，保守方向）。
+        code = (b.get('code') or '600000.XSHG').strip().upper()
+        bd = m.fee_breakdown('buy', n, amt / n,
+                             b.get('date') or '2026-01-01', full, code)
         want = round(float(b.get('commission') or 0)
                      + float(b.get('regulatory') or 0)
                      + float(b.get('transfer') or 0), 2)
@@ -1284,7 +1291,9 @@ def api_live_fee_infer(_q, body):
                        < float(mod['min_commission'] or 0))
         return {'fee': mod, 'recompute': bd['total'], 'breakdown': bd,
                 'bill_total': want, 'match': abs(bd['total'] - want) <= 0.02,
-                'incl_reg': mod['commission_incl_reg'],
+                'incl_reg': mod['commission_incl_reg'], 'code': code,
+                'market': m.market_of(code),
+                'rates': m.effective_rates(full, amt),
                 'need_small_bill': bool(mod['min_commission']) and not floor_binds}
     return _live_err(_go)
 
