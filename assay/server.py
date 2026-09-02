@@ -1246,7 +1246,8 @@ def api_live_fee_add(_q, body):
     def _go():
         m.migrate_fee(aid)          # 老数据先落成第一档，再追加
         r = m.add_fee_rate(aid, b.get('from'), b.get('fee') or {},
-                           note=b.get('note') or '')
+                           note=b.get('note') or '',
+                           supersede=bool(b.get('supersede')))
         return {'added': r, 'history': m.fee_rates(aid)}
     return _live_err(_go)
 

@@ -2259,81 +2259,99 @@ def t_live_ui():
             assert '—' not in pg.locator('#lvbody table.lvpos').inner_text(), \
                 '有持仓取不到现价 —— 估值应独立取价，不依赖当天信号'
 
-            # ---- 费率：版本化（只新增）+ 按成交日取档 + 手填优先 ----
+            # ---- 费率：照账单逐项填 + 版本化(只新增/更正) + 按成交日取档 ----
             #   2026-09-02 真实账单：66,110 元买入，佣金1.72 规费3.57 过户费0.66
-            #   合计 5.95。★ App 的"佣金费率万0.8"是【含规费】口径。
+            #   合计 5.95 = 万0.9。
+            #   ★ 刻意【去掉了】原来那个"这个率含不含规费"的开关 ——
+            #     它是最容易填错的一处：同一个万0.8，含规费口径算 5.95、
+            #     另收算 9.53，差 60%，而两种都不报错。现在规费自己一行，
+            #     填 0 就表示已含在佣金里，少一个概念。
             pg.click('#lvset')
-            pg.wait_for_selector('#ffrom', timeout=8000)
+            pg.wait_for_selector('#c0', timeout=8000)
             pg.wait_for_timeout(300)
-            # ★ 设置浮层里【一个 undefined 都不许有】。实测踩过一次：
-            #   serve.py 是旧进程（Python 模块只在启动时加载，而
-            #   web/index.html 每次请求都从磁盘读），页面去读 API 还没有的
-            #   字段，整屏渲染成 undefined 而**不报错**。
+            # 设置里一个 undefined 都不许有（旧进程/字段缺失都会露出来）
             stxt = pg.locator('.stbox').inner_text()
             assert 'undefined' not in stxt.lower(), \
-                '设置里出现了 undefined —— 某个字段取不到值：%s' \
+                '设置里出现了 undefined：%s' \
                 % [x for x in stxt.split('\n') if 'undefined' in x.lower()][:3]
             assert 'NaN' not in stxt, '设置里出现了 NaN'
-            # 每一项都要有标签，不能只靠 placeholder（空框看不出要填什么）
+            # 每一项都要有标签，不能只靠 placeholder
             labels = [x.strip() for x in
-                      pg.locator('.frow > label').all_inner_texts() if x.strip()]
-            for need in ('生效日', '计费方式', '佣金费率', '单笔最低佣金', '备注'):
-                assert need in labels, '费率表单缺「%s」标签：%s' % (need, labels)
-            pg.fill('#fi1', '66110')
-            pg.fill('#fi2', '1.72')
-            pg.fill('#fi3', '3.57')
-            pg.fill('#fi4', '0.66')
-            pg.click('#finfer')
-            pg.wait_for_timeout(1000)
-            fi = pg.locator('#fimsg').inner_text()
-            assert '✅' in fi and '5.95' in fi, '反推没对上账单：%s' % fi
-            assert abs(float(pg.input_value('#fr1')) - 0.00008) < 5e-7, \
-                '佣金率没回填成万0.8：%s' % pg.input_value('#fr1')
-            # ★ 断言输入框都不是 undefined —— 前端曾漏了 regulatory 一项，
-            #   保存被后端拒，而错误提示藏在浮层里，最后才在费用上暴露。
-            for fid in ('#fr1', '#fr2', '#fr3', '#fr6', '#fb1', '#fb2'):
-                v = pg.input_value(fid)
-                assert v not in ('', 'undefined', 'NaN'), \
-                    '费率输入框 %s 是 %r —— 前端默认值缺字段' % (fid, v)
+                      pg.locator('#fbill .frow > label').all_inner_texts() if x.strip()]
+            for need in ('成交金额', '佣金', '规费', '过户费', '印花税', '单笔最低佣金'):
+                assert need in labels, '账单表单缺「%s」一行：%s' % (need, labels)
+            assert pg.locator('#fr5').count() == 0, \
+                '"含不含规费"那个开关应该已经删掉 —— 它是最容易填错的一处'
+            # 照账单逐项填，边填边折成费率
+            for fid, v in (('#c0', '66110'), ('#c1', '1.72'),
+                           ('#c2', '3.57'), ('#c3', '0.66'), ('#c5', '0')):
+                pg.fill(fid, v)
+            pg.wait_for_timeout(300)
+            bs = ' '.join(pg.locator('#bsum').inner_text().split())
+            assert '5.95' in bs and '万0.90' in bs, \
+                '实时折算不对（应显示合计 5.95 = 万0.90）：%s' % bs
+            for rid, want in (('#r1', '万0.260'), ('#r2', '万0.540'),
+                              ('#r3', '万0.100')):
+                t = pg.locator(rid).inner_text()
+                assert want in t, '%s 应折成 %s，实得 %s' % (rid, want, t[:40])
             pg.fill('#ffrom', '2026-09-01')
-            pg.fill('#fnote', '开户费率')
+            pg.fill('#fnote', '照账单填')
             pg.click('#fsave')
-            pg.wait_for_timeout(1600)
+            pg.wait_for_timeout(1700)
+            aid0 = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            bd0 = lv.fee_breakdown('buy', 11000, 6.010, '2026-09-02',
+                                   lv.fee_model_at(aid0, '2026-09-02'))
+            assert abs(bd0['total'] - 5.95) < 0.011, \
+                '照账单填保存后复算应得 5.95，实得 %.2f' % bd0['total']
+            assert abs(bd0['commission'] - 1.72) < 0.011 and \
+                abs(bd0['regulatory'] - 3.57) < 0.011 and \
+                abs(bd0['transfer'] - 0.66) < 0.011, \
+                '逐项应各自对上账单：%s' % bd0
 
-            # 再新增一档（更晚生效）—— 上一档应自动在前一天结束
+            # 同一生效日：不勾「更正」要被拒，勾上则把上一档标为已作废
             pg.click('#lvset')
-            pg.wait_for_selector('#ffrom', timeout=8000)
-            pg.fill('#ffrom', '2026-10-01')
-            pg.select_option('#fmode', 'flat')
+            pg.wait_for_selector('#c0', timeout=8000)
+            pg.select_option('#fway', 'rate')
             pg.wait_for_timeout(200)
-            assert pg.locator('#fflat').is_visible(), '切到 flat 应显示总费率块'
-            assert not pg.locator('#fparts').is_visible(), 'parts 块应隐藏'
+            assert pg.locator('#frate').is_visible() and \
+                not pg.locator('#fbill').is_visible(), '切换填法没生效'
+            pg.fill('#ffrom', '2026-09-01')
+            pg.fill('#fr1', '0.0000260')
+            pg.click('#fsave')
+            pg.wait_for_timeout(900)
+            assert '生效日' in pg.locator('#emsg2').inner_text(), \
+                '同日不勾更正应被拒：%s' % pg.locator('#emsg2').inner_text()
+            pg.check('#fsup')
+            pg.fill('#fnote', '更正：直接填费率')
+            pg.click('#fsave')
+            pg.wait_for_timeout(1700)
+            pg.click('#lvset')
+            pg.wait_for_selector('#c0', timeout=8000)
+            hh = ' '.join(' '.join(
+                pg.locator('.stbox table.lvt tr').all_inner_texts()).split())
+            assert '已作废' in hh, '被更正的那档应标「已作废」并仍列在历史里：%s' % hh[:150]
+
+            # 再新增一档更晚生效的（总费率方式），上一档应在前一天结束
+            pg.select_option('#fway', 'flat')
+            pg.wait_for_timeout(200)
+            pg.fill('#ffrom', '2026-10-01')
             pg.fill('#fb1', '0.00006')
             pg.fill('#fb2', '0.00056')
             pg.fill('#fb3', '0')
+            pg.uncheck('#fsup')
             pg.fill('#fnote', '换券商')
             pg.click('#fsave')
-            pg.wait_for_timeout(1600)
+            pg.wait_for_timeout(1700)
             pg.click('#lvset')
-            pg.wait_for_selector('#ffrom', timeout=8000)
-            hrows = pg.locator('.stbox table.lvt tr').all_inner_texts()
-            body_h = ' '.join(' '.join(hrows).split())
-            assert '2026-09-30' in body_h, \
-                '上一档应显示结束于 2026-09-30（下一档生效日减一天）：%s' % body_h
-            assert '至今' in body_h, '最新一档应显示"至今"'
-            # 生效日倒退必须被拒（只能追加）
-            pg.fill('#ffrom', '2026-09-15')
-            pg.click('#fsave')
-            pg.wait_for_timeout(900)
-            # ★ 费率块的提示在 #emsg2（自己的消息位），不是账户信息那块的
-            #   #emsg —— 提示放错位置比没提示更糟，用户会以为保存成功了。
-            em2 = pg.locator('#emsg2').inner_text()
-            assert '生效日' in em2, '生效日倒退应被拒：%s' % em2
+            pg.wait_for_selector('#c0', timeout=8000)
+            hh2 = ' '.join(' '.join(
+                pg.locator('.stbox table.lvt tr').all_inner_texts()).split())
+            assert '2026-09-30' in hh2, \
+                '上一档应显示结束于 2026-09-30：%s' % hh2[:150]
             pg.locator('#mclose').click()
             pg.wait_for_timeout(400)
 
-            # 按成交日取档：9 月那笔按万0.9、10 月那笔按万0.6
-            aid0 = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            # 按成交日取档：9 月按万0.9、10 月按万0.6
             for d, want in (('2026-09-10', 5.95), ('2026-10-08', 3.97)):
                 rr = lv.add_fill(aid0, d, '603889.XSHG', 'buy', 11000, 6.010)
                 assert abs(rr['fee'] - want) < 0.011, \
@@ -2413,7 +2431,8 @@ def t_live_ui():
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
-                    '费率(反推真实账单 5.95/两档版本/按成交日取档/手填优先)；'
+                    '费率(照账单逐项 5.95 逐项对上/更正标已作废/新档旧档接续/'
+                    '按成交日取档/手填优先)；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

@@ -561,7 +561,14 @@ def fee_rates(aid):
         to = None
         if i + 1 < len(rows):
             to = (_d(rows[i + 1]['from']) - datetime.timedelta(days=1)).isoformat()
-        out.append(dict(r, to=to, active=(to is None)))
+        # to < from 说明有一条【同日】的记录把它盖掉了（更正），
+        # 有效区间零长度 —— 标成已作废，页面上照样列出来。
+        dead = bool(to and _d(to) < _d(r['from']))
+        # ★ 被同日那条盖掉时，推出来的 to 会早于 from（如 09-01 ~ 08-31）——
+        #   那是"零长度有效区间"的数学结果，但显示出来像个笔误。
+        #   置 None 并靠 superseded 标记表达"从没生效过"。
+        out.append(dict(r, to=(None if dead else to),
+                        active=(to is None), superseded=dead))
     return out
 
 
@@ -591,12 +598,21 @@ def fee_model(acct):
     return _merge_fee((acct.get('fee') or {}) if isinstance(acct, dict) else {})
 
 
-def add_fee_rate(aid, from_date, model, note=''):
-    """新增一档费率。**只能追加，不能改已有的。**
+def add_fee_rate(aid, from_date, model, note='', supersede=False):
+    """新增一档费率。**只能追加，不能改写已有的记录。**
 
-    ★ 页面上不提供"修改正在使用的费率"，因为那会让已经按它算过的成交
-      变得无从解释 —— 想改就新增一档，旧的自动在前一天结束。
-      真填错了，就再新增一档把它盖掉（历史仍然留着，看得见改过）。
+    两种追加：
+      · 默认（费率变了）：生效日必须【严格晚于】上一档，上一档自动在前一天结束
+      · `supersede=True`（**上一档填错了**）：允许与上一档【同一生效日】，
+        追加一条把它盖掉。上一档的有效区间变成零长度，在历史里显示为"已作废"。
+
+    ★ 为什么用"同日追加"而不是改写那条记录：改写就没法回答"当时用的是哪档"。
+      同日追加之后，`fee_model_at` 取到的是**后写入的那条**（fee_rates 按
+      (from, ts) 排序），而错的那条仍然看得见 —— 这正是账本该有的样子。
+
+    ★ 但这条通路**只解决填错**，不解决"改历史费率"：如果已经按错的费率
+      算过成交，那些成交的费用已经落在 fills 里了。要修得去流水页
+      「冲正 + 重录」，让它按更正后的费率重算。
     """
     get_account(aid)
     try:
@@ -625,14 +641,19 @@ def add_fee_rate(aid, from_date, model, note=''):
     if 'commission_incl_reg' in m:
         m['commission_incl_reg'] = bool(m['commission_incl_reg'])
     cur = fee_rates(aid)
-    if cur and _d(cur[-1]['from']) >= d:
-        raise LiveError(
-            '生效日必须晚于上一档（%s）。费率是按时间线追加的：'
-            '新的一档生效，上一档就在前一天结束。\n'
-            '要把上一档整个作废，请新增一档更晚生效的把它盖掉 —— '
-            '历史仍然留着，看得见改过。' % cur[-1]['from'])
+    if cur:
+        last = _d(cur[-1]['from'])
+        if d < last or (d == last and not supersede):
+            raise LiveError(
+                '生效日必须晚于上一档（%s）。费率是按时间线追加的：'
+                '新的一档生效，上一档就在前一天结束。\n'
+                '如果是【上一档填错了】，勾上「更正上一档」——'
+                '那会用同一个生效日追加一条把它盖掉，错的那条仍然看得见。'
+                % cur[-1]['from'])
     rec = {'ts': _now(), 'uid': _uid(), 'from': d.isoformat(),
            'fee': m, 'note': note or ''}
+    if supersede:
+        rec['supersede'] = True
     _append_jsonl(os.path.join(acct_dir(aid), 'fee_rates.jsonl'), rec)
     return dict(rec, to=None, active=True)
 

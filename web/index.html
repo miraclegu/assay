@@ -708,7 +708,9 @@ function openSettings(aid, a, ro){
               +(m.commission_incl_reg?'(含规费)':'(净)')
               +(m.min_commission?'，最低 '+m.min_commission:'，无最低');
           return `<tr class="${r.active?'':'lvrev'}">
-            <td>${esc(r.from)} ~ ${r.to?esc(r.to):'<b>至今</b>'}</td>
+            <td>${esc(r.from)} ${r.superseded
+              ?'<b style="color:var(--up)">已作废（从未生效）</b>'
+              :'~ '+(r.to?esc(r.to):'<b>至今</b>')}</td>
             <td>${m.mode==='flat'?'总费率':'按项'}</td>
             <td>${esc(desc)}</td>
             <td class="lvwhy">${esc(r.note||'')}</td></tr>`;}).join('')}</table>`
@@ -725,80 +727,93 @@ function openSettings(aid, a, ro){
       <div class="frow"><label>生效日</label>
         <input id="ffrom" size="12" value="${new Date().toISOString().slice(0,10)}">
         <span class="lvwhy">这一档从哪天开始算</span></div>
-      <div class="frow"><label>计费方式</label>
-        <select id="fmode">
-          <option value="flat" ${F.mode==='flat'?'selected':''}>直接填总费率（简单，填了就按它算）</option>
-          <option value="parts" ${F.mode==='flat'?'':'selected'}>按项算（佣金 + 法定规费/过户费/印花税）</option>
-        </select></div>
+      <div class="frow"><label>怎么填</label>
+        <select id="fway">
+          <option value="bill">照一张真实账单填（推荐）</option>
+          <option value="rate">直接填各项费率</option>
+          <option value="flat">只填买卖总费率</option>
+        </select>
+        <span class="lvwhy">前两种最后存的是同一套【逐项费率】；
+          总费率是"不想拆项"时用的</span></div>
 
-      <div id="fflat" style="${F.mode==='flat'?'':'display:none'}">
-        <div class="frow"><label>买入总费率</label>
-          <input id="fb1" size="12" value="${F.buy_rate}">
-          <span class="lvwhy">= 万${(F.buy_rate*1e4).toFixed(2)}。你的账户实测 <b>0.00009</b>（万0.9）</span></div>
-        <div class="frow"><label>卖出总费率</label>
-          <input id="fb2" size="12" value="${F.sell_rate}">
-          <span class="lvwhy">= 万${(F.sell_rate*1e4).toFixed(2)}。<b>要把印花税万5 算进去</b> ——
-            你的账户 <b>0.00059</b>（万0.9 + 万5）</span></div>
-        <div class="frow"><label>单笔最低</label>
-          <input id="fb3" size="12" value="${F.flat_min}">
-          <span class="lvwhy">元。<b>0 = 没有最低</b>；你的账户是 0（净佣金 1.72 也没被抬到 5）</span></div>
-        <div class="frow"><label></label>
-          <button class="btn" id="ffill">按当前拆项填入</button>
-          <span class="lvwhy">把「按项算」折出来的总费率填进上面两格</span></div>
-        <div class="lvwhy" style="margin:4px 0 10px">
-          填了总费率就<b>不再拆项、也不另加印花税</b>（卖出费率里就该已含）。<br>
-          注意：<b>录入成交时直接填费用金额，永远优先于这里</b> —— 三态是
-          留空 = 按费率算 / 填值 = 用填的 / 填 0 = 真的没有费用。
-        </div>
+      <!-- ① 照账单填：每一项对着券商账单抄一遍，实时折成费率 -->
+      <div id="fbill">
+        <div class="frow"><label>成交金额</label>
+          <input id="c0" size="12" class="ci" placeholder="66110">
+          <span class="lvwhy">元。这张账单那一笔的成交金额</span></div>
+        <div class="frow"><label>佣金</label>
+          <input id="c1" size="12" class="ci" placeholder="1.72">
+          <span class="lvwhy" id="r1">元 → 折成费率</span></div>
+        <div class="frow"><label>规费</label>
+          <input id="c2" size="12" class="ci" placeholder="3.57">
+          <span class="lvwhy" id="r2">元 → 法定：证管费万0.2 + 经手费万0.341。
+            <b>账单上没有这一行就填 0</b>（说明已并进佣金里）</span></div>
+        <div class="frow"><label>过户费</label>
+          <input id="c3" size="12" class="ci" placeholder="0.66">
+          <span class="lvwhy" id="r3">元 → 法定：中登，沪深都收</span></div>
+        <div class="frow"><label>印花税</label>
+          <input id="c4" size="12" class="ci" placeholder="留空 = 法定万5">
+          <span class="lvwhy" id="r4">元 → <b>仅卖出</b>。买入的账单上没有这行，
+            留空即按法定万5（2023-08-28 起；之前是千1）</span></div>
+        <div class="frow"><label>单笔最低佣金</label>
+          <input id="c5" size="12" class="ci" value="0">
+          <span class="lvwhy">元。<b>0 = 没有最低</b>。
+            账单上佣金若被抬到某个整数（常见 5 元），填那个数</span></div>
+        <div class="frow"><label></label><span class="lvwhy" id="bsum">
+          填上面几格，这里会显示合计与折算出的总费率</span></div>
       </div>
 
-      <div id="fparts" style="${F.mode==='flat'?'display:none':''}">
-        <div class="frow"><label>佣金费率</label>
+      <!-- ② 直接填费率：知道自己费率的人用 -->
+      <div id="frate" style="display:none">
+        <div class="frow"><label>净佣金率</label>
           <input id="fr1" size="12" value="${F.commission}">
-          <span class="lvwhy">= 万${(F.commission*1e4).toFixed(3)}。<b>照券商 App 上那个数填</b>，
-            如万0.8 就填 <code>0.00008</code></span></div>
-        <div class="frow"><label>这个率的口径</label>
-          <select id="fr5">
-            <option value="1" ${F.commission_incl_reg?'selected':''}>已含规费（App 上多是这种）</option>
-            <option value="0" ${F.commission_incl_reg?'':'selected'}>净佣金，规费另收</option>
-          </select>
-          <span class="lvwhy"><b>必须问清</b>：两家都说"万2.5 最低5元"，5 万成交
-            一家付 13.00、一家付 15.71</span></div>
+          <span class="lvwhy">= 万${(F.commission*1e4).toFixed(3)}。
+            <b>只填券商那部分</b>，不含规费</span></div>
+        <div class="frow"><label>规费率</label>
+          <input id="fr6" size="12" value="${F.commission_incl_reg?0:F.regulatory}">
+          <span class="lvwhy">= 万${((F.commission_incl_reg?0:F.regulatory)*1e4).toFixed(3)}。
+            法定万0.541。<b>填 0 = 已经含在上面的佣金率里</b></span></div>
+        <div class="frow"><label>过户费率</label>
+          <input id="fr3" size="12" value="${F.transfer}">
+          <span class="lvwhy">= 万${(F.transfer*1e4).toFixed(2)}。法定万0.1</span></div>
+        <div class="frow"><label>卖出印花税</label>
+          <input id="fr4" size="12" value="${esc(String(F.stamp))}">
+          <span class="lvwhy"><code>auto</code> = 按日期分段（万5，仅卖出）；
+            与回测引擎共用一份实现</span></div>
         <div class="frow"><label>单笔最低佣金</label>
           <input id="fr2" size="12" value="${F.min_commission}">
           <span class="lvwhy">元。<b>0 = 没有最低</b></span></div>
-        <div class="lvwhy" style="margin:4px 0 8px">
-          怎么判口径：拿一笔<b>小额</b>成交（金额 &lt; 2 万，最低会 binding），
-          看账单佣金那行是 <code>5.00</code> 且规费另列（= 净佣金口径），
-          还是 <code>佣金+规费 = 5.00</code>（= 已含规费）。大额单测不出来。
-        </div>
-        <details>
-          <summary class="lvwhy" style="cursor:pointer">法定费率（所有人一样，一般不用改）</summary>
-          <div class="frow" style="margin-top:6px"><label>规费率</label>
-            <input id="fr6" size="12" value="${F.regulatory}">
-            <span class="lvwhy">= 万${(F.regulatory*1e4).toFixed(3)}
-              = 证管费万0.2（证监会）+ 经手费万0.341（交易所），双边</span></div>
-          <div class="frow"><label>过户费率</label>
-            <input id="fr3" size="12" value="${F.transfer}">
-            <span class="lvwhy">= 万${(F.transfer*1e4).toFixed(2)}（中登，沪深都收）</span></div>
-          <div class="frow"><label>卖出印花税</label>
-            <input id="fr4" size="12" value="${esc(String(F.stamp))}">
-            <span class="lvwhy"><code>auto</code> = 按日期分段（2023-08-28 起千1 减半为万5），
-              <b>仅卖出</b>；与回测引擎共用一份实现</span></div>
-        </details>
-        <div class="frow" style="margin-top:10px"><label>从账单反推</label>
-          <input id="fi1" size="9" placeholder="成交金额">
-          <input id="fi2" size="7" placeholder="佣金">
-          <input id="fi3" size="7" placeholder="规费">
-          <input id="fi4" size="7" placeholder="过户费">
-          <button class="btn" id="finfer">反推</button></div>
-        <div class="lvwhy">不确定就照券商账单填这四个数，它会算出费率并<b>当场复算这一笔</b>核对</div>
-        <div class="lvmsg" id="fimsg"></div>
       </div>
 
+      <!-- ③ 只填总费率 -->
+      <div id="fflat" style="display:none">
+        <div class="frow"><label>买入总费率</label>
+          <input id="fb1" size="12" value="${F.buy_rate}">
+          <span class="lvwhy">= 万${(F.buy_rate*1e4).toFixed(2)}</span></div>
+        <div class="frow"><label>卖出总费率</label>
+          <input id="fb2" size="12" value="${F.sell_rate}">
+          <span class="lvwhy">= 万${(F.sell_rate*1e4).toFixed(2)}。
+            <b>要把印花税万5 算进去</b></span></div>
+        <div class="frow"><label>单笔最低</label>
+          <input id="fb3" size="12" value="${F.flat_min}">
+          <span class="lvwhy">元，0 = 无</span></div>
+        <div class="frow"><label></label>
+          <button class="btn" id="ffill">按当前逐项折算填入</button>
+          <span class="lvwhy">填了总费率就<b>不再拆项、也不另加印花税</b></span></div>
+      </div>
       <div class="frow" style="margin-top:10px"><label>备注</label>
-        <input id="fnote" placeholder="为什么改（如：换券商 / 谈到万0.5）" style="flex:1;min-width:200px">
-        <button class="btn" id="fsave" ${ro?'disabled':''}>新增这一档</button></div>
+        <input id="fnote" placeholder="为什么改（如：换券商 / 谈到万0.5 / 上一档填错了）"
+               style="flex:1;min-width:200px"></div>
+      <div class="frow"><label></label>
+        <label class="lvwhy" style="flex:0 0 auto;text-align:left">
+          <input type="checkbox" id="fsup"> 更正上一档（用同一生效日把它盖掉）</label>
+        <button class="btn" id="fsave" ${ro?'disabled':''}>新增这一档</button>
+        <span class="lvwhy">不勾：生效日必须晚于上一档（费率变了）。<br>
+          勾上：允许同一生效日 —— <b>上一档填错了</b>时用。
+          错的那条仍然列在历史里、标「已作废」，因为改写账本就没法回答
+          "当时用的是哪档"。<br>
+          ⚠ 只解决填错。若已按错费率算过成交，那些费用已落在流水里 ——
+          要去流水页「冲正 + 重录」让它重算。</span></div>
       <div class="lvmsg" id="emsg2"></div>
       <div class="lvwhy">id <code>${esc(a.id)}</code> 不可改 —— 它决定 live/&lt;id&gt;/
         目录名，改了等于换账户、流水与版本历史全断。<br>
@@ -817,10 +832,32 @@ function openSettings(aid, a, ro){
         close(); showLive(aid);
       }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
     };
-    const syncMode=()=>{ const fl=$('#fmode').value==='flat';
-      $('#fflat').style.display=fl?'':'none';
-      $('#fparts').style.display=fl?'none':''; };
-    $('#fmode').onchange=syncMode;
+    /* 三种填法都产出【同一套逐项费率】（总费率那种除外）。
+       ★ 刻意去掉了原来的"这个率含不含规费"开关 —— 它是最容易填错的一处：
+         同一个万0.8，含规费口径算 5.95、另收算 9.53，差 60%。
+         现在改成【规费自己一行】：填 0 就表示已含在佣金里，少一个概念。 */
+    const syncWay=()=>{ const w=$('#fway').value;
+      $('#fbill').style.display=w==='bill'?'':'none';
+      $('#frate').style.display=w==='rate'?'':'none';
+      $('#fflat').style.display=w==='flat'?'':'none'; };
+    $('#fway').onchange=syncWay; syncWay();
+    const bill=()=>{
+      const g=id=>parseFloat($('#'+id).value)||0;
+      const amt=g('c0');
+      const put=(id,v)=>{ const e=$('#'+id); if(!e) return;
+        e.dataset.base=e.dataset.base||e.innerHTML;
+        e.innerHTML=(amt>0?'= 万'+(v/amt*1e4).toFixed(3)+'　':'')+e.dataset.base; };
+      put('r1',g('c1')); put('r2',g('c2')); put('r3',g('c3')); put('r4',g('c4'));
+      const buy=g('c1')+g('c2')+g('c3');
+      const sell=buy+(g('c4')||(amt*0.0005));
+      $('#bsum').innerHTML=amt>0
+        ? '账单这一笔（买入口径）合计 <b>'+buy.toFixed(2)+'</b> 元 = 万'
+          +(buy/amt*1e4).toFixed(2)+'；卖出再加印花税 → 万'+(sell/amt*1e4).toFixed(2)
+          +'<br>保存后系统复算这一笔，若与账单差 0.01 是券商逐项截尾，正常'
+        : '填上面几格，这里会显示合计与折算出的总费率';
+    };
+    document.querySelectorAll('.ci').forEach(e=>e.oninput=bill);
+    bill();
     $('#ffill').onclick=()=>{
       /* 把 parts 折出来的总费率填进 flat —— 服务端算好给的（fee_rates），
          前端不再自己拆一遍。 */
@@ -835,49 +872,46 @@ function openSettings(aid, a, ro){
     $('#fsave').onclick=async()=>{
       const m=$('#emsg2');
       try{
+        const w=$('#fway').value;
+        let fee;
+        if(w==='flat'){
+          fee={mode:'flat', buy_rate:parseFloat($('#fb1').value),
+               sell_rate:parseFloat($('#fb2').value),
+               flat_min:parseFloat($('#fb3').value||'0')};
+        }else if(w==='bill'){
+          /* 照账单填：把各项金额除以成交金额得到费率。
+             ★ commission_incl_reg 永远写 false —— 规费自己一行，
+               填 0 就表示"已含在佣金里"。不再有那个开关。 */
+          const g=id=>parseFloat($('#'+id).value)||0;
+          const amt=g('c0');
+          if(!(amt>0)) throw new Error('请填这张账单那一笔的成交金额');
+          const st=$('#c4').value.trim();
+          fee={mode:'parts', commission_incl_reg:false,
+               commission:g('c1')/amt, regulatory:g('c2')/amt,
+               transfer:g('c3')/amt,
+               stamp:(st===''?'auto':g('c4')/amt),
+               min_commission:g('c5')};
+        }else{
+          fee={mode:'parts', commission_incl_reg:false,
+               commission:parseFloat($('#fr1').value),
+               regulatory:parseFloat($('#fr6').value||'0'),
+               transfer:parseFloat($('#fr3').value||'0'),
+               min_commission:parseFloat($('#fr2').value||'0'),
+               stamp:($('#fr4').value.trim()==='auto'?'auto':parseFloat($('#fr4').value))};
+        }
         await post('/api/live/fee_rate',{id:aid,
-          from:$('#ffrom').value.trim(), note:$('#fnote').value, fee:{
-          mode:$('#fmode').value,
-          buy_rate:parseFloat($('#fb1').value),
-          sell_rate:parseFloat($('#fb2').value),
-          flat_min:parseFloat($('#fb3').value||'0'),
-          commission:parseFloat($('#fr1').value),
-          min_commission:parseFloat($('#fr2').value||'0'),
-          commission_incl_reg:($('#fr5').value==='1'),
-          regulatory:parseFloat($('#fr6').value||'0'),
-          transfer:parseFloat($('#fr3').value||'0'),
-          stamp:($('#fr4').value.trim()==='auto'?'auto':parseFloat($('#fr4').value))}});
+          from:$('#ffrom').value.trim(), note:$('#fnote').value,
+          supersede:$('#fsup').checked, fee:fee});
         m.className='lvmsg ok';
         m.textContent='已新增一档 —— 上一档在前一天结束；'
           +'成交费用按【成交日】取对应那一档';
         setTimeout(()=>{ close(); showLive(aid); }, 900);
       }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
     };
-    $('#finfer').onclick=async()=>{
-      const m=$('#fimsg');
-      try{
-        const r=await post('/api/live/fee_infer',{
-          amount:parseFloat($('#fi1').value), commission:parseFloat($('#fi2').value||'0'),
-          regulatory:parseFloat($('#fi3').value||'0'), transfer:parseFloat($('#fi4').value||'0')});
-        $('#fr1').value=r.fee.commission; $('#fr3').value=r.fee.transfer;
-        $('#fr2').value=r.fee.min_commission;
-        $('#fr5').value=r.incl_reg?'1':'0';
-        m.className='lvmsg '+(r.match?'ok':'bad');
-        const bd=r.breakdown||{};
-        m.innerHTML=(r.match?'✅ ':'⚠ ')
-          +'反推：佣金率 万'+(r.fee.commission*1e4).toFixed(3)
-          +'（'+(r.incl_reg?'含规费':'净佣金')+'）+ 过户费 万'
-          +(r.fee.transfer*1e4).toFixed(3)
-          +'；复算 = '+r.recompute.toFixed(2)+'（佣金 '+(bd.commission||0).toFixed(2)
-          +' + 规费 '+(bd.regulatory||0).toFixed(2)+' + 过户费 '+(bd.transfer||0).toFixed(2)+'）'
-          +'，账单合计 '+r.bill_total.toFixed(2)
-          +(r.match?'　点「保存费率」生效':'　差得多，检查是不是漏了某一项')
-          +(r.need_small_bill?'<br>⚠ 你填了最低佣金，但这笔金额没让它 binding —— '
-            +'「最低是否含规费」定不出来。再拿一笔<b>小额</b>成交（金额 &lt; 2 万）'
-            +'反推一次：账单佣金那行是 5.00 且规费另列 = 另收口径；'
-            +'佣金+规费 = 5.00 = 含规费口径。':'');
-      }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
-    };
+    /* 原来的「反推」按钮已被【照账单填】取代 —— 那本来就是同一件事
+       （拿账单各项金额除以成交金额），只是绕了一圈：先反推、再回填到
+       "佣金率 + 口径开关"两个格子里，而口径正是最容易填错的地方。
+       现在直接对着账单逐项抄，费率是实时算出来的，没有中间环节。 */
     $('#earch').onclick=async()=>{
       try{ await post('/api/live/save',{id:aid, archived:!a.archived});
         close(); showLive(null);
