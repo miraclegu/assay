@@ -232,7 +232,12 @@ def upsert_account(aid, name=None, init_cash=None, broker_note=None,
         if bad:
             raise LiveError('费率字段只能是 %s，收到 %s'
                             % ('/'.join(FEE_FIELDS), bad))
-        for k in ('commission', 'min_commission', 'transfer'):
+        if 'mode' in fee and fee['mode'] not in FEE_MODES:
+            raise LiveError('mode 只能是 %s' % '/'.join(FEE_MODES))
+        if 'commission_incl_reg' in fee:
+            fee['commission_incl_reg'] = bool(fee['commission_incl_reg'])
+        for k in ('commission', 'min_commission', 'regulatory', 'transfer',
+                  'buy_rate', 'sell_rate', 'flat_min'):
             if k in fee:
                 try:
                     fee[k] = float(fee[k])
@@ -423,8 +428,10 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
     #   一年约 0.5% 的费用凭空消失）。
     if fee is None or fee == '':
         # 冲正不估费用 —— 见下面对负费用的说明。调用方应传 -原费用。
+        # ★ 按【成交日】取费率，不是"当前费率" —— 补录三个月前那笔时，
+        #   拿今天的费率去算，数字看着很正常，只是错的。
         fee = 0.0 if reverse_of else estimate_fee(
-            side, shares, price, d, fee_model(get_account(aid)))
+            side, shares, price, d, fee_model_at(aid, d))
         fee_estimated = not reverse_of
     else:
         try:
@@ -471,36 +478,175 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
 
 
 # ============================ 费率模型 ============================
-# 账户级费率。**按券商 App 显示的口径填**，不要自己拆算 —— 拆错了不报错。
+# ★ 只有【净佣金】是可谈的，其余全是法定、所有人一样、券商只是代收代缴。
+#   所以法定部分有默认值 —— **不配也能用**，配置界面只需要问你两件事：
+#     · 佣金率是多少
+#     · 报的这个率是「净佣金」还是「已含规费」
 #
-# ★ 实测定案（2026-09-02，红利账户一笔真实成交反推）：
-#     买入 新澳股份 6.010 × 11000 = 66,110
-#       佣金   1.72  = 万0.26   （净佣金，归券商）
-#       规费   3.57  = 万0.54   （代收：证管费万0.2 + 经手费万0.341，按分截尾）
-#       过户费 0.66  = 万0.10
-#       合计   5.95  = 万0.90
-#   而 App 显示的"佣金费率万0.8"是**含规费**的口径：
-#       66110 × 万0.8 = 5.2888 ≈ 佣金 1.72 + 规费 3.57 = 5.29  ✅
-#   单看净佣金万0.26 与 App 的万0.8 对不上 —— 这就是那条口径差。
+#   法定费率（2026-09 现行）：
+#     证管费  万0.2    证监会    双边
+#     经手费  万0.341  交易所    双边
+#     ---------------- 规费合计 万0.541
+#     过户费  万0.1    中登      双边（沪深都收）
+#     印花税  万5      税务      **仅卖出**（2023-08-28 起千1减半为万5）
 #
-# ★ 这个账户【没有 5 元最低佣金】：净佣金 1.72 < 5 却没被抬到 5。
-#   而引擎默认 min_commission=5 —— 同一笔买入回测算 16.53、实际 5.95。
-#   折成年化：红利差 0.15pp、froec 差 0.33pp（比滑点小一个量级，但真实存在）。
-FEE_FIELDS = ('commission', 'min_commission', 'transfer', 'stamp')
+# ★ `commission_incl_reg`（报价是否含规费）是**必须问清的一条**，因为两家
+#   券商可能都说"万2.5 最低 5 元"，而实付差很多：
+#     含规费口径：最低 5 元【覆盖】规费   -> 5 万成交付 13.00
+#     规费另收  ：规费加在 5 元【之外】   -> 5 万成交付 15.71
+#   实测用户账户是【含规费】口径：App 说万0.8，账单是佣金1.72 + 规费3.57，
+#   而 66110 × 万0.8 = 5.2888 ≈ 5.29 —— 单看净佣金万0.26 与 App 对不上。
+#
+# ★ 怎么定"最低佣金含不含规费"：需要一笔【小额】成交（金额 < 2 万，最低会
+#   binding）。看账单佣金那行是 5.00 且规费另列（另收口径），
+#   还是 佣金+规费 = 5.00（含规费口径）。大额单测不出来。
+REG_RATE = 0.0000541        # 规费 = 证管费万0.2 + 经手费万0.341
+TRANSFER_RATE = 0.00001     # 过户费 万0.1
+
+# 两种配置方式：
+#   'parts'（默认）按项算：佣金 + 规费 + 过户费 + 印花税，法定项有默认值
+#   'flat'   直接填【买入/卖出总费率】，**不再拆项**，填多少就是多少
+# ★ flat 存在的理由：费率谈好之后，"买入万0.9 / 卖出万5.9"就是全部事实，
+#   再拆成佣金/规费/过户费只是多几个能配错的地方（含规费 vs 净佣金那条
+#   口径差就坑过一次）。想省事就用 flat。
+FEE_MODES = ('parts', 'flat')
+FEE_FIELDS = ('mode', 'buy_rate', 'sell_rate', 'flat_min',
+              'commission', 'min_commission', 'commission_incl_reg',
+              'regulatory', 'transfer', 'stamp')
+# 默认取【常见零售报价】：万2.5 + 最低 5 元 + 规费另收。
+# 刻意偏保守（估高不估低）：估低会让现金虚高，而"多出来的钱"不报错。
+# 也正好与回测默认口径同量级，便于实盘与回测对照。
 FEE_DEFAULT = {
-    'commission': 0.00008,     # 佣金费率，**含规费**（照 App 填，万0.8）
-    'min_commission': 0.0,     # 单笔最低佣金（这个账户是 0，不是常见的 5）
-    'transfer': 0.00001,       # 过户费率 万0.1（沪深双边）
-    'stamp': 'auto',           # 卖出印花税：'auto' = 按日期分段（2023-08-28 起万5）
+    'mode': 'parts',
+    # ---- flat 模式用的（默认值取常见零售口径，与 parts 默认同量级）----
+    'buy_rate': 0.00031,          # 买入总费率 ≈ 万2.5 + 规费万0.541 + 过户费万0.1
+    'sell_rate': 0.00081,         # 卖出 = 买入 + 印花税万5
+    'flat_min': 5.0,              # 单笔最低（0 = 没有最低）
+    # ---- parts 模式用的 ----
+    'commission': 0.00025,        # 佣金率（可谈）
+    'min_commission': 5.0,        # 单笔最低佣金（可谈；填 0 = 没有最低）
+    'commission_incl_reg': False,  # 上面那个率是否已含规费
+    # ---- 以下法定，一般不用配；留字段是为了政策变动时能改 ----
+    'regulatory': REG_RATE,
+    'transfer': TRANSFER_RATE,
+    'stamp': 'auto',              # 'auto' = 按日期分段（复用 broker.Cost）
 }
+# 只有这三项需要用户填，其余留空即用法定默认
+FEE_USER_FIELDS = ('commission', 'min_commission', 'commission_incl_reg')
+
+
+def _merge_fee(raw):
+    m = dict(FEE_DEFAULT)
+    m.update({k: v for k, v in (raw or {}).items() if k in FEE_FIELDS})
+    return m
+
+
+def fee_rates(aid):
+    """费率版本历史，按生效日升序，并**推导出结束日**。
+
+    ★ 与策略版本、成交流水同一个模式：**append-only**。
+      "新费率生效时原费率立刻结束"这件事【不靠改写上一条】实现 ——
+      每条只记 `from`（生效日），`to` 由下一条的 from 减一天推出来。
+      改写账本是这个模块从头到尾都在避免的事：一旦能改写就没法复盘
+      "当时用的是哪个费率"。
+
+    ★ 为什么费率必须按日期分版本：**补录一笔历史成交时，要用那笔成交
+      当时生效的费率**。换过券商/谈过费率之后，拿今天的费率去算三个月前
+      那笔，数字看着很正常，只是错的。
+    """
+    rows = sorted(_read_jsonl(os.path.join(acct_dir(aid), 'fee_rates.jsonl')),
+                  key=lambda r: (r['from'], r['ts']))
+    out = []
+    for i, r in enumerate(rows):
+        to = None
+        if i + 1 < len(rows):
+            to = (_d(rows[i + 1]['from']) - datetime.timedelta(days=1)).isoformat()
+        out.append(dict(r, to=to, active=(to is None)))
+    return out
+
+
+def fee_model_at(aid, date):
+    """`date` 那天生效的费率。没有任何配置、或早于第一条生效日 -> FEE_DEFAULT。
+
+    ★ 早于第一条时【不往前延伸】—— 那是猜。用默认值（偏保守），
+      并且这件事在页面上看得见（历史表第一行的生效日就是分界）。
+    """
+    d = _d(date)
+    hit = None
+    for r in fee_rates(aid):
+        if _d(r['from']) <= d:
+            hit = r
+        else:
+            break
+    return _merge_fee((hit or {}).get('fee'))
 
 
 def fee_model(acct):
-    """账户的费率模型；没配就用 FEE_DEFAULT。"""
-    m = dict(FEE_DEFAULT)
-    m.update({k: v for k, v in (acct.get('fee') or {}).items()
-              if k in FEE_FIELDS})
-    return m
+    """兼容入口：账户【当前】生效的费率。"""
+    aid = acct['id'] if isinstance(acct, dict) else acct
+    rows = fee_rates(aid)
+    if rows:
+        return fee_model_at(aid, datetime.date.today())
+    # 老数据：单份 acct['fee']，没有生效日
+    return _merge_fee((acct.get('fee') or {}) if isinstance(acct, dict) else {})
+
+
+def add_fee_rate(aid, from_date, model, note=''):
+    """新增一档费率。**只能追加，不能改已有的。**
+
+    ★ 页面上不提供"修改正在使用的费率"，因为那会让已经按它算过的成交
+      变得无从解释 —— 想改就新增一档，旧的自动在前一天结束。
+      真填错了，就再新增一档把它盖掉（历史仍然留着，看得见改过）。
+    """
+    get_account(aid)
+    try:
+        d = _d(from_date)
+    except Exception:                                       # noqa: BLE001
+        raise LiveError('生效日格式应为 YYYY-MM-DD，收到 %r' % from_date)
+    m = {k: v for k, v in (model or {}).items() if k in FEE_FIELDS}
+    if not m:
+        raise LiveError('没有可保存的费率字段')
+    if m.get('mode') and m['mode'] not in FEE_MODES:
+        raise LiveError('mode 只能是 %s' % '/'.join(FEE_MODES))
+    for k in ('commission', 'min_commission', 'regulatory', 'transfer',
+              'buy_rate', 'sell_rate', 'flat_min'):
+        if k in m:
+            try:
+                m[k] = float(m[k])
+            except Exception:                               # noqa: BLE001
+                raise LiveError('%s 必须是数字' % k)
+            if m[k] < 0:
+                raise LiveError('%s 不能为负' % k)
+    if 'stamp' in m and m['stamp'] != 'auto':
+        try:
+            m['stamp'] = float(m['stamp'])
+        except Exception:                                   # noqa: BLE001
+            raise LiveError('stamp 必须是数字或 "auto"')
+    if 'commission_incl_reg' in m:
+        m['commission_incl_reg'] = bool(m['commission_incl_reg'])
+    cur = fee_rates(aid)
+    if cur and _d(cur[-1]['from']) >= d:
+        raise LiveError(
+            '生效日必须晚于上一档（%s）。费率是按时间线追加的：'
+            '新的一档生效，上一档就在前一天结束。\n'
+            '要把上一档整个作废，请新增一档更晚生效的把它盖掉 —— '
+            '历史仍然留着，看得见改过。' % cur[-1]['from'])
+    rec = {'ts': _now(), 'uid': _uid(), 'from': d.isoformat(),
+           'fee': m, 'note': note or ''}
+    _append_jsonl(os.path.join(acct_dir(aid), 'fee_rates.jsonl'), rec)
+    return dict(rec, to=None, active=True)
+
+
+def migrate_fee(aid):
+    """老数据迁移：acct['fee'] 单份配置 -> 费率历史的第一条。
+
+    生效日取账户创建日 —— 那是它唯一可能生效的起点。
+    """
+    a = get_account(aid)
+    if not a.get('fee') or fee_rates(aid):
+        return None
+    d = (a.get('created') or '2000-01-01')[:10]
+    return add_fee_rate(aid, d, a['fee'], note='从单份配置迁移')
 
 
 def _stamp_rate(m, d):
@@ -510,46 +656,96 @@ def _stamp_rate(m, d):
     return float(v or 0)
 
 
-def estimate_fee(side, shares, price, trade_date, model=None):
-    """按【账户自己的费率】算费用。model 为 None 时用 FEE_DEFAULT。
+def fee_breakdown(side, shares, price, trade_date, model=None):
+    """算一笔的费用明细。
 
-        买：max(额 × 佣金率, 最低佣金) + 额 × 过户费率
-        卖：上面 + 额 × 印花税率
+    mode='flat'：`max(额 × 买/卖总费率, 最低)` —— **不拆项，填多少算多少**。
+    mode='parts'（默认）：逐项拆开，见下。
 
-    ★ 佣金率是**含规费**的（照券商 App 填）—— 券商账单会把它拆成
-      「佣金 + 规费」两行，但两行之和 = 额 × App 显示的那个率。
-      自己拆成净佣金去算，会少收规费那部分且不报错。
+        佣金部分 = max(额 × 佣金率, 最低佣金)
+                   若报价【不含】规费，再加 额 × 规费率
+        + 过户费 = 额 × 过户费率
+        + 印花税 = 额 × 印花税率（仅卖出）
 
-    ★ 印花税默认走 `broker.Cost.close_tax_at`，不在这里重写分段日期 ——
-      分段规则写两份的话，实盘现金和回测成本会在 2023-08-28 前后分叉。
-
-    返回四舍五入到分。券商是逐项截尾/进位后相加，可能差 ±0.01 ——
-    对完账单用「冲正 + 重录」填实际值即可（入账已标 fee_estimated）。
+    ★ 印花税分段规则复用 `broker.Cost.close_tax_at`，不在这里重写 ——
+      写两份的话，实盘现金与回测成本会在 2023-08-28 前后分叉。
     """
     m = model or dict(FEE_DEFAULT)
     amt = float(shares) * float(price)
-    fee = max(amt * float(m['commission']), float(m['min_commission'] or 0))
-    fee += amt * float(m.get('transfer') or 0)
-    if side == 'sell':
-        fee += amt * _stamp_rate(m, trade_date)
-    return round(fee, 2)
+    if m.get('mode') == 'flat':
+        rate = float(m['sell_rate'] if side == 'sell' else m['buy_rate'])
+        tot = max(amt * rate, float(m.get('flat_min') or 0))
+        return {'mode': 'flat', 'amount': round(amt, 2), 'rate': rate,
+                'commission': None, 'regulatory': None, 'transfer': None,
+                'stamp': None, 'total': round(tot, 2)}
+    comm = max(amt * float(m['commission']), float(m['min_commission'] or 0))
+    reg = 0.0
+    if not m.get('commission_incl_reg'):
+        reg = amt * float(m.get('regulatory') or 0)
+    trf = amt * float(m.get('transfer') or 0)
+    stamp = amt * _stamp_rate(m, trade_date) if side == 'sell' else 0.0
+    out = {'mode': 'parts', 'amount': round(amt, 2),
+           'commission': round(comm, 2),
+           'regulatory': round(reg, 2), 'transfer': round(trf, 2),
+           'stamp': round(stamp, 2)}
+    out['total'] = round(comm + reg + trf + stamp, 2)
+    return out
+
+
+def estimate_fee(side, shares, price, trade_date, model=None):
+    """一笔成交的估算费用（分）。明细见 fee_breakdown。
+
+    这是**估算**：券商是逐项截尾/进位后相加，可能差 ±0.01。
+    对完账单用「冲正 + 重录」填实际值即可（入账已标 fee_estimated）。
+    """
+    return fee_breakdown(side, shares, price, trade_date, model)['total']
+
+
+def effective_rates(model, amount=100000.0, trade_date=None):
+    """把当前配置折成【买入/卖出总费率】。
+
+    parts 模式下总费率随金额变（最低佣金 binding 时更高），所以要给金额。
+    页面用它做两件事：显示"当前 ≈ 买入万X"，以及一键把它填进 flat 模式。
+    """
+    d = trade_date or datetime.date.today().isoformat()
+    n = 100
+    px = float(amount) / n
+    b = fee_breakdown('buy', n, px, d, model)['total']
+    s_ = fee_breakdown('sell', n, px, d, model)['total']
+    return {'amount': float(amount),
+            'buy_rate': round(b / float(amount), 8),
+            'sell_rate': round(s_ / float(amount), 8),
+            'buy_fee': b, 'sell_fee': s_}
 
 
 def infer_fee_model(amount, commission, regulatory=0.0, transfer=0.0,
                     stamp=0.0, min_commission=0.0):
-    """从一笔真实成交的账单反推费率。
+    """从一笔真实账单反推费率，并判断券商用的是哪种口径。
 
-    佣金率取 (佣金 + 规费) / 金额 —— 与券商 App 的口径一致。
+    ★ 判据：账单同时列了「佣金」与「规费」两行时，(佣金+规费)/金额 才是
+      App 上那个"佣金费率"。所以返回 commission_incl_reg=True 并把两行
+      之和折成率 —— 这样复算能与账单**精确一致**。
+      若只给了佣金（没有规费行），按"规费另收"处理。
+
+    ★ 这里定不出「最低佣金含不含规费」—— 那需要一笔【小额】成交
+      （最低会 binding）。返回里带 need_small_bill 提醒。
     """
     amount = float(amount)
     if amount <= 0:
         raise LiveError('成交金额必须为正')
+    commission = float(commission or 0)
+    regulatory = float(regulatory or 0)
+    incl = regulatory > 0
+    rate = (commission + regulatory) / amount if incl else commission / amount
     out = {
-        'commission': round((float(commission) + float(regulatory)) / amount, 8),
+        'commission': round(rate, 8),
         'min_commission': float(min_commission or 0),
-        'transfer': round(float(transfer) / amount, 8),
-        'stamp': ('auto' if not stamp else round(float(stamp) / amount, 8)),
+        'commission_incl_reg': incl,
+        'transfer': (round(float(transfer) / amount, 8) if transfer
+                     else TRANSFER_RATE),
     }
+    if stamp:
+        out['stamp'] = round(float(stamp) / amount, 8)
     return out
 
 

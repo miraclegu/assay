@@ -1023,6 +1023,14 @@ def api_live_account(q):
         rows = m.fills(aid)
         return {
             'account': m.get_account(aid),
+            # ★ 前端不要自己维护一份费率默认值 —— 那是第二份实现，
+            #   会和后端 FEE_DEFAULT 漂移（实测：前端漏了 regulatory，
+            #   输入框读出 undefined，保存直接被后端拒）。
+            'fee_effective': m.fee_model(m.get_account(aid)),
+            'fee_default': dict(m.FEE_DEFAULT),
+            'fee_history': m.fee_rates(aid),
+            # 当前配置折成的总费率（按 10 万一笔算；最低佣金 binding 时会更高）
+            'fee_rates': m.effective_rates(m.fee_model(m.get_account(aid))),
             'pos': m.positions_valued(aid),
             'cash': round(m.cash(aid), 2),
             'versions': m.versions(aid),
@@ -1204,6 +1212,27 @@ def api_live_backtest(_q, body):
     return {'job_id': job_id, 'cmd': ' '.join(cmd)}
 
 
+def api_live_fee_add(_q, body):
+    """POST /api/live/fee_rate —— **新增**一档费率（append-only）。
+
+    ★ 刻意【没有】改已有费率的接口。改了会让已经按它算过的成交无从解释；
+      想改就新增一档更晚生效的把它盖掉，历史仍然留着、看得见改过。
+    """
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+
+    def _go():
+        m.migrate_fee(aid)          # 老数据先落成第一档，再追加
+        r = m.add_fee_rate(aid, b.get('from'), b.get('fee') or {},
+                           note=b.get('note') or '')
+        return {'added': r, 'history': m.fee_rates(aid)}
+    return _live_err(_go)
+
+
 def api_live_fee_infer(_q, body):
     """POST /api/live/fee_infer —— 从一笔真实成交的账单反推费率。
 
@@ -1224,13 +1253,20 @@ def api_live_fee_infer(_q, body):
         amt = float(b.get('amount'))
         # 自证：用反推出的费率复算这一笔，应与账单合计一致
         n = int(b.get('shares') or 0) or 100
-        px = amt / n
-        got = m.estimate_fee('buy', n, px, b.get('date') or '2026-01-01', mod)
+        full = dict(m.FEE_DEFAULT)
+        full.update(mod)
+        bd = m.fee_breakdown('buy', n, amt / n, b.get('date') or '2026-01-01', full)
         want = round(float(b.get('commission') or 0)
                      + float(b.get('regulatory') or 0)
                      + float(b.get('transfer') or 0), 2)
-        return {'fee': mod, 'recompute': got, 'bill_total': want,
-                'match': abs(got - want) <= 0.02}
+        # ★ 最低佣金是否含规费，**这一笔定不出来** —— 要一笔小额成交
+        #   （金额 < 2 万，最低会 binding）。不提醒的话用户会以为全配好了。
+        floor_binds = (amt * float(mod['commission'])
+                       < float(mod['min_commission'] or 0))
+        return {'fee': mod, 'recompute': bd['total'], 'breakdown': bd,
+                'bill_total': want, 'match': abs(bd['total'] - want) <= 0.02,
+                'incl_reg': mod['commission_incl_reg'],
+                'need_small_bill': bool(mod['min_commission']) and not floor_binds}
     return _live_err(_go)
 
 
@@ -1488,6 +1524,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/tick': api_live_tick,
                  '/api/live/cash': api_live_cash,
                  '/api/live/fee_infer': api_live_fee_infer,
+                 '/api/live/fee_rate': api_live_fee_add,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         fn = POSTS.get(u.path)

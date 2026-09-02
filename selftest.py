@@ -1772,8 +1772,10 @@ def t_live_core():
                                 ('sell', 1000, 11.42, '2023-08-25'),
                                 ('sell', 1000, 11.42, '2023-08-28')):
             amt = sh * px
-            want = max(amt * m0['commission'], m0['min_commission']) \
-                + amt * m0['transfer']
+            want = max(amt * m0['commission'], m0['min_commission'])
+            if not m0['commission_incl_reg']:
+                want += amt * m0['regulatory']           # 默认口径：规费另收
+            want += amt * m0['transfer']
             if side == 'sell':
                 want += amt * c.close_tax_at(lv._d(d))   # 分段规则只此一处
             assert abs(lv.estimate_fee(side, sh, px, d, m0)
@@ -1790,49 +1792,168 @@ def t_live_core():
         except lv.LiveError:
             pass
 
-        # ---- 3d2) 账户级费率：用【真实账单】钉住 ----
-        #   2026-09-02 红利账户一笔真实成交：
-        #     买入 新澳股份 6.010 × 11000 = 66,110
-        #       佣金 1.72（万0.26）/ 规费 3.57（万0.54）/ 过户费 0.66（万0.10）
-        #       合计 5.95 = 万0.90
-        #   ★ App 显示的"佣金费率万0.8"是**含规费**的口径：
+        # ---- 3d2) 账户级费率：用【真实账单】钉住，并核两种口径 ----
+        #   2026-09-02 红利账户真实账单：买入 6.010 × 11000 = 66,110
+        #     佣金 1.72（万0.26，净，归券商）
+        #     规费 3.57（万0.54，法定：证管费万0.2 + 经手费万0.341，按分截尾）
+        #     过户费 0.66（万0.10，法定）
+        #     合计 5.95 = 万0.90
+        #   ★ App 显示"佣金费率万0.8"是【含规费】口径：
         #       66110 × 万0.8 = 5.2888 ≈ 1.72 + 3.57 = 5.29
-        #     单看净佣金万0.26 与 App 的万0.8 对不上 —— 自己拆开去配会
-        #     少收规费那部分，且不报错。
-        #   ★ 这个账户【没有 5 元最低佣金】（净佣金 1.72 < 5 却没被抬到 5），
-        #     而引擎默认 min_commission=5 —— 同一笔回测算 16.53、实际 5.95。
+        #     单看净佣金万0.26 与 App 对不上 —— 口径配错不会报错，只会算错。
+        #   ★ 只有净佣金可谈；规费/过户费/印花税法定、所有人一样，
+        #     所以它们有默认值，**不配也能用**。
         BILL = dict(amount=66110.0, commission=1.72, regulatory=3.57,
                     transfer=0.66)
         fm = lv.infer_fee_model(**BILL)
+        assert fm['commission_incl_reg'] is True, \
+            '账单同时列了佣金与规费，应判为【含规费】口径'
         assert abs(fm['commission'] - 0.00008) < 5e-7, \
             '反推的佣金率应≈万0.8（含规费），实得 万%.4f' % (fm['commission'] * 1e4)
-        # ★ 容差要留够：券商账单是【按分截尾】的，0.66/66110 = 万0.0998，
+        # ★ 容差留够：券商账单【按分截尾】，0.66/66110 = 万0.0998，
         #   本来就不会正好等于万0.1。写死等号会假失败。
         assert abs(fm['transfer'] - 0.00001) < 5e-8, \
             '反推的过户费率应≈万0.1，实得 万%.4f' % (fm['transfer'] * 1e4)
-        assert fm['min_commission'] == 0, '这个账户没有最低佣金'
-        got = lv.estimate_fee('buy', 11000, 6.010, '2026-09-02', fm)
-        assert abs(got - 5.95) < 0.011, \
-            '用反推费率复算应得 5.95（账单），实得 %.2f' % got
-        # 卖出 = 买入 + 印花税万5
-        got_s = lv.estimate_fee('sell', 11000, 6.010, '2026-09-02', fm)
-        assert abs(got_s - (5.95 + 66110 * 0.0005)) < 0.02, \
-            '卖出应为买入 + 印花税万5，实得 %.2f' % got_s
-        # 印花税仍按日期分段（不在 live 里重写规则）
-        assert lv.estimate_fee('sell', 11000, 6.010, '2023-08-25', fm) > got_s, \
+        full = dict(lv.FEE_DEFAULT)
+        full.update(fm)
+        bd = lv.fee_breakdown('buy', 11000, 6.010, '2026-09-02', full)
+        assert abs(bd['total'] - 5.95) < 0.011, \
+            '复算应得 5.95（账单），实得 %.2f' % bd['total']
+        assert bd['regulatory'] == 0, '含规费口径下不该再单收一次规费'
+        bs = lv.fee_breakdown('sell', 11000, 6.010, '2026-09-02', full)
+        assert abs(bs['stamp'] - 66110 * 0.0005) < 0.02, '卖出印花税万5'
+        assert abs(bs['total'] - (bd['total'] + bs['stamp'])) < 0.02, \
+            '卖出 = 买入 + 印花税'
+        # 印花税分段仍复用引擎（不在 live 里重写第二份）
+        assert lv.fee_breakdown('sell', 11000, 6.010, '2023-08-25',
+                                full)['stamp'] > bs['stamp'], \
             '2023-08-28 前印花税是千1，应更贵'
-        # 账户配了费率之后，add_fill 不填费用就按它算
-        lv.upsert_account('t_fee', fee=fm)
+
+        # 两种口径在【最低佣金 binding】时差别明显 —— 这是必须问清口径的理由
+        incl = dict(lv.FEE_DEFAULT, commission=0.00025, min_commission=5.0,
+                    commission_incl_reg=True)
+        netc = dict(lv.FEE_DEFAULT, commission=0.00025, min_commission=5.0,
+                    commission_incl_reg=False)
+        a5 = lv.fee_breakdown('buy', 1000, 50.0, '2026-09-02', incl)['total']
+        b5 = lv.fee_breakdown('buy', 1000, 50.0, '2026-09-02', netc)['total']
+        assert b5 > a5, '规费另收口径应更贵（规费加在最低之外）'
+        assert abs(b5 - a5 - 50000 * lv.REG_RATE) < 0.02, \
+            '两种口径的差应恰好是规费：%.2f vs %.2f' % (b5 - a5, 50000 * lv.REG_RATE)
+
+        # 不配置也能用：法定默认（万2.5 + 最低5 + 规费另收）
+        d0 = lv.fee_breakdown('buy', 11000, 6.010, '2026-09-02')
+        assert d0['regulatory'] > 0 and d0['transfer'] > 0, \
+            '不配置时法定部分要有默认值'
+        assert d0['total'] > bd['total'], '默认口径应比真实账户贵（刻意保守）'
+
+        # ---- flat 模式：直接填总费率，填了就以它为准、不再拆项 ----
+        #   费率谈好之后"买入万0.9 / 卖出万5.9"就是全部事实，再拆成
+        #   佣金/规费/过户费只是多几个能配错的地方（含规费 vs 净佣金
+        #   那条口径差已经坑过一次）。
+        flat = dict(lv.FEE_DEFAULT, mode='flat', buy_rate=0.00009,
+                    sell_rate=0.00059, flat_min=0)
+        fb = lv.fee_breakdown('buy', 11000, 6.010, '2026-09-02', flat)
+        assert fb['mode'] == 'flat'
+        assert abs(fb['total'] - 5.95) < 0.011, \
+            'flat 买入应得 5.95（万0.9），实得 %.2f' % fb['total']
+        assert fb['regulatory'] is None and fb['stamp'] is None, \
+            'flat 模式不该再拆项 —— 拆了就说明又加了一遍'
+        fs = lv.fee_breakdown('sell', 11000, 6.010, '2026-09-02', flat)
+        assert abs(fs['total'] - 39.00) < 0.02, \
+            'flat 卖出应得 39.00（万5.9），实得 %.2f' % fs['total']
+        # flat 不再另加印花税（卖出费率里已含）—— 换个日期结果必须一样
+        assert lv.fee_breakdown('sell', 11000, 6.010, '2023-08-25',
+                                flat)['total'] == fs['total'], \
+            'flat 模式不该再按日期加印花税'
+        # 单笔最低仍生效
+        f2 = dict(flat, flat_min=5.0)
+        assert lv.fee_breakdown('buy', 100, 10.0, '2026-09-02',
+                                f2)['total'] == 5.0, 'flat 的最低没生效'
+        # parts 折成总费率 -> 两种模式给同一个答案
+        er = lv.effective_rates(full, 66110)
+        assert abs(er['buy_fee'] - 5.95) < 0.011 and \
+            abs(er['buy_rate'] - 0.00009) < 5e-7, \
+            'parts 折出的买入总费率应是万0.9：%s' % er
+        assert abs(lv.fee_breakdown('buy', 11000, 6.010, '2026-09-02',
+                                    dict(flat, buy_rate=er['buy_rate']))['total']
+                   - 5.95) < 0.011, '把 parts 折出的率填进 flat，结果应一致'
+        # 非法 mode 要被拒
+        try:
+            lv.upsert_account('t_fee', fee={'mode': 'nope'})
+            raise AssertionError('未知 mode 应被拒')
+        except lv.LiveError:
+            pass
+
+        # ---- 费率版本化：append-only，按【成交日】取当时那一档 ----
+        #   ★ 为什么必须分版本：补录一笔历史成交时，要用那笔成交【当时】
+        #     生效的费率。换过券商之后拿今天的费率去算三个月前那笔，
+        #     数字看着很正常，只是错的。
+        #   ★ "新费率生效、原费率立刻结束" **不靠改写上一条** ——
+        #     每条只记 from，to 由下一条的 from 减一天推出。账本只追加。
+        lv.upsert_account('t_rate', name='rate', init_cash=1000000)
+        lv.bind_version('t_rate', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        assert lv.fee_rates('t_rate') == [], '新账户不该有费率历史'
+        # 没配置时按默认（偏保守），且早于第一档也走默认
+        d_def = lv.fee_model_at('t_rate', '2026-09-02')
+        assert d_def['commission'] == lv.FEE_DEFAULT['commission']
+        lv.add_fee_rate('t_rate', '2026-09-01',
+                        {'mode': 'flat', 'buy_rate': 0.00009,
+                         'sell_rate': 0.00059, 'flat_min': 0}, note='开户')
+        lv.add_fee_rate('t_rate', '2026-10-01',
+                        {'mode': 'flat', 'buy_rate': 0.00006,
+                         'sell_rate': 0.00056, 'flat_min': 0}, note='换券商')
+        h = lv.fee_rates('t_rate')
+        assert len(h) == 2, '应有两档'
+        assert h[0]['to'] == '2026-09-30' and not h[0]['active'], \
+            '上一档应在新档生效的前一天结束，实得 to=%s' % h[0]['to']
+        assert h[1]['to'] is None and h[1]['active'], '最新一档应仍生效'
+        # 按成交日取到不同费率
+        for d, want in (('2026-09-10', 5.95), ('2026-09-30', 5.95),
+                        ('2026-10-01', 3.97), ('2026-10-08', 3.97)):
+            got = lv.estimate_fee('buy', 11000, 6.010, d,
+                                  lv.fee_model_at('t_rate', d))
+            assert abs(got - want) < 0.011, \
+                '%s 应按当时费率算出 %.2f，实得 %.2f' % (d, want, got)
+        # 早于第一档 -> 默认费率（不往前延伸，那是猜）
+        early = lv.estimate_fee('buy', 11000, 6.010, '2026-08-01',
+                                lv.fee_model_at('t_rate', '2026-08-01'))
+        assert early > 5.95, '早于第一档应走默认（偏保守），实得 %.2f' % early
+        # add_fill 也按成交日取
+        for d, want in (('2026-09-10', 5.95), ('2026-10-08', 3.97)):
+            r = lv.add_fill('t_rate', d, '603889.XSHG', 'buy', 11000, 6.010)
+            assert abs(r['fee'] - want) < 0.011, \
+                'add_fill 在 %s 应算 %.2f，实得 %.2f' % (d, want, r['fee'])
+        # 生效日必须递增（不能插到中间、不能同日）
+        for fd, why in (('2026-09-15', '早于上一档'), ('2026-10-01', '与上一档同日')):
+            try:
+                lv.add_fee_rate('t_rate', fd, {'mode': 'flat', 'buy_rate': 1e-4,
+                                               'sell_rate': 6e-4})
+                raise AssertionError('%s 应被拒' % why)
+            except lv.LiveError:
+                pass
+        # 迁移：老的单份 acct['fee'] -> 第一档
+        lv.upsert_account('t_mig', name='mig', init_cash=100000, fee=fm)
+        assert lv.fee_rates('t_mig') == []
+        mg = lv.migrate_fee('t_mig')
+        assert mg and len(lv.fee_rates('t_mig')) == 1, '迁移应落成第一档'
+        assert lv.migrate_fee('t_mig') is None, '已迁移过不该重复落'
+
+        # 账户配了费率后，add_fill 不填费用就按它算
+        # ★ 走【费率历史】而不是老的单份 acct['fee'] —— add_fill 现在按
+        #   成交日从历史里取档，只写 acct['fee'] 不会生效（实测：算成 20.77
+        #   的默认费率）。老数据要先 migrate_fee 落成第一档。
+        lv.add_fee_rate('t_fee', '2026-09-01', fm, note='真实账单反推')
         rf = lv.add_fill('t_fee', '2026-09-02', '603889.XSHG', 'buy', 11000, 6.010)
         assert abs(rf['fee'] - 5.95) < 0.011, \
             'add_fill 没用账户费率：%.2f' % rf['fee']
         assert rf['fee_estimated'] is True, '自动算的费用要标 fee_estimated'
-        # 非法费率要被拒
         for bad, why in (({'commission': -1}, '负佣金率'),
-                         ({'nope': 1}, '未知字段'),
-                         ({'stamp': 'x'}, '印花税非数字非 auto')):
+                         ({'nope': 1}, '未知字段（会被过滤掉，等于没有可存字段）'),
+                         ({'stamp': 'x'}, '印花税非数字非 auto'),
+                         ({'mode': 'nope'}, '未知 mode')):
             try:
-                lv.upsert_account('t_fee', fee=dict(bad))
+                lv.add_fee_rate('t_fee', '2027-01-01', dict(bad))
                 raise AssertionError('%s 应被拒' % why)
             except lv.LiveError:
                 pass
@@ -2138,11 +2259,11 @@ def t_live_ui():
             assert '—' not in pg.locator('#lvbody table.lvpos').inner_text(), \
                 '有持仓取不到现价 —— 估值应独立取价，不依赖当天信号'
 
-            # ---- 费率：从真实账单反推 -> 保存 -> 录入自动算 ----
+            # ---- 费率：版本化（只新增）+ 按成交日取档 + 手填优先 ----
             #   2026-09-02 真实账单：66,110 元买入，佣金1.72 规费3.57 过户费0.66
             #   合计 5.95。★ App 的"佣金费率万0.8"是【含规费】口径。
             pg.click('#lvset')
-            pg.wait_for_selector('#fi1', timeout=8000)
+            pg.wait_for_selector('#ffrom', timeout=8000)
             pg.fill('#fi1', '66110')
             pg.fill('#fi2', '1.72')
             pg.fill('#fi3', '3.57')
@@ -2153,24 +2274,68 @@ def t_live_ui():
             assert '✅' in fi and '5.95' in fi, '反推没对上账单：%s' % fi
             assert abs(float(pg.input_value('#fr1')) - 0.00008) < 5e-7, \
                 '佣金率没回填成万0.8：%s' % pg.input_value('#fr1')
-            assert float(pg.input_value('#fr2')) == 0, '最低佣金应为 0'
+            # ★ 断言输入框都不是 undefined —— 前端曾漏了 regulatory 一项，
+            #   保存被后端拒，而错误提示藏在浮层里，最后才在费用上暴露。
+            for fid in ('#fr1', '#fr2', '#fr3', '#fr6', '#fb1', '#fb2'):
+                v = pg.input_value(fid)
+                assert v not in ('', 'undefined', 'NaN'), \
+                    '费率输入框 %s 是 %r —— 前端默认值缺字段' % (fid, v)
+            pg.fill('#ffrom', '2026-09-01')
+            pg.fill('#fnote', '开户费率')
+            pg.click('#fsave')
+            pg.wait_for_timeout(1600)
+
+            # 再新增一档（更晚生效）—— 上一档应自动在前一天结束
+            pg.click('#lvset')
+            pg.wait_for_selector('#ffrom', timeout=8000)
+            pg.fill('#ffrom', '2026-10-01')
+            pg.select_option('#fmode', 'flat')
+            pg.wait_for_timeout(200)
+            assert pg.locator('#fflat').is_visible(), '切到 flat 应显示总费率块'
+            assert not pg.locator('#fparts').is_visible(), 'parts 块应隐藏'
+            pg.fill('#fb1', '0.00006')
+            pg.fill('#fb2', '0.00056')
+            pg.fill('#fb3', '0')
+            pg.fill('#fnote', '换券商')
+            pg.click('#fsave')
+            pg.wait_for_timeout(1600)
+            pg.click('#lvset')
+            pg.wait_for_selector('#ffrom', timeout=8000)
+            hrows = pg.locator('.stbox table.lvt tr').all_inner_texts()
+            body_h = ' '.join(' '.join(hrows).split())
+            assert '2026-09-30' in body_h, \
+                '上一档应显示结束于 2026-09-30（下一档生效日减一天）：%s' % body_h
+            assert '至今' in body_h, '最新一档应显示"至今"'
+            # 生效日倒退必须被拒（只能追加）
+            pg.fill('#ffrom', '2026-09-15')
             pg.click('#fsave')
             pg.wait_for_timeout(900)
+            em2 = pg.locator('#emsg').inner_text()
+            assert '生效日' in em2, '生效日倒退应被拒：%s' % em2
             pg.locator('#mclose').click()
-            pg.wait_for_timeout(500)
+            pg.wait_for_timeout(400)
+
+            # 按成交日取档：9 月那笔按万0.9、10 月那笔按万0.6
+            aid0 = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            for d, want in (('2026-09-10', 5.95), ('2026-10-08', 3.97)):
+                rr = lv.add_fill(aid0, d, '603889.XSHG', 'buy', 11000, 6.010)
+                assert abs(rr['fee'] - want) < 0.011, \
+                    '%s 应按当时那一档算 %.2f，实得 %.2f' % (d, want, rr['fee'])
+            pg.reload()
+            pg.wait_for_timeout(1200)
             b4 = _cash()
             pg.click('#lvrec')
             pg.wait_for_selector('#rfill', timeout=8000)
             pg.fill('#fd', '2026-09-02')
-            pg.fill('#fc', '603889.XSHG')
-            pg.fill('#fq', '11000')
-            pg.fill('#fp', '6.010')
-            pg.fill('#ff', '')
+            pg.fill('#fc', '601857.XSHG')
+            pg.fill('#fq', '1000')
+            pg.fill('#fp', '11.42')
+            pg.fill('#ff', '7.77')
             pg.click('#fb')
             pg.wait_for_timeout(1500)
-            paid = round(b4 - _cash() - 66110, 2)
-            assert abs(paid - 5.95) < 0.011, \
-                '账户费率没生效：算出 %.2f，账单 5.95' % paid
+            paid = round(b4 - _cash() - 11420, 2)
+            assert abs(paid - 7.77) < 0.011, \
+                '手填费用应优先于费率：填 7.77 实得 %.2f' % paid
 
             # ---- 设置进浮层 ----
             assert pg.locator('#ename').count() == 0, '设置不该常驻主视图'
@@ -2215,7 +2380,7 @@ def t_live_ui():
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
-                    '费率反推真实账单 5.95 一分不差；'
+                    '费率(反推真实账单 5.95/两档版本/按成交日取档/手填优先)；'
                     '改名；冲正追加并划掉；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
         httpd.shutdown()

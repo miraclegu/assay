@@ -5,6 +5,7 @@
   "created": "2026-09-01T11:27:35",
   "fee": {
    "commission": 8.002e-05,
+   "commission_incl_reg": true,
    "min_commission": 0.0,
    "stamp": "auto",
    "transfer": 9.98e-06
@@ -25,6 +26,7 @@
   "created": "2026-09-01T11:27:35",
   "fee": {
    "commission": 8.002e-05,
+   "commission_incl_reg": true,
    "min_commission": 0.0,
    "stamp": "auto",
    "transfer": 9.98e-06
