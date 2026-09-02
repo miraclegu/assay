@@ -1104,6 +1104,54 @@ ROUNDINGS = ('round', 'floor', 'ceil')
 #   能证的是下面这条：成交价必须落在当日 high/low 区间内。
 
 
+# 待办"到警示时间"的判据。★ 只在这一处定义 —— 账户列表的红点、
+# 待办要不要默认展开，都读它。前端硬编码过一次判据（把 tdx 日历误报成
+# 不权威），每次打开都弹假告警；判据分两处写就一定会分叉。
+ALERT_SOON_DAYS = 2
+
+
+def signal_alert(sig):
+    """这份信号要不要"提请注意"。返回 (alert, 原因列表)。
+
+    三种要动手的情形：
+      · 今天就是调仓日
+      · 有卖出（止损 / 炸板离场）—— 与调仓日无关，随时可能出现
+      · 调仓日在 ALERT_SOON_DAYS 个交易日内 —— 当天早上才看已经晚了
+
+    没这些的话待办里其实什么都没有，默认收起来；一到警示就自己打开。
+    """
+    if not sig or sig.get('error'):
+        return False, []
+    why = []
+    if sig.get('is_rebalance_day'):
+        why.append('今天是调仓日')
+    n_s, n_b = len(sig.get('sell') or []), len(sig.get('buy') or [])
+    if n_s:
+        why.append('%d 只要卖出' % n_s)
+    if n_b and not sig.get('is_rebalance_day'):
+        why.append('%d 只要买入' % n_b)
+    du = sig.get('days_until_rebalance')
+    if not sig.get('is_rebalance_day') and du is not None \
+            and 0 < du <= ALERT_SOON_DAYS:
+        why.append('还有 %d 个交易日就调仓' % du)
+    return bool(why), why
+
+
+def latest_signal(aid):
+    """盘上最新那份信号（不重算）。账户列表要拿它判红点，不能触发重放。"""
+    d = os.path.join(acct_dir(aid), 'signals')
+    if not os.path.isdir(d):
+        return None
+    names = sorted(x for x in os.listdir(d) if x.endswith('.json'))
+    if not names:
+        return None
+    try:
+        with open(os.path.join(d, names[-1]), encoding='utf-8') as fh:
+            return json.load(fh)
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 def latest_data_day(datalake=None):
     """本地行情最新到哪天。取不到返回 None。
 
@@ -1520,20 +1568,33 @@ def equity_curve(aid, datalake=None):
     for r in twr:
         cum *= (1.0 + r)
     n = len(dates)
-    peak, mdd = -1e18, 0.0
-    for v in eq:
+    peak, mdd, mdd_at = -1e18, 0.0, None
+    for d, v in zip(dates, eq):
         peak = max(peak, v)
-        if peak > 0:
-            mdd = max(mdd, 1.0 - v / peak)
+        if peak > 0 and 1.0 - v / peak > mdd:
+            mdd, mdd_at = 1.0 - v / peak, d
     yrs = n / 244.0
     stats = {
         'days': n,
+        'start': dates[0] if dates else None,
+        'end': dates[-1] if dates else None,
         'equity_end': eq[-1] if eq else None,
         'twr': round(cum - 1.0, 6),
+        # ★ 不到 20 个交易日不给年化：把两周的收益乘 12 倍是**误导**，
+        #   而那个数会被拿去跟回测年化比。宁可显示"—"。
         'twr_annual': round(cum ** (1.0 / yrs) - 1.0, 6) if yrs > 0.08 else None,
         'max_drawdown': round(mdd, 6),
+        'max_drawdown_at': mdd_at,
+        # 当前回撤：距历史最高还差多少。最大回撤是历史，这个是现在。
+        'drawdown_now': round(1.0 - eq[-1] / peak, 6) if peak > 0 else None,
+        # 最近一个交易日的涨跌（已剔除当日现金流，与 TWR 同口径）
+        'day_ret': round(twr[-1], 6) if twr else None,
+        'day_pnl': (round(eq[-1] - eq[-2] - flow_by_day.get(_d(dates[-1]), 0.0), 2)
+                    if len(eq) >= 2 else None),
         'net_deposit': round(sum(flow_by_day.values()), 2),
         'init_cash': init,
+        # 已付手续费 —— 折成年化拖累才知道费率谈判值不值
+        'fee_paid': round(sum(float(r.get('fee') or 0) for r in rows), 2),
     }
     return {'dates': dates, 'equity': eq, 'stats': stats, 'note': None}
 

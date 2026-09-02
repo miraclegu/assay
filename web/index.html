@@ -243,6 +243,33 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 /* ---- 数据字典 ---- */
 #dk{display:grid;grid-template-columns:214px minmax(0,1fr);gap:20px;margin-top:14px}
 @media (max-width:880px){#dk{grid-template-columns:1fr}}
+/* 侧栏收起：只留一条 44px 的轨。★ 轨上必须还能看到告警点 ——
+   "收起后就看不到该干什么了"的收起功能不如不做。 */
+#dk.fold{grid-template-columns:44px minmax(0,1fr);gap:12px}
+.drail{position:sticky;top:60px;align-self:start;display:flex;flex-direction:column;
+  gap:6px;align-items:center}
+.dchip{position:relative;width:32px;height:32px;border-radius:6px;display:flex;
+  align-items:center;justify-content:center;font-size:13px;text-decoration:none;
+  color:var(--dim);background:var(--panel2);border:1px solid var(--line)}
+.dchip:hover{color:var(--fg)}
+.dchip.on{color:var(--accent);border-color:var(--accent)}
+/* 告警点：展开态挂在账户名后，收起态挂在方块角上。同一个类，两处复用。 */
+.adot{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--warn);flex:none}
+.dchip .adot{position:absolute;top:-2px;right:-2px;box-shadow:0 0 0 2px var(--panel)}
+
+/* KPI 板：账户的数字集中一处，不再是顶栏一串标签。
+   label 在上、数字在下 —— 扫的时候是先找名目再读数。 */
+.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
+  gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;
+  overflow:hidden;margin-bottom:14px}
+.kpi>div{background:var(--panel2);padding:7px 10px}
+.kpi .k{font-size:10px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .v{font-family:"SF Mono",Menlo,monospace;font-size:15px;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.kpi .s{font-size:10px;color:var(--dim);font-family:"SF Mono",Menlo,monospace}
+.kpi>div.big .v{font-size:19px}
 .dside{position:sticky;top:60px;align-self:start;max-height:calc(100vh - 84px);
   overflow-y:auto;background:var(--panel);border:1px solid var(--line);
   border-radius:8px;padding:10px}
@@ -317,7 +344,9 @@ table.dt td:first-child{color:var(--fg)}
 /* 表多列的两节给双倍宽度 —— 版本表 3 列挤在 230px 里，参数 chip 会一个一行 */
 .lvsec.wide{grid-column:span 2}
 .lvsec{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--panel2)}
-.lvsec h3{margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+.lvsec.lvalert{border-color:var(--warn)}
+.lvsec h3{display:flex;align-items:baseline;gap:6px;
+  margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
   color:var(--dim);font-weight:600}
 table.lvt{width:100%;border-collapse:collapse;font-size:12px}
 table.lvt th{text-align:right;color:var(--dim);font-weight:500;padding:3px 6px;
@@ -490,6 +519,11 @@ $('#gosync').onclick=()=>{location.hash='#/sync';};
 /* 页面只负责【显示与录入】。所有规则判定都在服务端 assay/live.py ——
    它把成交流水重建成 Portfolio 再喂给真引擎，不在前端重算任何一条规则。 */
 let LV=null, LVSEL=null, LVALL=false, LVO=null;
+/* 侧栏收起 / 待办手动展开的状态。★ 存 localStorage：每次切账户都重置的话
+   等于没有这个功能。待办的展开状态**不持久化** —— 它该由"到没到警示时间"
+   决定，记住上次的选择会让人下次错过提示。 */
+let LVFOLD = localStorage.getItem('lvfold')==='1';
+let LVTODO = null;   // null=跟随 alert；true/false=本次手动覆盖
 const LVPAGE=50;                      /* 流水每页条数（服务端也会夹到 1..500） */
 const CFK={deposit:'入金', withdraw:'出金', dividend:'分红到账', adjust:'调整'};
 
@@ -526,33 +560,57 @@ async function showLive(aid){
       <code>Ctrl-C</code> 后重新 <code>python3 serve.py --live</code> 即可。</div>`;
   if(o.readonly) head+=`<div class="lvwarn">服务以只读模式启动 —— 可以看，不能录入 / 建账户 / 重算。
      用 <code>python3 serve.py --live</code> 开启。</div>`;
+  /* ★ 告警点的判据由【服务端】给（a.alert，live.signal_alert）——
+     前端硬编码判据坑过一次（把 tdx 日历误报成不权威，每次打开都弹假告警）。
+     账户列表的点、待办要不要展开，读的是同一个字段。 */
+  const dot=a=>a.alert?`<span class="adot" title="${esc((a.alert_why||[]).join('；'))}"></span>`:'';
   const tabs=o.accounts.map(a=>`<a class="ditem${a.id===LVSEL?' on':''}${a.archived?' miss':''}"
-      href="#/live/${a.id}" ${a.archived?'title="已归档"':''}>
-      <span>${esc(a.name)}</span><span class="dmeta">${a.n_positions} 只</span></a>`).join('');
-  $('#main').innerHTML=head+`<div id="dk">
-    <div class="dside">
-      <div class="dhint">实盘账户。成交流水<b>只追加</b>，持仓由它推导。<br>
-        策略版本绑定后源码<b>永久留痕</b>。</div>
-      <div class="dgrp">账户${LVALL?'（含已归档）':''}</div>
+      href="#/live/${a.id}" title="${esc(a.alert?(a.alert_why||[]).join('；'):(a.archived?'已归档':''))}">
+      <span>${dot(a)} ${esc(a.name)}</span><span class="dmeta">${a.n_positions} 只</span></a>`).join('');
+  /* 收起态：一条 44px 的轨，每个账户一个方块（名称首字）+ 角上的告警点。
+     "收起后就看不到该干什么了"的收起功能不如不做。 */
+  const rail=`<div class="drail">
+      <a href="#" class="dchip" id="lvunfold" title="展开账户列表">›</a>
+      ${o.accounts.map(a=>`<a class="dchip${a.id===LVSEL?' on':''}"
+        href="#/live/${a.id}"
+        title="${esc(a.name)}${a.alert?' —— '+esc((a.alert_why||[]).join('；')):''}"
+        >${esc((a.name||'?').trim().slice(0,1))}${dot(a)}</a>`).join('')}
+    </div>`;
+  $('#main').innerHTML=head+`<div id="dk" class="${LVFOLD?'fold':''}">
+    ${LVFOLD?rail:`<div class="dside">
+      <div class="dgrp" style="display:flex;align-items:baseline;gap:6px">
+        <span style="flex:1">账户${LVALL?'（含已归档）':''}</span>
+        <a href="#" id="lvfold" class="lvwhy" title="收起到左边">‹ 收起</a></div>
       ${tabs||'<div class="none">还没有账户</div>'}
-      <div class="lvform" style="padding:2px 8px">
+      <div class="lvform" style="padding:2px 8px;gap:10px">
         <a href="#" id="lvall" class="lvwhy">${LVALL?'只看在用的':'显示已归档的'}</a>
+        <a href="#" id="lvnew" class="lvwhy">+ 新建账户</a>
       </div>
-      <div class="dgrp" style="margin-top:14px">新建</div>
-      <div class="lvform" style="padding:0 8px">
-        <input id="nn" placeholder="账户名称" style="flex:1;min-width:110px">
-        <input id="nc" size="6" placeholder="初始资金">
-        <button class="btn" id="nb" ${o.readonly?'disabled':''}>建</button>
+      <div id="nform" style="display:none;border-top:1px solid var(--line);
+           margin-top:8px;padding-top:8px">
+        <div class="lvform" style="padding:0 8px">
+          <input id="nn" placeholder="账户名称" style="flex:1;min-width:110px">
+          <input id="nc" size="6" placeholder="初始资金">
+          <button class="btn" id="nb" ${o.readonly?'disabled':''}>建</button>
+        </div>
+        <div class="lvwhy" style="padding:2px 8px">
+          id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>）。
+          id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。
+        </div>
+        <div class="lvmsg" id="nmsg"></div>
       </div>
-      <div class="lvwhy" style="padding:2px 8px">
-        id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>）。
-        id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。
-      </div>
-      <div class="lvmsg" id="nmsg"></div>
-    </div>
+      <div class="dhint" style="margin-top:12px">成交流水<b>只追加</b>，持仓由它推导。<br>
+        策略版本绑定后源码<b>永久留痕</b>。</div>
+    </div>`}
     <div class="dbody" id="lvbody"></div></div>`;
-  $('#lvall').onclick=ev=>{ ev.preventDefault(); LVALL=!LVALL; showLive(LVSEL); };
-  $('#nb').onclick=async()=>{
+  const fold=v=>{ LVFOLD=v; localStorage.setItem('lvfold', v?'1':'0'); showLive(LVSEL); };
+  if($('#lvfold')) $('#lvfold').onclick=ev=>{ ev.preventDefault(); fold(true); };
+  if($('#lvunfold')) $('#lvunfold').onclick=ev=>{ ev.preventDefault(); fold(false); };
+  if($('#lvall')) $('#lvall').onclick=ev=>{ ev.preventDefault(); LVALL=!LVALL; showLive(LVSEL); };
+  if($('#lvnew')) $('#lvnew').onclick=ev=>{ ev.preventDefault();
+    const e=$('#nform'); e.style.display=(e.style.display==='none'?'':'none');
+    if(e.style.display==='') $('#nn').focus(); };
+  if($('#nb')) $('#nb').onclick=async()=>{
     const m=$('#nmsg');
     try{
       const r=await post('/api/live/save',{
@@ -593,9 +651,6 @@ async function loadLive(aid){
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
     ${dataDayTag(o)}
-    <span class="lvtag">权益 ${num(P.equity,2)}</span>
-    <span class="lvtag">现金 ${num(P.cash,2)}</span>
-    <span class="lvtag" id="lveq">收益 …</span>
     ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
         title="源码 / 参数 / 版本历史 / 用这个版本跑过的回测">${esc(a.strategy_path.split('/').pop())}
         @${esc(a.code_sha256.slice(0,8))} ›</a>`
@@ -607,7 +662,8 @@ async function loadLive(aid){
     <button class="btn" id="lvset">⚙</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
-  ${sigHtml(sig)}
+  ${kpiHtml(o)}
+  ${sigHtml(sig, o.alert, o.alert_why)}
   <div class="lvsec"><h3>当前持仓
       ${it.length?`<span class="lvwhy">${it.length} 只 · 市值 ${num(P.market_value,2)}
         · 成本 ${num(P.cost,2)} · 浮盈 <b style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}
@@ -636,6 +692,8 @@ async function loadLive(aid){
       :`<div class="none">空仓${o.n_fills?'':' —— 还没录过成交，点「✎ 记一笔」'}</div>`}
   </div>`;
   liveEquityTag(aid);
+  if($('#todofold')) $('#todofold').onclick=ev=>{ ev.preventDefault();
+    LVTODO = !((LVTODO==null) ? !!o.alert : LVTODO); loadLive(aid); };
   $('#lvstrat').onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256||''); };
   $('#lvset').onclick=()=>openSettings(aid, a, ro);
   $('#lvrec').onclick=()=>openRecord(aid, sig, ro);
@@ -647,19 +705,82 @@ async function loadLive(aid){
 }
 
 /* 权益单独异步拉 —— 它要重放整条曲线，不该拖住主视图。 */
+/* ---- KPI 板 ----------------------------------------------------------
+   ★ 账户的数字集中一处，不再是顶栏一串标签 —— 标签栏里塞了权益/现金/收益
+     之后，眼睛得在标题、标签、持仓汇总三处来回跳才凑得出"我现在怎么样"。
+
+   ★ 分两段：**资产**（现在有多少、怎么分布）与**业绩**（赚了多少、
+     波动多大、多久）。业绩那段要重放整条权益曲线，所以异步补 ——
+     它不该拖住主视图（持仓和待办才是天天看的）。
+
+   ★ 不足 20 个交易日不显示年化：把两周的收益乘 12 倍是误导，
+     而那个数会被拿去跟回测年化比。宁可显示"—"并说明原因。 */
+function cell(k, v, sub, cls){
+  return `<div class="${cls||''}"><div class="k">${k}</div>
+    <div class="v">${v}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;
+}
+
+function kpiHtml(o){
+  const P=o.pos||{}, sgn=x=>x==null?'':(x>=0?'+':'');
+  const col=x=>x==null?'':(x>=0?'var(--up)':'var(--down)');
+  const wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
+  return `<div class="kpi">
+    ${cell('总资产', num(P.equity,2), '现金 + 持仓市值', 'big')}
+    ${cell('持仓市值', num(P.market_value,2),
+           (P.items||[]).length+' 只 · 成本 '+num(P.cost,2))}
+    ${cell('可用现金', num(P.cash,2),
+           wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%')}
+    ${cell('持仓浮盈',
+           `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
+           P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%'
+             +' · 估值日 '+esc(P.asof||'—'):'只算价差，不含分红')}
+    <div id="kperf" style="display:none"></div>
+  </div>
+  <div class="kpi" id="kperf2">
+    ${cell('累计收益','…','时间加权 TWR')}
+    ${cell('加权年化','…','')}${cell('最大回撤','…','')}
+    ${cell('当前回撤','…','')}${cell('最近一日','…','')}
+    ${cell('投资时间','…','')}</div>`;
+}
+
 async function liveEquityTag(aid){
-  const el=$('#lveq'); if(!el) return;
+  const el=$('#kperf2'); if(!el) return;
+  const pct=x=>(x==null?'—':(x>=0?'+':'')+(x*100).toFixed(2)+'%');
+  const col=x=>x==null?'':(x>=0?'var(--up)':'var(--down)');
   try{
     const e=await j('/api/live/equity?id='+encodeURIComponent(aid));
-    if(!e.stats){ el.textContent='收益 —'; el.title=e.note||''; return; }
-    const st=e.stats, pct=x=>(x==null?'—':(x>=0?'+':'')+(x*100).toFixed(2)+'%');
-    el.className='lvtag'+(st.twr>=0?' on':'');
-    el.innerHTML='收益 '+pct(st.twr)+' · 回撤 '+(st.max_drawdown*100).toFixed(2)+'%';
-    el.title='时间加权收益 TWR（入金/出金不算收益）\n'
-      +e.dates[0]+' ~ '+e.dates[e.dates.length-1]+'，'+st.days+' 个交易日'
-      +(st.net_deposit?'\n净入金 '+num(st.net_deposit,2):'')
-      +(st.twr_annual!=null?'\n年化 '+pct(st.twr_annual):'\n（不足一季，不折年化）');
-  }catch(err){ el.textContent='收益 —'; el.title=String(err); }
+    const st=e.stats;
+    if(!st){
+      el.innerHTML=cell('业绩','—', esc(e.note||'还没有成交'));
+      return;
+    }
+    /* 已付费用折成年化拖累 —— 费率谈判值不值就看这个数。
+       用净投入(初始 + 净入金)做分母，不用权益：权益含浮盈，会低估拖累。 */
+    const base=(st.init_cash||0)+(st.net_deposit||0);
+    const feeDrag=(base>0&&st.days)?st.fee_paid/base*(244/st.days):null;
+    el.innerHTML=
+      cell('累计收益',
+        `<span style="color:${col(st.twr)}">${pct(st.twr)}</span>`,
+        '时间加权 TWR · 入金不算收益')
+     +cell('加权年化',
+        st.twr_annual==null?'—'
+          :`<span style="color:${col(st.twr_annual)}">${pct(st.twr_annual)}</span>`,
+        st.twr_annual==null?'不足 20 个交易日，不折年化':'与回测年化同口径')
+     +cell('最大回撤', pct(-st.max_drawdown).replace('-','−'),
+        st.max_drawdown_at?'最深 '+esc(st.max_drawdown_at):'')
+     +cell('当前回撤',
+        st.drawdown_now==null?'—':pct(-st.drawdown_now).replace('-','−'),
+        '距历史最高')
+     +cell('最近一日',
+        st.day_ret==null?'—'
+          :`<span style="color:${col(st.day_ret)}">${pct(st.day_ret)}</span>`,
+        st.day_pnl==null?'':(st.day_pnl>=0?'+':'')+num(st.day_pnl,2)+' 元')
+     +cell('投资时间', st.days+' 个交易日',
+        esc(st.start||'')+' 起'
+        +(st.net_deposit?' · 净入金 '+num(st.net_deposit,2):'')
+        +(st.fee_paid?' · 已付费 '+num(st.fee_paid,2)
+          +(feeDrag?'（年化拖累 '+(feeDrag*100).toFixed(2)+'%）':''):''));
+  }catch(err){ el.innerHTML=cell('业绩','—', esc(String(err))); }
 }
 
 /* ---- 浮层骨架：三个浮层共用，避免各写一份开关/关闭/点外面关 ---- */
@@ -1438,7 +1559,44 @@ function dataDayTag(o){
     >数据日 ${dd}${behind?' · 信号用的是 '+asof:''}</span>`;
 }
 
-function sigHtml(s){
+/* ---- 自动同步开关 ---------------------------------------------------
+   "自动同步"就是那个 launchd agent，没有第二套定时（serve.py 里刻意不做
+   定时线程：daily_snapshot 漏一天永久丢失，不能挂在"看板恰好开着"上）。
+   ★ 按钮文字照【服务端复查到的状态】显示 —— 不是点一下就假设成功。
+     launchctl 对"已经是这个状态"会报错退出，所以判据是"现在到底开着没"。 */
+function autoTag(au){
+  if(!au) return '<span class="lvtag">自动同步 —</span>';
+  if(au.supported===false) return `<span class="lvtag" title="${esc(au.note||'')}">自动同步 不支持</span>`;
+  return `<span class="lvtag ${au.on?'on':'warn'}"
+    title="${esc(au.label)}\n${esc(au.plist)}"
+    >自动同步 ${au.on?'开 · 每日 '+esc(au.schedule||'?'):'关'}</span>`;
+}
+function autoBtn(au, ro){
+  if(!au||au.supported===false) return '';
+  return `<button class="btn" id="syauto" ${ro?'disabled':''}
+    >${au.on?'关闭自动同步':'开启自动同步'}</button>`;
+}
+function autoNote(au){
+  if(!au) return '';
+  let w='';
+  /* 关着的时候必须说清代价 —— PIT 快照漏一天是【永久】丢失，
+     而"关了自动同步"这件事本身不会报错，只会在几个月后发现历史缺口。 */
+  if(au.supported!==false && !au.on)
+    w+=`<div class="lvwarn"><b>自动同步是关的</b> —— 每天要自己点「立即同步」。<br>
+      ⚠ <code>daily_snapshot.py</code> 是<b>漏一天永久丢失</b>的（tdx 的名称/
+      分类/板块成分是 type-1 覆盖写，当天状态错过就再也重建不出来）。
+      忘一天就是历史上少一天，而这不会报错。</div>`;
+  if(au.drift)
+    w+=`<div class="lvwarn"><b>已安装的 plist 与仓库正本不一致</b> ——
+      正在生效的是 <code>${esc(au.plist)}</code> 那份（计划 ${esc(au.schedule||'?')}）。
+      改了仓库里的 plist 但没重新安装，跑的还是旧的，<b>而这不会报错</b>。
+      点「关闭」再「开启」会用正本覆盖。</div>`;
+  if(au.installed && au.loaded===false && au.supported!==false)
+    w+=`<div class="lvwarn">plist 已安装但没 load —— 点「开启自动同步」。</div>`;
+  return w;
+}
+
+function sigHtml(s, alert, alertWhy){
   if(!s) return '<div class="lvsec" style="margin-bottom:14px"><h3>今日待办</h3><div class="none">还没有信号 —— 点「立即重算」</div></div>';
   if(s.error) return `<div class="lvwarn"><b>出信号失败</b><br>${esc(s.error).replace(/\n/g,'<br>')}</div>`;
   const w=(s.warnings||[]).map(x=>`<div class="lvwarn">${esc(x)}</div>`).join('');
@@ -1465,10 +1623,26 @@ function sigHtml(s){
     (s.upcoming||[]).map(x=>`<span class="lvd${x.is_rebal?' rb':''}"
       title="${x.date}${x.is_rebal?' · 调仓日':''}">${x.date.slice(5)}<i>周${W[new Date(x.date+'T00:00:00').getDay()]}</i></span>`).join('')
     }</div>`:'';
-  return w+`<div class="lvsec" style="margin-bottom:14px">
-    <h3>${esc(s.for_date)} 待办 ${s.is_rebalance_day?'· 调仓日':'· 非调仓日'}
+  /* ★ 没到警示时间就默认收起：非调仓日、没有止损/炸板卖出时，待办里其实
+     什么都没有，而它占着主视图最上面一屏。判据用服务端的 alert
+     （live.signal_alert）—— 和账户列表的红点同一个，分两处写就会分叉。
+     ★ 手动展开的状态**不记住**（LVTODO 只在本次有效）：记住了会让人下次
+     错过"到点了自己打开"这件事，而那正是这个折叠的意义。 */
+  const open = (LVTODO==null) ? !!alert : LVTODO;
+  const sum = alert ? (alertWhy||[]).join(' · ')
+    : ((s.sell||[]).length+(s.buy||[]).length
+        ? (s.sell||[]).length+' 卖 / '+(s.buy||[]).length+' 买'
+        : '没有要动的');
+  return w+`<div class="lvsec${alert?' lvalert':''}" style="margin-bottom:14px">
+    <h3>${alert?'<span class="adot"></span> ':''}${esc(s.for_date)} 待办
+        ${s.is_rebalance_day?'· 调仓日':'· 非调仓日'}
         <span class="lvtag">数据 ${esc(s.data_asof)} 收盘</span>
-        <span class="lvwhy">版本 ${esc(s.code_sha)}</span></h3>
+        <span class="lvwhy">版本 ${esc(s.code_sha)}</span>
+        <span style="flex:1"></span>
+        <a href="#" id="todofold" class="lvwhy">${open?'收起 ▾':'展开 ▸'}</a></h3>
+    ${open?'':`<div class="lvwhy" style="padding:2px 0">${esc(sum)}${
+       rb?' · 下次调仓 '+esc(rb)+(du!=null?'（还有 '+du+' 个交易日）':''):''}</div>`}
+    <div style="display:${open?'':'none'}">
     ${banner}${strip}
     <div class="lvgrid">
       <div><b style="color:var(--up)">卖出 ${(s.sell||[]).length} 只</b>
@@ -1488,7 +1662,7 @@ function sigHtml(s){
           :'<div class="none">无</div>'}</div>
       <div><b>持有不动 ${(s.hold||[]).length} 只</b>
         <div class="lvwhy" style="margin-top:4px">${(s.hold||[]).map(x=>esc(x.name||x.code)).join('、')||'无'}</div></div>
-    </div></div>`;
+    </div></div></div>`;
 }
 
 function parseBulk(txt){
@@ -1560,10 +1734,14 @@ async function showSync(){
     <span class="lvtag">应到交易日 ${esc(st.expect_trade_day||'?')}</span>
     <span class="lvtag${cal.authoritative?' on':''}">
       日历 ${esc(cal.source||'缺')} → ${esc(cal.max||'?')}</span>
+    ${autoTag(o.auto)}
+    <span style="flex:1"></span>
     <button class="btn" id="syrun" ${o.readonly?'disabled':''}>立即同步</button>
+    ${autoBtn(o.auto, o.readonly)}
     <button class="btn" id="syref">刷新</button>
   </div>
   <div class="lvmsg" id="symsg"></div>
+  ${autoNote(o.auto)}
   <div class="lvgrid">
     <div class="lvsec"><h3>A 腿 · tdx 行情（全自动）</h3>
       <table class="lvt"><tr><th>项</th><th>最新</th><th>状态</th></tr>
@@ -1594,6 +1772,21 @@ async function showSync(){
     border-radius:6px;padding:12px;overflow:auto;max-height:60vh;font:11px/1.6 'SF Mono',Menlo,monospace"></pre>`;
 
   $('#syref').onclick=()=>showSync();
+  if($('#syauto')) $('#syauto').onclick=async()=>{
+    const on=!o.auto.on, m=$('#symsg');
+    /* 关闭要确认：它的代价是"几个月后发现历史有缺口"，而不是立刻报错。 */
+    if(!on && !confirm('关闭自动同步？\n\n之后每天要自己点「立即同步」。'
+        +'daily_snapshot 是漏一天永久丢失的（tdx 的名称/分类/板块成分是'
+        +'覆盖写），忘一天就是历史上少一天，而这不会报错。')) return;
+    m.className='lvmsg'; m.textContent=(on?'开启':'关闭')+'中…';
+    try{
+      const r=await post('/api/sync/auto',{on:on});
+      m.className='lvmsg ok';
+      m.textContent=(r.on?'自动同步已开启 —— 每日 '+(r.schedule||'?')+' 跑 sync_daily.sh'
+                         :'自动同步已关闭 —— 记得每天手动点「立即同步」');
+      showSync();
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
   $('#syrun').onclick=async()=>{
     const m=$('#symsg'); m.className='lvmsg'; m.textContent='已启动…（tdx2db cron 要几分钟）';
     try{

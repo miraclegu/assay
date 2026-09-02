@@ -24,6 +24,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1011,9 +1012,13 @@ def api_live_accounts(_q):
         if a.get('archived') and not show_all:
             continue
         pos = m.positions(a['id'])
+        # ★ 红点用【盘上最新那份信号】判，不重算 —— 重算要重放 30 天 warmup，
+        #   而这是每次打开实盘页都会跑的列表接口。
+        alert, why = m.signal_alert(m.latest_signal(a['id']))
         out.append(dict(a, n_positions=len(pos), cash=round(m.cash(a['id']), 2),
                         n_fills=len(m.fills(a['id'])),
-                        n_versions=len(m.versions(a['id']))))
+                        n_versions=len(m.versions(a['id'])),
+                        alert=alert, alert_why=why))
     cal = m.calendar_meta()
     # ★ 「权不权威」由服务端判 —— 名单只存在 live.AUTHORITATIVE_CAL 一处。
     #   前端原来硬编码 `source !== 'jq.get_all_trade_days'`，于是把
@@ -1038,6 +1043,8 @@ def api_live_account(q):
     # ★ 主视图【不再整包带流水】—— 成交多了之后这个响应会越来越大，
     #   而主视图根本不显示流水（它有独立页面 + 分页）。
     def _go():
+        sig = m.latest_signal(aid)
+        alert, why = m.signal_alert(sig)
         rows = m.fills(aid)
         return {
             'account': m.get_account(aid),
@@ -1062,7 +1069,10 @@ def api_live_account(q):
             'n_fills': len(rows),
             'fee_total': round(sum(float(f.get('fee') or 0) for f in rows), 2),
             'fee_estimated_n': sum(1 for f in rows if f.get('fee_estimated')),
-            'signal': m.latest_signal(aid),
+            'signal': sig,
+            # ★ 待办要不要默认展开、账户列表的红点，同一个判据
+            #   （live.signal_alert）—— 判据分两处写就一定会分叉
+            'alert': alert, 'alert_why': why,
         }
     return _live_err(_go)
 
@@ -1481,7 +1491,112 @@ def api_sync(_q):
                          'mtime': datetime.fromtimestamp(
                              os.path.getmtime(p)).replace(microsecond=0).isoformat()})
     out['logs'] = logs
+    # ★ 自动同步状态跟着一起给 —— 按钮的文字要照它显示（"开启"还是"关闭"），
+    #   前端不能自己猜。也不该为这一个字段再打一次请求。
+    out['auto'] = autosync_status()
     return out
+
+
+# ============================ 自动同步（launchd） ============================
+# ★ "自动同步"就是那个 launchd agent，没有第二套定时。serve.py 里【不做】
+#   定时线程 —— daily_snapshot.py 是漏一天永久丢失的（tdx 的名称/分类/板块
+#   成分是 type-1 覆盖写），挂在"看板恰好开着"上不可靠。launchd 还会在机器
+#   睡过预定时刻后醒来补跑。所以这个开关只是 load / unload 那个 agent。
+SYNC_LABEL = 'com.miraclegu.finacial.sync'
+SYNC_PLIST = SYNC_LABEL + '.plist'
+
+
+def _launch_agents_dir():
+    return os.path.join(os.path.expanduser('~'), 'Library', 'LaunchAgents')
+
+
+def _sync_plist_paths():
+    """(仓库里的正本, 已安装的那份)。"""
+    return (os.path.join(_datalake_dir(), '_manifest', SYNC_PLIST),
+            os.path.join(_launch_agents_dir(), SYNC_PLIST))
+
+
+def autosync_status():
+    """自动同步开着还是关着 —— 按钮要照这个显示文字，不能瞎猜。"""
+    import subprocess
+    src, dst = _sync_plist_paths()
+    out = {'label': SYNC_LABEL, 'plist': dst, 'src': src,
+           'installed': os.path.isfile(dst), 'src_exists': os.path.isfile(src),
+           'supported': sys.platform == 'darwin'}
+    if not out['supported']:
+        out['on'] = None
+        out['note'] = 'launchd 只有 macOS 有；其它平台请自行接 cron'
+        return out
+    try:
+        r = subprocess.run(['launchctl', 'list', SYNC_LABEL],
+                           capture_output=True, text=True, timeout=15)
+        out['loaded'] = (r.returncode == 0)
+    except Exception as e:                                  # noqa: BLE001
+        out['loaded'] = None
+        out['note'] = '%s: %s' % (type(e).__name__, e)
+    out['on'] = bool(out['installed'] and out['loaded'])
+    # ★ 已安装那份与仓库正本不一致时要说出来：改了 plist 但没重新安装，
+    #   跑的还是旧的（比如时间还停在旧的 18:10），而这**不会报错**。
+    if out['installed'] and out['src_exists']:
+        try:
+            out['drift'] = (open(src, 'rb').read() != open(dst, 'rb').read())
+        except Exception:                                   # noqa: BLE001
+            out['drift'] = None
+    # 计划时间从【已安装那份】里读 —— 显示正在生效的，不是仓库里的
+    out['schedule'] = None
+    try:
+        txt = open(dst if out['installed'] else src, encoding='utf-8').read()
+        h = re.search(r'<key>Hour</key>\s*<integer>(\d+)</integer>', txt)
+        mi = re.search(r'<key>Minute</key>\s*<integer>(\d+)</integer>', txt)
+        if h and mi:
+            out['schedule'] = '%02d:%02d' % (int(h.group(1)), int(mi.group(1)))
+    except Exception:                                       # noqa: BLE001
+        pass
+    return out
+
+
+def api_sync_auto(_q):
+    """GET /api/sync/auto —— 自动同步的当前状态。"""
+    return autosync_status()
+
+
+def api_sync_auto_set(_q, body):
+    """POST /api/sync/auto —— 开/关自动同步（load / unload 那个 launchd agent）。
+
+    ★ 用 `-w`：它同时写 Disabled 标记，重启后仍然生效。不带 -w 的话
+      "关掉"只活到下次登录 —— 而那种"以为关了其实又开了"比开着更糟。
+    ★ 开启时若 LaunchAgents 下没有或与仓库正本不一致，先复制过去 ——
+      否则会 load 到一份旧的 plist，而这不会报错。
+    """
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    import shutil
+    import subprocess
+    on = bool((body or {}).get('on'))
+    st = autosync_status()
+    if not st.get('supported'):
+        return {'error': st.get('note') or '当前平台不支持 launchd'}
+    src, dst = _sync_plist_paths()
+    if on:
+        if not os.path.isfile(src):
+            return {'error': '找不到 plist 正本：%s' % src}
+        if not st['installed'] or st.get('drift'):
+            os.makedirs(_launch_agents_dir(), exist_ok=True)
+            shutil.copyfile(src, dst)
+    elif not st['installed']:
+        return dict(autosync_status(), changed=False,
+                    note='本来就没安装，无需关闭')
+    cmd = ['launchctl', 'load' if on else 'unload', '-w', dst]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    st2 = autosync_status()
+    # ★ 以【复查到的状态】为准，不以命令返回码为准：launchctl 对"已经是这个
+    #   状态"会报错退出，而那不是失败。判据永远是"现在到底开着没"。
+    if st2.get('on') != on:
+        return dict(st2, changed=False,
+                    error='%s 失败：%s' % ('开启' if on else '关闭',
+                                          (r.stderr or r.stdout or
+                                           '返回码 %d' % r.returncode).strip()[-300:]))
+    return dict(st2, changed=True, cmd=' '.join(cmd))
 
 
 _LOG_RE = re.compile(r'^[0-9]{8}-[0-9]{6}\.log$')
@@ -1547,6 +1662,7 @@ ROUTES = {
     '/api/live/equity': api_live_equity,
     '/api/live/fills': api_live_fills,
     '/api/sync': api_sync,
+    '/api/sync/auto': api_sync_auto,
     '/api/sync/log': api_sync_log,
 }
 
@@ -1575,6 +1691,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/cash': api_live_cash,
                  '/api/live/fee_infer': api_live_fee_infer,
                  '/api/live/fee_rate': api_live_fee_add,
+                 '/api/sync/auto': api_sync_auto_set,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         fn = POSTS.get(u.path)

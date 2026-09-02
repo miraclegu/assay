@@ -2494,6 +2494,9 @@ def t_live_ui():
 
             # 建账户：id 自动，只填名称
             assert pg.locator('#na').count() == 0, '新建表单不该再要用户填 id'
+            # 创建账户的表单默认收起（它平时不用），先点「+ 新建账户」
+            pg.click('#lvnew')
+            pg.wait_for_selector('#nn', state='visible', timeout=8000)
             pg.fill('#nn', 'UI 测试')
             pg.fill('#nc', '400000')
             pg.click('#nb')
@@ -2531,6 +2534,94 @@ def t_live_ui():
             assert '· 调仓日' in pg.locator('#lvbody').inner_text(), \
                 '没标出是不是调仓日'
 
+            # ---- KPI 板：账户的数字集中一处，不再是顶栏一串标签 ----
+            #   ★ 原来"我现在怎么样"要在标题、标签栏、持仓汇总三处来回凑。
+            _kp = ' '.join(pg.locator('#lvbody .kpi .k').all_inner_texts())
+            for k in ('总资产', '持仓市值', '可用现金', '持仓浮盈'):
+                assert k in _kp, 'KPI 缺「%s」：%s' % (k, _kp)
+            assert '权益' not in pg.locator('#lvbody .lvhead').inner_text(), \
+                '顶栏又出现"权益"标签了 —— 数字应集中在 KPI 板'
+            # 业绩那半是异步补的（要重放整条权益曲线），等它落地
+            pg.wait_for_function(
+                "() => { const e=document.querySelector('#kperf2');"
+                " return e && !/…/.test(e.textContent); }", timeout=20000)
+            _kp2 = ' '.join(pg.locator('#lvbody #kperf2 .k').all_inner_texts())
+            _st = pg.evaluate(
+                "async () => { const a=(LV&&LV.accounts||[])"
+                ".find(x=>x.id===LVSEL); if(!a) return null;"
+                " return (await (await fetch('/api/live/equity?id='+a.id))"
+                ".json()).stats; }") or {}
+            if _st:
+                for k in ('累计收益', '加权年化', '最大回撤', '当前回撤',
+                          '最近一日', '投资时间'):
+                    assert k in _kp2, '业绩 KPI 缺「%s」：%s' % (k, _kp2)
+                # 不足 20 个交易日不该给年化 —— 两周收益乘 12 倍会被拿去跟回测比
+                if _st.get('twr_annual') is None:
+                    _ann = pg.locator('#lvbody #kperf2 > div').nth(1).inner_text()
+                    assert '—' in _ann and '不足' in _ann, \
+                        '不足 20 个交易日应显示"—"并说明：%s' % _ann
+            else:
+                # 还没成交 -> 不编数字，说明为什么没有
+                assert '业绩' in _kp2, '没有权益曲线时也要有一格说明：%s' % _kp2
+            _kpv = pg.locator('#lvbody .kpi').first.inner_text()
+            assert 'undefined' not in _kpv and 'NaN' not in _kpv, \
+                'KPI 板里有 undefined/NaN：%s' % _kpv
+
+            # ---- 待办：没到警示时间默认收起，到点自己打开 ----
+            #   ★ 非调仓日、没有止损/炸板卖出时，待办里其实什么都没有，
+            #     而它占着主视图最上面一屏。判据用服务端的 alert
+            #     （live.signal_alert）—— 和账户列表的红点同一个。
+            _al = pg.evaluate('() => !!(LVO && LVO.alert)')
+            _tf = pg.locator('#todofold')
+            if _tf.count():
+                _txt = _tf.inner_text()
+                assert ('收起' in _txt) == _al, \
+                    'alert=%s 时待办应%s：%s' % (_al, '展开' if _al else '收起', _txt)
+                # 收起态要留一行摘要，不能什么都不说
+                if not _al:
+                    _h3 = pg.locator('#lvbody .lvsec').first.inner_text()
+                    assert '待办' in _h3 and len(_h3.strip()) > 6, \
+                        '收起后应留一行摘要：%s' % _h3
+                _tf.click()
+                pg.wait_for_timeout(900)
+                assert ('收起' in pg.locator('#todofold').inner_text()) != _al, \
+                    '点「展开/收起」没生效'
+                pg.locator('#todofold').click()
+                pg.wait_for_timeout(900)
+            # 告警点：判据由服务端给，展开/收起两态都要能看到
+            _dots = pg.locator('.ditem .adot').count()
+            _n_al = pg.evaluate(
+                '() => (LV&&LV.accounts||[]).filter(a=>a.alert).length')
+            assert _n_al is not None, '服务端没给 alert 字段 —— 判据必须服务端给'
+            assert _dots == _n_al, \
+                '账户列表的告警点数(%d)应等于服务端说 alert 的账户数(%d)' \
+                % (_dots, _n_al)
+
+            # ---- 侧栏可收起，且收起后仍看得到告警点 ----
+            assert pg.locator('#dk .dside').count() == 1, '默认应展开'
+            assert pg.locator('#nform').count() == 1 and \
+                not pg.locator('#nform').is_visible(), \
+                '创建账户的表单应默认收起（点「+ 新建账户」才展开）'
+            pg.click('#lvnew')
+            pg.wait_for_timeout(200)
+            assert pg.locator('#nform').is_visible(), '点「+ 新建账户」应展开'
+            pg.click('#lvfold')
+            pg.wait_for_timeout(900)
+            assert pg.locator('#dk.fold').count() == 1 and \
+                pg.locator('#dk .dside').count() == 0, '收起没生效'
+            _chips = pg.locator('.drail .dchip').count()
+            assert _chips >= 2, '收起后的轨上应有展开按钮 + 每个账户一个方块'
+            # ★ 收起后【仍要看得到告警点】—— 看不到该干什么的收起不如不做。
+            #   告警数当场重算：收起会重新拉一次账户列表，用收起前的数会漂。
+            _n_al2 = pg.evaluate(
+                '() => (LV&&LV.accounts||[]).filter(a=>a.alert).length')
+            assert pg.locator('.drail .adot').count() == _n_al2, \
+                '收起态的轨上丢了告警点：轨上 %d 个，服务端说 %d 个' \
+                % (pg.locator('.drail .adot').count(), _n_al2)
+            pg.click('#lvunfold')
+            pg.wait_for_timeout(900)
+            assert pg.locator('#dk .dside').count() == 1, '展开没生效'
+
             # ---- 记一笔：一个入口、两个 tab ----
             pg.click('#lvrec')
             pg.wait_for_selector('#rfill', timeout=10000)
@@ -2541,10 +2632,15 @@ def t_live_ui():
                 '日期框不该是空的 —— 空了会让第二笔起静默失败'
 
             def _cash():
-                for t in pg.locator('.lvtag').all_inner_texts():
-                    if t.startswith('现金'):
-                        return float(t.replace('现金', '').replace(',', '').strip())
-                raise AssertionError('头部没有现金标签')
+                # 现金从 KPI 板的「可用现金」那格读（原来在顶栏标签里，
+                # 顶栏一串数字太杂，已集中到 KPI 板）
+                cs = pg.locator('#lvbody .kpi > div')
+                for i in range(cs.count()):
+                    t = cs.nth(i).inner_text().split('\n')
+                    if t and t[0].strip() == '可用现金':
+                        return float(t[1].replace(',', '').strip())
+                raise AssertionError('KPI 板里没有「可用现金」：%s'
+                                     % pg.locator('#lvbody .kpi').first.inner_text())
 
             # 费用三态（留空=估算 / 填值 / 填 0），断言【差额】不是绝对值
             for code, q, px, fv, amt, want in (
@@ -2917,7 +3013,8 @@ def t_live_ui():
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
                     '价格区间校验有逃生口；'
                     '排版：流水列序(日/方向/代码/名称/价/量/额/费,录入时间与来源置尾)、'
-                    '持仓代码与名称分列、数据日独立成标签；'
+                    '持仓代码与名称分列、数据日独立成标签、KPI 板 10 格无 undefined、'
+                    '侧栏可收起(轨上仍见告警点)、新建表单默认收起、待办按 alert 折叠；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
@@ -3041,7 +3138,9 @@ def t_sync_ui():
         from playwright.sync_api import sync_playwright
     except ImportError:
         return '跳过（无 playwright）'
+    import json as _json
     import threading
+    import urllib.request
     from http.server import ThreadingHTTPServer
 
     from assay import server as sv
@@ -3050,6 +3149,17 @@ def t_sync_ui():
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+
+    def _get(path):
+        return urllib.request.urlopen(base + path, timeout=120).read().decode()
+
+    def _post(path, body):
+        rq = urllib.request.Request(
+            base + path, data=_json.dumps(body).encode(),
+            headers={'Content-Type': 'application/json'})
+        return urllib.request.urlopen(rq, timeout=120).read().decode()
+
     try:
         with sync_playwright() as p:
             try:
@@ -3090,6 +3200,35 @@ def t_sync_ui():
                 '日历来源不在可信名单里: %s' % head
             # 只读模式下手动同步必须置灰（不能只靠前端 —— 接口也会拒，见 api_sync_run）
             assert pg.locator('#syrun').is_disabled(), '只读模式下「立即同步」应置灰'
+            # ---- 自动同步开关：按钮文字必须跟【服务端复查到的状态】一致 ----
+            #   ★ 不去真的 load/unload —— 那会改用户机器上的 launchd。
+            #     这里核的是"状态读得对、文字对得上、只读被拦住"。
+            au = _json.loads(_get('/api/sync/auto'))
+            if au.get('supported') is False:
+                assert pg.locator('#syauto').count() == 0,                     '不支持 launchd 的平台不该出现这个按钮'
+                auto_note = '本平台无 launchd，按钮已隐去'
+            else:
+                assert au.get('on') in (True, False),                     'on 必须是明确的真假，不能是 None：%s' % au
+                btn = pg.locator('#syauto').inner_text()
+                assert btn == ('关闭自动同步' if au['on'] else '开启自动同步'),                     '按钮文字与实际状态不符：状态 on=%s，按钮「%s」' % (au['on'], btn)
+                assert pg.locator('#syauto').is_disabled(),                     '只读模式下开关也要置灰 —— 它会改 launchd'
+                tag = pg.locator('.lvhead .lvtag').all_inner_texts()
+                tz = ' '.join(tag)
+                assert '自动同步' in tz, '顶栏要显示自动同步状态：%s' % tag
+                assert ('开' in tz) == au['on'], '标签与状态不符：%s' % tz
+                if au['on']:
+                    assert au.get('schedule') and au['schedule'] in tz,                         '开着的时候要显示计划时间：%s / %s' % (au.get('schedule'), tz)
+                    # 开着就不该弹"自动同步是关的"那条告警 —— 假告警看多了就不看了
+                    assert '自动同步是关的' not in pg.locator('#main').inner_text(),                         '开着却提示"关的"'
+                else:
+                    assert '永久丢失' in pg.locator('#main').inner_text(),                         '关着必须说清代价（daily_snapshot 漏一天永久丢失）'
+                # 只读接口层也要拒，不能只靠按钮置灰
+                r_auto = _json.loads(_post('/api/sync/auto', {'on': not au['on']}))
+                assert r_auto.get('error'), '只读模式下接口应拒绝改自动同步'
+                assert _json.loads(_get('/api/sync/auto')).get('on') == au['on'],                     '被拒之后状态不该变'
+                auto_note = '自动同步 %s%s（按钮文字一致、只读双层拦住）' % (
+                    '开' if au['on'] else '关',
+                    ' · ' + au['schedule'] if au.get('schedule') else '')
             # 日志可点开
             n_log = pg.locator('a.sylog').count()
             if n_log:
@@ -3100,7 +3239,8 @@ def t_sync_ui():
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('两条腿语义分离（A 报交易日落后 / B 报距今天数）；'
-                    '日历来源可信；只读拦住手动同步；%d 份日志可点开' % n_log)
+                    '日历来源可信；只读拦住手动同步；%s；%d 份日志可点开'
+                    % (auto_note, n_log))
     finally:
         httpd.shutdown()
         sv.ALLOW_LIVE = old
