@@ -1763,7 +1763,7 @@ def t_live_core():
         rb = lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'buy', 1000, 11.42)
         assert rb['fee'] > 0, '买入应估出费用'
         lv.add_fill('t_rev', '2026-08-20', '601857.XSHG', 'sell', 1000, 11.42,
-                    fee=-rb['fee'], reverse_of=rb['ts'])
+                    fee=-rb['fee'], reverse_of=rb['uid'])
         assert abs(lv.cash('t_rev') - c_before) < 1e-9, \
             '冲正后现金应精确回到 %.2f，实得 %.2f（差 %.2f = 多吃的费用）' \
             % (c_before, lv.cash('t_rev'), lv.cash('t_rev') - c_before)
@@ -1771,9 +1771,77 @@ def t_live_core():
         # 冲正不填费用时不该去估算（估了就抵消不掉）
         rb2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'buy', 100, 48.78)
         rv2 = lv.add_fill('t_rev', '2026-08-21', '601088.XSHG', 'sell', 100, 48.78,
-                          reverse_of=rb2['ts'])
+                          reverse_of=rb2['uid'])
         assert rv2['fee'] == 0 and not rv2.get('fee_estimated'), \
             '冲正不填费用时应记 0 而不是估算，实得 %s' % rv2['fee']
+
+        # ---- 3f) 改记录的完整链路：ts 不能当主键 / 冲正要还原批次 / 重放校验 ----
+        #     ★ 这一组是"录错了能不能改对"的全部保证。三个都曾经是 bug：
+        #       1. `ts` 是秒精度，同一秒两笔撞成同一"身份"，冲正配对到错的
+        #          记录 -> FIFO 批次不还原 -> 成本价与建仓日错 -> 止损判错
+        #       2. 已冲正的记录仍参与 fifo_lots -> 批次变成
+        #          [500@10 建仓08-10, 500@12 建仓08-20]，而实际什么都没发生
+        #       3. 校验只看"当前持仓" -> 被后续记录依赖的那笔【永远改不了】，
+        #          且补录更早日期的卖出会被放行
+        lv.upsert_account('t_edit', name='edit', init_cash=100000)
+        lv.bind_version('t_edit', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        eb = lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'buy', 1000, 10.0, fee=5)
+        es = lv.add_fill('t_edit', '2026-08-20', '601857.XSHG', 'sell', 500, 12.0, fee=8)
+        assert eb['uid'] != es['uid'], 'uid 必须唯一（ts 是秒精度，会撞）'
+        # 被依赖的那笔不能直接冲，但要给出下一步
+        try:
+            lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'sell', 1000, 10.0,
+                        fee=-5, reverse_of=eb['uid'])
+            raise AssertionError('被后续记录依赖的冲正应被拒')
+        except lv.LiveError as e:
+            assert '负持仓' in str(e), '拒绝理由要说清是负持仓：%s' % e
+        # 先冲后续那笔 -> 批次必须【完全还原】
+        lv.add_fill('t_edit', '2026-08-20', '601857.XSHG', 'buy', 500, 12.0,
+                    fee=-8, reverse_of=es['uid'])
+        # positions() 是接口层，date 已转 ISO 字符串（见其 docstring）；
+        # 内部计算用 fifo_lots 才拿 date 对象。这里比字符串。
+        lots = lv.positions('t_edit')['601857.XSHG']['lots']
+        assert len(lots) == 1 and lots[0]['shares'] == 1000 \
+            and abs(lots[0]['price'] - 10.0) < 1e-9 \
+            and str(lots[0]['date'])[:10] == '2026-08-10', \
+            ('冲正后批次没还原成 [1000@10.0 建仓 08-10]，实得 %s'
+             ' —— 成本价/建仓日直接喂给止损判定' % lots)
+        # 再冲原始那笔 -> 现金精确回到初始、空仓
+        lv.add_fill('t_edit', '2026-08-10', '601857.XSHG', 'sell', 1000, 10.0,
+                    fee=-5, reverse_of=eb['uid'])
+        assert not lv.positions('t_edit'), '全部冲正后应空仓'
+        assert abs(lv.cash('t_edit') - 100000) < 1e-9, \
+            '全部冲正后现金应精确回到 100000，实得 %.2f' % lv.cash('t_edit')
+        # 补录一笔日期在所有买入【之前】的卖出 —— 只看当前持仓会放行
+        lv.add_fill('t_edit', '2026-09-01', '601088.XSHG', 'buy', 1000, 48.0, fee=5)
+        try:
+            lv.add_fill('t_edit', '2026-08-01', '601088.XSHG', 'sell', 1000, 48.0,
+                        fee=5)
+            raise AssertionError('补录更早日期的卖出应被拒（重放时持仓为负）')
+        except lv.LiveError:
+            pass
+        assert len(lv.fills('t_edit')) == 5 and \
+            len(lv.active_fills(lv.fills('t_edit'))) == 1, \
+            '账本应留全部 5 条、有效 1 条（冲正只追加不删）'
+
+        # ---- 3g) 收益必须是【时间加权】—— 入金不算收益 ----
+        lv.upsert_account('t_twr', name='twr', init_cash=100000)
+        lv.bind_version('t_twr', 'strategies/小市值/froec_traded.py',
+                        params={'stop_loss': 0.35, 'stop_intraday': 1, 'weekday': 2})
+        lv.add_fill('t_twr', '2026-08-10', '601857.XSHG', 'buy', 5000, 11.0, fee=15)
+        e1 = lv.equity_curve('t_twr')
+        assert e1['stats'] and e1['dates'], '权益曲线为空'
+        assert len(e1['dates']) == len(e1['equity']), '日期与权益长度不一致'
+        t1 = e1['stats']['twr']
+        lv.add_cashflow('t_twr', '2026-08-25', 500000, 'deposit', '测试入金')
+        e2 = lv.equity_curve('t_twr')
+        naive = e2['equity'][-1] / 100000 - 1
+        assert naive > 4, '构造有误：入金后简单相除应远大于真实收益'
+        assert abs(e2['stats']['twr']) < 0.5, \
+            ('TWR 把入金算成收益了：%.4f（简单相除 %.4f）'
+             % (e2['stats']['twr'], naive))
+        assert e2['stats']['net_deposit'] == 500000, '净入金没记对'
 
         # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
         v = lv.versions('t_hit')
@@ -1809,6 +1877,7 @@ def t_live_core():
             assert c, '历史版本 %s 读不出来' % row['code_sha']
 
         return ('FIFO 剩 500@20.0；现金账务(入/出金+成交+费用三态+as-of)对；'
+                'uid 唯一 + 冲正还原批次 + 重放拦负持仓 + TWR 排除入金；'
                 '止损两侧 %.1f%%→stop / %.1f%%→非stop；'
                 '红利 %s %s 买入 %d 只；快照含 %d 个文件、删 runs/ 仍可读、'
                 '改依赖后哈希变 %s→%s'
@@ -2031,8 +2100,11 @@ def t_live_ui():
             pg.fill('#ft', '2026-09-01 %s 卖 900 10.00' % code)
             pg.click('#fbulk')
             pg.wait_for_timeout(700)
-            assert '超过当前持仓' in pg.locator('#fmsg').inner_text(), \
-                '超卖没被拒：%s' % pg.locator('#fmsg').inner_text()
+            # ★ 断言"被拒"这件事本身 + 理由里提到持仓，不去匹配具体措辞 ——
+            #   校验从「只看当前持仓」改成「重放整个账本」后措辞就变了，
+            #   而规则并没有变。断言绑死文案会在这种时候假失败。
+            _m = pg.locator('#fmsg').inner_text()
+            assert '录入 0 笔' in _m and '持仓' in _m, '超卖没被拒：%s' % _m
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]

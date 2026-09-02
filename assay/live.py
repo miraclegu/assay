@@ -49,6 +49,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import uuid
 
 from . import api
 from .broker import Cost, RecordingBroker
@@ -128,6 +129,18 @@ def _read_jsonl(path):
 
 def _now():
     return datetime.datetime.now().replace(microsecond=0).isoformat()
+
+
+def _uid():
+    """记录的唯一标识。
+
+    ★ 不能用 `ts` 当主键 —— `_now()` 是【秒精度】，同一秒内连续录两笔会得到
+      完全相同的 ts。实测踩到：冲正记录的 reverse_of 指向那个 ts，
+      by_ts 映射里只留下了后写入的那条，于是冲正配对到了**错的记录**，
+      FIFO 批次没被还原（成本价与建仓日都错，而它们直接喂给止损判定）。
+      ts 保留秒精度是为了可读；身份另用 uid。
+    """
+    return uuid.uuid4().hex[:12]
 
 
 def _d(x):
@@ -412,19 +425,27 @@ def add_fill(aid, trade_date, code, side, shares, price, fee=None,
         raise LiveError('买入数量必须是 %d 的整数倍，收到 %d' % (LOT_SIZE, shares))
     if '.' not in code:
         raise LiveError('代码要带市场后缀，如 601857.XSHG，收到 %r' % code)
-    # 卖出不能超过当前持仓 —— 这类错录进去会让后面所有信号都错，且不报错。
-    if side == 'sell':
-        held = positions(aid).get(code, {}).get('shares', 0)
-        if shares > held:
-            raise LiveError('卖出 %d 股超过当前持仓 %d 股（%s）'
-                            % (shares, held, code))
-    rec = {'ts': _now(), 'trade_date': d.isoformat(), 'code': code,
-           'name': name, 'side': side, 'shares': shares, 'price': price,
-           'fee': fee, 'source': source, 'note': note}
+    rec = {'uid': _uid(), 'ts': _now(), 'trade_date': d.isoformat(),
+           'code': code, 'name': name, 'side': side, 'shares': shares,
+           'price': price, 'fee': fee, 'source': source, 'note': note}
     if fee_estimated:
         rec['fee_estimated'] = True
     if reverse_of:
         rec['reverse_of'] = reverse_of
+    # ★ 把新记录放进账本【重放一遍】再决定收不收 —— 不是只看当前持仓。
+    #   这样冲正、补录历史日期都能正确判断（见 replay_violation 的注释）。
+    v = replay_violation(fills(aid) + [rec])
+    if v:
+        c, vd, cur, want, bad = v
+        if bad is rec:
+            raise LiveError('这笔卖出会让 %s 在 %s 的持仓变负：当时只有 %d 股，'
+                            '要卖 %d 股' % (c, vd, cur, want))
+        raise LiveError(
+            '加了这条之后，账本会在 %s 出现负持仓：%s 当时只有 %d 股，'
+            '而那天有一笔卖 %d 股。\n'
+            '—— 多半是你想冲正的这笔被【后面的记录】依赖了。'
+            '先冲正那笔后续卖出，再冲正这一笔。'
+            % (vd, c, cur, want))
     _append_jsonl(os.path.join(acct_dir(aid), 'fills.jsonl'), rec)
     return rec
 
@@ -459,7 +480,12 @@ def fifo_lots(rows):
       T+1 只锁当日买入那批），平均成本会让重建出来的持仓与引擎语义不一致。
     """
     book = {}
-    for r in sorted(rows, key=lambda x: (x['trade_date'], x['ts'])):
+    # ★ 同一天同一秒的多笔要有确定顺序，否则 FIFO 批次不可复现。
+    #   tiebreak 用【文件里的插入顺序】，**不能用 uid** —— uid 是随机 hex，
+    #   拿它排序会让同秒的买卖顺序随机翻转（实测：卖排到买前面，
+    #   于是重放报"持仓变负"，而账本本身没问题）。
+    for _i, r in sorted(_indexed(active_fills(rows)),
+                        key=lambda t: (t[1]['trade_date'], t[1]['ts'], t[0])):
         c = r['code']
         lots = book.setdefault(c, [])
         if r['side'] == 'buy':
@@ -478,7 +504,11 @@ def fifo_lots(rows):
 
 
 def lots_asof(rows, day):
-    """截至 day（含）的真实持仓。重放 warmup 时每天都要用。"""
+    """截至 day（含）的真实持仓。重放 warmup 时每天都要用。
+
+    ★ 先按日期切、再交给 fifo_lots（它内部会剔掉已冲正的成对记录）。
+      顺序不能反 —— 冲正记录可能晚于 day，那时原记录仍然有效。
+    """
     day = _d(day)
     return fifo_lots([r for r in rows if _d(r['trade_date']) <= day])
 
@@ -489,12 +519,81 @@ def cash_asof(init_cash, rows, day, flows=()):
     for r in flows:
         if _d(r['date']) <= day:
             v += float(r.get('signed') or 0)
-    for r in rows:
+    for r in active_fills(rows):
         if _d(r['trade_date']) > day:
             continue
         amt = r['shares'] * r['price']
         v += (-amt if r['side'] == 'buy' else amt) - float(r.get('fee') or 0)
     return v
+
+
+def _indexed(rows):
+    """(插入序号, 记录)。序号来自 fills.jsonl 的行序 —— append-only 的账本里
+    行序就是时间序，是唯一可靠的同秒 tiebreak。"""
+    return list(enumerate(rows))
+
+
+def active_fills(rows):
+    """剔掉【已冲正的成对记录】—— 原记录和它的冲正记录都不算。
+
+    ★ 为什么必须成对剔掉，而不是"让它们在账上互相抵消"：
+
+      1. **FIFO 批次会被搞错。** 买 1000@10（08-10）、卖 500@12（08-20）、
+         再冲正那笔卖出（买 500@12，08-20）。若照单全收，批次变成
+         [500@10 建仓08-10, 500@12 建仓08-20] —— 而实际上什么都没发生，
+         应该是 [1000@10 建仓08-10]。成本价和建仓日都错了，
+         **而这两个值直接喂给止损判定和红利税档位**。
+      2. **重放会出现假的负持仓。** 冲正 08-10 那笔买入时，反向记录也记在
+         08-10，于是排序后它落在 08-20 那笔卖出【之前】，那一刻持仓是负的
+         —— 尽管那笔卖出本身早已被冲正掉。
+
+      3. 现金也顺带更稳：成对剔掉后，冲正记录的费用符号填错也不会影响现金。
+
+    只有【股数一致】才视为成对冲正 —— 手工写的部分冲正不能整条剔掉。
+    """
+    key = lambda r: r.get('uid') or r['ts']
+    by_id = {key(r): r for r in rows}
+    dead = set()
+    for r in rows:
+        src = r.get('reverse_of')
+        if not src:
+            continue
+        o = by_id.get(src)
+        if o is not None and int(o['shares']) == int(r['shares']) \
+                and o['side'] != r['side']:
+            dead.add(src)
+            dead.add(key(r))
+    return [r for r in rows if key(r) not in dead]
+
+
+def replay_violation(rows):
+    """重放整个账本，返回第一个「持仓变负」的违规，没有则返回 None。
+
+    ★ 为什么不能只看「当前持仓」（原实现就是这么做的，有两个洞）：
+
+      1. **冲正被后面的记录锁死。** 买 1000（08-10）→ 卖 500（08-20）后想
+         冲正那笔买入，反向记录是"卖 1000"，而当前只持 500 —— 于是校验
+         把它拒了，那条错记录**永远改不了**。正确的判断是：冲正之后
+         08-20 那笔卖出会无股可卖，所以要先冲正 08-20 那笔。
+      2. **补录历史日期的卖出。** 只看当前持仓，一笔日期在所有买入【之前】
+         的卖出会被放行，而重放时那一刻持仓是负的。
+
+    返回 (code, date, 该时点持仓, 想卖的股数, 违规记录)。
+    """
+    held = {}
+    # 排序键带 uid：同一天同一秒的多笔要有确定顺序，否则 FIFO 批次不可复现
+    for _i, r in sorted(_indexed(active_fills(rows)),
+                        key=lambda t: (t[1]['trade_date'], t[1]['ts'], t[0])):
+        c = r['code']
+        n = int(r['shares'])
+        if r['side'] == 'buy':
+            held[c] = held.get(c, 0) + n
+        else:
+            cur = held.get(c, 0)
+            if n > cur:
+                return (c, r['trade_date'], cur, n, r)
+            held[c] = cur - n
+    return None
 
 
 def positions(aid):
@@ -562,12 +661,104 @@ def cash(aid, asof=None):
         if lim and _d(r['date']) > lim:
             continue
         v += float(r.get('signed') or 0)
-    for r in fills(aid):
+    for r in active_fills(fills(aid)):
         if lim and _d(r['trade_date']) > lim:
             continue
         amt = r['shares'] * r['price']
         v += (-amt if r['side'] == 'buy' else amt) - float(r.get('fee') or 0)
     return v
+
+
+# ============================ 权益与收益 ============================
+
+def equity_curve(aid, datalake=None):
+    """逐日权益曲线 + 收益统计。
+
+    权益 = 现金(as-of) + 持仓按当日**不复权收盘价**估值。
+    停牌当日无行情时按最后已知价挂账 —— 与引擎 broker 的做法一致。
+
+    ★ 收益用**时间加权（TWR）**，不是 `期末/期初 - 1`。
+      有入金出金时后者是错的：入金 5 万会让"收益"凭空变大，
+      而那不是你赚的。TWR 在每个有外部现金流的日子把区间切开：
+          r_t = (E_t − F_t) / E_{t−1} − 1        F_t = 当日净入金
+      再连乘。这也是能和回测年化直接比的那个口径。
+
+    ★ 已冲正的成对记录不参与（走 active_fills）—— 否则一笔"没发生"的交易
+      会在曲线上留下一个凭空的台阶。
+    """
+    acct = get_account(aid)
+    rows = active_fills(fills(aid))
+    flows = cashflows(aid)
+    init = float(acct.get('init_cash') or 0)
+    if not rows and not flows:
+        return {'dates': [], 'equity': [], 'stats': None,
+                'note': '还没有成交或现金流水'}
+    d0 = min([_d(r['trade_date']) for r in rows] +
+             [_d(f['date']) for f in flows])
+    feed = PanelFeed((d0 - datetime.timedelta(days=10)).isoformat(),
+                     datetime.date.today().isoformat(), root=datalake)
+    days = [d for d in feed.trading_days if d >= d0]
+    if not days:
+        return {'dates': [], 'equity': [], 'stats': None,
+                'note': '首笔成交日晚于最新行情日'}
+    codes = sorted({r['code'] for r in rows})
+    px = {}
+    if codes:
+        q = "','".join(codes)
+        for c, dd, p in feed.con.execute("""
+            SELECT jq_code, date, close_bfq
+            FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+            WHERE jq_code IN ('%s') AND date >= DATE '%s'
+        """ % (feed.root, q, days[0])).fetchall():
+            px[(c, dd)] = p
+    last = {}
+    flow_by_day = {}
+    for f in flows:
+        flow_by_day[_d(f['date'])] = flow_by_day.get(_d(f['date']), 0.0) \
+            + float(f.get('signed') or 0)
+
+    dates, eq, twr = [], [], []
+    prev_e = None
+    for d in days:
+        book = lots_asof(rows, d)
+        mv = 0.0
+        for c, lots in book.items():
+            p = px.get((c, d))
+            if p is None:
+                p = last.get(c)            # 停牌：按最后已知价挂账
+            else:
+                last[c] = p
+            if p is None:
+                continue
+            mv += sum(l['shares'] for l in lots) * p
+        e = cash_asof(init, rows, d, flows) + mv
+        f = flow_by_day.get(d, 0.0)
+        if prev_e is not None and prev_e > 0:
+            twr.append((e - f) / prev_e - 1.0)
+        prev_e = e
+        dates.append(d.isoformat())
+        eq.append(round(e, 2))
+
+    cum = 1.0
+    for r in twr:
+        cum *= (1.0 + r)
+    n = len(dates)
+    peak, mdd = -1e18, 0.0
+    for v in eq:
+        peak = max(peak, v)
+        if peak > 0:
+            mdd = max(mdd, 1.0 - v / peak)
+    yrs = n / 244.0
+    stats = {
+        'days': n,
+        'equity_end': eq[-1] if eq else None,
+        'twr': round(cum - 1.0, 6),
+        'twr_annual': round(cum ** (1.0 / yrs) - 1.0, 6) if yrs > 0.08 else None,
+        'max_drawdown': round(mdd, 6),
+        'net_deposit': round(sum(flow_by_day.values()), 2),
+        'init_cash': init,
+    }
+    return {'dates': dates, 'equity': eq, 'stats': stats, 'note': None}
 
 
 # ============================ 交易日历 ============================

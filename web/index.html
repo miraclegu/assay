@@ -522,6 +522,8 @@ async function loadLive(aid){
      信号本来就带这些字段，多一个接口就多一处会和信号不一致的地方。 */
   /* 已被冲正过的原记录 ts —— 用来把它一起划掉。
      不在服务端算是因为这纯属显示：账本本身只有"追加了一条反向记录"这个事实。 */
+  /* ★ 用 uid 不用 ts —— ts 是秒精度，同一秒录两笔会撞成同一个"身份"，
+     冲正就会配对到错的记录（FIFO 批次不还原、成本价与建仓日都错）。 */
   const REVED=new Set((o.fills||[]).map(f=>f.reverse_of).filter(Boolean));
   PX={}; NMS={};
   if(sig&&!sig.error) [].concat(sig.sell||[],sig.buy||[],sig.hold||[]).forEach(x=>{
@@ -534,6 +536,8 @@ async function loadLive(aid){
     <h2>${esc(a.name)}</h2>
     <span class="lvtag">现金 ${num(o.cash,2)}</span>
     <span class="lvtag">持仓 ${pos.length} 只</span>
+    <span class="lvtag" id="lveq" title="时间加权收益（TWR）——
+入金/出金不算收益。点开看逐日权益曲线">收益 …</span>
     ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
         title="点开看源码、参数表、以及用这个版本跑过的回测">${esc(a.strategy_path)}
         @${esc(a.code_sha256.slice(0,8))} ›</a>`
@@ -622,7 +626,8 @@ async function loadLive(aid){
       <div class="lvfill">${(o.fills||[]).length?`<table class="lvt">
         <tr><th>日期</th><th>代码</th><th>方向</th><th>股数</th><th>价格</th><th>费用</th><th>来源</th><th></th></tr>
         ${o.fills.map(f=>{
-          const rev=!!f.reverse_of, dead=REVED.has(f.ts);
+          const fid=f.uid||f.ts;
+          const rev=!!f.reverse_of, dead=REVED.has(fid);
           return `<tr class="${rev||dead?'lvrev':''}">
           <td>${esc(f.trade_date)}</td><td>${esc(f.code)} ${esc(f.name||'')}</td>
           <td>${f.side==='buy'?'买':'卖'}</td><td>${num(f.shares)}</td>
@@ -630,7 +635,7 @@ async function loadLive(aid){
           <td title="${f.fee_estimated?'估算值，对完账单请改成实际':''}">${num(f.fee,2)}${
             f.fee_estimated?'<span class="lvwhy">估</span>':''}</td>
           <td class="lvwhy">${rev?'冲正':esc(f.source||'')}</td>
-          <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(f.ts)}"
+          <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(fid)}"
             data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
             data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name||'')}"
             data-f="${f.fee||0}"
@@ -641,6 +646,23 @@ async function loadLive(aid){
         原记录**保留并划掉**。不物理删除：实盘账本一旦能被改写就没法复盘。</div>
     </div>
   </div>`;
+  /* 权益单独拉 —— 它要重放整条曲线，比账户信息慢，不该拖住主视图。 */
+  (async()=>{
+    const el=$('#lveq'); if(!el) return;
+    try{
+      const e=await j('/api/live/equity?id='+encodeURIComponent(aid));
+      if(!e.stats){ el.textContent='收益 —'; el.title=e.note||''; return; }
+      const st=e.stats;
+      const pct=x=>(x==null?'—':(x>=0?'+':'')+(x*100).toFixed(2)+'%');
+      el.className='lvtag'+(st.twr>=0?' on':'');
+      el.innerHTML='收益 '+pct(st.twr)+' · 回撤 '+(st.max_drawdown*100).toFixed(2)+'%';
+      el.title='时间加权收益 TWR（入金/出金不算收益）\n'
+        +'权益 '+num(st.equity_end,2)+'（初始 '+num(st.init_cash,2)
+        +(st.net_deposit? '，净入金 '+num(st.net_deposit,2):'')+'）\n'
+        +e.dates[0]+' ~ '+e.dates[e.dates.length-1]+'，'+st.days+' 个交易日'
+        +(st.twr_annual!=null?'\n年化 '+pct(st.twr_annual):'（不足一季，不折年化）');
+    }catch(err){ el.textContent='收益 —'; el.title=String(err); }
+  })();
   $('#esave').onclick=async()=>{
     const m=$('#emsg');
     try{

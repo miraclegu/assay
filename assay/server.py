@@ -1024,6 +1024,13 @@ def api_live_account(q):
     })
 
 
+def api_live_equity(q):
+    """GET /api/live/equity?id= —— 逐日权益曲线 + 时间加权收益。"""
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    return _live_err(lambda: m.equity_curve(aid))
+
+
 def api_live_signal(q):
     m = _live()
     aid = (q.get('id') or '').strip()
@@ -1370,6 +1377,7 @@ ROUTES = {
     '/api/live/signal': api_live_signal,
     '/api/live/code': api_live_code,
     '/api/live/strategy': api_live_strategy,
+    '/api/live/equity': api_live_equity,
     '/api/sync': api_sync,
     '/api/sync/log': api_sync_log,
 }
