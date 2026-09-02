@@ -13,6 +13,30 @@
 | `3-按字段索引.md` | 有字段名 → 口径、单位、跨源等价物 |
 | `4-按陷阱索引.md` | 「结果不对但不报错」→ 按**失效模式**倒查 |
 
+**看板里能直接查数据**：顶栏「🔍 查数据」(`#/query`) —— 只读 SQL,
+面板 / lake.db 的 31 张视图 / std parquet 都能查。命令行同一个入口:
+`python3 datalake/build/query.py "SELECT ..."`(或 `--sql-stdin` / `--schema`)。
+
+🔴 **安全规则只有一份**,在 `datalake/build/query.py` 里,CLI 与页面共用。
+三层:① `:memory:` 连接 + `READ_ONLY` 挂 lake.db ② 语句白名单 + 关键字黑名单
+③ 子进程 + 60 秒超时。
+**第 ① 层挡不住 `COPY (SELECT ...) TO 'file'`** —— 它不需要可写连接就能写文件
+系统,而被写坏的是 `mart/`:之后每次回测都用坏面板,**且不报错**。
+所以第 ② 层才是主防线,关键字按**词**匹配(不然 `db_create_time` 会被误杀)、
+分号后有内容一律拒(多语句能把 SELECT 和写操作串起来)。
+
+**没写 LIMIT 会自动补**,并在返回里带 `limit_added` / `truncated`,页面必须显示
+—— **悄悄截断比查不出来更糟**:少的那部分你不知道,而结论已经下了。
+
+★ **这一页的价值在模板,不在那个输入框。** 裸给一个 SQL 框等于把
+"`close_bfq` 还是 `close_hfq`"、"`volume` 单位是股×100"、"`pub_date` 要做 as-of"
+这些踩过的坑重新交回给人。8 条模板把口径写在注释里,照着改比从零写安全。
+🔴 selftest 里**逐条真跑**这些模板 —— 模板跑不通比没有模板更糟(它看着权威,
+而人会照着改)。本轮 8 条里我猜错了 4 条 schema,全是这条断言抓出来的:
+`public_status` 是**字符串**(`'正常上市'`)不是 1、`is_st` 是 TINYINT、
+`dividend` 的代码列叫 `code`、`index_member_asof` 是 `as_of`/`stock_code`、
+`std/trading_calendar.parquet` **没有未来日**(未来交易日由 `tdx.raw_holidays` 推)。
+
 也可以在 Web 看板里看：`python3 assay/serve.py` → 顶栏「📖 数据字典」
 （服务端每次请求重读磁盘上的 md，改文件刷新即生效；新增文档在
 `assay/assay/server.py` 的 `_DOCS` 加一行）。

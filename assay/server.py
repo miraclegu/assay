@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -1599,6 +1600,79 @@ def api_sync_auto_set(_q, body):
     return dict(st2, changed=True, cmd=' '.join(cmd))
 
 
+# ==================== 数据查询（只读） ====================
+# ★ 安全规则不在这里写 —— 全在 datalake/build/query.py 里，命令行与页面共用
+#   同一份。分两处写的话，页面那份哪天漏掉一个关键字，就能从看板上把 mart/
+#   写坏（`COPY ... TO 'file'` 不需要可写的连接），而那不会报错，
+#   只会让之后每次回测都用坏面板。
+# ★ 走【子进程 + 超时】：`SELECT * FROM kline_bfq` 是 3127 万行，
+#   在服务进程里跑会把内存吃光，而"页面转圈"看起来像卡住不像查错了。
+QUERY_TIMEOUT = 60
+_SCHEMA_CACHE = {'at': 0, 'data': None}
+
+
+def _query_script():
+    return os.path.join(_datalake_dir(), 'build', 'query.py')
+
+
+def api_query_schema(_q):
+    """GET /api/query/schema —— 有哪些表、每张表有哪些列。
+
+    ★ 缓存 5 分钟：列清单要开 31 张视图 + 读 parquet 头，每次打开页面都跑
+      一遍是浪费；而它只在跑过构建脚本之后才会变。
+    """
+    import subprocess
+    now = time.time()
+    if _SCHEMA_CACHE['data'] and now - _SCHEMA_CACHE['at'] < 300:
+        return dict(_SCHEMA_CACHE['data'], cached=True)
+    sc = _query_script()
+    if not os.path.isfile(sc):
+        return {'error': '找不到 %s' % sc}
+    try:
+        r = subprocess.run(['python3', sc, '--schema'], cwd=_datalake_dir(),
+                           capture_output=True, text=True, timeout=120)
+        data = json.loads(r.stdout)
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+    _SCHEMA_CACHE.update(at=now, data=data)
+    return dict(data, cached=False)
+
+
+def api_query(_q, body):
+    """POST /api/query —— 跑一条只读查询。
+
+    ★ SQL 走 **stdin**，不进命令行参数：引号/换行/中文在 argv 里迟早出事，
+      而"SQL 被 shell 截断后仍然能跑"是最难查的那类错。
+    """
+    import subprocess
+    b = body or {}
+    sql = b.get('sql') or ''
+    if len(sql) > 100000:
+        return {'error': 'SQL 太长了（%d 字符）' % len(sql)}
+    try:
+        lim = int(b.get('limit') or 500)
+    except Exception:                                       # noqa: BLE001
+        lim = 500
+    sc = _query_script()
+    if not os.path.isfile(sc):
+        return {'error': '找不到 %s' % sc}
+    cmd = ['python3', sc, '--json', '--sql-stdin', '--limit', str(lim)]
+    try:
+        r = subprocess.run(cmd, cwd=_datalake_dir(), input=sql,
+                           capture_output=True, text=True,
+                           timeout=QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {'error': '查询超过 %d 秒，已中止。'
+                         '加个更窄的 WHERE（date / jq_code），'
+                         '或先用 LIMIT 看几行。' % QUERY_TIMEOUT}
+    if not r.stdout.strip():
+        return {'error': (r.stderr or '子进程没有输出')[-500:]}
+    try:
+        return json.loads(r.stdout)
+    except Exception:                                       # noqa: BLE001
+        return {'error': '结果不是合法 JSON：%s' % r.stdout[:300]}
+
+
 # ==================== 财务数据（聚宽）导入 ====================
 # 闭环三步：① 页面给出可直接粘进研究环境的代码（SINCE/QUARTERS 按本地状态
 # 预填）② 在聚宽跑完下载那**一个** tar ③ 页面上传，服务端 merge + 跑全部
@@ -1815,6 +1889,7 @@ ROUTES = {
     '/api/sync': api_sync,
     '/api/sync/auto': api_sync_auto,
     '/api/sync/jq_code': api_sync_jq_code,
+    '/api/query/schema': api_query_schema,
     '/api/sync/log': api_sync_log,
 }
 
@@ -1844,6 +1919,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_infer': api_live_fee_infer,
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
+                 '/api/query': api_query,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再

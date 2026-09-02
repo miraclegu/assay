@@ -461,6 +461,7 @@ table.lvfr tr.frbody td{background:var(--bg)}
     <button class="btn" id="gopicks" title="独立索引页：只看被标星的规则">★ 选中的规则</button>
     <button class="btn" id="gosync" title="两条腿的数据新鲜度 / 手动同步 / 同步日志">🔄 数据同步</button>
     <button class="btn" id="golive" title="实盘账户：录成交、按时出买卖清单、策略版本留痕">💰 实盘</button>
+    <button class="btn" id="goquery" title="只读 SQL 查本地数据：面板 / 行情 / 财务 / 交易日历">🔍 查数据</button>
     <button class="btn" id="godocs" title="聚宽 / QMT / 本地的接口与口径实测定案（直接读仓库里的 md）">📖 数据字典</button>
   </div>
   <div id="cat"></div>
@@ -519,6 +520,7 @@ function route(){
   if(v){ openVersion(v[1]); return; }
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
   if((location.hash||'')==='#/sync'){ showSync(); return; }
+  if((location.hash||'')==='#/query'){ showQuery(); return; }
   const fm=/^#\/live\/([\w-]+)\/fills(?:\/(\d+))?$/.exec(location.hash||'');
   if(fm){ showFills(fm[1], parseInt(fm[2]||'0',10)); return; }
   const lm=/^#\/live(?:\/([\w-]+))?$/.exec(location.hash||'');
@@ -539,6 +541,7 @@ $('#gopicks').onclick=()=>{location.hash='#/picks';};
 $('#godocs').onclick=()=>{location.hash='#/docs';};
 $('#golive').onclick=()=>{location.hash='#/live';};
 $('#gosync').onclick=()=>{location.hash='#/sync';};
+$('#goquery').onclick=()=>{location.hash='#/query';};
 
 
 /* ============ 实盘模块 ============ */
@@ -1937,6 +1940,188 @@ async function pollSync(){
     SYJOB=null;
     setTimeout(()=>showSync(), 1200);
   }catch(e){ SYJOB=null; }
+}
+
+/* ============ 查数据（只读 SQL） ============ */
+/* ★ 安全规则【不在前端】：全在 datalake/build/query.py 里，命令行与页面共用
+     同一份。前端做校验只是体验，挡不住 curl —— 而 `COPY ... TO 'file'`
+     不需要可写连接就能把 mart/ 写坏，且不报错。
+
+   ★ 这一页的价值在【模板】而不是那个输入框。裸给一个 SQL 框等于把
+     "close_bfq 还是 close_hfq"、"volume 单位是股×100"、"pub_date 要做 as-of"
+     这些踩过的坑重新交回给人。每个模板都把口径写在注释里，
+     照着改比从零写安全。 */
+const QT=[
+ {n:'某只票的日线', s:
+`-- 不复权 open/high/low/close_bfq；后复权只有 close_hfq（差一个 hfq_factor）
+-- 🔴 open 就是当日集合竞价成交价 —— 竞价单的成交价可用它精确还原
+SELECT date, open, high, low, close_bfq, close_hfq, hfq_factor,
+       volume_shares, amount, change_pct
+FROM read_parquet('mart/panel_daily/panel_*.parquet')
+WHERE jq_code = '603506.XSHG' AND date >= DATE '2026-08-01'
+ORDER BY date DESC`},
+ {n:'某天的全市场切片', s:
+`-- 面板一天约 5200 行、71 列。挑列不要 SELECT *
+-- ⚠ public_status 是【字符串】：'正常上市' / 'ST' / '*ST' / NULL
+--   is_st 是 TINYINT（0/1），不是布尔
+SELECT jq_code, symbol, close_bfq, floatmv/1e8 AS 流通市值亿,
+       pe_ttm, pb, roe_ttm, sw_l1_name, is_st, is_limit_up
+FROM read_parquet('mart/panel_daily/panel_*.parquet')
+WHERE date = DATE '2026-09-01' AND public_status = '正常上市'
+ORDER BY floatmv
+LIMIT 50`},
+ {n:'小市值选股（复现策略口径）', s:
+`-- ⚠ 这只是"按流通市值排序"，不是 froec 的完整规则（还有 eps>0 / 涨跌停
+--   /ST / 上市天数 / 黑名单等，规则在 strategies/小市值/froec.py 里）
+SELECT jq_code, symbol, floatmv/1e8 AS 流通市值亿, close_bfq, eps_q,
+       listed_days, sw_l1_name
+FROM read_parquet('mart/panel_daily/panel_*.parquet')
+WHERE date = DATE '2026-09-01' AND public_status = '正常上市'
+  AND is_st = 0 AND listed_days > 250 AND eps_q > 0
+ORDER BY floatmv
+LIMIT 20`},
+ {n:'某只票的财务时序', s:
+`-- 🔴 报告期(fin_report_date) ≠ 公告日(fin_pub_date)。防未来函数一律用公告日
+SELECT DISTINCT fin_report_date, fin_pub_date, revenue, net_profit_parent,
+       eps_basic, roe_parent, np_ttm, np_q, np_q_yoy
+FROM read_parquet('mart/panel_daily/panel_*.parquet')
+WHERE jq_code = '603506.XSHG' AND fin_report_date >= DATE '2024-01-01'
+ORDER BY fin_report_date DESC`},
+ {n:'分红记录', s:
+`-- 🔴 bonus_ratio_rmb 是【每 10 股派息】，要 ÷10 才是每股
+-- ⚠ 这张表的代码列叫 code（不是 jq_code）；除权日是 a_xr_date
+SELECT code, report_date, board_plan_pub_date, a_xr_date,
+       bonus_ratio_rmb, bonus_ratio_rmb/10 AS 每股派息,
+       plan_progress, visible_date
+FROM dividend
+WHERE code = '601088.XSHG'
+ORDER BY board_plan_pub_date DESC
+LIMIT 20`},
+ {n:'交易日历 / 下一个交易日', s:
+`-- ⚠ std/trading_calendar.parquet 只到【已发生】的最后一个交易日，
+--   **没有未来日**。未来交易日由 tdx.db 的 raw_holidays 推算
+--   （工作日 − 休市日，见 build/build_trade_calendar.py），
+--   实盘页的"下次调仓"用的是那一份。这里只能看历史。
+SELECT date FROM trading_calendar
+ORDER BY date DESC
+LIMIT 10`},
+ {n:'各表最新数据日（对新鲜度）', s:
+`-- 数据同步页显示的就是这些；这里能自己交叉核一遍
+SELECT '面板' AS 表, max(date)::VARCHAR AS 最新
+  FROM read_parquet('mart/panel_daily/panel_*.parquet')
+UNION ALL SELECT '日线 kline_raw', max(date)::VARCHAR FROM kline_raw
+UNION ALL SELECT '财务指标 pub_date', max(pub_date)::VARCHAR FROM fin_indicator
+UNION ALL SELECT '利润表 pub_date', max(pub_date)::VARCHAR FROM fin_income
+UNION ALL SELECT '交易日历', max(date)::VARCHAR FROM trading_calendar`},
+ {n:'指数成分（按日 as-of）', s:
+`-- index_member_asof 已按日展开；列名是 as_of / index_code / stock_code
+-- （不是 date / jq_code）—— 直接按 as_of 取，不要自己 join 生效区间
+SELECT as_of, index_code, stock_code
+FROM index_member_asof
+WHERE index_code = '000300.XSHG'
+  AND as_of = (SELECT max(as_of) FROM index_member_asof
+               WHERE index_code = '000300.XSHG')
+LIMIT 30`},
+];
+let QSQL=null, QSCH=null, QBUSY=false;
+
+async function showQuery(){
+  stopPoll();
+  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
+  $('#filter').style.display='none'; $('#expand').style.display='none';
+  $('#back').style.display=''; $('#main').style.display='';
+  if(QSQL==null) QSQL=QT[0].s;
+  $('#main').innerHTML=`<div id="qy">
+    <div class="lvhead"><h2>🔍 查数据</h2>
+      <span class="lvtag">只读</span>
+      <span style="flex:1"></span>
+      <a class="lvtag" href="#/docs" title="接口与口径的实测定案">📖 先查数据字典</a></div>
+    <div class="note">⚠ <b>先看数据字典再写 SQL</b> ——
+      口径搞错不会报错，只会给你一个"看着正常"的错数
+      （<code>close_bfq</code> 还是 <code>close_hfq</code>、
+      <code>volume</code> 单位、<code>pub_date</code> 的 as-of）。
+      下面的模板已经把踩过的坑写在注释里，照着改比从零写安全。</div>
+    <div class="lvform" style="gap:6px;flex-wrap:wrap">
+      ${QT.map((t,i)=>`<button class="btn qt" data-i="${i}">${esc(t.n)}</button>`).join('')}
+    </div>
+    <textarea id="qsql" spellcheck="false" style="width:100%;min-height:170px;
+      margin-top:10px;background:var(--panel2);color:var(--fg);
+      border:1px solid var(--line);border-radius:6px;padding:10px;
+      font:12px/1.6 'SF Mono',Menlo,monospace;resize:vertical">${esc(QSQL)}</textarea>
+    <div class="lvform" style="margin-top:8px;gap:10px;align-items:baseline">
+      <button class="btn" id="qrun">运行　<span class="lvwhy">⌘/Ctrl+Enter</span></button>
+      <label class="lvwhy">最多 <input id="qlim" size="6" value="500"> 行</label>
+      <span class="lvwhy">超过 60 秒会中止。写操作一律被拒（连
+        <code>COPY&nbsp;TO</code> 也拒 —— 它能直接写盘）</span>
+      <span style="flex:1"></span>
+      <a href="#" id="qsch" class="lvwhy">有哪些表 / 列 ▸</a>
+    </div>
+    <div class="lvmsg" id="qmsg"></div>
+    <div id="qschema" style="display:none"></div>
+    <div id="qout"></div>
+  </div>`;
+  const ta=$('#qsql');
+  ta.oninput=()=>{ QSQL=ta.value; };
+  document.querySelectorAll('#qy .qt').forEach(e=>e.onclick=()=>{
+    QSQL=QT[+e.dataset.i].s; ta.value=QSQL; ta.focus(); });
+  ta.onkeydown=ev=>{ if((ev.metaKey||ev.ctrlKey)&&ev.key==='Enter'){
+    ev.preventDefault(); runQuery(); } };
+  $('#qrun').onclick=runQuery;
+  $('#qsch').onclick=async ev=>{ ev.preventDefault();
+    const el=$('#qschema');
+    if(el.style.display===''){ el.style.display='none'; return; }
+    el.style.display=''; el.innerHTML='<div class="lvwhy">取表清单…</div>';
+    try{
+      if(!QSCH) QSCH=await j('/api/query/schema');
+      if(QSCH.error) throw new Error(QSCH.error);
+      /* parquet 排在前面：面板是最常查的那张，而它【不在】lake.db 里 ——
+         只列 lake.db 的表等于这个功能只覆盖一半数据。 */
+      el.innerHTML=`<div class="lvsec" style="margin:8px 0">
+        <h3>parquet（直接 read_parquet）</h3>
+        ${QSCH.parquet.map(t=>`<div style="margin:4px 0">
+          <b>${esc(t.name)}</b> <span class="lvwhy">${esc(t.note||'')}　${t.columns.length} 列</span>
+          <div class="lvwhy" style="word-break:break-all">
+            <code>${esc(t.path)}</code>　${t.columns.map(c=>esc(c)).join('、')}</div></div>`).join('')}
+        <h3 style="margin-top:12px">lake.db（视图，直接写表名）</h3>
+        ${QSCH.tables.map(t=>`<div style="margin:3px 0">
+          <b>${esc(t.name)}</b> <span class="lvwhy">${t.kind==='VIEW'?'视图':'表'}　${t.columns.length} 列</span>
+          <div class="lvwhy" style="word-break:break-all">${t.columns.map(c=>esc(c)).join('、')}</div></div>`).join('')}
+      </div>`;
+    }catch(e){ el.innerHTML=`<div class="lvmsg bad">${esc(String(e))}</div>`; }
+  };
+}
+
+async function runQuery(){
+  if(QBUSY) return;
+  const m=$('#qmsg'), out=$('#qout');
+  QBUSY=true; m.className='lvmsg'; m.textContent='查询中…';
+  try{
+    const r=await post('/api/query',{sql:$('#qsql').value,
+      limit:parseInt($('#qlim').value||'500',10)});
+    if(r.error) throw new Error(r.error);
+    m.className='lvmsg ok';
+    /* ★ 截断必须说出来 —— 悄悄少给几行比查不出来更糟：
+         少的那部分你不知道，而结论已经下了。 */
+    m.innerHTML=r.n+' 行 · '+r.ms+' ms'
+      +(r.truncated?'<b style="color:var(--warn)">　⚠ 已截断到 '+r.limit
+        +' 行（没写 LIMIT，系统自动加的）—— 结果可能不全</b>':'')
+      +'　<a href="#" id="qcopy">复制为 TSV</a>';
+    out.innerHTML=r.n?`<div class="pw" style="margin-top:10px">
+      <table class="pkt"><tr>${r.columns.map(c=>
+        `<th class="tx">${esc(c)}</th>`).join('')}</tr>
+      ${r.rows.map(row=>`<tr>${row.map(v=>
+        `<td class="${typeof v==='number'?'':'tx'}">${v==null?
+          '<span class="lvwhy">NULL</span>':esc(String(v))}</td>`).join('')}</tr>`).join('')}
+      </table></div>`
+      :'<div class="none">没有行</div>';
+    $('#qcopy').onclick=async ev=>{ ev.preventDefault();
+      const tsv=[r.columns.join('\t')].concat(
+        r.rows.map(x=>x.map(v=>v==null?'':String(v)).join('\t'))).join('\n');
+      try{ await navigator.clipboard.writeText(tsv);
+           ev.target.textContent='已复制 ✓（可直接粘进 Excel）'; }
+      catch(e){ ev.target.textContent='复制失败'; } };
+  }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); out.innerHTML=''; }
+  finally{ QBUSY=false; }
 }
 
 /* ============ 数据字典 ============ */
