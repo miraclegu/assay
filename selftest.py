@@ -2379,6 +2379,70 @@ def t_forcast_csv():
                len(recs_loose) - len(recs_ok)))
 
 
+@case('页签图标：能取到 / mimetype 对 / 浏览器真的用了它', tag='fast')
+def t_favicon():
+    """★ favicon 坏了【不会有任何报错】—— 浏览器默默回落成默认图标，
+    而你只会觉得"好像一直是这样"。所以这条用例核三件事：
+
+      1. 文件在、能通过 HTTP 取到、是合法 XML
+      2. mimetype 是 image/svg+xml（猜错的话浏览器当文本渲染，图标空白）
+      3. HTML 里的 <link rel=icon> 指向它，且兜底的 data URI 也是有效 SVG
+
+    另外核配色与 :root 一致 —— 改主题时容易只改 CSS、忘了图标。
+    """
+    import threading
+    import urllib.request
+    import xml.dom.minidom
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    p = os.path.join(web, 'favicon.svg')
+    assert os.path.isfile(p), '缺 web/favicon.svg'
+    raw = open(p, encoding='utf-8').read()
+    xml.dom.minidom.parseString(raw)          # 合法 XML（注释里不能有 --）
+
+    html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
+    head = html[:html.index('<style>')]
+    assert 'rel="icon"' in head and '/favicon.svg' in head, \
+        'index.html 的 <head> 里没有指向 favicon.svg 的 <link rel=icon>'
+    # 兜底 data URI 也要是有效 SVG（Safari 16 以下不认 SVG favicon 文件）
+    m = re.search(r'href="data:image/svg\+xml,([^"]+)"', head)
+    assert m, '缺兜底的 data URI 图标'
+    import urllib.parse
+    xml.dom.minidom.parseString(urllib.parse.unquote(m.group(1)))
+
+    # 配色必须与 :root 一致 —— 改主题时最容易漏掉图标
+    css = html[html.index('<style>'):html.index('</style>')]
+    for name in ('--accent', '--up'):
+        mm = re.search(re.escape(name) + r':\s*(#[0-9a-fA-F]{3,8})', css)
+        assert mm, 'CSS 里找不到 %s' % name
+        hexv = mm.group(1).lower()
+        assert hexv in raw.lower(), \
+            ('图标没用 :root 的 %s (%s) —— 主题改了但图标没跟上' % (name, hexv))
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        r = urllib.request.urlopen('http://127.0.0.1:%d/favicon.svg' % port,
+                                   timeout=10)
+        ct = r.headers['Content-Type'] or ''
+        body = r.read()
+        assert r.status == 200, '/favicon.svg 返回 %d' % r.status
+        assert ct.startswith('image/svg+xml'), \
+            'mimetype 是 %r —— 浏览器会当文本渲染，图标空白' % ct
+        assert len(body) == len(raw.encode()), '取到的内容与磁盘不一致'
+    finally:
+        httpd.shutdown()
+
+    n_pt = raw.count(' L')
+    return ('favicon.svg %d bytes / %s / 曲线 %d 段（含回撤）/ '
+            '兜底 data URI 有效 / 配色与 :root 一致'
+            % (len(body), ct, n_pt // 2))
+
+
 def main():
     import time as _t
     ap = argparse.ArgumentParser(description='assay 自检')

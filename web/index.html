@@ -1,6 +1,12 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>assay 回测归档</title>
+<!-- 页签图标。SVG 优先（矢量、任意 DPI 清晰、改配色只动一处）；
+     Safari 16 以下不认 SVG favicon，用一个极简内联 data URI 兜底 ——
+     兜底不去引外部文件，多一个请求就多一处"加载失败=空白"。
+     图形的含义见 web/favicon.svg 里的注释。 -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%230f1216'/%3E%3Cpath%20d='M11%2043%20L21%2035%20L29%2039%20L38%2025%20L45%2031%20L53%2016'%20fill='none'%20stroke='%235b9cf0'%20stroke-width='5.5'%20stroke-linejoin='round'%20stroke-linecap='round'/%3E%3Ccircle%20cx='53'%20cy='16'%20r='5'%20fill='%23f05b5b'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg:#0f1216; --panel:#171b21; --panel2:#1d2229; --line:#2a313a;

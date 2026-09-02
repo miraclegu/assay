@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img"
+     aria-label="assay — 权益曲线">
+<!--
+  assay 的页签图标。
+
+  ## 为什么是这个图形
+
+  这个看板从头到尾在看的就是【权益曲线】，而且曲线是**手写 SVG 画的**
+  （见 web/index.html 的 chart()，项目刻意不用 CDN 图表库）。
+  所以图标用同一套东西画：同样的调色板、同样的 stroke-linejoin="round"。
+
+  ★ 曲线刻意带一段【回撤】，不是一根单调上扬的箭头。
+    单调上扬是宣传画，而这个项目的纪律恰恰是「如实显示回撤」——
+    selftest 里专门有一条用例核最大回撤与曲线一致。
+    图标是天天要看的东西，不该说一句这个项目本身不同意的话。
+
+  ## 为什么不用 emoji / png / CDN
+
+  · emoji 在不同平台长得完全不同，而且 16px 下中文系统常渲染成方块
+  · png 要给 16/32/180 好几套，改一次配色要重导出全部
+  · CDN 加载失败就是空白 —— 项目已被静默失败坑过多次，不再引入这类依赖
+
+  配色取自 index.html 的 :root，改主题时两边要一起改。
+-->
+  <defs>
+    <linearGradient id="a" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b9cf0" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#5b9cf0" stop-opacity=".04"/>
+    </linearGradient>
+  </defs>
+
+  <!--
+    ★ 按 16px 优先设计，不是按 160px。页签图标 99% 的时间是 16px：
+      · 去掉了描边圆环 —— 16px 下它只是一圈噪点，还吃掉一个像素的画布
+      · 底色用 :root 的 panel 而不是 bg，与深色标签栏拉开一点，
+        否则整块糊成一团看不出形状
+      · 线宽 7/64（16px 下约 1.75px）、端点 r=6，都是为了在最小尺寸下
+        还能看出"这是一条线 + 一个点"
+      · 曲线撑满画布（8..56），留白只够圆角
+  -->
+  <rect width="64" height="64" rx="13" fill="#171b21"/>
+
+  <!-- 基准线：起点那一档。压得很淡，16px 下不喧宾夺主 -->
+  <path d="M8 50h48" stroke="#39424e" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- 曲线下方的面积：给小尺寸增加"体量"，让形状立得住 -->
+  <path d="M8 50 L20 38 L29 43 L39 24 L46 31 L56 12 L56 50 Z" fill="url(#a)"/>
+
+  <!-- 权益曲线：涨 -> 回撤 -> 再创新高 -->
+  <path d="M8 50 L20 38 L29 43 L39 24 L46 31 L56 12"
+        fill="none" stroke="#5b9cf0" stroke-width="7"
+        stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- 末端：最新一点。用 :root 的 up（A 股红涨）标出来 -->
+  <circle cx="56" cy="12" r="6" fill="#f05b5b"/>
+</svg>
