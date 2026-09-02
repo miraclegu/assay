@@ -2349,11 +2349,26 @@ def t_live_ui():
             assert not pg.locator('tr.frbody').first.is_visible(), '明细应默认收起'
             pg.locator('tr.frhead').first.click()
             pg.wait_for_timeout(300)
-            det = ' | '.join(pg.locator('tr.frbody .frd').all_inner_texts())
-            for need in ('净佣金率', '规费率', '过户费率', '卖出印花税', '单笔最低佣金'):
-                assert need in det, '明细缺「%s」：%s' % (need, det[:160])
-            assert '万0.260' in det and '万0.540' in det and '万0.100' in det, \
-                '明细里各项费率不对：%s' % det[:160]
+            # 明细是【竖排三列】：费用名称 / 费率 / 说明 —— 从上往下扫完，
+            # 不用在横排卡片间来回找。
+            dth = pg.locator('table.frt th').all_inner_texts()
+            assert dth == ['费用名称', '费率', '说明'], '明细表头不对：%s' % dth
+            rows = {}
+            for tr in pg.locator('table.frt tr').all():
+                c = [x.strip() for x in tr.locator('td').all_inner_texts()]
+                if c:
+                    rows[c[0]] = c[1]
+            for need, want in (('净佣金', '万0.260'), ('规费', '万0.540'),
+                               ('过户费', '万0.100'), ('印花税', '万5'),
+                               ('单笔最低佣金', '0 元'),
+                               ('— 买入合计', '万0.90'), ('— 卖出合计', '万5.90')):
+                assert need in rows, '明细缺「%s」行：%s' % (need, list(rows))
+                assert rows[need] == want, \
+                    '「%s」应为 %s，实得 %s' % (need, want, rows[need])
+            # 说明列要点明"法定"还是"可谈" —— 这是最容易配错的地方
+            dtxt = ' '.join(pg.locator('table.frt').inner_text().split())
+            assert '可谈' in dtxt and '法定' in dtxt, \
+                '说明列没点明法定/可谈：%s' % dtxt[:150]
             pg.select_option('#fway', 'rate')
             pg.wait_for_timeout(200)
             assert pg.locator('#frate').is_visible() and \
@@ -2477,7 +2492,8 @@ def t_live_ui():
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
                     '持仓 %d 只全部取到现价 + 盈亏汇总；费用三态；入金；'
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
-                    '更正物理删除/新档旧档接续/按成交日取档/手填优先)；'
+                    '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
+                    '按成交日取档/手填优先)；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:

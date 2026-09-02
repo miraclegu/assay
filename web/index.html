@@ -360,10 +360,14 @@ table.lvt td{overflow-wrap:anywhere}
 .frow>label{flex:0 0 96px;text-align:right;color:var(--dim);font-size:12px}
 .frow>.lvwhy{flex:1;min-width:180px}
 /* 费率明细：一项一块，标签在上、值加粗、说明在下 */
-.frd{border:1px solid var(--line);border-radius:5px;padding:6px 9px;background:var(--bg)}
-.frd>span{display:block;font-size:10px;color:var(--dim);letter-spacing:.06em}
-.frd>b{font-family:"SF Mono",Menlo,monospace;font-size:13px}
-.frd>i{display:block;font-style:normal;font-size:10px;color:var(--dim);margin-top:2px}
+/* 费率明细：竖排三列（名称 / 费率 / 说明），从上往下一眼扫完 */
+table.frt{margin:2px 0 0}
+table.frt th:first-child,table.frt td:first-child{text-align:left;width:110px;white-space:nowrap}
+table.frt th:nth-child(2),table.frt td.frv{text-align:right;width:78px;
+  font-family:"SF Mono",Menlo,monospace}
+table.frt th:last-child,table.frt td:last-child{text-align:left}
+table.frt tr:last-child td,table.frt tr:nth-last-child(2) td{
+  border-top:1px solid var(--line);color:var(--fg)}
 table.lvfr tr.frhead:hover td{background:var(--panel2)}
 table.lvfr tr.frbody td{background:var(--bg)}
 /* 调仓日提示条 + 未来交易日历条 */
@@ -719,28 +723,40 @@ function openSettings(aid, a, ro){
             <td><b>万${((rt.sell_rate||0)*1e4).toFixed(2)}</b></td>
             <td class="lvwhy">▸ 明细</td></tr>
           <tr class="frbody" data-i="${i}" style="display:none"><td colspan="5">
-            <div class="lvgrid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
-              ${m.mode==='flat'?`
-                <div class="frd"><span>买入总费率</span><b>万${((m.buy_rate||0)*1e4).toFixed(3)}</b></div>
-                <div class="frd"><span>卖出总费率</span><b>万${((m.sell_rate||0)*1e4).toFixed(3)}</b>
-                  <i>已含印花税</i></div>
-                <div class="frd"><span>单笔最低</span><b>${m.flat_min||0} 元</b>
-                  <i>${m.flat_min?'':'无最低'}</i></div>`
-              :`
-                <div class="frd"><span>净佣金率</span><b>万${((m.commission||0)*1e4).toFixed(3)}</b>
-                  <i>券商那部分，可谈</i></div>
-                <div class="frd"><span>规费率</span><b>万${(((m.commission_incl_reg?0:m.regulatory)||0)*1e4).toFixed(3)}</b>
-                  <i>${m.commission_incl_reg?'已含在佣金率里':'法定：证管费万0.2 + 经手费万0.341'}</i></div>
-                <div class="frd"><span>过户费率</span><b>万${((m.transfer||0)*1e4).toFixed(3)}</b>
-                  <i>法定：中登，沪深都收</i></div>
-                <div class="frd"><span>卖出印花税</span><b>${esc(String(m.stamp))}</b>
-                  <i>${m.stamp==='auto'?'按日期分段：2023-08-28 起万5，之前千1':'固定'}；仅卖出</i></div>
-                <div class="frd"><span>单笔最低佣金</span><b>${m.min_commission||0} 元</b>
-                  <i>${m.min_commission?'':'无最低'}</i></div>`}
-              <div class="frd"><span>10 万一笔</span>
-                <b>买 ${num(rt.buy_fee,2)} / 卖 ${num(rt.sell_fee,2)}</b>
-                <i>元</i></div>
-            </div>
+            <!-- 竖排三列：费用名称 / 费率 / 说明 —— 一眼从上往下扫完，
+                 不用在横排卡片间来回找。说明里点明"法定"还是"可谈"。 -->
+            <table class="lvt frt">
+              <tr><th>费用名称</th><th>费率</th><th>说明</th></tr>
+              ${(m.mode==='flat'?[
+                  ['买入总费率', '万'+((m.buy_rate||0)*1e4).toFixed(3),
+                   '不拆项。10 万一笔买入 '+num(rt.buy_fee,2)+' 元'],
+                  ['卖出总费率', '万'+((m.sell_rate||0)*1e4).toFixed(3),
+                   '<b>已含印花税</b>，不再另加。10 万一笔卖出 '+num(rt.sell_fee,2)+' 元'],
+                  ['单笔最低', (m.flat_min||0)+' 元',
+                   (m.flat_min?'成交额小时按这个数收':'<b>没有最低</b>')],
+                ]:[
+                  ['净佣金', '万'+((m.commission||0)*1e4).toFixed(3),
+                   '<b>券商那部分，可谈</b>'+(m.commission_incl_reg?
+                     '。<b>此档口径为「已含规费」</b>，所以规费不再另收':'')],
+                  ['规费', '万'+(((m.commission_incl_reg?0:m.regulatory)||0)*1e4).toFixed(3),
+                   m.commission_incl_reg
+                     ? '已含在上面的佣金里（本档填 0）'
+                     : '<b>法定</b>：证管费万0.2（证监会）+ 经手费万0.341（交易所），双边'],
+                  ['过户费', '万'+((m.transfer||0)*1e4).toFixed(3),
+                   '<b>法定</b>：中登，沪深都收，双边'],
+                  ['印花税', (m.stamp==='auto'?'万5':'万'+((m.stamp||0)*1e4).toFixed(3)),
+                   '<b>法定，仅卖出</b>'+(m.stamp==='auto'
+                     ? '。<code>auto</code> = 按日期分段：2023-08-28 起万5，之前千1'
+                     : '（此档写死，不随日期分段）')],
+                  ['单笔最低佣金', (m.min_commission||0)+' 元',
+                   (m.min_commission?'佣金不足这个数时按它收':'<b>没有最低</b>')],
+                  ['— 买入合计', '万'+((rt.buy_rate||0)*1e4).toFixed(2),
+                   '净佣金 + 规费 + 过户费。10 万一笔 '+num(rt.buy_fee,2)+' 元'],
+                  ['— 卖出合计', '万'+((rt.sell_rate||0)*1e4).toFixed(2),
+                   '买入合计 + 印花税。10 万一笔 '+num(rt.sell_fee,2)+' 元'],
+                ]).map(x=>`<tr><td>${x[0]}</td><td class="frv">${x[1]}</td>
+                  <td class="lvwhy">${x[2]}</td></tr>`).join('')}
+            </table>
             ${r.note?`<div class="lvwhy" style="margin-top:6px">备注：${esc(r.note)}</div>`:''}
             <div class="lvwhy">录入于 ${esc((r.ts||'').slice(0,16).replace('T',' '))}</div>
           </td></tr>`;}).join('')}</table>`
