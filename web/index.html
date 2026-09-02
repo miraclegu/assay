@@ -229,15 +229,33 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 #pk .pg{border:1px solid var(--line);border-radius:6px;margin:14px 0;overflow:hidden}
 #pk .pgh{background:#1b2331;padding:7px 12px;font-size:12.5px;font-weight:600;
          border-bottom:1px solid var(--line)}
-#pk .card2{padding:11px 12px;border-bottom:1px solid #202836;cursor:pointer}
-#pk .card2:last-child{border-bottom:none}
-#pk .card2:hover{background:rgba(242,199,68,.06)}
-#pk .r1{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:5px}
-#pk .nm2{font-size:13px;font-weight:600}
-#pk .kv{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;margin:4px 0}
-#pk .kv b{font-size:12.5px}
-#pk .why{color:var(--warn);font-size:11.5px;margin-top:5px;line-height:1.5}
-#pk .cost{color:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+/* ★ 一行一条规则的【对比表】，不是一条一张卡。
+   卡片式横排的毛病不是挤，是**没法纵向扫**：每张卡各自排版，
+   同一个指标在不同卡里横坐标都不一样，10 条规则根本比不了。
+   表格才对得齐 —— 数字列右对齐 + 等宽数字 + 可点表头排序。 */
+#pk .pw{overflow-x:auto}                 /* 宽表自己横向滚，页面 body 不滚 */
+#pk table.pkt{width:100%;border-collapse:collapse;font-size:11.5px}
+/* ★ top:0 而不是 52px。`.pw` 有 overflow-x:auto —— 按 CSS 规范，一个轴不是
+   visible 时另一个轴的 visible 会算成 auto，于是这个容器在【两个轴】上都成了
+   滚动容器，sticky 就相对它定位。写 52px 会把表头压在第一行上面（实测：
+   第一行点不到，Playwright 一直等 "element is not stable"），而页面看着正常。 */
+#pk table.pkt th{position:sticky;top:0;z-index:1;background:#1b2331;
+  text-align:right;font-weight:500;color:var(--dim);white-space:nowrap;
+  padding:6px 8px;border-bottom:1px solid var(--line);cursor:pointer;
+  user-select:none}
+#pk table.pkt th.tx{text-align:left}
+#pk table.pkt th:hover{color:var(--fg)}
+#pk table.pkt th .ar{opacity:.45;font-size:9px}
+#pk table.pkt th.on{color:var(--accent)}
+#pk table.pkt th.on .ar{opacity:1}
+#pk table.pkt td{text-align:right;padding:6px 8px;white-space:nowrap;
+  border-bottom:1px solid #202836;font-variant-numeric:tabular-nums}
+#pk table.pkt td.tx{text-align:left;white-space:normal}
+#pk table.pkt tr.rw{cursor:pointer}
+#pk table.pkt tr.rw:hover td{background:rgba(242,199,68,.06)}
+#pk .nm2{font-size:12.5px;font-weight:600}
+#pk .why{color:var(--warn);font-size:11px;line-height:1.45;margin-top:3px}
+#pk .cost{color:var(--dim);font-size:10.5px;font-family:ui-monospace,Menlo,monospace}
 #pk .none{color:var(--dim);padding:40px 0;text-align:center}
 
 /* ---- 数据字典 ---- */
@@ -2255,6 +2273,11 @@ function renderCatalog(){
 }
 
 /* ============ 独立索引页：只看标星的规则 ============ */
+/* 排序状态。默认按年化降序 —— 打开这一页就是为了"哪条更好"。
+   ★ 不持久化：这一页是拿来比的，下次打开该从同一个起点看，
+     而不是"上次我按换手排过"。 */
+let PKSORT = {k:'annual_return', desc:true};
+
 /* 目录页顶部那条 #pick 只列关键几列（保留，便于在树里就地看到）；
    这里是完整视图：按分组/策略归拢，逐条给出参数、区间、本金、成本口径、
    全部指标、备注与数据新鲜度。
@@ -2283,41 +2306,75 @@ function showPicks(){
     return `滑点 ${sl} · 佣金 ${cm} · ${tx}`;
   };
   const nDiff=new Set(ms.map(r=>String(r.slippage))).size;
+  /* 列定义只写一处：表头、排序、单元格都读它。
+     ★ 加一列只改这个数组 —— 分三处写迟早对不上（表头 8 列、数据 9 个的那种）。 */
+  const COLS=[
+    {k:'annual_return', t:'年化',   f:r=>pct(r.annual_return,2), c:r=>sign(r.annual_return)},
+    {k:'max_drawdown',  t:'回撤',   f:r=>pct(r.max_drawdown,2),  c:()=>'neg',
+     asc:true},   /* 回撤越小越好 -> 默认升序 */
+    {k:'sharpe',        t:'夏普',   f:r=>fmtN(r.sharpe)},
+    {k:'excess_annual', t:'超额年化', f:r=>pct(r.excess_annual,2), c:r=>sign(r.excess_annual)},
+    {k:'info_ratio',    t:'信息比率', f:r=>fmtN(r.info_ratio)},
+    {k:'turnover_per_year', t:'年换手', f:r=>fmtN(r.turnover_per_year,1)},
+    {k:'n_trades',      t:'交易',   f:r=>r.n_trades??'—'},
+    {k:'win_rate',      t:'胜率',   f:r=>pct(r.win_rate,1)},
+  ];
+  const sk=PKSORT.k, sd=PKSORT.desc;
+  const cmp=(a,b)=>{
+    if(sk==='name') return String(a._st).localeCompare(String(b._st))*(sd?-1:1);
+    const x=a[sk], y=b[sk];
+    if(x==null&&y==null) return 0;
+    if(x==null) return 1;            /* 缺值永远排最后，不管升降序 */
+    if(y==null) return -1;
+    return (x<y?-1:x>y?1:0)*(sd?-1:1);
+  };
+  const arrow=k=>k===sk?`<span class="ar">${sd?'▼':'▲'}</span>`:'<span class="ar">↕</span>';
+  const th=(k,t,cls)=>`<th class="${cls||''}${k===sk?' on':''}" data-sk="${k}"
+      title="点击按此列排序">${t} ${arrow(k)}</th>`;
   $('#main').innerHTML=`<div id="pk">
     <h2>★ 选中的规则（${ms.length}）</h2>
     <div class="note">★ 标在【单次回测】上 —— run 记录了策略 + 参数 + 区间 + 成本口径
       + 数据指纹，才是完整的一条规则；同一策略换个参数就是另一条规则。
-      点卡片进入该次回测详情。${nDiff>1?
-      ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致，跨条比较年化前先看每条的成本行。</b>':''}</div>
-    ${Object.keys(by).sort().map(g=>`
-      <div class="pg"><div class="pgh">${esc(g)}</div>
-      ${Object.keys(by[g]).sort().map(st=>by[g][st].map(r=>`
-        <div class="card2" data-go="${r.run_id}">
-          <div class="r1">
-            <span class="nm2">${esc(st)}</span>
+      点<b>行</b>进入该次回测详情；点<b>表头</b>排序。${nDiff>1?
+      ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致，跨条比较年化前先看每行的成本。</b>':''}</div>
+    ${Object.keys(by).sort().map(g=>{
+      /* 组内展平再排序 —— 分组保留（业务域是有意义的归拢），
+         排序只在组内做，跨组比较本来就不该发生（区间/基准都可能不同）。 */
+      const rows=[];
+      Object.keys(by[g]).sort().forEach(st=>by[g][st].forEach(r=>
+        rows.push(Object.assign({_st:st}, r))));
+      rows.sort(cmp);
+      return `<div class="pg"><div class="pgh">${esc(g)}　<span class="lvwhy">${rows.length} 条</span></div>
+      <div class="pw"><table class="pkt">
+        <tr>${th('name','策略 · 参数','tx')}<th class="tx">区间</th>
+          ${COLS.map(c=>th(c.k,c.t)).join('')}
+          <th class="tx">成本口径</th></tr>
+        ${rows.map(r=>`<tr class="rw" data-go="${esc(r.run_id)}">
+          <td class="tx"><span class="nm2">${esc(r._st)}</span>
             ${Object.entries(r.params||{}).map(([k,v])=>
               `<span class="pill">${esc(k)}=${esc(String(v))}</span>`).join('')||
               '<span class="pill">默认参数</span>'}
             ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
-          </div>
-          <div class="kv">
-            <span>年化 <b class="${sign(r.annual_return)}">${pct(r.annual_return,2)}</b></span>
-            <span>回撤 <b class="neg">${pct(r.max_drawdown,2)}</b></span>
-            <span>夏普 <b>${fmtN(r.sharpe)}</b></span>
-            <span>超额年化 <b class="${sign(r.excess_annual)}">${pct(r.excess_annual,2)}</b></span>
-            <span>信息比率 <b>${fmtN(r.info_ratio)}</b></span>
-            <span>年换手 <b>${fmtN(r.turnover_per_year,1)}</b></span>
-            <span>交易 <b>${r.n_trades??'—'}</b></span>
-            <span>胜率 <b>${pct(r.win_rate,1)}</b></span>
-          </div>
-          <div class="cost">${r.start} ~ ${r.end} · 本金 ${(+r.cash).toLocaleString()}
-            · ${costTxt(r)} · <span class="mono">${esc(r.run_id)}</span></div>
-          ${r.mark_note?`<div class="why">${esc(r.mark_note)}</div>`:''}
-        </div>`).join('')).join('')}
-      </div>`).join('')}
+            ${r.mark_note?`<div class="why">${esc(r.mark_note)}</div>`:''}</td>
+          <td class="tx cost">${esc(r.start)}<br>${esc(r.end)}<br>本金 ${(+r.cash).toLocaleString()}</td>
+          ${COLS.map(c=>`<td><b class="${c.c?c.c(r):''}">${c.f(r)}</b></td>`).join('')}
+          <td class="tx cost">${costTxt(r)}<br>${esc(r.run_id)}</td></tr>`).join('')}
+      </table></div></div>`;}).join('')}
   </div>`;
-  document.querySelectorAll('#pk .card2[data-go]').forEach(e=>
+  document.querySelectorAll('#pk tr.rw[data-go]').forEach(e=>
     e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
+  document.querySelectorAll('#pk th[data-sk]').forEach(e=>
+    e.onclick=()=>{
+      const k=e.dataset.sk;
+      if(k===PKSORT.k){ PKSORT.desc=!PKSORT.desc; }
+      else{
+        /* 换列时的默认方向按【哪边更好】给：年化降序、回撤升序。
+           一律降序的话点"回撤"会把最差的排最前面。 */
+        const c=COLS.find(x=>x.k===k);
+        PKSORT.k=k; PKSORT.desc=!(c&&c.asc)&&k!=='name';
+      }
+      showPicks();
+    });
 }
 
 /* ============ 选中标记 ============ */

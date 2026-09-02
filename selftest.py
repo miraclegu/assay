@@ -1545,15 +1545,76 @@ def _():
                 pg.click('#gopicks'); pg.wait_for_timeout(600)
                 assert pg.url.endswith('#/picks'), '点入口没进 #/picks: %s' % pg.url
                 assert pg.locator('#pk').count() == 1, '索引页没渲染'
-                ncard = pg.locator('#pk .card2').count()
+                # ★ 一行一条规则的【对比表】，不是一条一张卡。
+                #   卡片横排的毛病不是挤，是**没法纵向扫**：每张卡各自排版，
+                #   同一个指标在不同卡里横坐标都不一样，10 条规则根本比不了。
+                ncard = pg.locator('#pk tr.rw').count()
                 assert ncard == after, \
-                    '索引页卡片数 %d 与标星数 %d 不一致' % (ncard, after)
+                    '索引页行数 %d 与标星数 %d 不一致' % (ncard, after)
+                assert pg.locator('#pk .card2').count() == 0, \
+                    '还在用卡片横排 —— 应该是对比表'
                 assert not pg.is_visible('#cat'), '进索引页后目录页应隐藏'
                 txt = pg.locator('#pk').inner_text()
                 assert '滑点' in txt, '索引页没有列出成本口径（滑点）'
-                # 点卡片进详情，再后退回索引页
-                pg.locator('#pk .card2').first.click(); pg.wait_for_timeout(700)
-                assert '#/run/' in pg.url, '点卡片没进回测详情: %s' % pg.url
+                # 🔴 表头列数必须等于每行的单元格数 —— 表头 8 列配 9 个数据
+                #    是横排改表格时最典型的错，而它不报错，只是所有列错位一格
+                _th = pg.locator('#pk table.pkt tr').first.locator('th').count()
+                _td = pg.locator('#pk table.pkt tr.rw').first.locator('td').count()
+                assert _th == _td, '表头 %d 列 vs 每行 %d 格 —— 会整表错位' % (_th, _td)
+                assert _th >= 11, '列太少，指标没列全：%d' % _th
+                # 数字列要能纵向对齐（等宽数字），否则位数一错开就没法扫
+                _tn = pg.evaluate(
+                    "() => getComputedStyle(document.querySelector("
+                    "'#pk table.pkt tr.rw td:nth-child(3)'))"
+                    ".fontVariantNumeric")
+                assert 'tabular-nums' in (_tn or ''), \
+                    '数字列没用等宽数字（%s）—— 位数对不齐扫起来就废了' % _tn
+                # 宽表自己横向滚，页面 body 不许出现横向滚动条
+                _ovf = pg.evaluate(
+                    "() => getComputedStyle(document.querySelector('#pk .pw'))"
+                    ".overflowX")
+                assert _ovf in ('auto', 'scroll'), \
+                    '宽表没自己横向滚（overflow-x=%s），会把页面撑横滚' % _ovf
+                # ---- 点表头排序 ----
+                # ★ 排序是【组内】做的（业务域是有意义的归拢，跨组比较本来
+                #   就不该发生：区间和基准都可能不同）。所以判据是"每个组内
+                #   单调"，不是"整列反过来" —— 后者跨组读必然不单调，
+                #   我第一版就是这么写错的。
+                def _bygrp(col=3):
+                    out = []
+                    gs = pg.locator('#pk .pg')
+                    for i in range(gs.count()):
+                        out.append([
+                            float(x.strip().rstrip('%').replace(',', ''))
+                            for x in gs.nth(i).locator(
+                                'tr.rw td:nth-child(%d)' % col).all_inner_texts()
+                            if x.strip() not in ('', '—')])
+                    return out
+
+                def _mono(vs, desc):
+                    return all((vs[i] >= vs[i + 1]) if desc else (vs[i] <= vs[i + 1])
+                               for i in range(len(vs) - 1))
+                _h = pg.locator('#pk table.pkt th[data-sk="annual_return"]').first
+                assert '▼' in _h.inner_text(), '默认应按年化降序，表头要标出方向'
+                for gi, vs in enumerate(_bygrp()):
+                    assert _mono(vs, True), \
+                        '第 %d 组的年化没按降序排：%s' % (gi + 1, vs)
+                _h.click(); pg.wait_for_timeout(500)
+                assert '▲' in pg.locator(
+                    '#pk table.pkt th[data-sk="annual_return"]').first.inner_text(), \
+                    '再点一次应翻成升序'
+                for gi, vs in enumerate(_bygrp()):
+                    assert _mono(vs, False), \
+                        '翻向后第 %d 组没变升序：%s' % (gi + 1, vs)
+                # 换列时的默认方向要按【哪边更好】给：回撤是升序
+                pg.locator('#pk table.pkt th[data-sk="max_drawdown"]').first.click()
+                pg.wait_for_timeout(500)
+                assert '▲' in pg.locator(
+                    '#pk table.pkt th[data-sk="max_drawdown"]').first.inner_text(), \
+                    '按回撤排序应默认升序 —— 一律降序会把最差的排最前面'
+                # 点行进详情，再后退回索引页
+                pg.locator('#pk tr.rw').first.click(); pg.wait_for_timeout(700)
+                assert '#/run/' in pg.url, '点行没进回测详情: %s' % pg.url
                 pg.go_back(); pg.wait_for_timeout(600)
                 assert pg.url.endswith('#/picks'), '后退没回到索引页: %s' % pg.url
 
@@ -1562,7 +1623,8 @@ def _():
         finally:
             httpd.shutdown()
         return ('服务端 5 项 + 浏览器 11 项通过；%d 条选中规则，星标冒泡到顶层，'
-                '独立索引页 #/picks 正常' % npick)
+                '独立索引页 #/picks 是对比表（表头与行等宽 %d 列、等宽数字、'
+                '宽表自滚、点表头排序且回撤默认升序）' % (npick, _th))
     finally:
         if had:
             shutil.move(bak, sv.MARKS_FILE)
