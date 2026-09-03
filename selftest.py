@@ -2548,6 +2548,62 @@ def t_live_core():
              % (e2['stats']['twr'], naive))
         assert e2['stats']['net_deposit'] == 500000, '净入金没记对'
 
+        # ---- 3h) 盘中：权益曲线要给【今天】补一点，否则整块业绩停在昨收 ----
+        #   🔴 上面的总资产/持仓浮盈是实时的，业绩指标停在昨收的话，同一屏里
+        #      就是两个口径（"累计收益 +0.74%" 配 "今日 +1,711" 对不上），
+        #      而这不报错。
+        #   ★ 判据是"确实有实时价"：没有就不补 —— 补一个与昨收相同的点等于
+        #      凭空多出一个 0% 交易日，会把年化和回撤都稀释掉。
+        from assay import realtime as _rtm
+        _o_lat = _rtm.latest
+        try:
+            # 🔴 基准两边都要取【面板收盘】：真实实时库里有这只票的话，
+            #   e0 的末点本身就是盘中点、positions_valued 的 price 也是实时价，
+            #   与"面板收盘"差一天 —— 基准不同，断言会失败而代码其实是对的。
+            #   所以先把实时桩关成空，取一遍纯收盘口径的基准。
+            _rtm.latest = lambda cs=None, day=None, root=None: {}
+            e0 = lv.equity_curve('t_twr')       # 纯收盘：末点是面板最新日
+            d_last = e0['dates'][-1]
+            _nx = (datetime.date.fromisoformat(d_last)
+                   + datetime.timedelta(days=1)).isoformat()
+            _pos = lv.positions_valued('t_twr')
+            _pc = {x['code']: x['price'] for x in _pos['items']}
+            # 每只都比昨收高 1 元
+            _rtm.latest = lambda cs=None, day=None, root=None: {
+                c: {'code': c, 'price': (_pc.get(c) or 0) + 1.0,
+                    'at': _nx + ' 10:30', 'src': 'snap',
+                    'preclose': _pc.get(c)}
+                for c in (cs or [])}
+            e3 = lv.equity_curve('t_twr')
+            iv = e3['stats']['intraday']
+            assert iv and e3['dates'][-1] == _nx,                 '有实时价却没给今天补点：%s' % e3['dates'][-3:]
+            assert iv['n_rt'] == iv['n_pos'] == 1, '补点没记清几只是实时的：%s' % iv
+            _sh = sum(l['shares'] for l in lv.fifo_lots(
+                lv.active_fills(lv.fills('t_twr')))['601857.XSHG'])
+            assert abs((e3['equity'][-1] - e0['equity'][-1]) - _sh) < 0.5,                 ('补的那一点算错了：每股涨 1 元 × %d 股应让权益 +%d，'
+                 '实得 %+.2f' % (_sh, _sh, e3['equity'][-1] - e0['equity'][-1]))
+            # 两条独立算出来的"今日"必须一致 —— 权益曲线是 Δ权益，
+            # 持仓表是逐批 ×(现价−基准)。对不上就是有一边错了。
+            _pv = lv.positions_valued('t_twr')
+            assert abs(e3['stats']['day_pnl'] - _pv['pnl_day']) < 0.02,                 ('权益曲线的"今日" %.2f 与持仓表的"当日盈亏" %.2f 对不上'
+                 % (e3['stats']['day_pnl'], _pv['pnl_day']))
+            # 没有实时价 -> 不补（不许凭空多一个 0% 交易日）
+            _rtm.latest = lambda cs=None, day=None, root=None: {}
+            e4 = lv.equity_curve('t_twr')
+            assert e4['stats']['intraday'] is None                 and e4['dates'][-1] == d_last,                 '没有实时价时不该补点：%s' % e4['dates'][-3:]
+        finally:
+            _rtm.latest = _o_lat
+
+        # ---- 3i) 「年化拖累」要够长的样本才给 ----
+        #   🔴 开户两天就把两笔建仓的费用乘 122 倍，会得出"年化拖累 1.72%"
+        #      这种纯外推的数，而它会被拿去跟真实费率比。同 twr_annual 那条纪律。
+        st9 = lv.equity_curve('t_twr')['stats']
+        assert st9['fee_paid'] > 0 and st9['fee_pct'] is not None,             '交易费用/占本金没给：%s' % st9
+        assert st9['days'] < 20 and st9['fee_drag_annual'] is None,             '不到 20 个交易日不该给年化拖累（%d 天给了 %s）'             % (st9['days'], st9['fee_drag_annual'])
+        assert abs(st9['fee_pct']
+                   - st9['fee_paid'] / (st9['init_cash'] + st9['net_deposit'])
+                   ) < 1e-9,             '占本金的分母应是【初始 + 净入金】（用权益会低估拖累）'
+
         # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
         v = lv.versions('t_hit')
         assert len(v) == 1 and v[0]['files'], 'versions.jsonl 没记文件清单'
@@ -2722,8 +2778,33 @@ def t_live_ui():
                 ".json()).stats; }") or {}
             if _st:
                 for k in ('累计收益', '加权年化', '最大回撤', '当前回撤',
-                          '最近一日', '投资时间'):
+                          '投资时间', '交易费用'):
                     assert k in _kp2, '业绩 KPI 缺「%s」：%s' % (k, _kp2)
+                # 盘中：末点是实时估的就要写「今日」并标时刻；否则写「最近一日」
+                _iv = _st.get('intraday')
+                assert ('今日' if _iv else '最近一日') in _kp2, \
+                    '盘中/收盘的那一格标题不对（intraday=%s）：%s' % (_iv, _kp2)
+                _cum = pg.locator('#lvbody #kperf2 > div').first.inner_text()
+                assert ('盘中' if _iv else '按收盘') in _cum, \
+                    ('累计收益没说明含不含今天的浮动 —— 上面的总资产是实时的，'
+                     '不标就是同屏两个口径：%s' % _cum)
+                # 🔴 「交易费用」那一格：短样本不许给年化拖累
+                _fee = [x for x in pg.locator(
+                    '#lvbody #kperf2 > div').all_inner_texts()
+                    if '交易费用' in x][0].replace('\n', ' ')
+                assert '占本金' in _fee, '交易费用没给占本金的比例：%s' % _fee
+                if _st.get('fee_drag_annual') is None:
+                    assert '年化' not in _fee or '不折年化' in _fee, \
+                        ('样本这么短还在给年化拖累 —— 开户两天把费用乘 122 倍，'
+                         '那个数会被拿去跟真实费率比：%s' % _fee)
+                # ⓘ 里要把 TWR / 盘中 / 年化拖累 三件事都说清
+                pg.locator('#lvbody #kperf2 .hlp').first.click()
+                pg.wait_for_timeout(250)
+                _hp = pg.locator('#hlpb_perf').inner_text()
+                for k in ('TWR', '入金', '年化拖累', '20 个交易日'):
+                    assert k in _hp, '业绩 ⓘ 里缺「%s」：%s' % (k, _hp[:200])
+                pg.locator('#lvbody #kperf2').click()
+                pg.wait_for_timeout(200)
                 # 不足 20 个交易日不该给年化 —— 两周收益乘 12 倍会被拿去跟回测比
                 if _st.get('twr_annual') is None:
                     _ann = pg.locator('#lvbody #kperf2 > div').nth(1).inner_text()
@@ -3295,6 +3376,8 @@ def t_live_ui():
                     '汇总数字只在 KPI 出现一次、KPI 板无 undefined、'
                     '侧栏可收起(轨上仍见告警点)、新建表单默认收起、待办按 alert 折叠；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
+                    '业绩板：盘中补点后标「今日/盘中时刻」、交易费用独立一格'
+                    '（占本金，短样本不折年化）、ⓘ 说清 TWR/盘中/年化拖累；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
     finally:
         httpd.shutdown()

@@ -358,14 +358,14 @@ async function liveEquityTag(aid){
       el.innerHTML=cell('业绩','—', esc(e.note||'还没有成交'));
       return;
     }
-    /* 已付费用折成年化拖累 —— 费率谈判值不值就看这个数。
-       用净投入(初始 + 净入金)做分母，不用权益：权益含浮盈，会低估拖累。 */
-    const base=(st.init_cash||0)+(st.net_deposit||0);
-    const feeDrag=(base>0&&st.days)?st.fee_paid/base*(244/st.days):null;
+    /* ★ 盘中：曲线最后一点是用实时价估的（服务端 stats.intraday）。
+         必须标出来 —— "累计收益"含不含今天的浮动是两个不同的数，
+         而上面的总资产/持仓浮盈本来就是实时的，不标就成了同屏两个口径。 */
+    const iv=st.intraday, ivs=iv?'盘中 '+esc(String(iv.at||'').slice(5)):'';
     el.innerHTML=
-      cell('累计收益',
+      cell('累计收益'+perfHelp(st),
         `<span style="color:${col(st.twr)}">${pct(st.twr)}</span>`,
-        '时间加权 TWR · 入金不算收益')
+        '时间加权 TWR'+(ivs?' · '+ivs:' · 按收盘'))
      +cell('加权年化',
         st.twr_annual==null?'—'
           :`<span style="color:${col(st.twr_annual)}">${pct(st.twr_annual)}</span>`,
@@ -375,15 +375,24 @@ async function liveEquityTag(aid){
      +cell('当前回撤',
         st.drawdown_now==null?'—':pct(-st.drawdown_now).replace('-','−'),
         '距历史最高')
-     +cell('最近一日',
+     +cell(iv?'今日':'最近一日',
         st.day_ret==null?'—'
           :`<span style="color:${col(st.day_ret)}">${pct(st.day_ret)}</span>`,
-        st.day_pnl==null?'':(st.day_pnl>=0?'+':'')+num(st.day_pnl,2)+' 元')
+        (st.day_pnl==null?'':(st.day_pnl>=0?'+':'')+num(st.day_pnl,2)+' 元')
+        +(ivs?'　'+ivs:''))
+     /* ★ 「交易费用」独立一格。原来它挤在"投资时间"的小字里写成
+          "已付费 56.51（年化拖累 1.72%）" —— 两个数都看不懂：
+          "已付费"没说是什么费，"年化拖累"更是把开户两天的费用乘了 122 倍。 */
+     +cell('交易费用',
+        st.fee_paid==null?'—':num(st.fee_paid,2),
+        st.fee_pct==null?'':'占本金 '+(st.fee_pct*100).toFixed(3)+'%'
+          +(st.fee_drag_annual!=null
+            ? '　≈ 年化 −'+(st.fee_drag_annual*100).toFixed(2)+'%'
+            : '　样本太短，不折年化'))
      +cell('投资时间', st.days+' 个交易日',
         esc(st.start||'')+' 起'
-        +(st.net_deposit?' · 净入金 '+num(st.net_deposit,2):'')
-        +(st.fee_paid?' · 已付费 '+num(st.fee_paid,2)
-          +(feeDrag?'（年化拖累 '+(feeDrag*100).toFixed(2)+'%）':''):''));
+        +(st.net_deposit?' · 净入金 '+num(st.net_deposit,2):''));
+    bindHelp();
   }catch(err){ el.innerHTML=cell('业绩','—', esc(String(err))); }
 }
 
@@ -1205,6 +1214,27 @@ function pnlHelp(P){
     用它自己的成交价（今天开盘时还没持有它），<b>以前买的</b>用昨收。<br>
     两者都不含<b>已收分红</b>（<code>entry_price</code> 除权时不缩，就为了把
     价差与分红分开记）；分红到账请在「✎ 记一笔 › 现金」里录一条。`);
+}
+function perfHelp(st){
+  const iv=st.intraday;
+  return helpIcon('perf', `<b>累计收益</b>用<b>时间加权（TWR）</b>，不是
+    "期末 ÷ 期初 − 1" —— 有入金时后者会把入金算成收益（实测：入 50 万后
+    简单相除是 502%，TWR 是 1.59%）。TWR 在每个有外部现金流的日子把区间切开
+    再连乘，这也是能和<b>回测年化</b>直接比的口径。<br>
+    ${iv?'★ 曲线最后一点是<b>盘中'+esc(String(iv.at||''))+'用实时价估的</b>'
+        +'（'+iv.n_rt+'/'+iv.n_pos+' 只有实时价）—— 所以这里的累计收益、'
+        +'回撤、今日都含今天的浮动。收盘后同步了日线，这一点会被权威的'
+        +'日线收盘替换。'
+      :'★ 曲线全部按<b>收盘价</b>：今天还没有实时价（非交易时段，或行情'
+        +'没抓到）。'}<br>
+    <b>不足 20 个交易日不折年化</b>：把两周的收益乘 12 倍是误导，而那个数
+    会被拿去跟回测年化比。宁可显示"—"。<br>
+    <b>交易费用</b>是已付的佣金 + 规费 + 过户费 + 印花税合计（成交流水里
+    每笔那个"费用"之和；估算的那几笔也算进来）。<b>占本金</b> =
+    费用 ÷（初始资金 + 净入金）—— 分母不用权益，权益含浮盈会低估拖累。<br>
+    <b>年化拖累</b>是"按当前这个交易频率跑满一年，费用会吃掉年化几个点"。
+    🔴 它同样要够长的样本：开户两天就把两笔建仓的费用乘 122 倍，
+    会得出"年化拖累 1.72%"这种纯外推的数 —— 所以不到 20 个交易日只报绝对值。`);
 }
 function posHelp(P){
   return helpIcon('pos', `<b>成本</b>这一列是<b>摊薄成本</b> =

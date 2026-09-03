@@ -1702,6 +1702,44 @@ def equity_curve(aid, datalake=None):
         dates.append(d.isoformat())
         eq.append(round(e, 2))
 
+    # ---- 盘中：给曲线补【今天】这一点 -------------------------------------
+    # 🔴 不补的话整块业绩指标停在昨收，而上面的总资产/持仓浮盈是实时的 ——
+    #    同一屏里两个口径，"累计收益 +0.74%" 配 "当日盈亏 +1,711" 对不上,
+    #    而这不报错。
+    # ★ 判据是"确实有实时价"（n_rt >= 1）：没有就不补 —— 补一个与昨收相同的
+    #   点等于凭空多出一个 0% 交易日，会把年化和回撤都稀释掉。
+    # ★ 面板已经有今天了（收盘后同步过）就不补：那一点是权威的日线，
+    #   实时价只是它的近似。
+    intraday = None
+    try:
+        from assay import realtime as _rt
+        rtp = _rt.latest(codes, root=datalake) if codes else {}
+        rtp = {c: v for c, v in rtp.items() if (v or {}).get('price')}
+        at = max([v.get('at') for v in rtp.values() if v.get('at')] or [None])
+        d_now = (datetime.date.fromisoformat(at[:10]) if at else None)
+        if rtp and d_now and days and d_now > days[-1]:
+            book = lots_asof(rows, d_now)
+
+            mv, n_rt = 0.0, 0
+            for c, lots in book.items():
+                r = rtp.get(c)
+                p = (r or {}).get('price') or last.get(c) or px.get((c, days[-1]))
+                if r and r.get('price'):
+                    n_rt += 1
+                if p is None:
+                    continue
+                mv += sum(l['shares'] for l in lots) * p
+            if n_rt:
+                e = cash_asof(init, rows, d_now, flows) + mv
+                f = flow_by_day.get(d_now, 0.0)
+                if prev_e is not None and prev_e > 0:
+                    twr.append((e - f) / prev_e - 1.0)
+                dates.append(d_now.isoformat())
+                eq.append(round(e, 2))
+                intraday = {'at': at, 'n_rt': n_rt, 'n_pos': len(book)}
+    except Exception:                                       # noqa: BLE001
+        intraday = None                 # 实时补点失败不该让整块业绩打不开
+
     cum = 1.0
     for r in twr:
         cum *= (1.0 + r)
@@ -1731,9 +1769,22 @@ def equity_curve(aid, datalake=None):
                     if len(eq) >= 2 else None),
         'net_deposit': round(sum(flow_by_day.values()), 2),
         'init_cash': init,
-        # 已付手续费 —— 折成年化拖累才知道费率谈判值不值
+        # 已付手续费。**折成年化拖累要够长的样本才有意义** —— 见下。
         'fee_paid': round(sum(float(r.get('fee') or 0) for r in rows), 2),
+        # 最后一点是不是盘中估的（None = 全是收盘价）。页面必须标出来：
+        # "累计收益"含不含今天的浮动，是两个不同的数。
+        'intraday': intraday,
     }
+    # 费用占净投入的比例（不用权益做分母：权益含浮盈，会低估拖累）
+    base = init + stats['net_deposit']
+    stats['fee_pct'] = (round(stats['fee_paid'] / base, 6) if base > 0 else None)
+    # 🔴 年化拖累 = 按【当前交易频率】外推一年，费用会吃掉年化几个点。
+    #   与 twr_annual 同一条纪律：不到 20 个交易日不给 —— 开户两天就把
+    #   两笔建仓的费用乘 122 倍，得到的"年化拖累 1.72%"纯属外推，
+    #   而它会被拿去跟真实费率比。宁可只报绝对值。
+    stats['fee_drag_annual'] = (
+        round(stats['fee_pct'] * (244.0 / n), 6)
+        if stats['fee_pct'] is not None and yrs > 0.08 else None)
     return {'dates': dates, 'equity': eq, 'stats': stats, 'note': None}
 
 
