@@ -562,6 +562,59 @@ def poll_once(codes, root=None, force_all=False):
     return out
 
 
+def missing(codes, root=None, day=None):
+    """这些代码里，**今天还一条实时数据都没有**的是哪些。"""
+    from assay import stock as st
+    want = [c for c in (st.norm_code(x) for x in (codes or [])) if c]
+    if not want:
+        return []
+    have = latest(want, day=day, root=root)
+    return [c for c in want if not (have.get(c) or {}).get('price')]
+
+
+def ensure_codes(codes, root=None, max_bars=3, day=None):
+    """**刚加进来的票立刻抓一次** —— 它不在上一轮的抓取范围里。
+
+    为什么需要它：轮询是每 60s 重算一次范围（持仓 ∪ 自选），所以新加的票
+    最快也要等下一轮；bar 是轮转抓的（~42 分钟一圈），更久。而人加完自选
+    是**马上**要看的 —— 那一刻页面上一片"收盘价"，看着像功能没生效。
+
+    ★ 只抓【真的没有数据】的那几只（`missing`），所以天然收敛：抓到了就
+      不再是 missing，下次页面刷新不会重复打请求。这也是"不要重复调用"。
+    ★ 不在交易时段/非交易日就什么都不做并说明原因 —— 收盘后本来就没有
+      盘中数据可抓，硬抓一次只会拿到空结果（**空结果一律当失败**）。
+    ★ bar 每次最多 `max_bars` 只：加自选是一只一只加的，这里不该变成
+      一个能被点出几十个请求的入口（限流是这条链上唯一的风险）。
+    """
+    out = {'missing': [], 'snap': 0, 'bars': 0, 'skipped': None, 'fail': []}
+    miss = missing(codes, root=root, day=day)
+    out['missing'] = miss
+    if not miss:
+        return out
+    now = datetime.datetime.now()
+    if is_trading_day() is False:
+        out['skipped'] = '非交易日'
+        return out
+    if not in_session(now):
+        out['skipped'] = '不在交易时段'
+        return out
+    try:
+        snap = snapshot(miss, root)
+        out['snap'] = len(snap)
+        if snap:
+            save_snap(list(snap.values()), root)
+    except Exception as e:                                  # noqa: BLE001
+        out['fail'].append({'stage': 'snapshot', 'error': str(e)[:120]})
+    # bar 只在没退避时抓（退避中说明 trends2 正在限流，硬抓只会加深）
+    if _backoff['until'] and now < _backoff['until']:
+        out['bar_skipped'] = '退避中，到 %s' % _backoff['until'].strftime('%H:%M:%S')
+    else:
+        r = fetch(miss[:max_bars], root)
+        out['bars'] = r['bars']
+        out['fail'].extend(r['fail'])
+    return out
+
+
 def last_poll():
     return dict(_last)
 

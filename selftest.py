@@ -4378,12 +4378,25 @@ def t_watchlist():
     import tempfile
 
     from assay import live as lv
+    from assay import realtime as rtm
     from assay import server as sv
     from assay import watchlist as wl
     old_live, old_dir = sv.ALLOW_LIVE, wl.LIVE
     sv.ALLOW_LIVE = True
     tmp = tempfile.mkdtemp()
     wl.LIVE = tmp
+    # 🔴 打桩：这个用例会走 `_rt_ensure`（加自选那一刻补抓）。不打桩的话
+    #    selftest 会真的去打行情接口 —— 而限流是这条链上唯一的风险。
+    HIT = {'snap': [], 'bar': []}
+    _o_snap, _o_fetch = rtm.snapshot, rtm.fetch
+    _o_sess, _o_day = rtm.in_session, rtm.is_trading_day
+    _o_miss = rtm.missing
+    rtm.snapshot = lambda cs, root=None: (HIT['snap'].append(list(cs)) or {})
+    rtm.fetch = lambda cs, root=None: (
+        HIT['bar'].append(list(cs)) or {'bars': 0, 'fail': []})
+    rtm.in_session = lambda now=None: True
+    rtm.is_trading_day = lambda d=None: True
+    sv._RT['miss_at'] = {}
     try:
         assert wl.current() == [] and wl.log() == [], '新目录应是空的'
         wl.act('add', '601857.SH', group='观察', note='页岩气')
@@ -4501,6 +4514,45 @@ def t_watchlist():
             wl.LIVE = old_dir2
             _sh.rmtree(tmp2, ignore_errors=True)
 
+        # ---- 刚加进来的票【立刻补抓一次】----
+        #   ★ 轮询每 60s 才重算一次范围、bar 还是轮转抓的（~42 分钟一圈），
+        #     而人加完自选是马上要看的 —— 那一刻一片"收盘价"，
+        #     看着像功能没生效。
+        #   ★ 只抓 `missing` 认定的那几只，所以天然收敛（抓到就不再 missing）；
+        #     每只带冷却 —— 退市股永远 missing，没冷却的话每次刷新都打一次。
+        rtm.missing = lambda cs, root=None, day=None: [
+            c for c in cs if c == '600585.XSHG']
+        HIT['snap'].clear(); HIT['bar'].clear()
+        sv._RT['miss_at'] = {}
+        assert sv.api_watchlist_act({}, {'act': 'add', 'code': '600585'})['ok']
+        assert HIT['snap'] == [['600585.XSHG']],             '加进自选没立刻补抓（或抓多了）：%s' % HIT['snap']
+        assert HIT['bar'] == [['600585.XSHG']],             'bar 也该补一次（轮转要 42 分钟才轮到它）：%s' % HIT['bar']
+        # 同一只票在冷却窗口内不再抓 —— 页面刷新几次不该变成几串请求
+        HIT['snap'].clear(); HIT['bar'].clear()
+        sv.api_watchlist({})
+        sv.api_watchlist({})
+        assert not HIT['snap'], '同一只票被反复补抓（没有冷却）：%s' % HIT['snap']
+        # 冷却过了才再抓
+        sv._RT['miss_at'] = {}
+        sv.api_watchlist({})
+        assert HIT['snap'] == [['600585.XSHG']],             '冷却过后应该再试一次：%s' % HIT['snap']
+        # 不在交易时段：什么都不抓 —— 收盘后没有盘中数据可抓，
+        # 硬抓只会拿到空结果，而**空结果一律当失败**
+        HIT['snap'].clear()
+        rtm.in_session = lambda now=None: False
+        sv._RT['miss_at'] = {}
+        sv.api_watchlist({})
+        assert not HIT['snap'], '非交易时段还在打接口：%s' % HIT['snap']
+        rtm.in_session = lambda now=None: True
+        # 只读模式（没开 --live）也不许往外发请求
+        HIT['snap'].clear()
+        sv.ALLOW_LIVE = False
+        sv._RT['miss_at'] = {}
+        sv.api_watchlist({})
+        assert not HIT['snap'], '只读模式下还在打接口：%s' % HIT['snap']
+        sv.ALLOW_LIVE = True
+        rtm.missing = _o_miss
+
         # 非法输入
         for bad in (('add', '99'), ('nope', '600519'), ('add', '')):
             try:
@@ -4522,10 +4574,16 @@ def t_watchlist():
                 '只读模式接口层拒写；持仓自动按账户分组同步且幂等、'
                 '不覆盖手工分组、已清仓只标记不移出；'
                 '抓取范围 = 持仓∪自选且去重（%d < %d+%d）；'
-                '自选带实时价且涨跌幅按实时价重算、不自己打接口'
+                '自选带实时价且涨跌幅按实时价重算、不自己打接口；'
+                '新加的票立刻补抓一次（snap+bar 各 1 请求）、'
+                '同一只有 180s 冷却、非交易时段与只读模式一律不发请求'
                 % (len(codes), len(held), len(watch)))
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
+        rtm.snapshot, rtm.fetch = _o_snap, _o_fetch
+        rtm.in_session, rtm.is_trading_day = _o_sess, _o_day
+        rtm.missing = _o_miss
+        sv._RT['miss_at'] = {}
         shutil.rmtree(tmp, ignore_errors=True)
 
 

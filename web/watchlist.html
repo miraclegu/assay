@@ -50,10 +50,23 @@ function render() {
     mountSearch($('#wadd'), {onPick: async r => {
       try {
         /* 加到哪个组：新建流程里用 NEWG，否则就进当前页签那个组。 */
-        await post('/api/watchlist', {act: 'add', code: r.code,
+        const rr = await post('/api/watchlist', {act: 'add', code: r.code,
           group: NEWG || GROUP || undefined});
         NEWG = null;
-        load();
+        await load();
+        /* ★ 服务端在"加进来那一刻"会给没有实时数据的票立刻补抓一次。
+           抓不到时**要说为什么** —— 否则人只看到一片"收盘价"，
+           会以为分钟数据这条链没工作（而收盘后本来就没有盘中数据）。 */
+        const m = $('#wmsg'), rt = rr && rr.rt;
+        if (rt && rt.skipped) {
+          m.className = 'lvmsg';
+          m.textContent = '已加入。' + rt.skipped
+            + ' —— 分钟数据要等开盘后才有，现价先按收盘价显示。';
+        } else if (rt && rt.snap) {
+          m.className = 'lvmsg ok';
+          m.textContent = '已加入，并立刻补抓了实时数据（' + rt.snap + ' 只快照'
+            + (rt.bars ? ' + ' + rt.bars + ' 根分钟线' : '') + '）。';
+        }
       } catch (e) { alert(String(e)); }
     }, placeholder: '加自选：代码或名称'});
     $$('.wtab[data-g]').forEach(e => e.onclick = ev => {

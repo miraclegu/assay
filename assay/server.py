@@ -1054,6 +1054,13 @@ def api_live_account(q):
         #   而且只有 --live 才抓 —— 只读模式不该往外发请求。
         if ALLOW_LIVE:
             _rt_catch_up()
+            # ★ 今天刚买进来的票不在上一轮的抓取范围里 —— 补一次，
+            #   不然它那一行是"收盘价"，而旁边几只是实时的（同一张表里
+            #   两个口径混着看，比全是收盘价更容易看错）。
+            try:
+                _rt_ensure(m.positions(aid))
+            except Exception:                               # noqa: BLE001
+                pass
         rows = m.fills(aid)
         return {
             'account': m.get_account(aid),
@@ -1538,6 +1545,50 @@ def _rt_loop():
 _RT_MIN_GAP = 20.0
 
 
+# 同一只票补抓失败后至少隔这么久再试。退市/停牌的票永远 missing，
+# 不设冷却的话每次打开页面都会为它打一次请求。
+_RT_MISS_GAP = 180.0
+
+
+def _rt_ensure(codes):
+    """**刚进抓取范围的票立刻补一次实时数据。**
+
+    为什么需要：轮询每 60s 才重算一次范围（持仓 ∪ 自选），bar 还是轮转抓的
+    （~42 分钟一圈）。而人加完自选、录完成交是**马上**要看的 —— 那一刻页面上
+    一片"收盘价"，看着像功能没生效。
+
+    ★ 只抓 `realtime.missing()` 认定的那几只，抓到就不再 missing ——
+      天然收敛，不会变成"每次刷新都打一遍"。
+    ★ 每只票带 180s 冷却：退市/停牌的票永远 missing，没有冷却的话它会在
+      每次打开页面时都换来一次请求。
+    ★ 与轮询同一个开关（--live）：realtime 的规矩是"只有 server 开着才调
+      接口"，只读模式下不该因为打开个页面就去打外部接口。
+    """
+    if not ALLOW_LIVE:
+        return None
+    rt = _rt()
+    try:
+        miss = rt.missing(codes)
+    except Exception:                                       # noqa: BLE001
+        return None
+    now = time.time()
+    seen = _RT.setdefault('miss_at', {})
+    todo = [c for c in miss if now - (seen.get(c) or 0) >= _RT_MISS_GAP]
+    if not todo:
+        return None
+    for c in todo:
+        seen[c] = now
+    try:
+        r = rt.ensure_codes(todo)
+        _RT['ensure'] = dict(r, at=datetime.now().replace(
+            microsecond=0).isoformat())
+        return r
+    except Exception as e:                                  # noqa: BLE001
+        _RT['err'] = [{'stage': 'ensure',
+                       'error': '%s: %s' % (type(e).__name__, e)}]
+        return None
+
+
 def _rt_catch_up(max_stale=2):
     """落后就补一次。**有节流**：多个标签页同时刷新不该变成一串请求。"""
     rt = _rt()
@@ -1570,6 +1621,15 @@ def api_rt_status(_q):
                       'err': _RT['err'], 'running': bool(_RT['thread'])}
         st['stale_minutes'] = rt.stale_minutes()
         st['codes_watched'] = _rt_codes() if ALLOW_LIVE else []
+        # 最近一次"新票补抓"（加自选 / 新买入触发的那次）
+        st['ensure'] = _RT.get('ensure')
+        # 还有哪几只今天一条实时数据都没有 —— 页面要能看见，
+        # 不然"这只票没实时价"会被当成整条链没工作
+        if ALLOW_LIVE:
+            try:
+                st['no_data'] = rt.missing(st['codes_watched'])
+            except Exception:                               # noqa: BLE001
+                pass
         return st
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
@@ -1909,9 +1969,18 @@ def _watch():
 
 
 def api_watchlist(q):
-    """GET /api/watchlist?group= —— 当前自选 + 行情。"""
+    """GET /api/watchlist?group= —— 当前自选 + 行情。
+
+    ★ 顺手把"今天还没有实时数据"的那几只补一次（`_rt_ensure`）——
+      服务重启前加进来的、或加进来时不在交易时段的，都靠这一步补上。
+      抓到就不再 missing，所以不会每次刷新都打请求。
+    """
     w = _watch()
     try:
+        try:
+            _rt_ensure([x['code'] for x in w.current()])
+        except Exception:                                   # noqa: BLE001
+            pass            # 补抓失败不该让自选打不开
         return w.valued(q.get('group'))
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
@@ -1933,6 +2002,8 @@ def api_watchlist_sync(_q, body):
     w = _watch()
     try:
         r = w.sync_live()
+        if r.get('added'):
+            _rt_ensure([x['code'] for x in r['added']])
         return dict(r, rows=w.valued().get('rows'), groups=w.groups())
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
@@ -1950,8 +2021,13 @@ def api_watchlist_act(_q, body):
     try:
         r = w.act((b.get('act') or '').strip(), b.get('code') or '',
                   group=b.get('group'), note=b.get('note') or '')
+        # ★ 加进来的那一刻就抓一次 —— 不然要等下一轮轮询（≤60s）、
+        #   bar 还要等轮转（~42 分钟），而人是马上要看的。
+        rte = None
+        if (b.get('act') or '').strip() == 'add' and r.get('code'):
+            rte = _rt_ensure([r['code']])
         return {'ok': True, 'rec': r, 'rows': w.valued().get('rows'),
-                'groups': w.groups()}
+                'groups': w.groups(), 'rt': rte}
     except w.WatchError as e:
         return {'error': str(e)}
 
