@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -1047,6 +1048,12 @@ def api_live_account(q):
     def _go():
         sig = m.latest_signal(aid)
         alert, why = m.signal_alert(sig)
+        # ★ 用户明确要的：「如果发现缺失最新的数据则立即调用一次」。
+        #   页面来问持仓的时候顺手看一眼实时库落后没有，落后就补抓。
+        #   只在交易时段生效（stale_minutes 非时段返回 None），
+        #   而且只有 --live 才抓 —— 只读模式不该往外发请求。
+        if ALLOW_LIVE:
+            _rt_catch_up()
         rows = m.fills(aid)
         return {
             'account': m.get_account(aid),
@@ -1442,6 +1449,134 @@ def _live_loop():
         except Exception as e:                              # noqa: BLE001
             print('[live] tick 异常: %s: %s' % (type(e).__name__, e), flush=True)
         time.sleep(60)
+
+
+# ==================== 盘中 1 分钟线 ====================
+# ★ 只有 server 开着才跑（用户明确要的）。这件事**漏了不要紧** ——
+#   trends2 每次给全天、快照下一分钟就补上，而实时盈亏只在看页面时才有意义。
+#   （对比 daily_snapshot.py 那种"漏一天永久丢失"的，才必须挂 launchd。）
+_RT = {'thread': None, 'last': None, 'rounds': 0, 'err': None,
+       'catch_at': 0}
+
+
+def _rt():
+    from assay import realtime as m
+    return m
+
+
+def _rt_codes():
+    """要抓哪些 —— 所有未归档账户的当前持仓。
+
+    ★ 只抓持仓，不抓自选/全市场：用户要的是"持仓的实时盈亏"。
+      范围越小越不容易触发限流，而限流是这条链上唯一的风险。
+    """
+    m = _live()
+    out = set()
+    for a in m.load_accounts():
+        if a.get('archived'):
+            continue
+        try:
+            out.update(m.positions(a['id']))
+        except Exception:                                   # noqa: BLE001
+            pass
+    return sorted(out)
+
+
+def _rt_loop():
+    """守护线程：交易时段内每 60s 一轮。
+
+    ★ 时段与交易日都在这里判：
+      · 9:30~11:31 / 13:00~15:01（收盘那根要到 15:01 才拿得到）
+      · 非交易日整天不抓 —— 日历取不到（None）时**照抓**：
+        "不知道是不是交易日"和"确定不是"是两件事，前者宁可多抓一次。
+    """
+    import time as _t
+    rt = _rt()
+    while True:
+        try:
+            now = datetime.now()
+            day_ok = rt.is_trading_day()
+            if rt.in_session(now) and day_ok is not False:
+                codes = _rt_codes()
+                if codes:
+                    # 收盘那一轮对全部持仓强抓，保证当天 bar 完整
+                    force = now.time() >= dtime(15, 0)
+                    r = rt.poll_once(codes, force_all=force)
+                    _RT['last'] = r
+                    _RT['rounds'] += 1
+                    _RT['err'] = r.get('fail') or None
+        except Exception as e:                              # noqa: BLE001
+            _RT['err'] = [{'stage': 'loop', 'error': '%s: %s' % (type(e).__name__, e)}]
+            print('[rt] 异常: %s: %s' % (type(e).__name__, e), flush=True)
+        _t.sleep(60)
+
+
+# 距上次"补抓"至少隔这么久，避免页面一刷新就打一串请求
+_RT_MIN_GAP = 20.0
+
+
+def _rt_catch_up(max_stale=2):
+    """落后就补一次。**有节流**：多个标签页同时刷新不该变成一串请求。"""
+    rt = _rt()
+    now = time.time()
+    if now - (_RT.get('catch_at') or 0) < _RT_MIN_GAP:
+        return None
+    try:
+        st = rt.stale_minutes()
+        if st is None or st <= max_stale:
+            return None
+        codes = _rt_codes()
+        if not codes:
+            return None
+        _RT['catch_at'] = now
+        r = rt.poll_once(codes)
+        _RT['last'] = r
+        _RT['rounds'] += 1
+        return r
+    except Exception as e:                                  # noqa: BLE001
+        _RT['err'] = [{'stage': 'catch_up', 'error': '%s: %s' % (type(e).__name__, e)}]
+        return None
+
+
+def api_rt_status(_q):
+    """GET /api/rt/status —— 1 分钟线库的状态 + 轮询情况。"""
+    rt = _rt()
+    try:
+        st = rt.status()
+        st['poll'] = {'rounds': _RT['rounds'], 'last': _RT['last'],
+                      'err': _RT['err'], 'running': bool(_RT['thread'])}
+        st['stale_minutes'] = rt.stale_minutes()
+        st['codes_watched'] = _rt_codes() if ALLOW_LIVE else []
+        return st
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_rt_bars(q):
+    """GET /api/rt/bars?code=&day= —— 某只票当日 1 分钟线（画分时用）。"""
+    rt = _rt()
+    try:
+        return {'code': q.get('code'), 'bars': rt.bars(q.get('code') or '',
+                                                       q.get('day'))}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_rt_poll(_q, body):
+    """POST /api/rt/poll —— 立刻抓一次（页面上的"刷新实时价"）。"""
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    rt = _rt()
+    try:
+        codes = _rt_codes()
+        if not codes:
+            return {'error': '没有持仓，没什么可抓的'}
+        r = rt.poll_once(codes, force_all=bool((body or {}).get('all')))
+        _RT['last'] = r
+        _RT['rounds'] += 1
+        return r
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
 
 
 # ==================== 数据同步状态（只读）====================
@@ -2010,6 +2145,8 @@ ROUTES = {
     '/api/stock/profile': api_stock_profile,
     '/api/stock/kline': api_stock_kline,
     '/api/stock/finance': api_stock_finance,
+    '/api/rt/status': api_rt_status,
+    '/api/rt/bars': api_rt_bars,
     '/api/stock/indicators': api_stock_indicators,
     '/api/stock/events': api_stock_events,
     '/api/stock/peers': api_stock_peers,
@@ -2052,6 +2189,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
                  '/api/watchlist': api_watchlist_act,
+                 '/api/rt/poll': api_rt_poll,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
         # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再
@@ -2142,7 +2280,16 @@ def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):
               % (len(accts), cal.get('source')))
         _live_thread = threading.Thread(target=_live_loop, daemon=True)
         _live_thread.start()
+        # 盘中 1 分钟线：只在 server 开着时跑，只抓持仓，只在交易时段
+        rt = _rt()
+        _RT['thread'] = threading.Thread(target=_rt_loop, daemon=True)
+        _RT['thread'].start()
+        print('盘中 1 分钟线：开启  时段 %s  存 %s'
+              % (' / '.join('%s~%s' % (a.strftime('%H:%M'), b.strftime('%H:%M'))
+                            for a, b in rt.SESSIONS),
+                 os.path.join(_datalake_dir(), 'rt')))
     else:
         print('实盘模块：关闭（--live 开启）')
+        print('盘中 1 分钟线：关闭（跟随 --live）')
     print('Ctrl-C 退出', flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

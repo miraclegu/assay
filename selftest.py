@@ -2864,6 +2864,19 @@ def t_live_ui():
                    pg.locator('#lvbody table.lvpos tr td:nth-child(2)').all_inner_texts()]
             assert all('.' in x for x in _pc if x), '第一列应只有代码：%s' % _pc
             assert any(_pn), '第二列（名称）全空'
+            # ★ 这份估值用的是什么价，必须在页面上说出来 —— 人分不清
+            #   "实时"和"昨收"的话，那是两个数量级的误解（尤其大涨大跌那天）。
+            _kpz = pg.locator('#lvbody .kpi').first.inner_text()
+            _psrc = pg.evaluate('() => (LVO && LVO.pos && LVO.pos.price_src) || ""')
+            assert _psrc, '估值没给 price_src'
+            assert _psrc in _kpz, \
+                '持仓浮盈那格没说明价来源（%s）：%s' % (_psrc, _kpz[:160])
+            if _psrc == '实时':
+                # 逐只也要标，且现价列上有「实」
+                assert pg.locator(
+                    '#lvbody table.lvpos td .lvwhy[title*="实时价"]').count() >= 1, \
+                    '持仓表的现价没标出是实时价'
+
             # ★ 数据日期要有【自己的位置】，不是塞在"（用 xx 收盘数据算）"括号里
             _tags = ' '.join(pg.locator('#lvbody .lvhead .lvtag').all_inner_texts())
             assert '数据日' in _tags, '顶栏缺独立的「数据日」：%s' % _tags
@@ -4816,6 +4829,145 @@ def t_extapi_doc():
             % (len(md.encode()) / 1024))
 
 
+@case('盘中 1 分钟线：时段 / 落盘去重 / 实时估值 / 限流兜底', tag='fast')
+def t_realtime():
+    """两个源各干各的，这是稳定性的关键（见 realtime.py 模块说明）：
+
+        腾讯 qt.gtimg.cn  **批量**快照  1 次请求覆盖全部持仓 -> 实时盈亏
+        东财 trends2      单只          一次拿当天全部 1 分钟 -> 落盘的 bar
+
+    ★ 这条用例**不打真接口** —— selftest 要能离线跑，而且拿外部接口当断言
+      等于把别人的限流变成自己的红灯。真实连通性在调研时实测过
+      （见数据字典索引 5）。这里用假数据验【我们自己的逻辑】：
+      时段判定、按键去重、实时价覆盖、以及**取不到时的行为**。
+    """
+    import shutil
+    import tempfile
+    from datetime import datetime as _dt
+    from datetime import time as _t
+
+    from assay import live as lv
+    from assay import realtime as rt
+
+    # ---- 1) 交易时段：边界要含在内 ----
+    #   ★ 15:01 而不是 15:00 —— 收盘那一根要到 15:01 才拿得到。
+    #     写成 15:00 会永远缺当天最后一根，而这不会报错。
+    for hh, mm, want in ((9, 29, False), (9, 30, True), (11, 30, True),
+                         (11, 31, True), (11, 32, False), (12, 30, False),
+                         (13, 0, True), (14, 59, True), (15, 0, True),
+                         (15, 1, True), (15, 2, False)):
+        got = rt.in_session(_dt(2026, 9, 3, hh, mm))
+        assert got is want, '%02d:%02d 应%s在时段内' % (hh, mm, '' if want else '不')
+    assert rt.SESSIONS[0][1] == _t(11, 31) and rt.SESSIONS[1][1] == _t(15, 1), \
+        '收盘边界要留到 11:31 / 15:01，否则永远缺最后一根'
+
+    # ---- 2) 落盘：两个库分开 + 按键去重 ----
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, 'rt'), exist_ok=True)
+    try:
+        day = '2026-09-03'
+        bar = {'code': '601857.XSHG', 'datetime': day + ' 09:31',
+               'open': 11.2, 'close': 11.25, 'high': 11.26, 'low': 11.19,
+               'volume': 100.0, 'amount': 112000.0, 'avg': 11.22}
+        rt.save([bar], day, root=tmp)
+        rt.save([bar], day, root=tmp)                   # 同一根写两遍
+        rt.save([dict(bar, close=11.30, volume=180.0)], day, root=tmp)
+        b = rt.bars('601857.XSHG', day, root=tmp)
+        assert len(b) == 1, \
+            ('同一 (code, datetime) 必须只留一行 —— 追加会让成交量凭空翻倍，'
+             '而多出来的行不报错：%s' % b)
+        assert b[0]['volume'] == 180.0, '重复写应保留量更大的那条（更完整）'
+        # 两个库是不同文件
+        assert rt.day_file(root=tmp, kind='minute_1m') != \
+            rt.day_file(root=tmp, kind='snap_1m'), 'bar 与快照必须分开存'
+
+        snap = {'code': '601857.XSHG', 'price': 11.31, 'preclose': 11.26,
+                'open': 11.2, 'high': 11.4, 'low': 11.18, 'change_pct': 0.44,
+                'turnover_pct': 1.9, 'volume': 5000.0, 'amount': 5.6e7,
+                'ts': '20260903143012'}
+        rt.save_snap([snap], root=tmp)
+        rt.save_snap([dict(snap, price=11.33, ts='20260903143055')], root=tmp)
+        lt = rt.latest(['601857.XSHG'], day, root=tmp)
+        v = lt['601857.XSHG']
+        assert v['at'] == '2026-09-03 14:30', '快照要按【分钟】归并：%s' % v['at']
+        assert v['price'] == 11.33, '同一分钟应留最后一次采样'
+        assert v['src'] == 'snap', \
+            '最新价应优先取快照库（它每分钟每只都有，bar 是轮转抓的）'
+        assert v.get('avg') is None or v['at'] != b[0]['datetime']
+
+        # ---- 3) 快照缺某只时，bar 库要能补上 ----
+        lt2 = rt.latest(['601857.XSHG', '600519.XSHG'], day, root=tmp)
+        assert '600519.XSHG' not in lt2, \
+            '两个库都没有的票【不该】出现 —— 不能拿别的价顶上'
+        rt.save([dict(bar, code='600519.XSHG', close=1500.0)], day, root=tmp)
+        lt3 = rt.latest(['600519.XSHG'], day, root=tmp)
+        assert lt3['600519.XSHG']['src'] == 'bar', '快照没有时应回落到 bar 库'
+
+        # ---- 4) status / stale ----
+        st = rt.status(day, root=tmp)
+        assert st['bar']['rows'] == 2 and st['snap']['rows'] == 1
+        assert st['last'] == '2026-09-03 14:30', \
+            'last 应取两个库里更新的那个（否则会以为一直落后）：%s' % st['last']
+        # 非交易时段不算"落后"
+        assert rt.stale_minutes(day, tmp, now=_dt(2026, 9, 3, 12, 30)) is None, \
+            '非时段不该报落后 —— 收盘后当然落后，那不是缺数据'
+        assert rt.stale_minutes(day, tmp, now=_dt(2026, 9, 3, 14, 35)) == 5
+
+        # ---- 5) 抓取失败：空结果一律当失败，不能当"这只票没数据" ----
+        #   东财限流时会返回 data:null 或空 trends（见索引 5 §3.1）。
+        real = rt.urllib.request.urlopen
+        try:
+            class _R:
+                def __init__(self, b):
+                    self._b = b
+
+                def read(self):
+                    return self._b
+            rt.urllib.request.urlopen = lambda *a, **k: _R(b'{"data":null}')
+            try:
+                rt.fetch_one('601857.XSHG')
+                raise AssertionError('返回 data:null 时必须报错，'
+                                     '不能当成"这只票没数据"（会把持仓价清空）')
+            except rt.RTError as e:
+                assert '限流' in str(e) or '空' in str(e), '报错要说清原因：%s' % e
+            # 整批里一只失败不该打断其它只
+            r = rt.fetch(['601857.XSHG', '600519.XSHG'], root=tmp, sleep=0)
+            assert r['ok'] == 0 and len(r['fail']) == 2, r
+        finally:
+            rt.urllib.request.urlopen = real
+
+        # ---- 6) 字段位序：trends2 少一个字段就整行错位 ----
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'assay', 'realtime.py'), encoding='utf-8').read()
+        assert 'f51,f52,f53,f54,f55,f56,f57,f58' in src, \
+            ('trends2 必须请求 8 个 fields2 —— 漏掉 f52(开) 时只返回 7 段，'
+             '按 8 段解析会把"收"当成"开"，而这不报错')
+        assert 'TX_BATCH = 400' in src, \
+            '腾讯批量要有上限（实测 900 ✓ / 950 ❌ HTTP 414）'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- 7) 持仓估值：有实时价就用，没有就回落收盘，且【标出来】----
+    P = lv.positions_valued('froec')
+    assert 'price_src' in P and 'rt_n' in P, '估值没给"价来源"'
+    assert P['price_src'] in ('实时', '部分实时', '收盘')
+    for x in P['items']:
+        if x.get('rt_src'):
+            assert x.get('rt_at'), '标了实时却没给时刻'
+    if P['rt_n']:
+        assert P['asof'] == P['rt_at'], \
+            ('全部实时时 asof 要写实时那一刻 —— 还写日线日的话，页面上会出现'
+             '"估值日 09-02"配 09-03 的实时价：%s vs %s' % (P['asof'], P['rt_at']))
+        assert P['asof_close'] and P['asof_close'] != P['asof'], \
+            '收盘日要单独留一份（部分实时时要用它说明其余按哪天算）'
+    return ('时段 11 个边界点（收盘留到 11:31/15:01）；bar 与快照两库分开且'
+            '按键去重（重复写不翻倍）；最新价优先快照、缺了回落 bar、'
+            '两库都没有的不顶价；last 取两库较新者；非时段不报落后；'
+            'data:null 当失败且不打断整批；trends2 八字段位序与腾讯批量上限'
+            '写死在代码里；持仓估值 %s（%d/%d 实时）'
+            % (P['price_src'], P['rt_n'], len(P['items'])))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
@@ -4885,8 +5037,8 @@ def t_page_inventory():
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 53, \
-        ('用例只剩 %d 条，少于已知的 53 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 54, \
+        ('用例只剩 %d 条，少于已知的 54 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))

@@ -1493,6 +1493,17 @@ def positions_valued(aid, datalake=None):
     out['asof'] = day.isoformat()
     px = _last_px(feed, list(book), day)
     nm = _names(feed, list(book), day)
+    # ★ 盘中用【实时价】覆盖日线收盘 —— 这样持仓盈亏是活的。
+    #   取不到就用日线收盘（不是留空）：实时是锦上添花，
+    #   而"没有实时价"不该让整个持仓表变成 —。
+    #   来源逐只标出来（rt_src / rt_at），页面必须显示 —— 人分不清
+    #   "实时"和"昨收"的话，那是两个数量级的误解。
+    rtp = {}
+    try:
+        from assay import realtime as _rt
+        rtp = _rt.latest(list(book), root=datalake)
+    except Exception:                                       # noqa: BLE001
+        rtp = {}
     mv = cst = cst_net = 0.0
     for c, lots in sorted(book.items()):
         sh = sum(l['shares'] for l in lots)
@@ -1500,9 +1511,14 @@ def positions_valued(aid, datalake=None):
         buy_fee = sum(l.get('fee') or 0 for l in lots)
         avg_net = (sh * avg + buy_fee) / sh          # 摊薄成本
         p, pd_ = px.get(c, (None, None))
+        rt_src = rt_at = None
+        r = rtp.get(c)
+        if r and r.get('price'):
+            p, rt_src, rt_at = r['price'], r.get('src') or 'rt', r.get('at')
         v = (sh * p) if p else None
         pnl = (v - sh * avg_net) if v is not None else None
         out['items'].append({
+            'rt_src': rt_src, 'rt_at': rt_at,
             'code': c, 'name': nm.get(c, ''), 'shares': sh,
             'cost': round(avg, 4),                  # 成交均价（引擎口径）
             'cost_net': round(avg_net, 4),          # 摊薄成本（含买入费）
@@ -1567,6 +1583,19 @@ def positions_valued(aid, datalake=None):
     out['fee_estimated_n'] = sum(
         1 for r in active_fills(fills(aid))
         if r['side'] == 'buy' and r.get('fee_estimated'))
+    # 汇总层也要说清"这份估值用的是什么价"
+    n_rt = sum(1 for x in out['items'] if x.get('rt_src'))
+    out['rt_n'] = n_rt
+    out['rt_at'] = max([x['rt_at'] for x in out['items'] if x.get('rt_at')] or
+                       [None])
+    out['price_src'] = ('实时' if n_rt == len(out['items']) and n_rt
+                        else ('部分实时' if n_rt else '收盘'))
+    # ★ asof 是"这份估值用的是哪天/哪一刻的价"。全部实时时要写实时那一刻 ——
+    #   还写日线日的话，页面上会出现"估值日 09-02"配着 09-03 的实时价，
+    #   而人会以为看的是昨天的数。
+    out['asof_close'] = out['asof']
+    if n_rt and out['rt_at']:
+        out['asof'] = out['rt_at']
     out['equity'] = round(mv + money, 2)
     return out
 

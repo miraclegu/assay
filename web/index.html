@@ -274,7 +274,9 @@ async function loadLive(aid){
         <td class="rt" title="成交均价 ${num(x.cost,4)}（引擎 entry_price 用它）＋买入费 ${num(x.buy_fee,2)}">${num(x.cost_net,3)}</td>
         <td class="rt lvwhy" title="卖到这个价才不亏（含估算卖出费）">${x.breakeven==null?'—':num(x.breakeven,3)}</td>
         <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
-            `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}</td>
+            `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}${
+          x.rt_src?`<span class="lvwhy" style="color:var(--accent)"
+            title="盘中实时价（${esc(x.rt_at||'')}，来源 ${esc(x.rt_src)}）">实</span>`:''}</td>
         <td class="rt">${x.value==null?'—':num(x.value,2)}</td>
         <td class="rt" style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
         <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
@@ -339,7 +341,7 @@ function kpiHtml(o){
            `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
            (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':'')
            +(P.buy_fee?'　按摊薄成本（已含买入费 '+num(P.buy_fee,2)+'）':'')
-           +' · 估值日 '+esc(P.asof||'—'))}
+           +'　'+priceSrc(P))}
     ${cell('全平落袋',
            P.pnl_net==null?'—':
            `<span style="color:${col(P.pnl_net)}">${sgn(P.pnl_net)}${num(P.pnl_net,2)}</span>`,
@@ -1169,6 +1171,17 @@ const skLink=(code, text, cls)=>code
        rel="noopener" class="${cls||''}" style="color:inherit"
        title="在新标签页打开个股：${esc(code)}">${esc(text==null?code:text)}</a>`
   : esc(text||'');
+
+/* 这份估值用的是什么价。★ 必须显示 —— 人分不清"实时"和"昨收"的话，
+   那是两个数量级的误解（尤其大涨大跌那天）。 */
+function priceSrc(P){
+  if(!P) return '';
+  if(P.price_src==='实时') return `<b style="color:var(--accent)">实时 ${esc(P.rt_at||'')}</b>`;
+  if(P.price_src==='部分实时')
+    return `<b style="color:var(--warn)">部分实时 ${P.rt_n}/${(P.items||[]).length}</b>`
+      +`<span class="lvwhy">　其余按 ${esc(P.asof_close||P.asof||'')} 收盘</span>`;
+  return `收盘 ${esc(P.asof_close||P.asof||'—')}`;
+}
 
 function dataDayTag(o){
   const dd=o.data_day, sg=o.signal||{}, asof=sg.data_asof;
