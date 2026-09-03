@@ -1,0 +1,338 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>买点 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/common.js"></script>
+<script>
+/* ============ 股息率买点清单 ============
+   就是把用户手里那张 Excel 搬进来：一只票一行，一个「预计分红（每股）」，
+   再写几档想买的价；每档旁边是那个价对应的股息率。到价提醒。
+
+   ★ 它**不是策略**（没有回测、不产生委托）—— 是手工的挂单计划表。
+     所以这一页不出现任何"回测/信号/持仓"，只回答两件事：
+       ① 每档目标价是多少、对应股息率多少
+       ② 现在离最近的那档还差多少
+   ★ 每档可以填【目标价】也可以填【目标股息率】，另一个由分红现算。
+     存的是你填的那个（by），另一个不存 —— 都存下来的话改了分红以后
+     另一个就是过期的，而它看着仍然像个正常数字。
+   ★ 现价与自选/持仓页**共用同一个实时库**（datalake/rt/），页面不额外
+     打行情接口；抓取范围里已经包含这张清单里的票。 */
+let V = null;            // 上一次取回的整份清单
+let EDIT = null;         // 正在编辑哪一行（code），'' = 新增
+let FORM = null;         // 编辑中的表单状态（不直接改 V）
+let SORT = 'near';       // near = 按接近度（默认）/ mine = 我排的顺序
+
+pageHead('alerts', '🎯 买点');
+load();
+
+async function load() {
+  const pg = $('#pg');
+  if (!V) pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    V = await j('/api/alerts');
+    if (V.error) throw new Error(V.error);
+    render();
+  } catch (e) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+
+/* ---- 排序 ----
+   默认【按接近度】而不是"我排的顺序"：这一页是拿来回答"现在该做什么"的，
+   跌破的必须在最上面。但保留"我排的顺序"—— 那张表的行序是用户自己的分组
+   习惯（银行放一起、公用事业放一起），排序把它打散了就不好扫。 */
+function sorted(rows) {
+  if (SORT === 'mine') return rows;
+  const rank = {hit: 0, near: 1, far: 2};
+  return rows.slice().sort((a, b) => {
+    const ra = rank[a.state] ?? 3, rb = rank[b.state] ?? 3;
+    if (ra !== rb) return ra - rb;
+    const ga = a.next ? a.next.gap : 9, gb = b.next ? b.next.gap : 9;
+    return (gb ?? 9) - (ga ?? 9);      /* gap 是负的：越接近 0 越近 */
+  });
+}
+
+function render() {
+  const pg = $('#pg'), rows = V.rows || [];
+  pg.innerHTML = head() + '<div class="lvmsg" id="amsg"></div>'
+    + (EDIT === null ? '' : editor()) + table(sorted(rows)) + foot();
+  /* 顶栏那个红点用【本页已经取回的这份数据】点，不再打一遍接口；
+     改完一行也要立刻跟上 —— 只在加载时点一次的话，刚加的那只到价了
+     红点还是灭的，而它不报错。 */
+  setAlertDot(V);
+  wire();
+}
+
+function head() {
+  const n = (V.rows || []).length;
+  const src = V.price_src === '实时' ? ' · 实时 ' + esc(String(V.rt_at || '').slice(5))
+    : (V.price_src === '部分实时' ? ' · 部分实时 ' + V.rt_n + '/' + n : ' · 收盘价');
+  return `<div class="lvhead">
+      <h2 style="font-size:17px">买点清单 <span class="lvwhy">${n} 只</span></h2>
+      <span class="lvtag${V.price_src === '实时' ? ' on' : ''}"
+        title="现价与持仓页/自选页共用同一个实时库（datalake/rt/），本页不额外调接口"
+        >数据日 ${esc(V.date || '—')}${src}</span>
+      ${V.n_hit ? `<span class="lvtag warn" title="现价已跌到目标价以下"
+        >⚑ ${V.n_hit} 只到价</span>` : ''}
+      ${V.n_near ? `<span class="lvtag" title="现价在目标价上方 ${
+        ((V.near_default || 0) * 100).toFixed(0)}% 以内"
+        >${V.n_near} 只接近</span>` : ''}
+      <span style="flex:1"></span>
+      <a href="#" class="chip${SORT === 'near' ? ' on' : ''}" id="asort"
+        title="默认按接近度排（跌破的在最上面）；切成"我排的顺序"就是加入的先后"
+        >${SORT === 'near' ? '按接近度' : '我排的顺序'}</a>
+      <div id="aadd" style="flex:0 0 240px"></div>
+    </div>`;
+}
+
+/* ---- 一行的编辑器 ----
+   ★ 表单每一项都有【标签】，不靠 placeholder —— 字段取不到值时
+     placeholder 也没了，剩一个空框，人不知道要填什么。 */
+function editor() {
+  const f = FORM || {};
+  const tiers = f.tiers || [];
+  const sg = (V.suggest || {})[f.code];
+  return `<div class="lvsec" style="margin-bottom:12px">
+    <h3>${f.isnew ? '新增' : '修改'} ${esc(f.code || '')}
+      <span class="lvwhy">${esc(f.name || '')}</span></h3>
+    <div class="frow">
+      <label>预计分红（每股，元）
+        <input id="adiv" value="${f.div == null ? '' : f.div}" style="width:110px">
+      </label>
+      ${sg ? `<span class="lvwhy">近 12 个月已公告合计
+        <b>${sg.per_share}</b>（${sg.n} 次，最近公告 ${esc(sg.last_pub)}）
+        <a href="#" id="ause">用它</a><br>
+        它只是<b>预填</b>：这一列填的是你的<b>预计</b>，不是数据。</span>` : ''}
+      <label>「接近」阈值（%）
+        <input id="anear" value="${f.near == null ? '' : (f.near * 100)}"
+          style="width:70px" placeholder="${((V.near_default || 0) * 100).toFixed(0)}">
+      </label>
+      <label>备注
+        <input id="anote" value="${esc(f.note || '')}" style="width:200px">
+      </label>
+    </div>
+    <table class="lvt" style="margin-top:8px">
+      <tr><th class="tx">档</th><th class="tx">按什么填</th><th class="rt">数值</th>
+        <th class="rt">换算出来的</th><th class="tx">备注</th><th></th></tr>
+      ${tiers.map((t, i) => {
+        const div = parseFloat(f.div) || 0;
+        const v = parseFloat(t.v) || 0;
+        let other = '—';
+        if (div > 0 && v > 0) {
+          other = t.by === 'price'
+            ? (div / v * 100).toFixed(2) + '%　（' + div + '/' + v + '）'
+            : (div / (v >= 1 ? v / 100 : v)).toFixed(2) + ' 元';
+        }
+        return `<tr>
+        <td class="tx lvwhy">${i + 1}</td>
+        <td class="tx"><select class="aby" data-i="${i}">
+          <option value="price"${t.by === 'price' ? ' selected' : ''}>目标价</option>
+          <option value="yield"${t.by === 'yield' ? ' selected' : ''}>目标股息率 %</option>
+        </select></td>
+        <td class="rt"><input class="av" data-i="${i}" value="${t.v == null ? '' : t.v}"
+          style="width:90px;text-align:right"></td>
+        <td class="rt lvwhy">${esc(other)}</td>
+        <td class="tx"><input class="an" data-i="${i}" value="${esc(t.note || '')}"
+          style="width:120px"></td>
+        <td class="tx"><a href="#" class="atrm" data-i="${i}" class="lvwhy">删</a></td>
+      </tr>`; }).join('')}
+    </table>
+    <div class="frow" style="margin-top:8px">
+      <button class="btn" id="atadd">+ 加一档</button>
+      <span style="flex:1"></span>
+      ${f.isnew ? '' : '<button class="btn" id="adel">删掉这一行</button>'}
+      <button class="btn" id="acancel">取消</button>
+      <button class="btn on" id="asave">保存</button>
+    </div>
+    <div class="lvmsg" id="aemsg"></div>
+  </div>`;
+}
+
+function table(rows) {
+  if (!rows.length) return '<div class="none">清单是空的 —— '
+    + '右上角搜代码或名称加一只，然后填「预计分红」和几档想买的价</div>';
+  const nt = Math.max(1, ...rows.map(x => (x.tiers || []).length));
+  const st = {hit: ['到价', 'var(--up)'], near: ['接近', 'var(--warn)'],
+              far: ['', 'var(--dim)'], na: ['', 'var(--dim)']};
+  return `<div class="lvsec"><h3>盯价
+      <span class="lvwhy">目标价从高到低 · 跌到哪一档就点亮哪一档</span></h3>
+    <div class="pw"><table class="pkt">
+      <tr><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">现价</th><th class="rt">当日</th>
+        <th class="rt">预计分红</th><th class="rt">当前股息率</th>
+        ${Array.from({length: nt}, (_, i) => `<th class="rt">第 ${i + 1} 档</th>`).join('')}
+        <th class="tx">状态</th><th class="tx">备注</th><th class="tx"></th></tr>
+      ${rows.map(x => `<tr${x.state === 'hit' ? ' class="ahit"'
+          : (x.state === 'near' ? ' class="anear"' : '')}>
+        <td class="tx"><a href="${stockHref(x.code)}"
+          style="font-family:'SF Mono',Menlo,monospace;color:inherit"
+          >${esc(x.code.slice(0, 6))}</a></td>
+        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit"
+          >${esc(x.name || '')}</a>${x.missing
+            ? '<span class="stale" title="面板里查不到这个代码 —— 可能填错了，或已退市/未上市。这一行刻意留着，不静默丢掉">查不到</span>' : ''}
+          ${x.is_st ? '<span class="stale">ST</span>' : ''}</td>
+        <td class="rt">${fmtN(x.price)}${x.rt_src ? `<span class="lvwhy"
+          style="color:var(--accent)" title="盘中实时价（${esc(x.rt_at || '')}）">实</span>` : ''}</td>
+        <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+        <td class="rt">${fmtN(x.div)}</td>
+        <td class="rt">${x.yield_now == null ? '—'
+          : (x.yield_now * 100).toFixed(2) + '%'}</td>
+        ${Array.from({length: nt}, (_, i) => {
+          const t = (x.tiers || [])[i];
+          if (!t) return '<td class="rt lvwhy">—</td>';
+          const s = st[t.state] || st.far;
+          return `<td class="rt" style="color:${s[1]}"
+            title="${t.by === 'price' ? '填的是目标价' : '填的是目标股息率'}${
+              t.note ? '　' + esc(t.note) : ''}">
+            <b>${fmtN(t.price)}</b>
+            <div class="lvwhy" style="color:inherit">${
+              t.yield == null ? '' : (t.yield * 100).toFixed(2) + '%'}</div>
+            <div class="lvwhy">${t.gap == null ? ''
+              : (t.state === 'hit' ? '已跌破'
+                 : '跌 ' + (-t.gap * 100).toFixed(1) + '%')}</div></td>`;
+        }).join('')}
+        <td class="tx">${x.state === 'hit'
+          ? `<b style="color:var(--up)">到价 · 第 ${x.hit + 1} 档</b>`
+          : (x.state === 'near'
+             ? `<b style="color:var(--warn)">接近 · 第 ${x.near + 1} 档</b>`
+             : (x.next ? '<span class="lvwhy">还要跌 '
+                 + (-x.next.gap * 100).toFixed(1) + '%</span>' : ''))}</td>
+        <td class="tx lvwhy">${esc(x.note || '')}</td>
+        <td class="tx"><a href="#" class="aed" data-c="${esc(x.code)}">改</a></td>
+      </tr>`).join('')}
+    </table></div>
+  </div>`;
+}
+
+function foot() {
+  const fired = V.fired_today || [];
+  return `${fired.length ? `<div class="lvsec" style="margin-top:12px">
+      <h3>今天提醒过 <span class="lvwhy">${fired.length} 条 · 同一档一天只提醒一次</span></h3>
+      <table class="lvt">
+        <tr><th class="tx">时刻</th><th class="tx">代码</th><th class="tx">名称</th>
+          <th class="tx">类型</th><th class="rt">目标价</th><th class="rt">当时现价</th></tr>
+        ${fired.slice().reverse().slice(0, 30).map(r => `<tr>
+          <td class="tx lvwhy">${esc(String(r.ts || '').replace('T', ' ').slice(5))}</td>
+          <td class="tx">${esc((r.code || '').slice(0, 6))}</td>
+          <td class="tx">${esc(r.name || '')}</td>
+          <td class="tx">${r.kind === 'hit' ? '到价' : '接近'}</td>
+          <td class="rt">${fmtN(r.target)}</td>
+          <td class="rt">${fmtN(r.price)}</td></tr>`).join('')}
+      </table></div>` : ''}
+    <div class="lvwhy" style="margin-top:10px">
+      这一页<b>不是策略</b>：没有回测、不产生委托，就是手工的挂单计划表
+      （止损、调仓那些规则在实盘模块里，一条都不在这儿重写）。<br>
+      每档<b>存的是你填的那个数</b>（目标价或目标股息率），另一个由分红
+      <b>现算</b> —— 两个都存的话，改了分红以后另一个就是过期的，
+      而它看着仍然像个正常数字。<br>
+      <b>预计分红是你的判断</b>，「近 12 个月已公告合计」只是预填
+      （口径与红利策略同源：按董事会预案公告日可见、同一
+      期次去重留流程最靠后那条）。分红改了、目标价跟着变，这是对的。<br>
+      账本 <b>append-only</b>（<code>live/alerts.jsonl</code>）：改一行是
+      追加一条、删一行也是追加一条，当前清单由<b>重放</b>得出。<br>
+      到价提醒走 macOS 通知中心，<b>serve.py 开着时才有</b>；同一
+      (票, 档, 类型) <b>一天只提醒一次</b> —— 价格在阈值上下抖一抖就发几十条
+      的话，通知就没人看了。
+    </div>`;
+}
+
+/* ---------------------------------------------------------------- 交互 */
+function wire() {
+  mountSearch($('#aadd'), {onPick: async r => {
+    if ((V.rows || []).some(x => x.code === r.code)) {
+      EDIT = r.code; FORM = formOf(r.code); render();
+      return;
+    }
+    /* 新增：先把分红预填拿回来 —— 空着一个"预计分红"让人自己去查，
+       等于把这一页最烦的一步留给人。 */
+    let sg = null;
+    try { sg = (await j('/api/alerts/suggest?code='
+      + encodeURIComponent(r.code))).suggest; } catch (e) { sg = null; }
+    EDIT = ''; FORM = {code: r.code, name: r.name || '', isnew: true,
+      div: sg ? sg.per_share : '', div_src: sg ? sg.src : '手填',
+      note: '', near: null,
+      tiers: [{by: 'yield', v: ''}, {by: 'yield', v: ''}, {by: 'yield', v: ''}]};
+    if (sg) V.suggest = Object.assign({}, V.suggest, {[r.code]: sg});
+    render();
+    if ($('#adiv')) $('#adiv').focus();
+  }, placeholder: '加一只：代码或名称'});
+
+  $('#asort').onclick = ev => { ev.preventDefault();
+    SORT = SORT === 'near' ? 'mine' : 'near'; render(); };
+  $$('.aed').forEach(a => a.onclick = ev => { ev.preventDefault();
+    EDIT = a.dataset.c; FORM = formOf(a.dataset.c); render(); });
+  if (!$('#asave')) return;
+
+  /* 编辑器里的每一次输入都要**回写 FORM 再重渲染** —— 只改 DOM 的话，
+     "换算出来的"那一列不会跟着动，而那一列正是这一页的意义。 */
+  const pull = () => {
+    FORM.div = $('#adiv').value.trim();
+    FORM.note = $('#anote').value;
+    const nv = $('#anear').value.trim();
+    FORM.near = nv === '' ? null : (parseFloat(nv) / 100);
+    $$('.aby').forEach(e => FORM.tiers[+e.dataset.i].by = e.value);
+    $$('.av').forEach(e => FORM.tiers[+e.dataset.i].v = e.value.trim());
+    $$('.an').forEach(e => FORM.tiers[+e.dataset.i].note = e.value);
+  };
+  const redraw = () => { pull(); render(); };
+  $('#adiv').onchange = redraw;
+  $$('.aby').forEach(e => e.onchange = redraw);
+  $$('.av').forEach(e => e.onchange = redraw);
+  if ($('#ause')) $('#ause').onclick = ev => { ev.preventDefault(); pull();
+    FORM.div = (V.suggest[FORM.code] || {}).per_share;
+    FORM.div_src = '近 12 个月已公告合计'; render(); };
+  $('#atadd').onclick = () => { pull();
+    FORM.tiers.push({by: FORM.tiers.length && FORM.tiers[0].by || 'yield', v: ''});
+    render(); };
+  $$('.atrm').forEach(a => a.onclick = ev => { ev.preventDefault(); pull();
+    FORM.tiers.splice(+a.dataset.i, 1); render(); });
+  $('#acancel').onclick = () => { EDIT = null; FORM = null; render(); };
+  if ($('#adel')) $('#adel').onclick = async () => {
+    if (!confirm('把 ' + FORM.code + ' 从买点清单里删掉？\n\n'
+      + '账本是 append-only 的 —— 会追加一条 remove，历史仍然保留。')) return;
+    try {
+      await post('/api/alerts', {act: 'remove', code: FORM.code});
+      EDIT = null; FORM = null; await load();
+    } catch (e) { msg(String(e), true); }
+  };
+  $('#asave').onclick = async () => {
+    pull();
+    const tiers = FORM.tiers
+      .filter(t => String(t.v).trim() !== '')
+      .map(t => ({by: t.by, v: parseFloat(t.v), note: t.note || ''}));
+    try {
+      await post('/api/alerts', {act: 'set', code: FORM.code, div: FORM.div,
+        tiers: tiers, note: FORM.note, near: FORM.near,
+        div_src: FORM.div_src || '手填'});
+      EDIT = null; FORM = null; await load();
+      msg('已保存');
+    } catch (e) { msg(String(e), true); }
+  };
+}
+
+function formOf(code) {
+  const x = (V.rows || []).find(y => y.code === code) || {};
+  /* 编辑时要拿【存的那个】—— 表里显示的是换算后的两个数，
+     照着显示值回填会把"我填的是股息率"变成"我填的是价格"。 */
+  return {code: code, name: x.name || '', div: x.div, note: x.note || '',
+    near: x.near_used === (V.near_default) ? null : x.near_used,
+    div_src: x.div_src || '手填',
+    tiers: (x.tiers || []).map(t => ({by: t.by,
+      v: t.by === 'price' ? t.price : +(t.yield * 100).toFixed(4),
+      note: t.note || ''}))};
+}
+
+function msg(t, bad) {
+  const m = $('#aemsg') || $('#amsg');
+  if (!m) return;
+  m.className = 'lvmsg ' + (bad ? 'bad' : 'ok');
+  m.textContent = t;
+}
+</script>

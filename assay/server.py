@@ -1485,7 +1485,7 @@ def _rt():
 
 
 def _rt_codes():
-    """要抓哪些 —— **持仓 ∪ 自选**，按代码去重。
+    """要抓哪些 —— **持仓 ∪ 自选 ∪ 股息率买点清单**，按代码去重。
 
     🔴 **去重是硬要求**（用户明确说"不要重复调用"）：持仓的票会被自动同步
       进自选，所以一只票通常同时出现在持仓和自选里；同一只还可能被手工加进
@@ -1507,6 +1507,12 @@ def _rt_codes():
             pass
     try:
         out.update(x['code'] for x in _watch().current())
+    except Exception:                                       # noqa: BLE001
+        pass
+    try:
+        # 股息率买点清单：它存在的全部意义就是"价格到了叫我"，
+        # 不抓价就什么都不会发生。同一只票已在持仓/自选里的话 set 会去重。
+        out.update(_alerts().codes())
     except Exception:                                       # noqa: BLE001
         pass
     return sorted(out)
@@ -1535,10 +1541,54 @@ def _rt_loop():
                     _RT['last'] = r
                     _RT['rounds'] += 1
                     _RT['err'] = r.get('fail') or None
+                    _fire_alerts()
         except Exception as e:                              # noqa: BLE001
             _RT['err'] = [{'stage': 'loop', 'error': '%s: %s' % (type(e).__name__, e)}]
             print('[rt] 异常: %s: %s' % (type(e).__name__, e), flush=True)
         _t.sleep(60)
+
+
+def _notify(title, text):
+    """macOS 通知中心。**失败就算了** —— 提醒不该把轮询搞挂。
+
+    ★ 用 osascript 而不是第三方库：不引依赖，且 serve.py 关着的时候
+      本来就不该有通知（提醒只在"看板开着"时有意义）。
+    """
+    try:
+        import shlex
+        import subprocess
+        subprocess.run(
+            ['osascript', '-e',
+             'display notification %s with title %s sound name "Ping"'
+             % (shlex.quote(text[:200]), shlex.quote(title[:60]))],
+            timeout=5, capture_output=True, check=False)
+        return True
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+def _fire_alerts():
+    """价格到了就提醒。**判据与去重都在 alerts.check_fire 里**（一处）。
+
+    🔴 通知一多就没人看了（同"假告警看多了就不看告警"那条），所以同一
+      (code, 档, 类型) 一天只发一次 —— 去重依据落盘在 alerts_fired.jsonl，
+      重启也不会把今天提醒过的又提醒一遍。
+    """
+    if not ALLOW_LIVE:
+        return []
+    try:
+        a = _alerts()
+        new = a.check_fire()
+        for r in new:
+            _notify('assay · 买点到了' if r['kind'] == 'hit'
+                    else 'assay · 接近买点', a.notify_text(r))
+        if new:
+            _RT['fired'] = new
+        return new
+    except Exception as e:                                  # noqa: BLE001
+        _RT['err'] = [{'stage': 'alerts',
+                       'error': '%s: %s' % (type(e).__name__, e)}]
+        return []
 
 
 # 距上次"补抓"至少隔这么久，避免页面一刷新就打一串请求
@@ -1968,6 +2018,76 @@ def _watch():
     return w
 
 
+def _alerts():
+    from assay import alerts as a
+    return a
+
+
+def api_alerts(_q):
+    """GET /api/alerts —— 股息率买点清单 + 现价 + 每档状态。
+
+    ★ 顺手补抓没有实时数据的那几只（同自选）—— 这张表的全部意义是
+      "价格到了叫我"，而价格取不到就什么都不会发生。
+    """
+    a = _alerts()
+    try:
+        try:
+            _rt_ensure(a.codes())
+        except Exception:                                   # noqa: BLE001
+            pass
+        v = a.valued()
+        # 分红预填一并给：用户填的那个数与"近 12 个月已公告"差得多时，
+        # 页面把后者作为提示显示出来（不覆盖 —— "预计分红"是判断不是数据）
+        try:
+            v['suggest'] = a.suggest_div([x['code'] for x in v['rows']])
+        except Exception:                                   # noqa: BLE001
+            v['suggest'] = {}
+        v['fired_today'] = [r for r in a.fired_log()
+                            if str(r.get('ts', ''))[:10]
+                            == datetime.now().date().isoformat()]
+        return v
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_alerts_suggest(q):
+    """GET /api/alerts/suggest?code= —— 新增一行时的分红预填。"""
+    a = _alerts()
+    try:
+        code = q.get('code') or ''
+        d = a.suggest_div([code])
+        from assay import stock as st
+        jc = st.norm_code(code)
+        return {'code': jc, 'suggest': d.get(jc)}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_alerts_act(_q, body):
+    """POST /api/alerts —— 加/改一行（set，整行覆盖）或删一行（remove）。
+
+    ★ 归 --live 管：它写 live/ 下的账本。
+    """
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    a = _alerts()
+    b = body or {}
+    act = (b.get('act') or 'set').strip()
+    try:
+        if act == 'remove':
+            a.remove(b.get('code') or '')
+        elif act == 'set':
+            a.set_row(b.get('code') or '', b.get('div'), b.get('tiers') or [],
+                      note=b.get('note') or '', near=b.get('near'),
+                      div_src=b.get('div_src') or '手填')
+            _rt_ensure([b.get('code') or ''])
+        else:
+            return {'error': 'act 只能是 set / remove，收到 %r' % act}
+        return dict(api_alerts({}), ok=True)
+    except a.AlertError as e:
+        return {'error': str(e)}
+
+
 def api_watchlist(q):
     """GET /api/watchlist?group= —— 当前自选 + 行情。
 
@@ -2268,6 +2388,8 @@ ROUTES = {
     '/api/sector/kinds': api_sector_kinds,
     '/api/sector/list': api_sector_list,
     '/api/sector/members': api_sector_members,
+    '/api/alerts': api_alerts,
+    '/api/alerts/suggest': api_alerts_suggest,
     '/api/watchlist': api_watchlist,
     '/api/watchlist/log': api_watchlist_log,
     '/api/sync/log': api_sync_log,
@@ -2299,6 +2421,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_infer': api_live_fee_infer,
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
+                 '/api/alerts': api_alerts_act,
                  '/api/watchlist': api_watchlist_act,
                  '/api/watchlist/sync': api_watchlist_sync,
                  '/api/rt/poll': api_rt_poll,

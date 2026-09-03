@@ -1618,9 +1618,10 @@ async function showHome(){
   enterView();
   $('#main').innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
   const one=u=>j(u).catch(e=>({error:String(e)}));
-  const [accts, sync, mkt, watch, marks] = await Promise.all([
+  const [accts, sync, mkt, watch, marks, alerts] = await Promise.all([
     one('/api/live/accounts'), one('/api/sync'),
     one('/api/market/overview?top=5'), one('/api/watchlist'), one('/api/marks'),
+    one('/api/alerts'),
   ]);
   const todo = [];
   if(accts && !accts.error){
@@ -1639,7 +1640,10 @@ async function showHome(){
       ${homeMarket(mkt)}
     </div>
     <div class="pgrid c2" style="margin-top:14px">
+      ${homeAlerts(alerts)}
       ${homeWatch(watch)}
+    </div>
+    <div class="pgrid c2" style="margin-top:14px">
       ${homeData(sync)}
     </div>
     ${homeMarks(marks)}`;
@@ -1742,6 +1746,45 @@ function homeWatch(w){
     </table>
     <div class="lvwhy" style="margin-top:4px">按<b>涨跌幅绝对值</b>排 ——
       跌得多的和涨得多的一样需要知道。</div>`);
+}
+
+/* 买点到价 —— 首页只给【要动的那几行】。
+   ★ 不重复做那一页的事：这里不列每一档，只说"哪只、到了第几档、目标价"。
+     全清单在买点页（标题就是入口）。 */
+function homeAlerts(o){
+  if(!o || o.error) return homeCard('买点', '/alerts.html',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到买点清单')}</div>`);
+  const rows=(o.rows||[]);
+  if(!rows.length) return homeCard('买点清单', '/alerts.html',
+    '<div class="none">清单是空的 —— 去买点页填「预计分红 + 几档想买的价」</div>');
+  const act=rows.filter(x=>x.state==='hit'||x.state==='near');
+  /* 没有到价的就给"最接近的三只" —— 一块空卡片不如告诉人"还差多少" */
+  const show=(act.length?act:rows.filter(x=>x.next)
+    .sort((a,b)=>b.next.gap-a.next.gap)).slice(0,6);
+  return homeCard(`买点${act.length?' · '+act.length+' 只到价/接近':' · 最接近的几只'}`,
+    '/alerts.html', `
+    <table class="pkt"><tr><th class="tx">名称</th><th class="rt">现价</th>
+      <th class="rt">股息率</th><th class="rt">目标</th><th class="tx">状态</th></tr>
+      ${show.map(x=>{
+        const t=(x.state==='hit'?x.tiers[x.hit]
+                :(x.state==='near'?x.tiers[x.near]:x.next))||{};
+        return `<tr${x.state==='hit'?' class="ahit"'
+          :(x.state==='near'?' class="anear"':'')}>
+        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
+          style="color:inherit">${esc(x.name||x.code)}</a></td>
+        <td class="rt">${fmtN(x.price)}</td>
+        <td class="rt">${x.yield_now==null?'—':(x.yield_now*100).toFixed(2)+'%'}</td>
+        <td class="rt">${fmtN(t.price)}<span class="lvwhy">${
+          t.yield==null?'':'/'+(t.yield*100).toFixed(2)+'%'}</span></td>
+        <td class="tx">${x.state==='hit'
+          ? `<b style="color:var(--up)">到价 · 第 ${x.hit+1} 档</b>`
+          : (x.state==='near'
+             ? `<b style="color:var(--warn)">接近 · 第 ${x.near+1} 档</b>`
+             : `<span class="lvwhy">还要跌 ${(-t.gap*100).toFixed(1)}%</span>`)}</td>
+      </tr>`;}).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">手工填的挂单计划（不是策略）——
+      到价会走系统通知，同一档一天只提醒一次。</div>`);
 }
 
 function homeData(o){

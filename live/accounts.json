@@ -42,5 +42,17 @@
   "strategy_path": "strategies/小市值/froec_traded.py",
   "tick_time": "22:00",
   "warmup_start": "2016-01-01"
+ },
+ {
+  "broker_note": "",
+  "code_sha256": null,
+  "created": "2026-09-03T17:17:27",
+  "id": "a1",
+  "init_cash": 200000.0,
+  "name": "主观红利账户",
+  "params": {},
+  "strategy_path": null,
+  "tick_time": "22:00",
+  "warmup_start": "2016-01-01"
  }
 ]

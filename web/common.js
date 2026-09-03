@@ -139,6 +139,7 @@ function boardTag(code) {
    分隔线是【信息】不是装饰：它告诉人"这几个是一类，可以一起扫"。 */
 const NAV = [
   ['/#/live',         '💰 实盘',     '今日待办 / 持仓 / 录成交 / 版本留痕', 'live', 'act'],
+  ['/alerts.html',    '🎯 买点',     '股息率买点清单：手填目标价/目标股息率，到价提醒', 'alerts', 'act'],
   ['/market.html',    '🌡 盘面',     '某天的全市场：涨跌分布 / 涨跌停 / 行业榜 / 各类榜单', 'market', 'mkt'],
   ['/stock.html',     '📈 个股',     '按代码或名称查：K 线 / 副图 / 事件 / 财务 / 同业', 'stock', 'mkt'],
   ['/sector.html',    '🏭 板块',     '申万行业 + 通达信板块：涨幅榜 / 成分股穿透', 'sector', 'mkt'],
@@ -155,7 +156,10 @@ function navHtml(cur) {
     last = grp;
     /* 实盘那个入口留一个挂红点的位置 —— 有待办时点亮（见 navAlert）。
        ★ 判据由服务端给（live.signal_alert），前端只负责显示。 */
-    const dot = key === 'live' ? '<span class="adot navdot" id="navdot"></span>' : '';
+    const dot = key === 'live'
+      ? '<span class="adot navdot" id="navdot"></span>'
+      : (key === 'alerts'
+         ? '<span class="adot navdot" id="navdot2"></span>' : '');
     return `${sep}<a class="btn nav${key === cur ? ' on' : ''}" href="${href}"
        title="${esc(tip)}">${t}${dot}</a>`;
   }).join('');
@@ -165,6 +169,9 @@ function navHtml(cur) {
    ★ 异步补，不拖住页面渲染 —— 它是锦上添花，取不到就不显示，
      不该让整页等它。 */
 async function navAlert() {
+  /* 🔴 先起「买点」那个红点：写在下面的话，一旦实盘没有待办就
+     early-return 掉，买点的红点永远不亮 —— 而它不报错。 */
+  alertDot();
   const d = $('#navdot');
   if (!d) return;
   d.style.display = 'none';
@@ -175,6 +182,29 @@ async function navAlert() {
     d.style.display = 'inline-block';
     d.title = hit.map(a => a.name + '：' + (a.alert_why || []).join('；')).join('\n');
   } catch (e) { /* 只读模式或旧进程：不显示，不报错 */ }
+}
+
+/* 顶栏「买点」上的红点：有跌破/接近任一档就点亮。
+   ★ 判据来自服务端（alerts.valued 的 n_hit / n_near）—— 前端不自己比价，
+     那会变成第二份实现，而"接近"的阈值是每行可覆盖的。 */
+async function alertDot() {
+  if (!$('#navdot2')) return;
+  try { setAlertDot(await j('/api/alerts')); }
+  catch (e) { /* 清单空 / 只读：不显示 */ }
+}
+/* ★ 拆出一个"拿现成数据点灯"的入口：买点页自己已经取过那份数据了，
+     再让红点去打一遍接口就是同一份数据取两遍（这条链上唯一的风险是限流）。
+   ★ 而且买点页【改完一行要立刻更新红点】—— 只在页面加载时点一次的话，
+     刚加的那只到价了红点还是灭的，而它不报错。 */
+function setAlertDot(o) {
+  const d = $('#navdot2');
+  if (!d) return;
+  d.style.display = 'none';
+  if (!o || o.error || !(o.n_hit || o.n_near)) return;
+  d.style.display = 'inline-block';
+  d.title = (o.n_hit ? o.n_hit + ' 只跌破目标价' : '')
+    + (o.n_hit && o.n_near ? '、' : '')
+    + (o.n_near ? o.n_near + ' 只接近' : '');
 }
 
 /* 从站内别处跳过来时给一个「‹ 返回」。

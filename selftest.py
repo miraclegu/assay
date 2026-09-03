@@ -4496,6 +4496,152 @@ def t_stock_ext():
                len(lk['runs']), rh * 100, rb * 100))
 
 
+@case('买点清单：目标价/股息率互算 + 到价判定 + 提醒去重', tag='fast')
+def t_alerts():
+    """把用户那张 Excel 搬进来的那张表。**它不是策略**（没有回测、不下单）。
+
+    这一条守四件事：
+      ① 两种输入方式互算：填价出股息率、填率出目标价，且**存的是你填的那个**
+      ② 分红预填的口径（`bonus_ratio_rmb` 是每【10】股 —— 不除 10 会大 10 倍）
+      ③ 到价 / 接近 / 还差多少的判定
+      ④ 提醒**一天只发一次**（不然价格在阈值上下抖一抖就是几十条通知）
+    """
+    import shutil
+    import tempfile
+
+    from assay import alerts as al
+    from assay import server as sv
+    old_live, old_dir = sv.ALLOW_LIVE, al.LIVE
+    sv.ALLOW_LIVE = True
+    tmp = tempfile.mkdtemp()
+    al.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    try:
+        # ---- 1) 分红预填：每 10 股 -> 每股 ----
+        #   🔴 bonus_ratio_rmb 是"每 10 股派现"。不除 10 的话"预计分红"大 10 倍，
+        #     目标价跟着小 10 倍，而它不报错 —— 只是那一行永远不会触发。
+        sg = al.suggest_div(['600900', '600036'])
+        cj = sg.get('600900.XSHG') or {}
+        assert 0.5 < (cj.get('per_share') or 0) < 2.0, \
+            ('长江电力近 12 个月每股分红应在 1 元附近（用户手填 1），实得 %s'
+             ' —— 大 10 倍就是 bonus_ratio_rmb 没除 10' % cj.get('per_share'))
+        assert (sg.get('600036.XSHG') or {}).get('per_share'), '招行没取到分红'
+
+        # ---- 2) 两种输入方式互算，且存的是【填的那个】----
+        al.set_row('000423', 2.7, [{'by': 'price', 'v': 49},
+                                   {'by': 'price', 'v': 45}], note='东阿阿胶')
+        al.set_row('601318', 2.7, [{'by': 'yield', 'v': 6}])   # 6 == 6%
+        cur = {x['code']: x for x in al.current()}
+        assert cur['000423.XSHE']['tiers'][0] == {'by': 'price', 'v': 49.0}, \
+            '填的是价，存的却不是：%s' % cur['000423.XSHE']['tiers'][0]
+        assert cur['601318.XSHG']['tiers'][0] == {'by': 'yield', 'v': 0.06}, \
+            '6 应当作 6% 存成 0.06：%s' % cur['601318.XSHG']['tiers'][0]
+        v = al.valued()
+        r1 = [x for x in v['rows'] if x['code'] == '000423.XSHE'][0]
+        r2 = [x for x in v['rows'] if x['code'] == '601318.XSHG'][0]
+        t49 = [t for t in r1['tiers'] if t['price'] == 49][0]
+        assert abs(t49['yield'] - 2.7 / 49) < 1e-6, \
+            '2.7/49 应是 5.51%%，实得 %.4f' % t49['yield']
+        assert abs(r2['tiers'][0]['price'] - 45.0) < 0.01, \
+            '分红 2.7 / 目标股息率 6%% 应算出目标价 45.00，实得 %s' \
+            % r2['tiers'][0]['price']
+        # 🔴 改了分红，"另一个"必须跟着变 —— 这就是不把两个都存下来的原因
+        al.set_row('601318', 3.0, [{'by': 'yield', 'v': 6}])
+        r2b = [x for x in al.valued()['rows'] if x['code'] == '601318.XSHG'][0]
+        assert abs(r2b['tiers'][0]['price'] - 50.0) < 0.01, \
+            ('分红改成 3.0 后目标价应变成 50.00（两个都存的话这里还是 45，'
+             '而它看着仍然像个正常数字）：%s' % r2b['tiers'][0]['price'])
+
+        # ---- 3) 到价 / 接近 / 还差多少 ----
+        #   用真现价推出三档，判定必须落在预期的那一格上。
+        px = [x for x in al.valued()['rows'] if x['code'] == '000423.XSHE'][0]
+        p0 = px['price']
+        assert p0, '取不到现价，没法验判定'
+        al.set_row('000423', 2.7, [
+            {'by': 'price', 'v': round(p0 * 1.05, 2)},      # 已跌破
+            {'by': 'price', 'v': round(p0 * 0.99, 2)},      # 差 1% -> 接近
+            {'by': 'price', 'v': round(p0 * 0.60, 2)},      # 差 40% -> 远
+        ])
+        r = [x for x in al.valued()['rows'] if x['code'] == '000423.XSHE'][0]
+        assert [t['state'] for t in r['tiers']] == ['hit', 'near', 'far'], \
+            '三档的状态判错了：%s' % [(t['price'], t['state']) for t in r['tiers']]
+        assert r['state'] == 'hit' and r['hit'] == 0, \
+            '整行状态该是"到价 · 第 1 档"：%s' % (r['state'], r['hit'])
+        # 目标价必须【从高到低】：价高的先触发，与表格里的排法一致
+        ps = [t['price'] for t in r['tiers']]
+        assert ps == sorted(ps, reverse=True), '档位没按目标价降序：%s' % ps
+        # 「还要跌多少」= 目标/现价 − 1（负数）。gap 存到 6 位小数，
+        # 所以比的是 1e-5 而不是精确相等。
+        _g = r['tiers'][2]
+        assert abs(_g['gap'] - (_g['price'] / p0 - 1)) < 1e-5, \
+            'gap 不是"目标/现价 − 1"：%s vs %s' % (
+                _g['gap'], _g['price'] / p0 - 1)
+
+        # ---- 4) 提醒一天只发一次 ----
+        n1 = al.check_fire()
+        assert n1, '到价了却没有任何提醒'
+        assert all(x['code'] == '000423.XSHE' for x in n1), \
+            '提醒里混进了别的票：%s' % [x['code'] for x in n1]
+        assert {x['kind'] for x in n1} == {'hit', 'near'}, \
+            '到价与接近都该提醒一次：%s' % [x['kind'] for x in n1]
+        n2 = al.check_fire()
+        assert n2 == [], \
+            ('同一 (票, 档, 类型) 一天只该提醒一次 —— 轮询是每分钟一轮，'
+             '不去重的话价格在阈值上下抖一抖就是几十条通知，'
+             '而通知一多就没人看了：%s' % n2)
+        # 去重依据要**落盘**：重启后不该把今天提醒过的又提醒一遍
+        assert os.path.isfile(os.path.join(tmp, al.FIRED)), \
+            '触发记录没落盘 —— 那重启后会重复提醒'
+
+        # ---- 5) append-only：改一行是追加，当前清单靠重放 ----
+        n_log = len(al.log())
+        al.set_row('000423', 2.7, [{'by': 'price', 'v': 40}])
+        assert len(al.log()) == n_log + 1, '改一行应当是追加一条'
+        assert len(al.current()) == 2, '重放出的清单该还是 2 行'
+        assert [t['v'] for t in
+                {x['code']: x for x in al.current()}['000423.XSHE']['tiers']] \
+            == [40.0], '重放出来的不是最后那一条'
+        al.remove('000423')
+        assert len(al.current()) == 1 and len(al.log()) == n_log + 2, \
+            '删一行也该是追加一条（历史仍在）'
+
+        # ---- 6) 非法输入要被拒（而不是存个看着正常的错值）----
+        for bad, why in (
+                (('99', 1, [{'by': 'price', 'v': 10}]), '认不出的代码'),
+                (('600900', 0, [{'by': 'price', 'v': 10}]), '分红 0'),
+                (('600900', 1, []), '一档都没填'),
+                (('600900', 1, [{'by': 'yield', 'v': 60}]), '股息率 60%'),
+                (('600900', 1, [{'by': 'price', 'v': -1}]), '负的目标价'),
+                (('600900', 1, [{'by': 'nope', 'v': 1}]), 'by 不合法')):
+            try:
+                al.set_row(*bad)
+                raise AssertionError('%s 应被拒' % why)
+            except al.AlertError:
+                pass
+
+        # ---- 7) 抓取范围要带上它 ----
+        #   不抓价，"到价提醒"就什么都不会发生。
+        assert set(al.codes()) <= set(sv._rt_codes()), \
+            '买点清单里的票没进抓取范围 —— 那它永远不会提醒'
+
+        # ---- 8) 只读模式接口层要拒（不能只靠页面）----
+        sv.ALLOW_LIVE = False
+        assert (sv.api_alerts_act({}, {'act': 'set', 'code': '600900',
+                                       'div': 1, 'tiers': [
+                                           {'by': 'price', 'v': 20}]})
+                or {}).get('error'), '只读模式下应拒绝改买点清单'
+        sv.ALLOW_LIVE = True
+        return ('每 10 股 -> 每股（长江电力 %.2f，用户手填 1）；'
+                '填价出息率(2.7/49=5.51%%)、填率出目标价(2.7/6%%=45.00)且存的是'
+                '填的那个；改分红后另一个跟着变(45->50)；三档判定 hit/near/far'
+                '且按目标价降序；提醒一天只一次且去重落盘；append-only 改一行'
+                '是追加、重放取最后一条；6 类非法输入被拒；'
+                '抓取范围含买点清单；只读模式拒写'
+                % (cj.get('per_share') or 0))
+    finally:
+        sv.ALLOW_LIVE, al.LIVE = old_live, old_dir
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @case('自选：append-only / 重放出当前池 / 只读拦写', tag='fast')
 def t_watchlist():
     """★ 与实盘账本同一套纪律：加/移出/改分组/改备注都是**追加一条**，
@@ -4613,9 +4759,12 @@ def t_watchlist():
                 if not a.get('archived'):
                     held |= set(lv.positions(a['id']))
             watch = {x['code'] for x in wl.current()}
-            assert set(codes) == held | watch, \
-                '抓取范围应是【持仓 ∪ 自选】：少了 %s / 多了 %s' \
-                % (sorted((held | watch) - set(codes)), sorted(set(codes) - (held | watch)))
+            from assay import alerts as _al
+            buy = set(_al.codes())          # 买点清单也在抓取范围里
+            assert set(codes) == held | watch | buy, \
+                '抓取范围应是【持仓 ∪ 自选 ∪ 买点清单】：少了 %s / 多了 %s' \
+                % (sorted((held | watch | buy) - set(codes)),
+                   sorted(set(codes) - (held | watch | buy)))
             assert len(codes) < len(held) + len(watch), \
                 ('去重没生效 —— 持仓的票会被自动同步进自选，两边分别抓的话'
                  '请求量直接翻倍（%d = %d + %d）' % (len(codes), len(held), len(watch)))
@@ -4700,7 +4849,7 @@ def t_watchlist():
                 '退市代码不静默丢掉而是标 missing；3 类非法输入被拒；'
                 '只读模式接口层拒写；持仓自动按账户分组同步且幂等、'
                 '不覆盖手工分组、已清仓只标记不移出；'
-                '抓取范围 = 持仓∪自选且去重（%d < %d+%d）；'
+                '抓取范围 = 持仓∪自选∪买点且去重（%d < %d+%d）；'
                 '自选带实时价且涨跌幅按实时价重算、不自己打接口；'
                 '新加的票立刻补抓一次（snap+bar 各 1 请求）、'
                 '同一只有 180s 冷却、非交易时段与只读模式一律不发请求'
@@ -4711,6 +4860,153 @@ def t_watchlist():
         rtm.in_session, rtm.is_trading_day = _o_sess, _o_day
         rtm.missing = _o_miss
         sv._RT['miss_at'] = {}
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('买点页面真实渲染：手工填表 + 互算 + 到价点亮（playwright）', tag='web')
+def t_alerts_ui():
+    """那张 Excel 的页面版。**手工填**是这一页的全部意义，所以这里真的去填。
+
+    ★ 表单每一项都要有【标签】—— 一个空输入框谁也不知道要填什么。
+    ★ 「换算出来的」那一列必须**跟着输入变**：只改 DOM 不重渲染的话，
+      填完价它还显示着上一次的股息率，而这一页存在的理由就是这个换算。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import alerts as al
+    from assay import server as sv
+    old_live, old_dir = sv.ALLOW_LIVE, al.LIVE
+    sv.ALLOW_LIVE = True
+    tmp = tempfile.mkdtemp()
+    al.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto(base + '/alerts.html', wait_until='networkidle')
+            pg.wait_for_selector('#aadd input', timeout=40000)
+            assert '买点' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '买点页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
+            assert '空的' in pg.locator('#pg').inner_text(), '空清单没给空态提示'
+
+            # ---- 新增一行：搜票 -> 编辑器 -> 填两档 -> 保存 ----
+            pg.fill('#aadd input', '000423')
+            pg.wait_for_selector('.skit', timeout=20000)
+            pg.locator('.skit').first.click()
+            pg.wait_for_selector('#adiv', timeout=20000)
+            pg.wait_for_timeout(500)
+            ed = pg.locator('.lvsec').first.inner_text()
+            # 分红要【预填】—— 空着让人自己去查，等于把最烦的一步留给人
+            assert float(pg.input_value('#adiv')) > 0, \
+                '预计分红没有预填：%r' % pg.input_value('#adiv')
+            assert '近 12 个月已公告' in ed, 'ⓘ没说这个预填是什么口径：%s' % ed[:120]
+            assert '预填' in ed and '预计' in ed, \
+                '没写清"这是你的预计、预填只是参考"：%s' % ed[:160]
+            for lab in ('预计分红', '接近', '备注', '按什么填', '数值',
+                        '换算出来的'):
+                assert lab in ed, '编辑器缺「%s」这个标签：%s' % (lab, ed[:200])
+            # 填第一档：目标价 49 -> 换算出 5.51%（分红按 2.7 填）
+            pg.fill('#adiv', '2.7')
+            pg.locator('#adiv').dispatch_event('change')
+            pg.wait_for_timeout(400)
+            pg.locator('.aby').first.select_option('price')
+            pg.wait_for_timeout(300)
+            pg.locator('.av').first.fill('49')
+            pg.locator('.av').first.dispatch_event('change')
+            pg.wait_for_timeout(400)
+            row1 = pg.locator('.lvsec').first.locator(
+                'table.lvt tr').nth(1).inner_text()
+            assert '5.51%' in row1 and '2.7/49' in row1.replace(' ', ''), \
+                '填了目标价 49 却没换算出 2.7/49=5.51%%：%s' % row1
+            # 第二档改成按【目标股息率】填 6% -> 换算出 45.00 元
+            pg.locator('.aby').nth(1).select_option('yield')
+            pg.wait_for_timeout(300)
+            pg.locator('.av').nth(1).fill('6')
+            pg.locator('.av').nth(1).dispatch_event('change')
+            pg.wait_for_timeout(400)
+            row2 = pg.locator('.lvsec').first.locator(
+                'table.lvt tr').nth(2).inner_text()
+            assert '45.00' in row2, \
+                '填了目标股息率 6%% 却没换算出目标价 45.00：%s' % row2
+            pg.click('#asave')
+            pg.wait_for_selector('table.pkt', timeout=20000)
+            pg.wait_for_timeout(800)
+
+            # ---- 表里那一行 ----
+            th = ' '.join(pg.locator('table.pkt th').all_inner_texts())
+            for k in ('代码', '名称', '现价', '预计分红', '当前股息率',
+                      '第 1 档', '状态'):
+                assert k in th, '盯价表缺「%s」列：%s' % (k, th)
+            r1 = pg.locator('table.pkt tr').nth(1).inner_text().replace('\n', ' ')
+            assert '东阿阿胶' in r1, '保存后没渲染出来：%s' % r1
+            assert '5.51%' in r1 and '49.00' in r1, \
+                '表里没给"目标价 + 那个价对应的股息率"：%s' % r1
+            # 现价低于 49 -> 第一档必须点亮，且【整行】点亮
+            v = al.valued()
+            st = v['rows'][0]['state']
+            if st == 'hit':
+                assert pg.locator('tr.ahit').count() >= 1, \
+                    ('到价了却没点亮整行 —— 只给状态列上色的话，一屏十几行时'
+                     '要逐行看那一列才知道哪行该动')
+                assert '到价' in r1, '状态列没写"到价"：%s' % r1
+                # 顶栏「买点」那个红点要亮（判据来自服务端 n_hit/n_near）
+                pg.wait_for_timeout(1200)
+                assert pg.evaluate(
+                    "() => (document.querySelector('#navdot2')||{}).style"
+                    "?.display") == 'inline-block', \
+                    '有票到价，顶栏「买点」的红点却没亮'
+            # 名称能点进个股页（独立页面之间不许断链）
+            pg.locator('table.pkt a[href*="/stock.html"]').first.click()
+            pg.wait_for_selector('#kcv', timeout=40000)
+            assert '000423' in pg.url, '从买点页点不到个股页：%s' % pg.url
+            pg.go_back()
+            pg.wait_for_selector('table.pkt', timeout=40000)
+            pg.wait_for_timeout(800)
+
+            # ---- 改一行：编辑器要回填【存的那个】口径 ----
+            #   表里显示的是换算后的两个数，照着显示值回填会把"我填的是
+            #   股息率"悄悄变成"我填的是价格"。
+            pg.locator('.aed').first.click()
+            pg.wait_for_selector('#adiv', timeout=20000)
+            pg.wait_for_timeout(400)
+            bys = pg.locator('.aby').evaluate_all('es => es.map(e => e.value)')
+            vs = pg.locator('.av').evaluate_all('es => es.map(e => e.value)')
+            assert bys[:2] == ['price', 'yield'], \
+                '编辑器没回填"当初填的是哪一种"：%s' % bys
+            assert abs(float(vs[0]) - 49) < 0.01 and abs(float(vs[1]) - 6) < 0.01, \
+                '回填的数值不对（第二档该是 6 而不是 45）：%s' % vs
+            # 窄屏不许把 body 撑出横滚
+            pg.set_viewport_size({'width': 1024, 'height': 900})
+            pg.wait_for_timeout(500)
+            ov = pg.evaluate('document.body.scrollWidth'
+                             ' - document.body.clientWidth')
+            assert ov <= 1, '1024 宽下 body 横滚了 %dpx' % ov
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+        return ('空态 -> 搜票 -> 分红预填(近12个月已公告) -> 填目标价 49 当场'
+                '换算 2.7/49=5.51% -> 第二档改按股息率 6% 换算出 45.00 -> 保存；'
+                '表里给"目标价+股息率"、到价整行点亮且顶栏红点亮；'
+                '点名称进个股页；改一行回填的是【存的那个口径】'
+                '(price/yield 而不是换算值)；1024 宽无横滚；0 个 JS 错误')
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE, al.LIVE = old_live, old_dir
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -5031,13 +5327,14 @@ def t_home_ui():
             assert not pg.is_visible('#cat'), '首页居然显示的是回测目录树'
             secs = [x.split('\n')[0] for x in
                     pg.locator('#main .lvsec h3').all_inner_texts()]
-            for k in ('实盘', '盘面', '自选', '数据'):
+            for k in ('实盘', '盘面', '买点', '自选', '数据'):
                 assert any(k in x for x in secs), '首页缺「%s」这一块：%s' % (k, secs)
             body = pg.locator('#main').inner_text()
             assert 'undefined' not in body and 'NaN' not in body, \
                 '首页有 undefined/NaN'
             # 每块的标题本身就是入口（首页只给摘要）
-            for href in ('#/live', '/market.html', '/watchlist.html', '#/sync'):
+            for href in ('#/live', '/market.html', '/watchlist.html',
+                         '/alerts.html', '#/sync'):
                 assert pg.locator('#main .lvsec h3 a[href="%s"]' % href).count() >= 1, \
                     '「%s」那块的标题不是入口' % href
             # 站名在首页要点亮 —— 否则"我在哪"没有指示
@@ -5050,9 +5347,11 @@ def t_home_ui():
 
             # ---------------- 顶栏分组 ----------------
             navs = pg.locator('#top a.nav').all_inner_texts()
-            assert len(navs) == 8, '顶栏应是 8 个入口：%s' % navs
+            assert len(navs) == 9, '顶栏应是 9 个入口：%s' % navs
             assert '实盘' in navs[0], \
                 '实盘应排最前 —— 它是唯一回答"今天要做什么"的入口：%s' % navs
+            # 买点紧跟实盘（同属"每天必看"那一组，都是回答"今天要做什么"）
+            assert '买点' in navs[1], '买点应紧跟实盘：%s' % navs
             assert pg.locator('#top .navsep').count() == 3, \
                 '应有 3 条分组分隔（实盘 | 市场 | 研究 | 数据）'
             # 已取消的入口不该还在
@@ -5110,8 +5409,8 @@ def t_home_ui():
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
-            return ('首页是总览（5 块，标题即入口，站名点亮，不再是回测目录树）；'
-                    '顶栏 8 个入口分 4 组 3 条分隔、实盘排最前、'
+            return ('首页是总览（6 块，标题即入口，站名点亮，不再是回测目录树）；'
+                    '顶栏 9 个入口分 4 组 3 条分隔、实盘排最前、'
                     '已取消的「查数据」与并入页签的「数据字典」都不在顶栏；'
                     '回测归档在 #/runs 且过滤框只在那里；'
                     '数据页两个页签互切、顶栏高亮不跑、URL 可直达；'
@@ -5368,7 +5667,9 @@ def t_page_inventory():
     src_all = open(os.path.join(here, 'selftest.py'), encoding='utf-8').read()
     for case_name, marker in (('个股页面', 'wlmod.LIVE = tmp'),
                               ('新页面真实渲染', 'wl.LIVE = tmp'),
-                              ('自选：append-only', 'wl.LIVE = tmp')):
+                              ('自选：append-only', 'wl.LIVE = tmp'),
+                              ('买点清单', 'al.LIVE = tmp'),
+                              ('买点页面', 'al.LIVE = tmp')):
         i = src_all.index("@case('" + case_name)
         j = src_all.index('\n@case(', i + 10)
         assert marker in src_all[i:j], \
