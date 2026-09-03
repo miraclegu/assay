@@ -16,3 +16,5 @@
 {"uid": "4b020bf46140", "ts": "2026-09-03T11:03:20", "act": "remove", "code": "601857.XSHG"}
 {"uid": "8766a8528ee5", "ts": "2026-09-03T11:11:27", "act": "add", "code": "601857.XSHG", "group": "默认"}
 {"uid": "b1b3c3fc6ddc", "ts": "2026-09-03T11:11:28", "act": "remove", "code": "601857.XSHG"}
+{"uid": "65de0dbe78e4", "ts": "2026-09-03T11:51:11", "act": "add", "code": "601857.XSHG", "group": "默认"}
+{"uid": "d55b39eac53e", "ts": "2026-09-03T11:51:12", "act": "remove", "code": "601857.XSHG"}

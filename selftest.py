@@ -4733,6 +4733,89 @@ def t_home_ui():
         httpd.shutdown()
 
 
+@case('外部行情接口文档：结构完整 / 示例代码能跑（离线）', tag='fast')
+def t_extapi_doc():
+    """索引 5 是【调研结果的定案】—— 它存在的意义就是"下次不要重新试一遍"。
+
+    ★ 所以这条用例守两件事：
+      1. **文档在字典页里挂着**（写了没挂 = 只有翻仓库才看得到）
+      2. **示例代码是真代码** —— 能 import、能定义出那三个函数、
+         并且**超限时会抛错而不是返回空**。
+
+    ★ 刻意**不打真接口**：selftest 要能离线跑，而且拿外部接口当断言
+      等于把别人的限流变成自己的红灯。真实连通性是调研时逐个实测过的
+      （耗时、条数、字段位都写在文档里），这里只守"文档没烂"。
+    """
+    import re
+
+    from assay import server as sv
+    root = sv._repo_root()
+    keys = {d[0] for d in sv._DOCS}
+    assert 'extapi' in keys, '索引 5 没挂进数据字典页 —— 写了没挂等于没写'
+    rel = [d[3] for d in sv._DOCS if d[0] == 'extapi'][0]
+    path = os.path.join(root, rel)
+    assert os.path.isfile(path), '找不到 %s' % path
+    md = open(path, encoding='utf-8').read()
+
+    # ---- 1) 两个索引都要在（用户明确要的：分渠道 + 分功能）----
+    assert '## 1. 分渠道索引' in md, '缺【分渠道】索引'
+    assert '## 2. 分功能索引' in md, '缺【分功能】索引'
+    assert '## 3. 🔴 陷阱' in md, '缺陷阱段'
+
+    # ---- 2) 四个主力接口的域名都要写明 ----
+    for host, why in (('quotes.sina.cn', '唯一有历史深度的分钟源'),
+                      ('push2his.eastmoney.com', '当日分时'),
+                      ('push2delay.eastmoney.com', '东财被限流时的唯一活口'),
+                      ('qt.gtimg.cn', '批量实时快照'),
+                      ('ifzq.gtimg.cn', '腾讯分时')):
+        assert host in md, '文档里没有 %s（%s）' % (host, why)
+    # 已确认不可用的要标出来，否则下次还会去试
+    assert 'hq.sinajs.cn' in md and '403' in md, \
+        '没写明 hq.sinajs.cn 已经 403 —— 下次会重新踩'
+    assert 'web.ifzq.gtimg.cn' in md, \
+        '没写明 web. 那个子域 DNS 解析不了（stock-sdk 源码里写的正是它）'
+
+    # ---- 3) 历史深度是这次调研最值钱的结论，必须逐档写清 ----
+    for scale, days in (('1 分', '5 日'), ('5 分', '22 日'),
+                        ('15 分', '65 日'), ('30 分', '129 日'),
+                        ('60 分', '257 日')):
+        assert scale in md and days in md, \
+            '新浪 %s 的历史深度（%s）没写' % (scale, days)
+
+    # ---- 4) 三个"静默失败"必须写明（这类最费时间）----
+    for k in ('静默', 'RemoteDisconnected', 'data: null', '1023'):
+        assert k in md, '陷阱段缺「%s」' % k
+
+    # ---- 5) 示例代码是真代码：能 exec，且定义出三个函数 ----
+    m = re.search(r'```python\n(.*?)```', md, re.S)
+    assert m, '文档里没有可抄的示例代码'
+    ns = {}
+    exec(compile(m.group(1), '<doc>', 'exec'), ns)      # noqa: S102
+    for fn in ('sina_minute', 'em_trends', 'tx_quote'):
+        assert callable(ns.get(fn)), '示例代码里没有 %s()' % fn
+    # ★ 超限要抛错而不是返回空 —— 这是文档反复强调的那条，
+    #   示例代码自己得做到。用假的取数函数验，不打真接口。
+    ns['_get'] = lambda *a, **k: 'null'
+    try:
+        ns['sina_minute'](n=4000)
+        raise AssertionError('示例代码在拿到空结果时没抛错 —— '
+                             '而文档说"空结果一律当失败处理"')
+    except RuntimeError:
+        pass
+
+    # ---- 6) 交叉引用：按需求 / 按陷阱两个索引都要指过来 ----
+    for idx in ('1-按需求索引.md', '4-按陷阱索引.md', 'README.md'):
+        p2 = os.path.join(root, 'datalake', 'docs', '数据字典', idx)
+        t2 = open(p2, encoding='utf-8').read()
+        assert '索引 5' in t2 or '5-外部行情接口' in t2, \
+            '%s 没指向索引 5 —— 从别的索引查过来时会以为本地没有这块' % idx
+    return ('索引 5 已挂进字典页（%.1fK）；分渠道 + 分功能两个索引齐全；'
+            '5 个域名与 2 个已失效的都写明；新浪 5 档历史深度逐档记录；'
+            '3 类静默失败写明；示例代码可 exec 且超限会抛错；'
+            '按需求/按陷阱/README 三处都有交叉引用'
+            % (len(md.encode()) / 1024))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
@@ -4802,8 +4885,8 @@ def t_page_inventory():
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 52, \
-        ('用例只剩 %d 条，少于已知的 52 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 53, \
+        ('用例只剩 %d 条，少于已知的 53 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))

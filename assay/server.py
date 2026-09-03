@@ -775,11 +775,12 @@ def api_datafp(_q):
 
 _DOCS = [
     # (key, 侧栏标题, 分组, 相对仓库根的路径)
-    ('need',    '1 · 按需求',      '数据字典（四维索引）', 'datalake/docs/数据字典/1-按需求索引.md'),
-    ('api',     '2 · 按接口',      '数据字典（四维索引）', 'datalake/docs/数据字典/2-按接口索引.md'),
-    ('field',   '3 · 按字段',      '数据字典（四维索引）', 'datalake/docs/数据字典/3-按字段索引.md'),
-    ('trap',    '4 · 按陷阱',      '数据字典（四维索引）', 'datalake/docs/数据字典/4-按陷阱索引.md'),
-    ('dictix',  '索引说明',        '数据字典（四维索引）', 'datalake/docs/数据字典/README.md'),
+    ('need',    '1 · 按需求',      '数据字典（索引）', 'datalake/docs/数据字典/1-按需求索引.md'),
+    ('api',     '2 · 按接口',      '数据字典（索引）', 'datalake/docs/数据字典/2-按接口索引.md'),
+    ('field',   '3 · 按字段',      '数据字典（索引）', 'datalake/docs/数据字典/3-按字段索引.md'),
+    ('trap',    '4 · 按陷阱',      '数据字典（索引）', 'datalake/docs/数据字典/4-按陷阱索引.md'),
+    ('extapi',  '5 · 外部行情接口', '数据字典（索引）', 'datalake/docs/数据字典/5-外部行情接口.md'),
+    ('dictix',  '索引说明',        '数据字典（索引）', 'datalake/docs/数据字典/README.md'),
     ('jq',      '聚宽接口备忘',    '原文出处',             'datalake/docs/聚宽接口备忘.md'),
     ('jqfactor', '聚宽因子口径',   '原文出处',             'datalake/docs/jqfactor-口径.md'),
     ('qmt',     'QMT 探针实测',    '原文出处',             'assay/qmt/PROBE_FINDINGS.md'),
