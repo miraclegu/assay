@@ -33,7 +33,21 @@ let RUNS=[], CUR=null, DATA={}, HD={off:0,lim:100};
    【服务端还是旧进程、没有这个新接口】。这里先看状态码再解析，把话说清楚。 */
 
 /* ============ 路由：用 location.hash，让浏览器前进/后退天然可用 ============ */
+/* 进入一个视图前的统一收拾。
+   ★ 收成一个函数而不是每处抄三行：`#filter` / `#expand` 现在只在
+     回测归档目录那个视图里存在（顶栏随 hash 变），别处 `$('#filter')`
+     是 null —— 每处抄一遍的话漏掉一处就是 TypeError 整页白屏。
+     `?.` 让"元素不在"变成无害。 */
+function enterView(){
+  const c=$('#cat'); if(c) c.style.display='none';
+  const v=$('#vp'); if(v){ v.innerHTML=''; v.style.display='none'; }
+  const m=$('#main'); if(m) m.style.display='';
+}
+
 function route(){
+  /* ★ 顶栏跟着 hash 走：这一页承载多个视图，标题与高亮固定写死的话，
+     在实盘页也会显示"回测归档" —— 而顶栏高亮本来就是用来告诉人"我在哪"的。 */
+  syncHead();
   // 年详情页要排在 run 之前匹配 —— run 的 (.+) 是贪婪的，会把 /y/2016 一起吃掉。
   // 同一份回测内切换年份【不重新拉数据】：CUR/DATA 还在就直接重画。
   const my=/^#\/run\/(.+)\/y\/(\d{4})$/.exec(location.hash||'');
@@ -51,6 +65,7 @@ function route(){
   const v=/^#\/ver\/([0-9a-f]{6,64})$/.exec(location.hash||'');
   if(v){ openVersion(v[1]); return; }
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
+  if((location.hash||'')==='#/runs'){ showCatalog(); return; }
   if((location.hash||'')==='#/sync'){ showSync(); return; }
   /* ★ 个股已经搬到独立页 /stock.html。这里保留旧 hash 路由并【跳转】——
      旧链接和书签不该失效，而"点了没反应"是最难查的那种坏。 */
@@ -63,7 +78,10 @@ function route(){
   if(lm){ showLive(lm[1]||null); return; }
   const dm=/^#\/docs(?:\/([\w-]+))?$/.exec(location.hash||'');
   if(dm){ showDocs(dm[1]||null); return; }
-  showCatalog();
+  /* 空 hash = 总览首页。★ 回测归档搬到 #/runs —— 打开看板第一眼该看到
+     "今天什么状态、要做什么"，而不是一棵回测目录树（那是做策略时才进的）。
+     旧的 `/`（无 hash）书签仍然可用，只是内容换成了总览。 */
+  showHome();
 }
 /* 同一份回测内切年份不必重拉数据。但【详情视图必须正在显示】才能走这条快捷路径 ——
    从目录页后退回来时 #main 是隐藏的，只调 tab() 不会把它显出来（曾因此白屏）。 */
@@ -74,12 +92,31 @@ window.onhashchange=route;
 /* 顶栏：导航用共享的 pageHead/navHtml（一处定义，加入口只改 common.js），
    这一页自己的三个控件（返回目录 / 过滤 / 全部展开）作为 extra 传进去 ——
    它们只在回测归档页有意义。 */
-pageHead('runs', '回测归档', `
-  <button class="btn" id="back" style="display:none">‹ 返回目录</button>
-  <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
-  <button class="btn" id="expand">全部展开</button>
-  <a class="btn" href="#/picks" title="独立索引页：只看被标星的规则">★ 选中的规则</a>`);
-$('#back').onclick=()=>{location.hash='';};
+/* 顶栏：导航用共享的 pageHead/navHtml（一处定义，加入口只改 common.js）。
+   ★ 这一页承载多个 hash 视图（首页 / 回测归档 / 实盘 / 数据 / 字典 / 选中的
+     规则），所以标题与高亮要【随 hash 变】—— 固定写死的话在实盘页也会
+     显示"回测归档"，而顶栏高亮的位置本来是用来告诉人"我在哪"的。 */
+const HEADS={
+  '':      ['home', '总览'],
+  'runs':  ['runs', '回测归档'],
+  'picks': ['runs', '选中的规则'],
+  'run':   ['runs', '回测详情'],
+  'ver':   ['runs', '策略版本'],
+  'live':  ['live', '实盘'],
+  'sync':  ['sync', '数据'],
+  'docs':  ['sync', '数据字典'],
+};
+function syncHead(){
+  const seg=(location.hash||'').replace(/^#\//,'').split('/')[0];
+  const [key,title]=HEADS[seg]||HEADS[''];
+  /* 过滤/全部展开只在【回测归档目录】上有意义 —— 别的视图里它们是噪声。 */
+  const onRuns = seg==='runs';
+  pageHead(key, title, onRuns ? `
+    <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
+    <button class="btn" id="expand">全部展开</button>
+    <a class="btn" href="#/picks" title="只看被标星的规则">★ 选中的规则</a>` : '');
+  if(onRuns) wireCatalogControls();
+}
 
 
 /* ============ 实盘模块 ============ */
@@ -97,9 +134,7 @@ const CFK={deposit:'入金', withdraw:'出金', dividend:'分红到账', adjust:
 /* esc 复用文件上方那个（第 ~357 行）—— 不重复定义。 */
 async function showLive(aid){
   stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
+  enterView();
   let o;
   try{ o=await j('/api/live/accounts'+(LVALL?'?all=1':'')); }
   catch(e){ $('#main').innerHTML='<div class="none">实盘模块读取失败：'+esc(e)+'</div>'; return; }
@@ -920,9 +955,7 @@ function openRecord(aid, sig, ro, tab){
 /* ---- 成交流水：独立页面 + 服务端分页 ---- */
 async function showFills(aid, off){
   stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
+  enterView();
   if(!LV){ try{ LV=await j('/api/live/accounts'); }catch(e){} }
   let o; try{ o=await j('/api/live/fills?id='+encodeURIComponent(aid)
       +'&offset='+(off||0)+'&limit='+LVPAGE); }
@@ -1278,9 +1311,7 @@ let SY=null, SYJOB=null;
 
 async function showSync(){
   stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
+  enterView();
   let o; try{ o=await j('/api/sync'); }
   catch(e){ $('#main').innerHTML='<div class="none">读取失败：'+esc(e)+'</div>'; return; }
   SY=o;
@@ -1320,6 +1351,7 @@ async function showSync(){
     return `<tr><td>${esc(x.name)}</td><td>${esc(x.max||'—')}</td><td>${tag}</td></tr>`;
   };
   $('#main').innerHTML=warn+`
+  ${dataTabs('sync')}
   <div class="lvhead">
     <h2>数据同步</h2>
     <span class="lvtag">应到交易日 ${esc(st.expect_trade_day||'?')}</span>
@@ -1477,6 +1509,200 @@ async function pollSync(){
   }catch(e){ SYJOB=null; }
 }
 
+/* ============ 总览首页 ============
+   ★ 打开看板第一眼该回答的是「今天什么状态、要做什么」，
+     而不是一棵回测目录树 —— 那是做策略时才进的（已移到 #/runs）。
+
+   ★ 每一块都只给【摘要 + 一个入口】，不在首页重复做那一页的事：
+     首页做成小型全功能页的话，同一份数据两处渲染，迟早不一致。
+
+   ★ 五块并发拉，任何一块失败只让它自己显示错误 —— 数据同步挂了不该
+     让待办也看不见。 */
+async function showHome(){
+  stopPoll();
+  enterView();
+  $('#main').innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
+  const one=u=>j(u).catch(e=>({error:String(e)}));
+  const [accts, sync, mkt, watch, marks] = await Promise.all([
+    one('/api/live/accounts'), one('/api/sync'),
+    one('/api/market/overview?top=5'), one('/api/watchlist'), one('/api/marks'),
+  ]);
+  const todo = [];
+  if(accts && !accts.error){
+    /* 逐账户拉一次详情才有待办清单与权益 —— 账户不多（个数级），
+       并发拉没问题。 */
+    const ds = await Promise.all((accts.accounts||[])
+      .filter(a=>!a.archived)
+      .map(a=>one('/api/live/account?id='+encodeURIComponent(a.id))
+        .then(o=>({acct:a, d:o}))));
+    ds.forEach(x=>todo.push(x));
+  }
+  $('#main').innerHTML=`
+    ${homeAlert(todo, sync)}
+    <div class="pgrid c2">
+      ${homeLive(accts, todo)}
+      ${homeMarket(mkt)}
+    </div>
+    <div class="pgrid c2" style="margin-top:14px">
+      ${homeWatch(watch)}
+      ${homeData(sync)}
+    </div>
+    ${homeMarks(marks)}`;
+  document.querySelectorAll('#main [data-star]').forEach(e=>e.onclick=ev=>{
+    ev.preventDefault(); ev.stopPropagation();
+    toggleStar(e, e.dataset.star, !!e.dataset.on); });
+}
+
+/* 顶部横条：只在【真的要做什么】时出现。
+   ★ 没有待办就不显示 —— 常驻一条"一切正常"的横幅，等于教人忽略这个位置。 */
+function homeAlert(todo, sync){
+  const hit = todo.filter(x=>x.d && !x.d.error && x.d.alert);
+  const lag = (sync && !sync.error && sync.status && sync.status.leg_a_lag) || 0;
+  let h='';
+  if(hit.length) h+=`<div class="lvrb now"><b>今天有事要做</b> —— ${
+    hit.map(x=>`<a href="#/live/${esc(x.acct.id)}" style="color:inherit">${esc(x.acct.name)}</a>：${
+      esc((x.d.alert_why||[]).join('；'))}`).join('　·　')}</div>`;
+  if(lag) h+=`<div class="lvwarn"><b>行情数据落后 ${lag} 个交易日</b> ——
+    信号会用旧数据算。<a href="#/sync">去数据页同步 ›</a></div>`;
+  return h;
+}
+
+function homeLive(accts, todo){
+  if(!accts || accts.error) return homeCard('实盘', '#/live',
+    `<div class="lvmsg bad">${esc((accts||{}).error||'取不到账户')}</div>`);
+  const rows = todo.filter(x=>x.d && !x.d.error);
+  if(!rows.length) return homeCard('实盘', '#/live',
+    '<div class="none">还没有账户 —— 去实盘页建一个</div>');
+  return homeCard('实盘 · 今日待办与持仓', '#/live', `
+    <table class="pkt"><tr>
+      <th class="tx">账户</th><th class="rt">总资产</th><th class="rt">持仓浮盈</th>
+      <th class="rt">仓位</th><th class="tx">今天</th></tr>
+      ${rows.map(x=>{
+        const P=x.d.pos||{}, wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
+        const sg=x.d.signal||{};
+        const act=x.d.alert
+          ? `<b style="color:var(--warn)">${esc((x.d.alert_why||[]).join('；'))}</b>`
+          : `<span class="lvwhy">${sg.next_rebalance
+              ? '下次调仓 '+esc(sg.next_rebalance)
+                +(sg.days_until_rebalance!=null?`（${sg.days_until_rebalance} 个交易日）`:'')
+              : '没有要动的'}</span>`;
+        return `<tr>
+          <td class="tx">${x.d.alert?'<span class="adot"></span> ':''}<a
+            href="#/live/${esc(x.acct.id)}" style="color:inherit">${esc(x.acct.name)}</a>
+            <div class="lvwhy">${(P.items||[]).length} 只持仓</div></td>
+          <td class="rt">${num(P.equity,2)}</td>
+          <td class="rt" style="color:${upc(P.pnl)}">${P.pnl==null?'—':(P.pnl>=0?'+':'')+num(P.pnl,2)}
+            <div class="lvwhy">${ratv(P.pnl_pct)}</div></td>
+          <td class="rt">${wt==null?'—':(wt*100).toFixed(1)+'%'}</td>
+          <td class="tx">${act}</td></tr>`;}).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">浮盈按<b>摊薄成本</b>（含买入费）算。
+      调仓日是纯日历的，能提前算出来；清单要等前一交易日收盘。</div>`);
+}
+
+function homeMarket(o){
+  if(!o || o.error) return homeCard('盘面', '/market.html',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到盘面')}</div>`);
+  const rate = o.n ? (o.up/o.n*100) : null;
+  return homeCard(`盘面 · ${esc(o.date)}`, '/market.html', `
+    <div class="kpi" style="margin-bottom:8px">
+      ${cell('涨 / 跌',
+        `<span style="color:var(--up)">${num(o.up)}</span> / <span style="color:var(--down)">${num(o.down)}</span>`,
+        rate==null?'':'上涨占比 '+rate.toFixed(1)+'%')}
+      ${cell('涨停 / 跌停',
+        `<span style="color:var(--up)">${num(o.limit_up)}</span> / <span style="color:var(--down)">${num(o.limit_down)}</span>`,
+        '炸板 '+num(o.open_limit_up))}
+      ${cell('成交额', yiv(o.amount), '中位换手 '+pctn(o.median_turnover))}
+      ${cell('中位涨幅',
+        `<span style="color:${upc(o.median_change)}">${pctv(o.median_change)}</span>`, '')}
+    </div>
+    <div class="lvwhy" style="margin-bottom:4px">行业 · 领涨领跌</div>
+    ${(o.industries||[]).slice(0,3).map(x=>
+      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+        >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}
+    ${(o.industries||[]).slice(-2).map(x=>
+      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+        >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}`);
+}
+
+function homeWatch(w){
+  if(!w || w.error) return homeCard('自选', '/watchlist.html',
+    `<div class="lvmsg bad">${esc((w||{}).error||'取不到自选')}</div>`);
+  const rows=(w.rows||[]).filter(x=>x.change_pct!=null)
+    .sort((a,b)=>Math.abs(b.change_pct)-Math.abs(a.change_pct));
+  if(!rows.length) return homeCard('自选', '/watchlist.html',
+    '<div class="none">自选是空的 —— 在个股页或盘面榜单里点 ★ 加进来</div>');
+  return homeCard(`自选 · 异动前 ${Math.min(8,rows.length)}`, '/watchlist.html', `
+    <table class="pkt"><tr><th class="tx">名称</th><th class="rt">现价</th>
+      <th class="rt">涨跌</th><th class="rt">换手</th><th class="tx">分组</th></tr>
+      ${rows.slice(0,8).map(x=>`<tr>
+        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
+          style="color:inherit">${esc(x.name||x.code)}</a>
+          ${x.limit_up?'<span class="lvwhy" style="color:var(--up)">涨停</span>':''}
+          ${x.limit_down?'<span class="lvwhy" style="color:var(--down)">跌停</span>':''}</td>
+        <td class="rt">${fmtN(x.close)}</td>
+        <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+        <td class="rt">${pctn(x.turnover)}</td>
+        <td class="tx lvwhy">${esc(x.group||'')}</td></tr>`).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">按<b>涨跌幅绝对值</b>排 ——
+      跌得多的和涨得多的一样需要知道。</div>`);
+}
+
+function homeData(o){
+  if(!o || o.error) return homeCard('数据', '#/sync',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到数据状态')}</div>`);
+  const st=o.status||{};
+  const A=(st.items||[]).filter(x=>x.leg==='A');
+  const B=(st.items||[]).filter(x=>x.leg==='B');
+  const au=o.auto||{};
+  return homeCard('数据 · 新鲜度', '#/sync', `
+    <table class="pkt"><tr><th class="tx">项</th><th class="tx">最新</th>
+      <th class="tx">状态</th></tr>
+      ${A.map(x=>`<tr><td class="tx">${esc(x.name)}</td>
+        <td class="tx">${esc(x.max||'—')}</td>
+        <td class="tx">${x.lag_days?`<b style="color:var(--warn)">落后 ${x.lag_days} 交易日</b>`
+          :'<span style="color:var(--down)">最新</span>'}</td></tr>`).join('')}
+      <tr><td class="tx lvwhy" colspan="3">财务（事件驱动，不按交易日算落后）</td></tr>
+      ${B.slice(0,3).map(x=>`<tr><td class="tx">${esc(x.name)}</td>
+        <td class="tx">${esc(x.max||'—')}</td>
+        <td class="tx lvwhy">距今 ${x.days_since==null?'—':x.days_since} 天</td></tr>`).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">
+      自动同步 <b>${au.on?'开 · 每日 '+esc(au.schedule||'?'):(au.supported===false?'不支持':'关')}</b>。
+      财务的"落后"<b>不按交易日算</b> —— 没公告的日子本来就没有新 pub_date。
+    </div>`);
+}
+
+function homeMarks(ms){
+  if(!ms || ms.error || !ms.length) return '';
+  const top=ms.slice().sort((a,b)=>(b.annual_return||-9)-(a.annual_return||-9)).slice(0,5);
+  return homeCard('选中的规则 · 年化前 5', '#/picks', `
+    <table class="pkt"><tr><th class="tx">策略 · 参数</th><th class="rt">年化</th>
+      <th class="rt">回撤</th><th class="rt">夏普</th><th class="tx">区间</th></tr>
+      ${top.map(r=>`<tr>
+        <td class="tx"><a href="#/run/${encodeURIComponent(r.run_id)}"
+          style="color:inherit">${esc(r.strategy||'')}</a>
+          <div class="lvwhy">${Object.entries(r.params||{}).slice(0,4)
+            .map(([k,v])=>esc(k+'='+v)).join(' ')||'默认参数'}</div></td>
+        <td class="rt"><b class="${sign(r.annual_return)}">${pct(r.annual_return,2)}</b></td>
+        <td class="rt neg">${pct(r.max_drawdown,2)}</td>
+        <td class="rt">${fmtN(r.sharpe)}</td>
+        <td class="tx lvwhy">${esc(r.start||'')}<br>~ ${esc(r.end||'')}</td></tr>`).join('')}
+    </table>`, 'wide');
+}
+
+/* 首页的一块。★ 标题本身就是入口 —— 首页只给摘要，要看全的点标题过去。
+   ★ 叫 homeCard 而不是 card —— 这个文件里已经有一个 `card(k,v,cls,note)`
+     （回测详情页的指标卡）。同名函数不会报错，**后定义的直接覆盖前面的**，
+     表现是首页渲染出一堆指标卡的骨架而内容全错位。 */
+function homeCard(title, href, body, cls){
+  return `<div class="lvsec ${cls||''}"><h3>
+      <a href="${href}" style="color:inherit;text-decoration:none">${esc(title)} ›</a>
+      <span style="flex:1"></span>
+      <a class="lvwhy" href="${href}">看全部 ›</a></h3>${body}</div>`;
+}
+
 /* 个股与查数据都已经不在这个文件里：
    · 个股 -> 独立页 /stock.html（本文件的 #/stock 路由只做跳转，旧链接不失效）
    · 查数据（只读 SQL 页）-> **已取消**。命令行工具仍在
@@ -1488,11 +1714,23 @@ async function pollSync(){
    改 md 刷新页面就生效，新增一份文档只需在 server.py 的 _DOCS 加一行。 */
 let DOCS=null, DOCKEY=null, DOCQ='', DOCHTML={}, DOCALL=false;
 
+/* 「数据」这一块的两个页签。★ 合并的理由：同步（新鲜度）与字典（口径）
+   都是**数据的元信息**，而且都是低频 —— 出问题时或者写代码查口径时才进。
+   顶栏平铺两个入口，等于让人每次在 9 个里多扫一个。
+   ★ `#/docs/<key>` 仍然是直达路由，旧链接与书签不失效。 */
+function dataTabs(cur){
+  const T=[['sync','#/sync','数据状态 / 同步'],
+           ['docs','#/docs','口径字典']];
+  return `<div class="lvform" style="gap:6px;margin-bottom:10px">
+    ${T.map(([k,h,t])=>`<a class="btn${k===cur?' on':''}" href="${h}">${t}</a>`).join('')}
+    <span class="lvwhy">两件事都是【数据的元信息】：一个管"新不新"，
+      一个管"口径是什么"。都是低频，所以并成一个入口。</span>
+  </div>`;
+}
+
 async function showDocs(key){
   stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
+  enterView();
   if(!DOCS){
     try{ DOCS=await j('/api/docs'); }
     catch(e){ $('#main').innerHTML='<div class="none">数据字典读取失败：'+e+'</div>'; return; }
@@ -1502,7 +1740,7 @@ async function showDocs(key){
   const groups=[];
   DOCS.docs.forEach(d=>{ let g=groups.find(x=>x.g===d.group);
     if(!g){ g={g:d.group, items:[]}; groups.push(g); } g.items.push(d); });
-  $('#main').innerHTML=`<div id="dk">
+  $('#main').innerHTML=dataTabs('docs')+`<div id="dk">
     <div class="dside">
       <div class="dhint">直接读仓库里的 md —— <b>改文件刷新即生效</b>。<br>
         根目录 <code>${DOCS.root}</code></div>
@@ -1655,8 +1893,7 @@ function showCatalog(){
   stopPoll();
   $('#vp').innerHTML=''; $('#vp').style.display='none';
   $('#main').innerHTML=''; $('#main').style.display='none';
-  $('#cat').style.display=''; $('#back').style.display='none';
-  $('#filter').style.display=''; $('#expand').style.display='';
+  $('#cat').style.display='';
   renderCatalog();
 }
 // 同一语义版本下可能有多份字节版本（差异仅注释/排版）。
@@ -1799,7 +2036,9 @@ function renderNode(node,depth,keyPrefix,auto){
   return h;
 }
 function renderCatalog(){
-  const q=$('#filter').value.trim().toLowerCase();
+  /* 过滤框只在回测归档视图里存在（顶栏随 hash 变）—— 没有它时当空过滤。 */
+  const fe=$('#filter');
+  const q=(fe?fe.value:'').trim().toLowerCase();
   const rs=RUNS.filter(r=>!q||((r.strategy_path||'')+' '+r.strategy+' '+r.run_id+' '+r.code_sha+' '+
       Object.entries(r.params||{}).map(([k,v])=>k+'='+v).join(' ')).toLowerCase().includes(q));
   if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
@@ -1838,9 +2077,7 @@ let PKSORT = {k:'annual_return', desc:true};
      否则跨行比较又是苹果比橘子。 */
 function showPicks(){
   stopPoll();
-  $('#cat').style.display='none'; $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#filter').style.display='none'; $('#expand').style.display='none';
-  $('#back').style.display=''; $('#main').style.display='';
+  enterView();
   const ms=RUNS.filter(r=>r.mark);
   if(!ms.length){
     $('#main').innerHTML=`<div id="pk"><h2>★ 选中的规则</h2>
@@ -1986,18 +2223,23 @@ function wireStars(){
       const o=await res.json();
       if(o.error){ alert('打标记失败：'+o.error); e.style.opacity=''; return; }
       await loadRuns0();                                // 重取，别只改本地状态
-      if(!location.hash) renderCatalog();
+      if(location.hash==='#/runs') renderCatalog();   /* 归档目录的 hash 从 '' 变成了 #/runs */
     }catch(err){ alert('打标记失败：'+err); e.style.opacity=''; }
   });
   document.querySelectorAll('#pick tr[data-go]').forEach(e=>
     e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
 }
-$('#filter').oninput=()=>{ if(!location.hash) renderCatalog(); };
-$('#expand').onclick=()=>{
+/* 这两个控件是【回测归档目录专属】的，每次进那个视图时才创建 ——
+   所以绑定也得在那时做（原来是页面加载时一次性绑，控件搬进 pageHead 的
+   extra 之后就绑不到了）。 */
+function wireCatalogControls(){
+  const fe=$('#filter'), ee=$('#expand');
+  if(fe) fe.oninput=()=>{ renderCatalog(); };
+  if(ee) ee.onclick=()=>{
   const anyClosed=document.querySelector('.nd[data-k]:not(.op)');
   if(anyClosed) document.querySelectorAll('.nd[data-k]').forEach(e=>OPEN.add(e.dataset.k));
   else OPEN.clear();
-  $('#expand').textContent=anyClosed?'全部收起':'全部展开';
+  ee.textContent=anyClosed?'全部收起':'全部展开';
   renderCatalog();
   // 展开是逐层的：新露出来的节点这一轮才存在，需要再补一次
   if(anyClosed) for(let i=0;i<6;i++){
@@ -2005,7 +2247,8 @@ $('#expand').onclick=()=>{
     if(!more.length) break;
     more.forEach(e=>OPEN.add(e.dataset.k)); renderCatalog();
   }
-};
+  };
+}
 
 
 /* ============ 版本页：源码 + 可填参数 + 触发回测 ============ */
@@ -2018,8 +2261,6 @@ async function openVersion(sha){
   stopPoll();
   $('#cat').style.display='none'; $('#main').innerHTML='';
   $('#main').style.display='none'; $('#vp').style.display='';
-  $('#back').style.display=''; $('#filter').style.display='none';
-  $('#expand').style.display='none';
   $('#vp').innerHTML='<div class="note" style="padding:40px 0">加载中…</div>';
   let v;
   try{ v=await j('/api/version?sha='+encodeURIComponent(sha)); }
@@ -2167,10 +2408,7 @@ async function openRun(id, initTab){
   EQR={a:null,b:null};
                               // ★ YPAGE 由 route() 先设好，这里不能清
   stopPoll();
-  $('#vp').innerHTML=''; $('#vp').style.display='none';
-  $('#cat').style.display='none'; $('#main').style.display='';
-  $('#back').style.display=''; $('#filter').style.display='none';
-  $('#expand').style.display='none';
+  enterView();
   $('#main').innerHTML='<div class="note" style="padding:40px 0">加载中…</div>';
   let run,eq;
   try{ [run,eq]=await Promise.all([j('/api/run?id='+encodeURIComponent(id)),

@@ -503,3 +503,17 @@ table.lvfr tr.frbody td{background:var(--bg)}
 table.pkt.rk{table-layout:auto;width:100%}
 table.pkt.rk td.tx,table.pkt.rk th.tx{max-width:0}   /* 让 ellipsis 生效 */
 table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}
+
+/* 顶栏分组分隔 —— 是【信息】不是装饰：告诉人"这几个是一类，可以一起扫"。 */
+#top .navsep{display:inline-block;width:1px;height:15px;background:var(--line);
+  margin:0 3px}
+#top .btn.nav{position:relative}
+#top .adot.navdot{display:none;position:absolute;top:-3px;right:-3px;
+  box-shadow:0 0 0 2px var(--bg)}
+
+/* 页签用的 .btn.on —— 与导航高亮同一套视觉（当前位置只有一种表示法） */
+.btn.on{color:var(--accent);border-color:var(--accent)}
+/* 站名点回首页；在首页时点亮 —— 不然"我在哪"没有指示 */
+#top h1 a{color:var(--dim)}
+#top h1 a:hover{color:var(--fg)}
+#top h1 a.homeon{color:var(--accent)}

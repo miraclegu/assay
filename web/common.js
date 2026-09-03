@@ -102,32 +102,64 @@ function boardTag(code) {
    ★ 一处定义，每页调用 —— 分页面各写一份的话，加一个入口就得改 N 个文件，
      而漏改的那页少一个入口（不报错，只是从那页走不到新功能）。
    页面用 `data-nav` 标出自己是谁，对应入口高亮。 */
+/* ★ 按【使用频率】分四组，不是平铺 9 个 ——
+   平铺时每次都要在 9 个里扫一遍才找到要去的地方，而它们的重要性差很远：
+
+     实盘   唯一回答"今天要做什么"的地方，每个交易日都要看  -> 放最前 + 告警红点
+     市场   收盘后看行情、研究某只票                      -> 一组
+     研究   回测归档，做策略时才进                        -> 单独
+     数据   新鲜度与口径，出问题或写代码时才进            -> 单独，字典并进来
+
+   分隔线是【信息】不是装饰：它告诉人"这几个是一类，可以一起扫"。 */
 const NAV = [
-  ['/',              '📚 回测归档', '回测目录树 / 详情 / 选中的规则', 'runs'],
-  ['/market.html',   '🌡 盘面',     '某天的全市场：涨跌分布 / 涨跌停 / 行业榜 / 各类榜单', 'market'],
-  ['/stock.html',    '📈 个股',     '按代码或名称查：K 线 / 副图 / 事件 / 财务 / 同业', 'stock'],
-  ['/sector.html',   '🏭 行业板块', '申万行业 + 通达信板块：涨幅榜 / 成分股穿透', 'sector'],
-  ['/watchlist.html','⭐ 自选',     '自选股分组与盯盘列表', 'watch'],
-  ['/compare.html',  '⚖ 对比',     '2~6 只叠加后复权涨幅曲线', 'compare'],
-  ['/#/live',        '💰 实盘',     '实盘账户：录成交 / 出买卖清单 / 版本留痕', 'live'],
-  ['/#/sync',        '🔄 数据同步', '数据新鲜度 / 手动同步 / 财务导入', 'sync'],
-  ['/#/docs',        '📖 数据字典', '接口与口径的实测定案', 'docs'],
+  ['/#/live',         '💰 实盘',     '今日待办 / 持仓 / 录成交 / 版本留痕', 'live', 'act'],
+  ['/market.html',    '🌡 盘面',     '某天的全市场：涨跌分布 / 涨跌停 / 行业榜 / 各类榜单', 'market', 'mkt'],
+  ['/stock.html',     '📈 个股',     '按代码或名称查：K 线 / 副图 / 事件 / 财务 / 同业', 'stock', 'mkt'],
+  ['/sector.html',    '🏭 板块',     '申万行业 + 通达信板块：涨幅榜 / 成分股穿透', 'sector', 'mkt'],
+  ['/watchlist.html', '⭐ 自选',     '自选股分组与盯盘列表', 'watch', 'mkt'],
+  ['/compare.html',   '⚖ 对比',     '2~6 只叠加后复权涨幅曲线', 'compare', 'mkt'],
+  ['/#/runs',         '📚 回测',     '回测归档目录树 / 详情 / 选中的规则', 'runs', 'res'],
+  ['/#/sync',         '🔄 数据',     '数据新鲜度 / 手动同步 / 财务导入 / 口径字典', 'sync', 'data'],
 ];
+
 function navHtml(cur) {
-  return NAV.map(([href, t, tip, key]) =>
-    `<a class="btn nav${key === cur ? ' on' : ''}" href="${href}"
-       title="${esc(tip)}">${t}</a>`).join('');
+  let last = null;
+  return NAV.map(([href, t, tip, key, grp]) => {
+    const sep = (last !== null && grp !== last) ? '<span class="navsep"></span>' : '';
+    last = grp;
+    /* 实盘那个入口留一个挂红点的位置 —— 有待办时点亮（见 navAlert）。
+       ★ 判据由服务端给（live.signal_alert），前端只负责显示。 */
+    const dot = key === 'live' ? '<span class="adot navdot" id="navdot"></span>' : '';
+    return `${sep}<a class="btn nav${key === cur ? ' on' : ''}" href="${href}"
+       title="${esc(tip)}">${t}${dot}</a>`;
+  }).join('');
 }
+
+/* 顶栏「实盘」上的红点：任一账户有待办就点亮。
+   ★ 异步补，不拖住页面渲染 —— 它是锦上添花，取不到就不显示，
+     不该让整页等它。 */
+async function navAlert() {
+  const d = $('#navdot');
+  if (!d) return;
+  d.style.display = 'none';
+  try {
+    const o = await j('/api/live/accounts');
+    const hit = (o.accounts || []).filter(a => a.alert);
+    if (!hit.length) return;
+    d.style.display = 'inline-block';
+    d.title = hit.map(a => a.name + '：' + (a.alert_why || []).join('；')).join('\n');
+  } catch (e) { /* 只读模式或旧进程：不显示，不报错 */ }
+}
+
 /* 从站内别处跳过来时给一个「‹ 返回」。
-   ★ 判据用 `document.referrer` 且**同源** —— 直接输网址/新标签页打开时
-     没有 referrer，那时不显示：给一个点了没反应的返回按钮比不给更糟。
+   ★ 判据用 `document.referrer` 且**同源**，再加 `history.length > 1`。
+   🔴 `history.length` 这条不能少：用 target="_blank" 从实盘页打开时
+     **有 referrer 但没有可回的历史**（新标签的 history.length === 1）——
+     只看 referrer 的话按钮会显示出来，点了却什么都不发生。
+     "给一个点了没反应的返回按钮比不给更糟。"
    ★ 用 history.back() 而不是跳 referrer：back 能保留原页面的滚动位置与
      状态（实盘页可能正开着浮层）。 */
 function backLink() {
-  /* 🔴 `history.length > 1` 这条不能少。用 target="_blank" 从实盘页打开时
-     **有 referrer 但没有可回的历史**（新标签的 history.length === 1）——
-     只看 referrer 的话按钮会显示出来，点了却什么都不发生。
-     这正是"给一个点了没反应的返回按钮比不给更糟"。 */
   if (history.length <= 1) return '';
   try {
     const r = document.referrer;
@@ -149,10 +181,15 @@ function pageHead(cur, title, extra) {
   document.title = title + ' · assay';
   const el = $('#top');
   if (!el) return;
-  el.innerHTML = `<h1><a href="/" style="color:inherit;text-decoration:none"
-      ><b>assay</b></a> ${esc(title)}</h1>${backLink()}${extra || ''}
+  /* ★ 「assay」这个标题本身就是【首页】入口，所以 NAV 里不再单列一项 ——
+     左上角的站名点回首页是通用约定，多一个"🏠 首页"按钮是冗余。
+     在首页时把它点亮，否则"我在哪"就没有指示。 */
+  el.innerHTML = `<h1><a href="/" class="${cur === 'home' ? 'homeon' : ''}"
+      style="text-decoration:none" title="回总览首页"><b>assay</b></a>
+      ${esc(title)}</h1>${backLink()}${extra || ''}
     <div class="sp"></div>${navHtml(cur)}`;
   wireBack();
+  navAlert();
 }
 
 /* ---- 个股搜索框 ------------------------------------------------------

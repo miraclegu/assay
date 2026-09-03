@@ -706,7 +706,8 @@ def t_ui():
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console',
                   lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
-            pg.goto('http://127.0.0.1:%d/' % port, wait_until='networkidle')
+            # 回测归档已移到 #/runs —— `/` 现在是总览首页
+            pg.goto('http://127.0.0.1:%d/#/runs' % port, wait_until='networkidle')
             pg.wait_for_timeout(900)
 
             # 目录树：任意深度文件夹 -> 策略文件 -> 代码版本 -> 回测
@@ -879,8 +880,10 @@ def t_ui():
                      '%s 当日明细 持仓 %d 只；%s'
                      % (yc.count(), ys[0], cr, yr, mk, cal_days, real, cal_off, dsel, nh, rng))
 
-            pg.click('#back'); pg.wait_for_timeout(400)
-            assert pg.is_visible('#cat'), '返回目录失败'
+            # 「‹ 返回目录」那个专属按钮已被顶栏的「📚 回测」入口 + 通用
+            # 「‹ 返回」取代 —— 顶栏一处定义，不再每个视图各摆一个返回键
+            pg.click('#top a.nav[href="/#/runs"]'); pg.wait_for_timeout(700)
+            assert pg.is_visible('#cat'), '从顶栏回不到回测目录'
             pg.go_back(); pg.wait_for_timeout(900)
             assert pg.is_visible('#main'), '浏览器后退未回到详情'
             br.close()
@@ -944,9 +947,9 @@ def t_docs_ui():
             pg.click('.ditem[href="#/docs/qmt"]')
             pg.wait_for_timeout(900)
             assert pg.locator('#dc table.dt').count() > 5, '切篇后表格没出来'
-            pg.click('#back')
-            pg.wait_for_timeout(700)
-            assert pg.locator('.tree').count() >= 1, '返回目录后目录树没了'
+            pg.click('#top a.nav[href="/#/runs"]')
+            pg.wait_for_timeout(900)
+            assert pg.locator('.tree').count() >= 1, '从顶栏回不到回测目录'
             b.close()
     finally:
         httpd.shutdown()
@@ -991,7 +994,8 @@ def t_version_page():
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console',
                   lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
-            pg.goto('http://127.0.0.1:%d/' % port, wait_until='networkidle')
+            # 回测归档已移到 #/runs —— `/` 现在是总览首页
+            pg.goto('http://127.0.0.1:%d/#/runs' % port, wait_until='networkidle')
             pg.wait_for_timeout(800)
             # 过滤会自动展开，直接抵达版本层
             pg.fill('#filter', '红利'); pg.wait_for_timeout(800)
@@ -1047,8 +1051,8 @@ def t_version_page():
                 '只读模式下 api_version 仍报 runnable'
             sv.ALLOW_BACKTEST = True
 
-            pg.click('#back'); pg.wait_for_timeout(500)
-            assert pg.is_visible('#cat'), '返回目录失败'
+            pg.click('#top a.nav[href="/#/runs"]'); pg.wait_for_timeout(700)
+            assert pg.is_visible('#cat'), '从顶栏回不到回测目录'
             br.close()
             assert not errs, 'JS 报错 %d 处: %s' % (len(errs), errs[:2])
     finally:
@@ -1513,7 +1517,7 @@ def _():
                 pg.on('console', lambda m: errs.append('console: ' + m.text)
                       if m.type == 'error' else None)
                 pg.on('dialog', lambda dl: dl.accept('selftest 备注'))
-                pg.goto('http://127.0.0.1:%d/' % port, wait_until='networkidle')
+                pg.goto('http://127.0.0.1:%d/#/runs' % port, wait_until='networkidle')
                 pg.wait_for_timeout(900)
 
                 assert pg.locator('#pick').count() == 1, '顶部「选中的规则」面板没渲染'
@@ -4469,7 +4473,8 @@ def t_new_pages_ui():
             pg.goto(base + '/sector.html', wait_until='networkidle')
             pg.wait_for_selector('table.pkt', timeout=40000)
             pg.wait_for_timeout(800)
-            assert '行业板块' in pg.locator('#top .btn.nav.on').inner_text()
+            assert '板块' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '板块页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
             kinds = pg.locator('.lvhead .kd').count()
             assert kinds >= 4, '板块分类入口只有 %d 个' % kinds
             n_sw = pg.locator('.lvsec table.pkt tr').count() - 1
@@ -4497,7 +4502,8 @@ def t_new_pages_ui():
             # ================= 自选 =================
             pg.goto(base + '/watchlist.html', wait_until='networkidle')
             pg.wait_for_selector('#wadd input', timeout=40000)
-            assert '自选' in pg.locator('#top .btn.nav.on').inner_text()
+            assert '自选' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '自选页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
             assert '空的' in pg.locator('#pg').inner_text(), '空自选没给空态提示'
             pg.fill('#wadd input', '601857')
             pg.wait_for_selector('.skit', timeout=20000)
@@ -4517,7 +4523,8 @@ def t_new_pages_ui():
                     wait_until='networkidle')
             pg.wait_for_selector('#ccv', timeout=40000)
             pg.wait_for_timeout(1500)
-            assert '对比' in pg.locator('#top .btn.nav.on').inner_text()
+            assert '对比' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '对比页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
             nz2 = pg.evaluate(NZ('#ccv'))
             assert nz2 > 3000, '对比曲线没画出来：%d' % nz2
             t = clean()
@@ -4569,6 +4576,13 @@ def t_new_pages_ui():
                     '顶栏缺 %s 的入口' % href
             assert pg.locator('#top a.nav[href="/#/live"]').count() == 1, \
                 '顶栏缺实盘入口'
+            # ★ 分组分隔线是【信息】不是装饰：告诉人"这几个是一类"。
+            #   平铺 8 个入口时每次都要在 8 个里扫一遍才找到要去的地方。
+            assert pg.locator('#top .navsep').count() == 3, \
+                '顶栏没分组（实盘 | 市场 | 研究 | 数据 应有 3 条分隔）：%d' \
+                % pg.locator('#top .navsep').count()
+            assert pg.locator('#top a.nav').first.inner_text().find('实盘') >= 0, \
+                '实盘应排在最前 —— 它是唯一回答"今天要做什么"的入口'
 
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
@@ -4580,6 +4594,142 @@ def t_new_pages_ui():
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
         shutil.rmtree(tmp, ignore_errors=True)
+        httpd.shutdown()
+
+
+@case('总览首页 / 顶栏分组 / 数据页签（playwright）', tag='web')
+def t_home_ui():
+    """信息架构那一层的自证。
+
+    ★ 打开看板第一眼该回答「今天什么状态、要做什么」—— 而不是一棵回测
+      目录树（那是做策略时才进的，已移到 #/runs）。
+    ★ 顶栏按【使用频率】分组，不是平铺：平铺时每次都要在 8 个里扫一遍
+      才找到要去的地方，而它们的重要性差很远。
+    ★ 首页每块只给【摘要 + 一个入口】，不重复做那一页的事 ——
+      首页做成小型全功能页的话，同一份数据两处渲染，迟早不一致。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1600, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console',
+                  lambda m: errs.append('console: ' + m.text) if m.type == 'error' else None)
+
+            # ---------------- 首页 ----------------
+            pg.goto(base + '/', wait_until='networkidle')
+            pg.wait_for_selector('#main .lvsec', timeout=60000)
+            pg.wait_for_timeout(2500)
+            assert '总览' in pg.title(), '首页标题不对：%s' % pg.title()
+            # ★ 打开看板第一眼不该是回测目录树
+            assert not pg.is_visible('#cat'), '首页居然显示的是回测目录树'
+            secs = [x.split('\n')[0] for x in
+                    pg.locator('#main .lvsec h3').all_inner_texts()]
+            for k in ('实盘', '盘面', '自选', '数据'):
+                assert any(k in x for x in secs), '首页缺「%s」这一块：%s' % (k, secs)
+            body = pg.locator('#main').inner_text()
+            assert 'undefined' not in body and 'NaN' not in body, \
+                '首页有 undefined/NaN'
+            # 每块的标题本身就是入口（首页只给摘要）
+            for href in ('#/live', '/market.html', '/watchlist.html', '#/sync'):
+                assert pg.locator('#main .lvsec h3 a[href="%s"]' % href).count() >= 1, \
+                    '「%s」那块的标题不是入口' % href
+            # 站名在首页要点亮 —— 否则"我在哪"没有指示
+            assert pg.locator('#top h1 a.homeon').count() == 1, \
+                '首页没把站名点亮'
+            # 实盘那块必须真的有账户与数字（不是空壳）
+            live_sec = pg.locator('#main .lvsec').first.inner_text()
+            assert '总资产' in live_sec and '持仓浮盈' in live_sec, \
+                '实盘那块没渲染出数字：%s' % live_sec[:120]
+
+            # ---------------- 顶栏分组 ----------------
+            navs = pg.locator('#top a.nav').all_inner_texts()
+            assert len(navs) == 8, '顶栏应是 8 个入口：%s' % navs
+            assert '实盘' in navs[0], \
+                '实盘应排最前 —— 它是唯一回答"今天要做什么"的入口：%s' % navs
+            assert pg.locator('#top .navsep').count() == 3, \
+                '应有 3 条分组分隔（实盘 | 市场 | 研究 | 数据）'
+            # 已取消的入口不该还在
+            joined = ' '.join(navs)
+            assert '查数据' not in joined, '顶栏还有已取消的「查数据」'
+            assert '数据字典' not in joined, \
+                '「数据字典」应并进「数据」页的页签，顶栏不再单列'
+
+            # ---------------- 回测归档搬到 #/runs ----------------
+            pg.click('#top a.nav[href="/#/runs"]')
+            pg.wait_for_timeout(1500)
+            assert pg.is_visible('#cat'), '#/runs 没显示回测目录树'
+            assert pg.locator('.nd.d0').count() > 0, '目录树没有顶层节点'
+            # 过滤/全部展开只在这个视图里出现（别处是噪声）
+            assert pg.locator('#filter').count() == 1, '#/runs 缺过滤框'
+            pg.fill('#filter', '不可能匹配的字符串xyz')
+            pg.wait_for_timeout(600)
+            assert '没有匹配' in pg.locator('#cat').inner_text(), '过滤没生效'
+            pg.fill('#filter', '')
+            pg.wait_for_timeout(600)
+
+            # ---------------- 数据页签 ----------------
+            pg.click('#top a.nav[href="/#/sync"]')
+            pg.wait_for_selector('#main .lvsec', timeout=90000)
+            pg.wait_for_timeout(1200)
+            assert pg.locator('#filter').count() == 0, \
+                '过滤框跑到数据页去了 —— 它只在回测目录有意义'
+            tabs = pg.locator('#main .btn').all_inner_texts()[:2]
+            assert '数据状态 / 同步' in tabs[0] and '口径字典' in tabs[1], \
+                '数据页的两个页签不对：%s' % tabs
+            assert '数据' in pg.locator('#top .btn.nav.on').inner_text()
+            # 切到口径字典：同一个顶栏入口仍然高亮（它们是一件事的两面）
+            pg.click('#main .btn:has-text("口径字典")')
+            pg.wait_for_selector('.ditem', timeout=60000)
+            pg.wait_for_timeout(800)
+            assert pg.locator('.ditem').count() >= 4, '字典侧栏没渲染'
+            assert '数据' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '切到字典页签后顶栏高亮跑了'
+            assert '#/docs' in pg.url, 'URL 没跟着变（旧链接要能直达）'
+            # 切回来
+            pg.click('#main .btn:has-text("数据状态")')
+            pg.wait_for_timeout(2000)
+            assert pg.locator('#syrun').count() == 1, '切不回同步页签'
+
+            # ---------------- 顶栏标题跟着 hash 变 ----------------
+            for h, want in (('#/live', '实盘'), ('#/picks', '选中的规则'),
+                            ('#/runs', '回测归档'), ('', '总览')):
+                pg.goto(base + '/' + h, wait_until='networkidle')
+                pg.wait_for_timeout(2200)
+                got = pg.locator('#top h1').inner_text()
+                assert want in got, \
+                    ('%s 的标题应是「%s」，实得「%s」—— 固定写死的话在实盘页'
+                     '也会显示"回测归档"，而顶栏本来是用来告诉人"我在哪"的'
+                     % (h or '(空)', want, got))
+
+            br.close()
+            assert not errs, '页面有运行时错误：%s' % errs[:3]
+            return ('首页是总览（5 块，标题即入口，站名点亮，不再是回测目录树）；'
+                    '顶栏 8 个入口分 4 组 3 条分隔、实盘排最前、'
+                    '已取消的「查数据」与并入页签的「数据字典」都不在顶栏；'
+                    '回测归档在 #/runs 且过滤框只在那里；'
+                    '数据页两个页签互切、顶栏高亮不跑、URL 可直达；'
+                    '顶栏标题跟着 hash 变（4 个视图核过）')
+    finally:
+        sv.ALLOW_LIVE = old_live
         httpd.shutdown()
 
 
@@ -4641,7 +4791,7 @@ def t_page_inventory():
     # 每个 hash 路由都要有入口
     for route, fn in (('#/live', 'showLive'), ('#/sync', 'showSync'),
                       ('#/docs', 'showDocs'), ('#/picks', 'showPicks'),
-                      ('#/stock', None)):
+                      ('#/runs', 'showCatalog'), ('#/stock', None)):
         assert route in js, '路由 %s 不见了' % route
         # fn=None：这个路由只做跳转（个股已搬到独立页 /stock.html），
         # 本文件里没有对应的 showXxx 实现
@@ -4652,8 +4802,8 @@ def t_page_inventory():
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
-    assert n >= 51, \
-        ('用例只剩 %d 条，少于已知的 51 —— 是不是删代码时把某条一起切掉了？'
+    assert n >= 52, \
+        ('用例只剩 %d 条，少于已知的 52 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
     return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))
