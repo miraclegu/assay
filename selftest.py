@@ -5631,9 +5631,13 @@ def t_new_pages_ui():
             # 实时价：与持仓页共用同一个库，页面侧不额外调接口
             #   ★ 在【实盘持仓那个页签】上验 —— 手工加的票没进抓取轮转，
             #     在它那一页看不到实时标记是正常的。
-            _psrc = pg.evaluate("() => document.querySelector("
-                                "'.lvhead .lvtag.on, .lvhead .lvtag.warn')"
-                                "?.textContent || ''")
+            # 🔴 选择器不能限定 .on/.warn —— 那两个 class 只在【有实时价】时
+            #   才加，而非交易时段（或实时库里今天还没数据）就一个都没有。
+            #   实测踩过：跨过零点后 nrt=0，这条断言凭空失败一次。
+            #   判据应该是"那个标签存在且写了数据日"，与有没有实时价无关。
+            _psrc = pg.evaluate(
+                "() => [...document.querySelectorAll('.lvhead .lvtag')]"
+                ".map(e => e.textContent).find(t => t.includes('数据日')) || ''")
             assert '数据日' in _psrc, '自选头上没有数据日+报价时间：%s' % _psrc
             if '实时' in _psrc:
                 assert pg.locator(
