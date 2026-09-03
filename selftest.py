@@ -4716,7 +4716,20 @@ def t_setup_tdx():
     assert 'raw_adjust_factor' in b and 'raw_basic_daily' in b, \
         'bootstrap 缺"这两张表不许是空的"那条断言'
 
-    # ---- ⑥ 护栏在不在 ----
+    # ---- ⑥ 口径护栏（缩表护栏拦不住"值变了"）----
+    #   🔴 通达信改过 .day 里 volume 的单位：老 vipdoc 是"股×100"、
+    #     现在下的 hsjday.zip 是"股"。而 turnover 是 tdx2db 用
+    #     volume/流通股数 算出来的 —— 重建一次，面板的 turnover 就从
+    #     百分数变小数，全程差 100 倍，而**行数一行不少**。
+    #     实测护栏输出：最近 250 天 861,032 行，中位 旧 2.34 / 新 0.0234。
+    assert '_check_scale' in src, '缺口径护栏 —— 缩表护栏只看行数'
+    assert 'turnover' in src, '口径护栏得盯 turnover（volume 单位变过）'
+    _sc = m._check_scale(m.DB, m.DB) if os.path.isfile(m.DB) else None
+    if _sc:
+        assert abs(_sc[0] - 1.0) < 1e-9, \
+            '自己比自己应得比值 1.0，实得 %s' % _sc[0]
+
+    # ---- ⑦ 护栏在不在 ----
     assert 'allow_shrink' in src and 'before_init' in src, '缺缩表护栏'
     assert '_probe_schema' in src and '_meta' in src, '缺 schema 兼容探针'
     assert 'duckdb://./%s' in src or "duckdb://./" in src, 'init 目标写法不对'
@@ -4730,7 +4743,8 @@ def t_setup_tdx():
     return ('资产表 4 个平台且无 Darwin_x86_64；aarch64/amd64 归一；'
             'CLI 用实测的 --dburi/--min（不是文档的 --dbpath/--minline）；'
             '反斜杠路径归一成目录树且拒路径穿越；bootstrap 里 init 后紧跟 '
-            'cron 且断言复权因子表非空；'
+            'cron 且断言复权因子表非空；口径护栏在（turnover 量级，'
+            '缩表护栏拦不住"值变了"）；'
             '不用 pip 装（PyPI 同名项目无 DuckDB）；'
             '定时 PATH 首段是当前解释器%s；plist 带 EnvironmentVariables 且 '
             'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在'
