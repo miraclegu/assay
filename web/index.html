@@ -334,8 +334,12 @@ function kpiHtml(o){
     ${cell('当日盈亏',
            P.pnl_day==null?'—':
            `<span style="color:${col(P.pnl_day)}">${sgn(P.pnl_day)}${num(P.pnl_day,2)}</span>`,
+           /* ★ 百分比要标【分母是什么】：这一格是持仓的当日浮动，
+                业绩板那格「今日」是**账户**当日收益（分母是总资产，还含
+                当天已实现的买卖与费用）。不标的话两个 −0.15%/−0.16%
+                摆在同一屏上，看着像其中一个算错了。 */
            (P.pnl_day!=null&&P.market_value)
-             ? (P.pnl_day/(P.market_value-P.pnl_day)>=0?'+':'')
+             ? '持仓 '+(P.pnl_day/(P.market_value-P.pnl_day)>=0?'+':'')
                +(P.pnl_day/(P.market_value-P.pnl_day)*100).toFixed(2)+'%'
              : '')}
     <div id="kperf" style="display:none"></div>
@@ -365,7 +369,13 @@ async function liveEquityTag(aid){
     el.innerHTML=
       cell('累计收益'+perfHelp(st),
         `<span style="color:${col(st.twr)}">${pct(st.twr)}</span>`,
-        '时间加权 TWR'+(ivs?' · '+ivs:' · 按收盘'))
+        /* ★ 百分比旁边必须有【金额】—— 只给 % 的话，它和上面的
+             "持仓浮盈 +3,698.55" 就没有能对上的数，看着像两回事。
+             金额 = 期末 − 起点 − 净入金（真正多出来的钱）。 */
+        (st.pnl_total==null?''
+          :`<span style="color:${col(st.pnl_total)}">${st.pnl_total>=0?'+':''}${
+              num(st.pnl_total,2)}</span> 元　`)
+        +'TWR'+(ivs?' · '+ivs:' · 按收盘'))
      +cell('加权年化',
         st.twr_annual==null?'—'
           :`<span style="color:${col(st.twr_annual)}">${pct(st.twr_annual)}</span>`,
@@ -1227,6 +1237,20 @@ function perfHelp(st){
         +'日线收盘替换。'
       :'★ 曲线全部按<b>收盘价</b>：今天还没有实时价（非交易时段，或行情'
         +'没抓到）。'}<br>
+    <b>百分比与金额的分母不一样，这是正常的</b>：这里的 %
+    是 TWR（分母是**整段资金**，闲置现金会摊薄它），金额是
+    <code>期末 − 起点 − 净入金</code>；而上面「持仓浮盈」的 %
+    分母是**投出去的那部分**（摊薄成本额）。没有已实现盈亏和入金时，
+    两者的**金额相等**${st.pnl_total!=null?'（现在是 '
+      +(st.pnl_total>=0?'+':'')+num(st.pnl_total,2)+'）':''}，
+    百分比不等。<br>
+    起点是<b>开户那一刻的资金</b>${st.equity_start!=null?'（'
+      +num(st.equity_start,2)+'）':''}，不是第一天的收盘 ——
+    🔴 从收盘起算会把**建仓第一天的盈亏整个丢掉**（实测：红利 09-01
+    当天 +1.16%，从收盘起算的 TWR 是 −0.78%，而净值其实是 +0.37%）。<br>
+    <b>「今日」是账户当日收益</b>：分母是总资产，且含当天**已实现**的买卖与
+    费用；而资产板那格「当日盈亏」只算**持仓**的当日浮动、分母是持仓市值。
+    没有当日成交时两者金额相同，调仓日会不同 —— 不是哪个算错了。<br>
     <b>不足 20 个交易日不折年化</b>：把两周的收益乘 12 倍是误导，而那个数
     会被拿去跟回测年化比。宁可显示"—"。<br>
     <b>交易费用</b>是已付的佣金 + 规费 + 过户费 + 印花税合计（成交流水里

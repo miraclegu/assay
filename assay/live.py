@@ -1681,7 +1681,16 @@ def equity_curve(aid, datalake=None):
             + float(f.get('signed') or 0)
 
     dates, eq, twr = [], [], []
-    prev_e = None
+    # 🔴 起点是【开户那一刻的资金】，不是第一天的收盘。
+    #   原来 prev_e 从 None 起，于是**第一天的收益整个丢了**：红利 09-01 建仓
+    #   当天收盘 1,011,598（+1.16%），TWR 却从 09-02 才开始连乘，
+    #   算出 −0.78%，而实际净值是 1,003,698（+0.37%）——
+    #   页面上就成了"持仓浮盈 +3,698 / 累计收益 −0.78%"自相矛盾，**且不报错**。
+    prev_e = init
+    # ★ 当日现金流 F_t 取【上一条曲线日之后、到今天为止】的所有流水，
+    #   不是"正好落在今天那天"的 —— 入金落在周末/节假日时，
+    #   按精确日期取会漏掉它，而漏掉的入金会被当成收益（TWR 就白做了）。
+    prev_d = None
     for d in days:
         book = lots_asof(rows, d)
         mv = 0.0
@@ -1695,10 +1704,11 @@ def equity_curve(aid, datalake=None):
                 continue
             mv += sum(l['shares'] for l in lots) * p
         e = cash_asof(init, rows, d, flows) + mv
-        f = flow_by_day.get(d, 0.0)
+        f = sum(v for fd, v in flow_by_day.items()
+                if fd <= d and (prev_d is None or fd > prev_d))
         if prev_e is not None and prev_e > 0:
             twr.append((e - f) / prev_e - 1.0)
-        prev_e = e
+        prev_e, prev_d = e, d
         dates.append(d.isoformat())
         eq.append(round(e, 2))
 
@@ -1731,7 +1741,8 @@ def equity_curve(aid, datalake=None):
                 mv += sum(l['shares'] for l in lots) * p
             if n_rt:
                 e = cash_asof(init, rows, d_now, flows) + mv
-                f = flow_by_day.get(d_now, 0.0)
+                f = sum(v for fd, v in flow_by_day.items()
+                        if fd <= d_now and (prev_d is None or fd > prev_d))
                 if prev_e is not None and prev_e > 0:
                     twr.append((e - f) / prev_e - 1.0)
                 dates.append(d_now.isoformat())
@@ -1744,7 +1755,9 @@ def equity_curve(aid, datalake=None):
     for r in twr:
         cum *= (1.0 + r)
     n = len(dates)
-    peak, mdd, mdd_at = -1e18, 0.0, None
+    # ★ 峰值从【起点资金】起算 —— 第一天就跌的话，回撤该从起点量,
+    #   只看曲线上的点会把第一天的下跌算成"没有回撤"。
+    peak, mdd, mdd_at = init, 0.0, None
     for d, v in zip(dates, eq):
         peak = max(peak, v)
         if peak > 0 and 1.0 - v / peak > mdd:
@@ -1769,6 +1782,9 @@ def equity_curve(aid, datalake=None):
                     if len(eq) >= 2 else None),
         'net_deposit': round(sum(flow_by_day.values()), 2),
         'init_cash': init,
+        # 起点资金（开户那一刻）—— TWR 的第一个分母，页面上"累计收益"
+        # 那一格的金额就是 期末 − 起点 − 净入金。
+        'equity_start': round(init, 2),
         # 已付手续费。**折成年化拖累要够长的样本才有意义** —— 见下。
         'fee_paid': round(sum(float(r.get('fee') or 0) for r in rows), 2),
         # 最后一点是不是盘中估的（None = 全是收盘价）。页面必须标出来：
@@ -1782,6 +1798,13 @@ def equity_curve(aid, datalake=None):
     #   与 twr_annual 同一条纪律：不到 20 个交易日不给 —— 开户两天就把
     #   两笔建仓的费用乘 122 倍，得到的"年化拖累 1.72%"纯属外推，
     #   而它会被拿去跟真实费率比。宁可只报绝对值。
+    # ★ 累计收益【也要给金额】：百分比是 TWR（入金不算收益），金额是
+    #   期末 − 起点 − 净入金 = 真正多出来的钱。只给百分比的话，
+    #   "累计收益 −0.78%" 旁边就没有能和"持仓浮盈 +3,698"对上的数。
+    #   🔴 两者分母不同是**正常的**：TWR 按整段资金的时间加权算，
+    #     而 浮盈% 的分母是投出去的那部分（闲置现金会摊薄前者）。
+    stats['pnl_total'] = round(eq[-1] - init - stats['net_deposit'], 2) if eq \
+        else None
     stats['fee_drag_annual'] = (
         round(stats['fee_pct'] * (244.0 / n), 6)
         if stats['fee_pct'] is not None and yrs > 0.08 else None)

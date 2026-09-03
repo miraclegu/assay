@@ -2594,6 +2594,38 @@ def t_live_core():
         finally:
             _rtm.latest = _o_lat
 
+        # ---- 3h2) TWR 必须从【起点资金】起算，第一天的盈亏不许丢 ----
+        #   🔴 原来 prev_e 从 None 起，第一个交易日的收益整段丢掉：实测红利
+        #      09-01 建仓当天 +1.16%，TWR 却从 09-02 才连乘，给出 −0.78%，
+        #      而净值其实是 +0.37% —— 页面上就成了"持仓浮盈 +3,698 /
+        #      累计收益 −0.78%"自相矛盾，**且不报错**。
+        #   ★ 判据：没有外部现金流时，TWR 必须精确等于 期末/起点 − 1。
+        lv.upsert_account('t_seed', name='seed', init_cash=100000)
+        lv.add_fill('t_seed', '2026-08-10', '601857.XSHG', 'buy', 5000, 11.0,
+                    fee=15, force_price=True)
+        es = lv.equity_curve('t_seed')['stats']
+        assert abs(es['twr'] - (es['equity_end'] / es['init_cash'] - 1)) < 1e-6, \
+            ('没有现金流时 TWR 必须等于 期末/起点 − 1：%.6f vs %.6f'
+             ' —— 差的就是第一个交易日'
+             % (es['twr'], es['equity_end'] / es['init_cash'] - 1))
+        assert es['equity_start'] == es['init_cash'], '起点不是开户资金'
+        # 金额：期末 − 起点 − 净入金，且与持仓浮盈同一个数（无已实现盈亏时）
+        assert abs(es['pnl_total']
+                   - (es['equity_end'] - es['init_cash'] - es['net_deposit'])
+                   ) < 0.02, '累计收益金额算错：%s' % es['pnl_total']
+        assert abs(es['pnl_total']
+                   - lv.positions_valued('t_seed')['pnl']) < 0.02, \
+            ('累计收益金额与持仓浮盈对不上（无已实现盈亏时必须相等）：'
+             '%.2f vs %.2f' % (es['pnl_total'],
+                               lv.positions_valued('t_seed')['pnl']))
+        # 入金落在【非交易日】也不许被当成收益 —— F_t 要按区间取，
+        # 不是"正好落在那天"
+        lv.add_cashflow('t_seed', '2026-08-16', 200000, 'deposit', '周六入金')
+        es2 = lv.equity_curve('t_seed')['stats']
+        assert abs(es2['twr'] - es['twr']) < 0.02, \
+            ('周末入金被当成收益了：TWR 从 %.4f 跳到 %.4f'
+             % (es['twr'], es2['twr']))
+
         # ---- 3i) 「年化拖累」要够长的样本才给 ----
         #   🔴 开户两天就把两笔建仓的费用乘 122 倍，会得出"年化拖累 1.72%"
         #      这种纯外推的数，而它会被拿去跟真实费率比。同 twr_annual 那条纪律。
@@ -2788,6 +2820,18 @@ def t_live_ui():
                 assert ('盘中' if _iv else '按收盘') in _cum, \
                     ('累计收益没说明含不含今天的浮动 —— 上面的总资产是实时的，'
                      '不标就是同屏两个口径：%s' % _cum)
+                # 🔴 只给百分比不行：旁边要有能和「持仓浮盈」对上的金额
+                assert _st.get('pnl_total') is not None, '累计收益没给金额'
+                assert '元' in _cum and ('%.2f' % abs(_st['pnl_total'])) \
+                    in _cum.replace(',', ''), \
+                    '累计收益那一格缺金额（只有百分比）：%s' % _cum
+                # 「当日盈亏」的百分比要标分母 —— 它和业绩板「今日」的
+                # 分母不同（持仓市值 vs 总资产），不标就像其中一个算错了
+                _dd = [x for x in pg.locator('#lvbody .kpi').first.locator(
+                    '>div').all_inner_texts() if '当日盈亏' in x]
+                if _dd and '%' in _dd[0]:
+                    assert '持仓' in _dd[0], \
+                        '当日盈亏那格的百分比没标分母：%s' % _dd[0].replace('\n', ' ')
                 # 🔴 「交易费用」那一格：短样本不许给年化拖累
                 _fee = [x for x in pg.locator(
                     '#lvbody #kperf2 > div').all_inner_texts()
