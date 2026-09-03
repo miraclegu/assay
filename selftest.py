@@ -4584,6 +4584,159 @@ def t_stock_ext():
                len(lk['runs']), rh * 100, rb * 100))
 
 
+@case('tdx 装配脚本：跨 OS 表 / 缩表护栏 / 定时环境自证', tag='fast')
+def t_setup_tdx():
+    """`datalake/setup_tdx.py` —— 换台机器把 tdx 链装回来的那个入口。
+
+    这一条**不联网、不装东西**，只守"判据有没有写对"：
+      ① 四个平台的资产名齐、且刻意没有 Darwin_x86_64（Intel Mac 没预编译包）
+      ② CLI 用的是实测的 `--dburi`/`--min`，不是文档里的 `--dbpath`/`--minline`
+      ③ 定时任务的 PATH 必须带上**当前解释器**所在目录
+      ④ 缩表护栏与 schema 探针都在
+    """
+    import importlib.util
+    import platform
+    import re
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(os.path.dirname(here), 'datalake', 'setup_tdx.py')
+    assert os.path.isfile(p), '找不到 setup_tdx.py'
+    src = open(p, encoding='utf-8').read()
+    spec = importlib.util.spec_from_file_location('setup_tdx', p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    # ---- ① 跨 OS 资产表 ----
+    want = {('Darwin', 'arm64'), ('Linux', 'arm64'), ('Linux', 'x86_64'),
+            ('Windows', 'x86_64')}
+    assert set(m.ASSETS) == want, '资产表对不上 release：%s' % set(m.ASSETS)
+    assert ('Darwin', 'x86_64') not in m.ASSETS, \
+        ('Intel Mac 刻意没有预编译包（release 里只有 Darwin_arm64）——'
+         '加了会装上一个跑不了的包')
+    for k, v in m.ASSETS.items():
+        assert v.startswith('tdx2db_') and (
+            v.endswith('.tar.gz') or v.endswith('.zip')), '资产名不对：%s' % v
+    # 架构名归一化：aarch64 / amd64 都要认（Linux 上 uname 给的是这两个）
+    _o = platform.machine
+    try:
+        for raw, norm in (('aarch64', 'arm64'), ('arm64', 'arm64'),
+                          ('AMD64', 'x86_64'), ('x86_64', 'x86_64')):
+            platform.machine = lambda r=raw: r
+            assert m._arch() == norm, '%s 应归一成 %s，实得 %s' % (
+                raw, norm, m._arch())
+    finally:
+        platform.machine = _o
+
+    # ---- ② CLI 实参（实测 v2026.5/v2026.8.12 都是这两个）----
+    #   🔴 网上文档常写 --dbpath / --minline 1,5，本机 --help 是
+    #     --dburi / --min（布尔）。抄错了表现为"命令直接不认"。
+    assert "'--dburi'" in src, 'cron/init 应该用 --dburi'
+    assert '--dbpath' not in src.replace('`--dbpath`', ''), \
+        '用了文档里那个 --dbpath —— 实测的参数是 --dburi'
+    assert '--minline' not in src.replace('`--minline 1,5`', ''), \
+        '用了文档里那个 --minline —— 实测是布尔的 --min'
+    # 🔴 不许出现 pip install tdx2db（PyPI 那个是同名的另一个项目，无 DuckDB）
+    assert not re.search(r'^\s*[^#*\n]*subprocess.*pip.*tdx2db', src, re.M), \
+        'pip 装 tdx2db —— PyPI 上那个是另一个项目，不支持 DuckDB'
+
+    # ---- ③ 定时任务的 PATH 必须带当前解释器 ----
+    #   🔴 launchd/systemd 的默认环境很窄，python3 会解析到系统那个
+    #     （没装 duckdb），2/6 PIT 快照就炸 —— 而那一步漏一天不可逆，
+    #     失败只写在 launchd 日志里。2026-09-03 真踩过。
+    pth = m._sched_path()
+    mine = os.path.dirname(os.path.abspath(sys.executable))
+    assert pth.split(':')[0] == mine, \
+        '定时 PATH 的第一段应是当前解释器的目录（%s），实得 %s' % (mine, pth)
+    assert pth.count(mine) == 1, 'PATH 里重复了当前解释器目录：%s' % pth
+    pl = m._plist(18, 10)
+    assert 'EnvironmentVariables' in pl and mine in pl, \
+        'plist 丢了 EnvironmentVariables/PATH —— 这正是踩过的那个坑'
+    for k in ('StartCalendarInterval', '<key>Hour</key><integer>18',
+              '<key>Minute</key><integer>10', m.SH, m.ROOT):
+        assert k in pl, 'plist 缺「%s」' % k
+    # plist 要能被系统解析（macOS 上真解一遍）
+    if platform.system() == 'Darwin':
+        import subprocess as _sp
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile('w', suffix='.plist', delete=False,
+                                    encoding='utf-8') as fh:
+            fh.write(pl)
+            tmp = fh.name
+        try:
+            r = _sp.run(['plutil', '-lint', tmp], capture_output=True,
+                        text=True)
+            assert r.returncode == 0, 'plist 不合法：%s' % r.stdout
+        finally:
+            os.remove(tmp)
+    # 🔴 绝对路径不许硬编码我这台机器 —— 这个文件的意义就是换机器也能用
+    assert '/Users/guhao' not in src, \
+        '源码里硬编码了 /Users/guhao —— 换台机器就指错了'
+
+    # ---- ④ 解压要把 Windows 反斜杠归一成目录（真跑一遍）----
+    #   🔴 hsjday.zip 里 12,392 个条目全是反斜杠、零个目录条目，而 Python 的
+    #     zipfile 按规范把反斜杠当普通字符 —— extractall 出来是平坦的怪文件名，
+    #     tdx2db 一个都扫不到，报的却是"我的中间文件 stock.csv 不存在"。
+    #     那个报错指不到真正的原因，所以这条必须有断言。
+    import tempfile as _tf
+    import zipfile as _zf
+    d = _tf.mkdtemp()
+    try:
+        zp = os.path.join(d, 't.zip')
+        with _zf.ZipFile(zp, 'w') as z:
+            z.writestr('sh\\lday\\sh000001.day', b'x' * 8)
+            z.writestr('sz\\lday\\sz000001.day', b'y' * 8)
+        out = os.path.join(d, 'vip')
+        n = m._extract_zip(zp, out)
+        assert n == 2, '落盘文件数不对：%d' % n
+        assert os.path.isfile(os.path.join(out, 'sh', 'lday',
+                                           'sh000001.day')), \
+            ('反斜杠没归一成目录 —— 解出来是 %s'
+             % os.listdir(out))
+        assert sorted(os.listdir(out)) == ['sh', 'sz'], \
+            '应该建出 sh/sz 两个子目录：%s' % os.listdir(out)
+        # 路径穿越要拒（extractall 的老 CVE 就是这个）
+        bad = os.path.join(d, 'bad.zip')
+        with _zf.ZipFile(bad, 'w') as z:
+            z.writestr('..\\..\\evil.day', b'z')
+        try:
+            m._extract_zip(bad, os.path.join(d, 'v2'))
+            raise AssertionError('带 .. 的路径应被拒')
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # ---- ⑤ init 之后必须紧跟 cron ----
+    #   🔴 init 只导日线、自报"导入成功"，但 raw_adjust_factor /
+    #     raw_basic_daily 是【空表】—— 复权因子要 gbbq，而 gbbq 是 cron 下的。
+    b = src[src.index('def bootstrap('):src.index('def sync(')]
+    assert "'init'" in b and "'cron'" in b, \
+        'bootstrap 里必须 init 之后紧跟 cron（否则复权因子/基础面是空表）'
+    assert b.index("'init'") < b.index("'cron'"), 'cron 应在 init 之后'
+    assert 'raw_adjust_factor' in b and 'raw_basic_daily' in b, \
+        'bootstrap 缺"这两张表不许是空的"那条断言'
+
+    # ---- ⑥ 护栏在不在 ----
+    assert 'allow_shrink' in src and 'before_init' in src, '缺缩表护栏'
+    assert '_probe_schema' in src and '_meta' in src, '缺 schema 兼容探针'
+    assert 'duckdb://./%s' in src or "duckdb://./" in src, 'init 目标写法不对'
+    #  init 必须先落到别的文件，确认后才替换（不许直接覆盖 tdx.db）
+    assert "DB + '.new'" in src, \
+        'init 直接覆盖 tdx.db 了 —— 全量包不含退市股时历史会静默缩水'
+    # 本地这个库的 schema 版本读得出来（顺带证明 _meta 判据有效）
+    v = m._db_schema_version()
+    if v:
+        assert m._major(v) is not None, 'schema 版本解析不出主版本号：%s' % v
+    return ('资产表 4 个平台且无 Darwin_x86_64；aarch64/amd64 归一；'
+            'CLI 用实测的 --dburi/--min（不是文档的 --dbpath/--minline）；'
+            '反斜杠路径归一成目录树且拒路径穿越；bootstrap 里 init 后紧跟 '
+            'cron 且断言复权因子表非空；'
+            '不用 pip 装（PyPI 同名项目无 DuckDB）；'
+            '定时 PATH 首段是当前解释器%s；plist 带 EnvironmentVariables 且 '
+            'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在'
+            '%s' % (mine, ('；本地库 schema %s' % v) if v else ''))
+
+
 @case('买点清单：目标价/股息率互算 + 到价判定 + 提醒去重', tag='fast')
 def t_alerts():
     """把用户那张 Excel 搬进来的那张表。**它不是策略**（没有回测、不下单）。
