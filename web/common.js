@@ -72,6 +72,32 @@ function cell(k, v, sub, cls) {
     <div class="v">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
 }
 
+/* ---- ⓘ 口径说明 ------------------------------------------------------
+   ★ **解释放进点开的浮块，不占主页面。** 主视图上每多一行"这个数是怎么
+     算的"，天天要看的那几个数字就被推远一屏 —— 而口径只在头一次看时要读。
+   🔴 但【警告】不许进来：警告要一直看得见。"有 3 笔费用是估算的"藏起来
+     等于没有。这里只放"这个数是怎么算的"，不放"这个数可能不对"。
+   ★ 用 class 开关而不是 style.display —— `.hlpbox` 的 display:none 写在
+     样式表里，`style.display=''` 只是删掉内联样式，规则照旧生效（点了
+     没反应，且不报错）。 */
+function helpIcon(id, html) {
+  return `<a href="#" class="hlp" data-h="${id}" title="口径说明">ⓘ</a>
+    <div class="hlpbox" id="hlpb_${id}">${html}</div>`;
+}
+function bindHelp() {
+  $$('.hlp').forEach(a => a.onclick = ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const b = document.getElementById('hlpb_' + a.dataset.h);
+    if (!b) return;
+    const was = b.classList.contains('on');
+    $$('.hlpbox.on').forEach(x => x.classList.remove('on'));
+    if (!was) b.classList.add('on');
+  });
+  /* 点别处收起 —— 浮块盖住下面的表格，留着不动会挡住要看的数字。 */
+  document.addEventListener('click', () =>
+    $$('.hlpbox.on').forEach(x => x.classList.remove('on')));
+}
+
 /* ---- 代码 ----
    ★ 与 assay/stock.py: norm_code 同一套规则。判不出来返回 null 而不抛错 ——
      搜索框每敲一个字都会调它，半个代码不是错误。 */

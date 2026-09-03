@@ -256,52 +256,43 @@ async function loadLive(aid){
   ${kpiHtml(o)}
   ${sigHtml(sig, o.alert, o.alert_why)}
   <div class="lvsec"><h3>当前持仓
-      ${it.length?`<span class="lvwhy">${it.length} 只 · 市值 ${num(P.market_value,2)}
-        · 成本 ${num(P.cost,2)} · 浮盈 <b style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}
-        ${P.pnl_pct!=null?'（'+sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%）':''}</b>
-        · 估值日 ${esc(P.asof||'—')}</span>`:''}</h3>
+      ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}`:''}</h3>
     ${it.length?`<table class="lvt lvpos">
       <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
-          <th class="rt">摊薄成本<div class="lvwhy">含买入费</div></th>
-          <th class="rt">保本价</th>
-          <th class="rt">现价</th><th class="rt">市值</th>
+          <th class="rt">成本</th>
+          <th class="rt">现价</th>
+          <th class="rt">当日</th><th class="rt">当日盈亏</th>
+          <th class="rt">市值</th>
           <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
-          <th class="rt">估卖出费</th><th class="tx">建仓</th></tr>
+          <th class="tx">建仓</th></tr>
       ${it.map(x=>`<tr>
         <td>${skLink(x.code, x.code)}</td>
         <td class="tx">${skLink(x.code, x.name||'')}</td>
         <td class="rt">${num(x.shares)}</td>
-        <td class="rt" title="成交均价 ${num(x.cost,4)}（引擎 entry_price 用它）＋买入费 ${num(x.buy_fee,2)}">${num(x.cost_net,3)}</td>
-        <td class="rt lvwhy" title="卖到这个价才不亏（含估算卖出费）">${x.breakeven==null?'—':num(x.breakeven,3)}</td>
+        <td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee,2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost,4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven==null?'—':num(x.breakeven,3)}（含估算卖出费 ${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}）">${num(x.cost_net,3)}</td>
         <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
             `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}${
           x.rt_src?`<span class="lvwhy" style="color:var(--accent)"
             title="盘中实时价（${esc(x.rt_at||'')}，来源 ${esc(x.rt_src)}）">实</span>`:''}</td>
+        <td class="rt" style="color:${col(x.chg_day)}"
+            title="相对昨收 ${x.preclose==null?'—':num(x.preclose,2)}">${
+          x.chg_day==null?'—':sgn(x.chg_day)+(x.chg_day*100).toFixed(2)+'%'}</td>
+        <td class="rt" style="color:${col(x.pnl_day)}"
+            title="${x.entry===(P.asof||'').slice(0,10)?'今天建的仓 —— 基准是成交价，不是昨收':'基准是昨收 '+num(x.preclose,2)}">${
+          x.pnl_day==null?'—':sgn(x.pnl_day)+num(x.pnl_day,2)}</td>
         <td class="rt">${x.value==null?'—':num(x.value,2)}</td>
         <td class="rt" style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
         <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
         <td class="rt">${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
-        <td class="rt lvwhy">${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}</td>
         <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
       </table>
-      <div class="lvwhy" style="margin-top:6px">
-        <b>浮盈按「摊薄成本」算，已含买入费</b>（券商 App 的口径）——
-        费用是真金白银出去了，不算进成本等于把浮盈报高。部分卖出时，
-        那一批的买入费按<b>剩余股数比例</b>留在成本里。<br>
-        三个价各答一个问题：<b>成交均价</b>是喂给引擎 <code>entry_price</code>
-        的那个数（<b>止损、吊灯、红利税档位都读它</b>，所以它不含费、不能动），
-        也是能与回测 <code>trades.ret</code> 对照的口径（引擎的 ret 只含滑点
-        不含佣金）；<b>摊薄成本</b>是浮盈的基准；<b>保本价</b> =
-        摊薄成本 ÷(1−卖出费率)，卖到它才不亏。<br>
-        <b>浮盈 − 估卖出费 = 全平落袋</b>，不会重复计费：买入费只在成本里出现
-        一次，卖出费只在这一步出现一次。<br>
-        都不含<b>已收分红</b>（<code>entry_price</code> 除权时不缩，就为了把
-        价差与分红分开记）；分红到账请在「✎ 记一笔 › 现金」里录一条。
-        ${P.fee_estimated_n?'<br>⚠ 有 <b>'+P.fee_estimated_n
-          +'</b> 笔买入的费用是<b>估算</b>的，摊薄成本跟着也是估算 ——'
-          +'对完账单可在流水页「冲正 + 重录」填实际值。':''}</div>`
+      ${P.fee_estimated_n?'<div class="lvwhy" style="margin-top:6px">'
+        +'⚠ 有 <b>'+P.fee_estimated_n+'</b> 笔买入的费用是<b>估算</b>的，'
+        +'成本跟着也是估算 —— 对完账单可在流水页「冲正 + 重录」填实际值。'
+        +'</div>':''}`
       :`<div class="none">空仓${o.n_fills?'':' —— 还没录过成交，点「✎ 记一笔」'}</div>`}
   </div>`;
+  bindHelp();
   liveEquityTag(aid);
   if($('#todofold')) $('#todofold').onclick=ev=>{ ev.preventDefault();
     LVTODO = !((LVTODO==null) ? !!o.alert : LVTODO); loadLive(aid); };
@@ -337,16 +328,16 @@ function kpiHtml(o){
            (P.items||[]).length+' 只 · 成本 '+num(P.cost,2))}
     ${cell('可用现金', num(P.cash,2),
            wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%')}
-    ${cell('持仓浮盈 <span class="lvwhy">含买入费</span>',
+    ${cell('持仓浮盈'+pnlHelp(P),
            `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
-           (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':'')
-           +(P.buy_fee?'　按摊薄成本（已含买入费 '+num(P.buy_fee,2)+'）':'')
-           +'　'+priceSrc(P))}
-    ${cell('全平落袋',
-           P.pnl_net==null?'—':
-           `<span style="color:${col(P.pnl_net)}">${sgn(P.pnl_net)}${num(P.pnl_net,2)}</span>`,
-           P.exit_fee_est?'再扣估算卖出费 '+num(P.exit_fee_est,2)+'（含印花税万5）'
-             :'再扣估算卖出费')}
+           (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':''))}
+    ${cell('当日盈亏',
+           P.pnl_day==null?'—':
+           `<span style="color:${col(P.pnl_day)}">${sgn(P.pnl_day)}${num(P.pnl_day,2)}</span>`,
+           (P.pnl_day!=null&&P.market_value)
+             ? (P.pnl_day/(P.market_value-P.pnl_day)>=0?'+':'')
+               +(P.pnl_day/(P.market_value-P.pnl_day)*100).toFixed(2)+'%'
+             : '')}
     <div id="kperf" style="display:none"></div>
   </div>
   <div class="kpi" id="kperf2">
@@ -1172,24 +1163,61 @@ const skLink=(code, text, cls)=>code
        title="在新标签页打开个股：${esc(code)}">${esc(text==null?code:text)}</a>`
   : esc(text||'');
 
-/* 这份估值用的是什么价。★ 必须显示 —— 人分不清"实时"和"昨收"的话，
-   那是两个数量级的误解（尤其大涨大跌那天）。 */
-function priceSrc(P){
-  if(!P) return '';
-  if(P.price_src==='实时') return `<b style="color:var(--accent)">实时 ${esc(P.rt_at||'')}</b>`;
-  if(P.price_src==='部分实时')
-    return `<b style="color:var(--warn)">部分实时 ${P.rt_n}/${(P.items||[]).length}</b>`
-      +`<span class="lvwhy">　其余按 ${esc(P.asof_close||P.asof||'')} 收盘</span>`;
-  return `收盘 ${esc(P.asof_close||P.asof||'—')}`;
-}
-
+/* ★ 数据日与报价时间写在【同一个标签】里，紧跟账户名。
+     原来数据日在账户后面、"实时 09-03 13:19"在持仓浮盈下面 —— 两处各写
+     一半，看着像自相矛盾（"数据到 09-02" vs "实时 09-03"）。其实它们是
+     两件事：**日线面板**到 09-02，**现价**是 09-03 盘中的。挨着放就不矛盾了。 */
 function dataDayTag(o){
-  const dd=o.data_day, sg=o.signal||{}, asof=sg.data_asof;
+  const dd=o.data_day, sg=o.signal||{}, asof=sg.data_asof, P=o.pos||{};
   if(!dd) return '<span class="lvtag" title="拿不到面板最新日 —— serve.py 可能是旧进程">数据日 —</span>';
   const behind=asof&&asof<dd;
+  let px='', t='';
+  if(P.price_src==='实时'){
+    px=' · 实时 '+esc((P.rt_at||'').slice(5));
+    t='；现价是 '+(P.rt_at||'')+' 的盘中实时价';
+  }else if(P.price_src==='部分实时'){
+    px=' · 部分实时 '+P.rt_n+'/'+(P.items||[]).length;
+    t='；'+P.rt_n+' 只有盘中实时价（最新 '+(P.rt_at||'')
+      +'），其余按 '+(P.asof_close||'')+' 收盘';
+  }else if((P.items||[]).length){
+    px=' · 收盘价';
+    t='；现价用的是 '+(P.asof_close||dd)+' 收盘（没有盘中实时价）';
+  }
   return `<span class="lvtag${behind?' warn':''}"
-    title="本地行情最新到 ${dd}${behind?'，而当前信号是用 '+asof+' 的数据算的 —— 点「立即重算」':''}"
-    >数据日 ${dd}${behind?' · 信号用的是 '+asof:''}</span>`;
+    title="日线行情最新到 ${dd}${t}${behind?'。⚠ 当前信号是用 '+asof+' 的数据算的 —— 点「立即重算」':''}"
+    >数据日 ${dd}${px}${behind?' · 信号用的是 '+asof:''}</span>`;
+}
+
+/* ---- 两块口径说明（点 ⓘ 才展开）--------------------------------------
+   ★ 这些是"这个数怎么算的"，只在头一次看时要读 —— 常驻主页面的话，
+     天天要看的数字被解释文字推远一屏。警告不在这里（见表下的 ⚠）。 */
+function pnlHelp(P){
+  return helpIcon('pnl', `<b>持仓浮盈</b> = 市值 − 摊薄成本额，<b>已含买入费</b>
+    （券商 App 的口径）—— 费用是真金白银出去了，不算进成本等于把浮盈报高。
+    往返自证：<code>浮盈 = 现值 − (本金 + 买入费) = 现值 − 现金减少额</code>。<br>
+    ${P.buy_fee?'当前含买入费 <b>'+num(P.buy_fee,2)+'</b>；':''}
+    不含费的口径（专门用来和回测对照）是
+    ${P.pnl_gross==null?'—':'<b>'+num(P.pnl_gross,2)+'</b>'}。<br>
+    再扣估算卖出费 ${P.exit_fee_est?num(P.exit_fee_est,2)+'（含印花税万5）':'—'}
+    就是<b>全平落袋</b> ${P.pnl_net==null?'—':'<b>'+num(P.pnl_net,2)+'</b>'}，
+    不会重复计费：买入费只在成本里出现一次，卖出费只在这一步出现一次。<br>
+    <b>当日盈亏</b> = Σ 每一批 ×（现价 − 基准）。基准分两种：<b>今天买的</b>那批
+    用它自己的成交价（今天开盘时还没持有它），<b>以前买的</b>用昨收。<br>
+    两者都不含<b>已收分红</b>（<code>entry_price</code> 除权时不缩，就为了把
+    价差与分红分开记）；分红到账请在「✎ 记一笔 › 现金」里录一条。`);
+}
+function posHelp(P){
+  return helpIcon('pos', `<b>成本</b>这一列是<b>摊薄成本</b> =
+    (成交额 + 买入费) / 股数 —— 券商 App 说的"摊薄成本价"就是它，浮盈按它算。
+    部分卖出时，那一批的买入费按<b>剩余股数比例</b>留在成本里。<br>
+    另外两个价放在这一列的悬浮提示里：<b>成交均价</b>是喂给引擎
+    <code>entry_price</code> 的那个数（<b>止损、吊灯、红利税档位都读它</b>，
+    所以它不含费、不能动），也是能与回测 <code>trades.ret</code> 对照的口径
+    （引擎的 ret 只含滑点不含佣金）；<b>保本价</b> = 摊薄成本 ÷(1−卖出费率)，
+    卖到它才不亏。<br>
+    现价带「实」的是盘中实时价，与自选页<b>共用同一个实时库</b>
+    （<code>datalake/rt/</code>）；带「停」的是停牌，按最后已知价挂账。<br>
+    ${P.exit_fee_est?'当前全部卖出的估算费用合计 <b>'+num(P.exit_fee_est,2)+'</b>。':''}`);
 }
 
 /* ---- 自动同步开关 ---------------------------------------------------

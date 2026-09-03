@@ -289,7 +289,19 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
 .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
   gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;
   overflow:hidden;margin-bottom:14px}
-.kpi>div{background:var(--panel2);padding:7px 10px}
+.kpi>div{background:var(--panel2);padding:7px 10px;position:relative}
+/* ⓘ 口径说明：小图标 + 点开的浮块（解释不占主页面） */
+.hlp{display:inline-block;width:13px;height:13px;line-height:13px;text-align:center;
+  border-radius:50%;font-size:10px;color:var(--dim);text-decoration:none;
+  border:1px solid var(--line);vertical-align:1px;margin-left:3px}
+.hlp:hover{color:var(--accent);border-color:var(--accent)}
+.hlpbox{display:none;position:absolute;z-index:40;left:0;top:100%;margin-top:4px;
+  width:min(460px,86vw);background:var(--panel);border:1px solid var(--line);
+  padding:10px 12px;font-size:11px;line-height:1.65;color:var(--fg);
+  box-shadow:0 8px 28px rgba(0,0,0,.45);text-transform:none;letter-spacing:0}
+.hlpbox.on{display:block}
+.hlpbox b{color:var(--fg)}
+.hlpbox code{font-size:10px}
 .kpi .k{font-size:10px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi .v{font-family:"SF Mono",Menlo,monospace;font-size:15px;margin-top:2px;
@@ -371,7 +383,7 @@ table.dt td:first-child{color:var(--fg)}
 .lvsec.wide{grid-column:span 2}
 .lvsec{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--panel2)}
 .lvsec.lvalert{border-color:var(--warn)}
-.lvsec h3{display:flex;align-items:baseline;gap:6px;
+.lvsec h3{display:flex;align-items:baseline;gap:6px;position:relative;
   margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
   color:var(--dim);font-weight:600}
 table.lvt{width:100%;border-collapse:collapse;font-size:12px}

@@ -19,6 +19,7 @@
      否则"我加过的票不见了"。 */
 let GROUP = qs('group') || '';
 let NEWG = null;              // 新建分组流程里暂存组名
+let W = null;                 // 上一次取回的整份自选（页签切换只重渲染）
 
 pageHead('watch', '⭐ 自选');
 load();
@@ -27,16 +28,28 @@ async function load() {
   const pg = $('#pg');
   pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
   try {
-    const [w, lg] = await Promise.all([
-      j('/api/watchlist' + (GROUP ? '?group=' + encodeURIComponent(GROUP) : '')),
-      j('/api/watchlist/log').catch(e => ({rows: [], error: String(e)})),
-    ]);
-    pg.innerHTML = head(w) + '<div class="lvmsg" id="wmsg"></div>'
-      + table(w) + logBox(lg);
+    /* 一次取【全部】，页签在本地切 —— 每切一次页签重新打一遍接口的话，
+       同一份数据要取 N 遍（自选页与持仓页共用一个实时库，页面侧不该
+       多打请求）。切页签也就没有等待。 */
+    W = await j('/api/watchlist');
+    render();
+  } catch (e) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+  }
+}
+
+function render() {
+  const pg = $('#pg'), w = W;
+  const names = (w.groups || []).map(g => g.name);
+  /* 🔴 没有「全部」页签了 —— 不同账户的持仓放一起横向比没有意义
+     （区间、策略、本金都不同）。所以 GROUP 必须落在某个真分组上：
+     URL 里带的那个不存在了（改过名/清空了）就落到第一个。 */
+  if (!names.includes(GROUP)) GROUP = sortGroups(w)[0] ? sortGroups(w)[0].name : '';
+  pg.innerHTML = head(w) + '<div class="lvmsg" id="wmsg"></div>' + table(w);
+  {
     mountSearch($('#wadd'), {onPick: async r => {
       try {
-        /* 加到哪个组：新建流程里用 NEWG，否则用当前页签；
-           在「全部」页签下加就进默认组。 */
+        /* 加到哪个组：新建流程里用 NEWG，否则就进当前页签那个组。 */
         await post('/api/watchlist', {act: 'add', code: r.code,
           group: NEWG || GROUP || undefined});
         NEWG = null;
@@ -46,8 +59,8 @@ async function load() {
     $$('.wtab[data-g]').forEach(e => e.onclick = ev => {
       ev.preventDefault(); GROUP = e.dataset.g;
       const u = new URL(location.href);
-      if (GROUP) u.searchParams.set('group', GROUP); else u.searchParams.delete('group');
-      history.replaceState(null, '', u); load(); });
+      u.searchParams.set('group', GROUP);
+      history.replaceState(null, '', u); render(); });
     /* 新建分组：先建个空页签没意义（自选是按票分组的），所以让它
        "选一只票 + 填组名"一步完成 —— 空组存不下来也不该假装存下来了。 */
     $('#wnewg').onclick = ev => {
@@ -90,8 +103,6 @@ async function load() {
       if (n == null) return;
       try { await post('/api/watchlist', {act: 'note', code: e.dataset.c, note: n}); load(); }
       catch (err) { alert(String(err)); } });
-  } catch (e) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
   }
 }
 
@@ -100,24 +111,32 @@ async function load() {
      筛选标签。参考 table-data-viewer 的 `groups[] -> items[]` 模型。
    ★ 实盘账户组带「持」标记并排在前面 —— 它们是自动同步来的，
      和手工分的组语义不同（自动组里的票会跟着持仓变）。 */
-function head(w) {
-  const gs = (w.groups || []).slice();
-  // 实盘自动组排前面，其余按名称
-  gs.sort((a, b) => {
+/* 实盘自动组排前面（它们跟着持仓变），其余按名称 */
+function sortGroups(w) {
+  return (w.groups || []).slice().sort((a, b) => {
     const aa = a.name.startsWith('实盘·'), bb = b.name.startsWith('实盘·');
     if (aa !== bb) return aa ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+function rowsOf(w) {
+  return (w.rows || []).filter(x => x.group === GROUP);
+}
+
+function head(w) {
+  const gs = sortGroups(w);
   const total = gs.reduce((s, g) => s + g.n, 0);
-  const codes = (w.rows || []).map(x => x.code).slice(0, 6).join(',');
+  const rows = rowsOf(w);
+  const codes = rows.map(x => x.code).slice(0, 6).join(',');
+  const nrt = rows.filter(x => x.rt_src).length;
   return `<div class="lvhead">
-      <h2 style="font-size:17px">自选 <span class="lvwhy">${total} 只</span></h2>
-      ${w.date ? `<span class="lvtag">面板 ${esc(w.date)}</span>` : ''}
-      <span class="lvtag${w.price_src === '实时' ? ' on' : (w.rt_n ? ' warn' : '')}"
+      <h2 style="font-size:17px">自选 <span class="lvwhy">${rows.length} 只
+        ${total > rows.length ? '· 共 ' + total : ''}</span></h2>
+      <span class="lvtag${nrt === rows.length && nrt ? ' on' : (nrt ? ' warn' : '')}"
         title="自选与持仓共用同一个实时库（datalake/rt/），页面不额外调接口">
-        ${w.price_src === '实时' ? '实时 ' + esc(w.rt_at || '')
-          : (w.rt_n ? '部分实时 ' + w.rt_n + '/' + (w.rows || []).length
-                    : '收盘 ' + esc(w.date || ''))}</span>
+        数据日 ${esc(w.date || '—')}${nrt === rows.length && nrt
+          ? ' · 实时 ' + esc((w.rt_at || '').slice(5))
+          : (nrt ? ' · 部分实时 ' + nrt + '/' + rows.length : ' · 收盘价')}</span>
       <span style="flex:1"></span>
       ${codes ? `<a class="chip" href="/compare.html?codes=${encodeURIComponent(codes)}"
         title="把本页签前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a>` : ''}
@@ -126,8 +145,6 @@ function head(w) {
       <div id="wadd" style="flex:0 0 240px"></div>
     </div>
     <div class="wtabs">
-      <a href="#" class="wtab${GROUP === '' ? ' on' : ''}" data-g=""
-        >全部 <span class="n">${total}</span></a>
       ${gs.map(g => `<a href="#" class="wtab${GROUP === g.name ? ' on' : ''}"
         data-g="${esc(g.name)}" title="${g.name.startsWith('实盘·')
           ? '实盘账户自动同步的组 —— 里面的票跟着持仓变' : '手工分组'}"
@@ -138,10 +155,11 @@ function head(w) {
 }
 
 function table(w) {
-  const rows = w.rows || [];
-  if (!rows.length) return '<div class="none">自选是空的 —— 右上角搜代码或名称加进来，'
-    + '或者在个股页/盘面榜单里点 ★</div>';
-  return `<div class="lvsec"><h3>盯盘</h3>
+  const rows = rowsOf(w);
+  if (!rows.length) return '<div class="none">'
+    + (W && (W.groups || []).length ? '这个分组是空的' : '自选是空的')
+    + ' —— 右上角搜代码或名称加进来，或者在个股页/盘面榜单里点 ★</div>';
+  return `<div class="lvsec"><h3>盯盘 <span class="lvwhy">${esc(GROUP)}</span></h3>
     <div class="pw"><table class="pkt">
       <tr><th class="tx">分组</th><th class="tx">代码</th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
@@ -178,9 +196,8 @@ function table(w) {
     </table></div>
     <div class="lvwhy" style="margin-top:6px">
       账本 <b>append-only</b>（<code>live/watchlist.jsonl</code>）——
-      移出是追加一条 <code>remove</code>，历史仍然保留（见下面的变更历史）。
-      当前池子由<b>重放</b>得出，不单独存一份：存两份就会分叉，
-      而"页面显示的和日志对不上"没法复盘。<br>
+      移出是追加一条 <code>remove</code>，当前池子由<b>重放</b>得出，
+      不单独存一份：存两份就会分叉，而"页面显示的和日志对不上"没法复盘。<br>
       带「持」标记的页签是<b>实盘账户自动同步</b>的（跟着持仓变）。
       🔴 <b>只加不自动移</b> —— 卖光了标"已清仓"但留在自选里，
       自动移出会把手写的备注一起抹掉。要清就自己点「移出」。<br>
@@ -191,24 +208,4 @@ function table(w) {
   </div>`;
 }
 
-function logBox(lg) {
-  const rows = lg.rows || [];
-  if (!rows.length) return '';
-  const ACT = {add: '加入', remove: '移出', group: '改分组', note: '改备注'};
-  return `<div class="lvsec" style="margin-top:14px"><h3>变更历史
-    <span class="lvwhy">${rows.length} 条 · append-only</span></h3>
-    <div class="pw" style="max-height:280px;overflow:auto"><table class="pkt">
-      <tr><th class="tx">时间</th><th class="tx">动作</th><th class="tx">代码</th>
-        <th class="tx">分组</th><th class="tx">备注</th></tr>
-      ${rows.slice(0, 200).map(r => `<tr>
-        <td class="tx lvwhy">${esc(String(r.ts || '').replace('T', ' '))}</td>
-        <td class="tx">${esc(ACT[r.act] || r.act || '')}</td>
-        <td class="tx"><a href="${stockHref(r.code || '')}"
-          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc((r.code || '').slice(0,6))}</a></td>
-        <td class="tx lvwhy">${esc(r.group || '')}</td>
-        <td class="tx lvwhy">${esc(r.note || '')}</td>
-      </tr>`).join('')}
-    </table></div>
-  </div>`;
-}
 </script>

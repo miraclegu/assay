@@ -1442,20 +1442,23 @@ def cash(aid, asof=None):
 # ============================ 权益与收益 ============================
 
 def _last_px(feed, codes, day):
-    """{code: (最新收盘, 那天的日期)}，按 <= day 取最近一条。
-    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。"""
+    """{code: (最新收盘, 那天的日期, 那天的昨收)}，按 <= day 取最近一条。
+    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。
+
+    ★ 一并带回 `preclose` 是为了算**当日涨跌**：面板里有这一列，
+      不用自己回去找上一个交易日（停牌股的"上一个交易日"还得逐只算）。"""
     if not codes:
         return {}
     q = "','".join(codes)
     rows = feed.con.execute("""
-        SELECT code, close_bfq, date FROM (
-          SELECT jq_code AS code, close_bfq, date,
+        SELECT code, close_bfq, date, preclose FROM (
+          SELECT jq_code AS code, close_bfq, date, preclose,
                  row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
           FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
           WHERE jq_code IN ('%s') AND date <= DATE '%s'
             AND date > DATE '%s' - INTERVAL 400 DAY
         ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
-    return {r[0]: (r[1], r[2]) for r in rows}
+    return {r[0]: (r[1], r[2], r[3]) for r in rows}
 
 
 def positions_valued(aid, datalake=None):
@@ -1510,15 +1513,41 @@ def positions_valued(aid, datalake=None):
         avg = sum(l['shares'] * l['price'] for l in lots) / sh
         buy_fee = sum(l.get('fee') or 0 for l in lots)
         avg_net = (sh * avg + buy_fee) / sh          # 摊薄成本
-        p, pd_ = px.get(c, (None, None))
+        p, pd_, pc = px.get(c, (None, None, None))
         rt_src = rt_at = None
         r = rtp.get(c)
         if r and r.get('price'):
             p, rt_src, rt_at = r['price'], r.get('src') or 'rt', r.get('at')
+            # 🔴 盘中的「昨收」不能用面板那一行的 preclose —— 那是**面板
+            #   那一天**的昨收（面板到 09-02 时它是 09-01 收盘），而实时价
+            #   是 09-03 的，基准差一天。正确基准：快照自带的 preclose，
+            #   退一步用面板最新那天的**收盘**（= 今天的昨收）。
+            pc = r.get('preclose') or (px.get(c, (None,))[0])
         v = (sh * p) if p else None
         pnl = (v - sh * avg_net) if v is not None else None
+        # ★ 当日盈亏 = Σ 每一批 × (现价 − 基准)，基准分两种：
+        #     今天买的那批 -> 它自己的成交价（今天开盘时还没持有它，
+        #       拿昨收当基准会把"买入那一刻到现在"之外的涨幅也算进当日）
+        #     以前买的     -> 昨收
+        #   这是券商 App 的算法。按整只票统一用昨收算的话，建仓当天
+        #   那只票的当日盈亏会凭空多出一个开盘涨幅，而它不报错。
+        today = (rt_at[:10] if rt_at else (pd_.isoformat() if pd_ else None))
+        pnl_day = None
+        if p:
+            acc, ok = 0.0, True
+            for l in lots:
+                base = (l['price'] if (today and l['date'].isoformat() == today)
+                        else pc)
+                if base is None:
+                    ok = False
+                    break
+                acc += l['shares'] * (p - base)
+            pnl_day = round(acc, 2) if ok else None
         out['items'].append({
             'rt_src': rt_src, 'rt_at': rt_at,
+            'preclose': (round(pc, 3) if pc else None),
+            'chg_day': (round(p / pc - 1, 6) if p and pc else None),
+            'pnl_day': pnl_day,
             'code': c, 'name': nm.get(c, ''), 'shares': sh,
             'cost': round(avg, 4),                  # 成交均价（引擎口径）
             'cost_net': round(avg_net, 4),          # 摊薄成本（含买入费）
@@ -1567,6 +1596,11 @@ def positions_valued(aid, datalake=None):
         if f:
             exit_fee += f
     out['exit_fee_est'] = round(exit_fee, 2)
+    # 当日盈亏汇总：有一只算不出来（无价 / 无昨收）就整体给 None ——
+    # 少了一只的合计看着像个正常数字，而它是错的。
+    dv = [x['pnl_day'] for x in out['items']]
+    out['pnl_day'] = (round(sum(dv), 2) if dv and all(x is not None for x in dv)
+                      else None)
     out['market_value'] = round(mv, 2)
     out['cost'] = round(cst, 2)                 # 成交额（不含费）
     out['cost_net'] = round(cst_net, 2)         # 摊薄成本额（含买入费）

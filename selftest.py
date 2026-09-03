@@ -2706,7 +2706,7 @@ def t_live_ui():
             # ---- KPI 板：账户的数字集中一处，不再是顶栏一串标签 ----
             #   ★ 原来"我现在怎么样"要在标题、标签栏、持仓汇总三处来回凑。
             _kp = ' '.join(pg.locator('#lvbody .kpi .k').all_inner_texts())
-            for k in ('总资产', '持仓市值', '可用现金', '持仓浮盈'):
+            for k in ('总资产', '持仓市值', '可用现金', '持仓浮盈', '当日盈亏'):
                 assert k in _kp, 'KPI 缺「%s」：%s' % (k, _kp)
             assert '权益' not in pg.locator('#lvbody .lvhead').inner_text(), \
                 '顶栏又出现"权益"标签了 —— 数字应集中在 KPI 板'
@@ -2732,13 +2732,31 @@ def t_live_ui():
             else:
                 # 还没成交 -> 不编数字，说明为什么没有
                 assert '业绩' in _kp2, '没有权益曲线时也要有一格说明：%s' % _kp2
-            # 浮盈那格要写明"纯价差"，并且另有一格"全平落袋"
-            assert '含买入费' in _kp, \
-                'KPI 要写明浮盈是按摊薄成本（含买入费）算的：%s' % _kp
-            assert '全平落袋' in _kp, 'KPI 缺「全平落袋」（扣估算卖出费）：%s' % _kp
+            # ---- 口径说明进 ⓘ，不占主视图 ----
+            #   ★ 主视图上每多一行"这个数是怎么算的"，天天要看的数字就被
+            #     推远一屏。但知识不能丢：点开必须给全（摊薄成本 / 全平落袋
+            #     / 当日盈亏的基准）。
             _kpv = pg.locator('#lvbody .kpi').first.inner_text()
             assert 'undefined' not in _kpv and 'NaN' not in _kpv, \
                 'KPI 板里有 undefined/NaN：%s' % _kpv
+            for _bad in ('含买入费', '摊薄成本', '全平落袋'):
+                assert _bad not in _kpv, \
+                    '口径解释又回到 KPI 主视图上了（该进 ⓘ）：%s' % _kpv
+            assert pg.locator('#lvbody .kpi .hlp').count() >= 1, \
+                'KPI 里没有 ⓘ —— 口径说明搬走了就得有地方看'
+            assert not pg.locator('#hlpb_pnl').is_visible(), 'ⓘ 默认就展开了'
+            pg.locator('#lvbody .kpi .hlp').first.click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#hlpb_pnl').is_visible(), \
+                ('ⓘ 点了没反应 —— .hlpbox 的 display:none 写在样式表里，'
+                 '开的时候只能加 class，不能靠 style.display=""')
+            _hb = pg.locator('#hlpb_pnl').inner_text()
+            for k in ('摊薄成本', '买入费', '全平落袋', '当日盈亏', '昨收'):
+                assert k in _hb, 'ⓘ 里缺「%s」的口径：%s' % (k, _hb[:200])
+            pg.locator('#lvbody .kpi').first.click()      # 点别处要收起
+            pg.wait_for_timeout(300)
+            assert not pg.locator('#hlpb_pnl').is_visible(), \
+                'ⓘ 浮块点别处不收 —— 它盖着下面的持仓表'
 
             # ---- 待办：没到警示时间默认收起，到点自己打开 ----
             #   ★ 非调仓日、没有止损/炸板卖出时，待办里其实什么都没有，
@@ -2852,10 +2870,25 @@ def t_live_ui():
             th = [x.strip() for x in
                   pg.locator('#lvbody table.lvpos th').all_inner_texts()]
             _thz = ' '.join(th)
-            for k in ('摊薄成本', '保本价', '现价', '市值', '浮盈', '仓位',
-                      '估卖出费'):
+            for k in ('成本', '现价', '当日', '当日盈亏', '市值', '浮盈',
+                      '仓位'):
                 assert k in _thz, '持仓表缺「%s」列：%s' % (k, th)
-            assert '含买入费' in _thz, '摊薄成本那列要注明含买入费：%s' % th
+            # 🔴 列数是有限的：保本价 / 估卖出费 / "含买入费"这种注解都退到
+            #    悬浮提示与 ⓘ 里 —— 十几列会把要看的数字挤出屏幕。
+            for k in ('保本价', '估卖出费', '含买入费'):
+                assert k not in _thz, '「%s」不该再占一列：%s' % (k, th)
+            _ct = pg.locator(
+                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(4)'
+            ).get_attribute('title') or ''
+            for k in ('摊薄成本', '成交均价', '保本价'):
+                assert k in _ct, \
+                    '三个成本口径要在「成本」列的悬浮提示里给全，缺「%s」：%s' \
+                    % (k, _ct)
+            # 当日盈亏的基准：以前买的按昨收，今天买的按成交价
+            _dt = pg.locator(
+                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(7)'
+            ).get_attribute('title') or ''
+            assert '基准' in _dt, '当日盈亏没说基准是什么：%s' % _dt
             # 代码与名称【各占一列】—— 挤在一格里没法按名称扫
             assert th[:2] == ['代码', '名称'], '持仓表前两列应是代码/名称：%s' % th
             _pc = [x.strip() for x in
@@ -2869,9 +2902,18 @@ def t_live_ui():
             _kpz = pg.locator('#lvbody .kpi').first.inner_text()
             _psrc = pg.evaluate('() => (LVO && LVO.pos && LVO.pos.price_src) || ""')
             assert _psrc, '估值没给 price_src'
-            assert _psrc in _kpz, \
-                '持仓浮盈那格没说明价来源（%s）：%s' % (_psrc, _kpz[:160])
+            # ★ 价来源与数据日写在【同一个标签】里，紧跟账户名 —— 原来数据日
+            #   在账户后面、"实时 09-03 13:19"在持仓浮盈下面，两处各写一半，
+            #   看着像自相矛盾（"数据到 09-02" vs "实时 09-03"）。
+            _dtag = ' '.join(pg.locator('#lvbody .lvhead .lvtag').all_inner_texts())
+            assert _psrc in _dtag or ('收盘' in _dtag and _psrc == '收盘'), \
+                '数据日那个标签里没说价来源（%s）：%s' % (_psrc, _dtag)
+            assert '实时' not in _kpz and ':' not in _kpz, \
+                '报价时间又回到持仓浮盈下面了（与数据日重复）：%s' % _kpz[:160]
             if _psrc == '实时':
+                import re as _re0
+                assert _re0.search(r'实时\s*\d{2}-\d{2}\s*\d{2}:\d{2}', _dtag), \
+                    '说是实时却没给到分钟的时间：%s' % _dtag
                 # 逐只也要标，且现价列上有「实」
                 assert pg.locator(
                     '#lvbody table.lvpos td .lvwhy[title*="实时价"]').count() >= 1, \
@@ -2887,8 +2929,12 @@ def t_live_ui():
             _sh = pg.locator('#lvbody .lvsec h3').first.inner_text()
             assert '（用' not in _sh, '数据日期又被塞回括号里了：%s' % _sh
             head = ' '.join(pg.locator('#lvbody .lvsec h3').last.inner_text().split())
-            for k in ('市值', '成本', '浮盈'):
-                assert k in head, '持仓汇总缺「%s」：%s' % (k, head)
+            # 🔴 汇总数字只在 KPI 板出现【一次】：这里再写一遍市值/成本/浮盈
+            #   就是同一份数据两处渲染，迟早不一致（而且眼睛要来回跳）。
+            assert '只' in head, '持仓汇总该给只数：%s' % head
+            for k in ('市值', '成本', '浮盈', '估值日'):
+                assert k not in head, \
+                    '「%s」在 KPI 板里已经有了，别在标题里重复：%s' % (k, head)
             # 价格必须来自独立取价，不是"信号里恰好有的那几只"
             n_pos = pg.locator('#lvbody table.lvpos tr').count() - 1
             assert n_pos == 3, '应有 3 只持仓，实得 %d' % n_pos
@@ -3235,8 +3281,9 @@ def t_live_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
-                    '持仓 %d 只全部取到现价 + 盈亏汇总（浮盈按摊薄成本含买入费 + 保本价 + '
-                    '全平落袋）；费用三态；入金；'
+                    '持仓 %d 只全部取到现价 + 当日涨跌/当日盈亏（今天买的按成交价）'
+                    '；口径说明进 ⓘ（点开有摊薄成本/保本价/全平落袋，主视图不占版面）'
+                    '；费用三态；入金；'
                     '费率(新增面板收起/表显总费率/点行展开逐项/照账单填 5.95 逐项对上/'
                     '更正物理删除/明细竖排三列 7 行/新档旧档接续/'
                     '按成交日取档/手填优先/每账户独立/来源写在行上)；'
@@ -3244,7 +3291,8 @@ def t_live_ui():
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
                     '价格区间校验有逃生口；'
                     '排版：流水列序(日/方向/代码/名称/价/量/额/费,录入时间与来源置尾)、'
-                    '持仓代码与名称分列、数据日独立成标签、KPI 板 10 格无 undefined、'
+                    '持仓代码与名称分列、数据日与报价时间合成一个标签、'
+                    '汇总数字只在 KPI 出现一次、KPI 板无 undefined、'
                     '侧栏可收起(轨上仍见告警点)、新建表单默认收起、待办按 alert 折叠；'
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
@@ -4612,7 +4660,8 @@ def t_new_pages_ui():
             pg.wait_for_timeout(2500)
             t = clean()
             assert '中国石油' in t, '加进自选后没渲染出来：%s' % t[:200]
-            assert '变更历史' in t, '没有 append-only 的变更历史'
+            assert '变更历史' not in t, \
+                '变更历史不该渲染在页面上（账本仍在，只是不占版面）'
             assert pg.locator('.lvsec table.pkt tr').count() >= 2, '盯盘表没行'
             # ---- 页签：多个分组并列，实盘账户组带「持」并排在前 ----
             #   ★ 分组是"我要分别盯的几拨票"，用页签而不是 chip ——
@@ -4621,38 +4670,55 @@ def t_new_pages_ui():
             pg.wait_for_timeout(3000)
             tabs = [x.replace('\n', ' ') for x in
                     pg.locator('.wtab').all_inner_texts()]
-            assert len(tabs) >= 4, '页签太少（应有 全部 + 各账户 + ＋）：%s' % tabs
-            assert '全部' in tabs[0], '第一个页签应是「全部」：%s' % tabs
+            assert len(tabs) >= 4, '页签太少（应有 各账户 + 手工组 + ＋）：%s' % tabs
+            # 🔴 没有「全部」页签 —— 不同账户的持仓放一起横向比没有意义
+            assert not any('全部' in x for x in tabs), \
+                '不该再有「全部」页签：%s' % tabs
             assert tabs[-1].strip() == '＋', '最后应是新建页签：%s' % tabs
             auto = [x for x in tabs if '持' in x]
             assert len(auto) >= 2, \
                 '两个实盘账户应各成一个带「持」的页签：%s' % tabs
-            assert '持' in tabs[1], \
+            assert '持' in tabs[0], \
                 '实盘账户组应排在手工组前面（它们跟着持仓变）：%s' % tabs
-            # 切页签：行数要跟着变
-            n_all = pg.locator('.lvsec').first.locator('table.pkt tr').count()
-            pg.locator('.wtab[data-g]').nth(1).click()
-            pg.wait_for_timeout(2500)
-            n_one = pg.locator('.lvsec').first.locator('table.pkt tr').count()
-            assert 1 < n_one < n_all, \
-                '切到账户页签后行数没变少（%d -> %d）' % (n_all, n_one)
-            assert '持' in pg.locator('.wtab.on').inner_text(), '高亮没跟上'
+            assert pg.locator('.wtab.on').count() == 1, \
+                '同一时刻只该有一个页签高亮'
+            # 重新进这一页：没有「全部」了，默认要落在第一个（实盘）分组上
+            #   —— 落到空字符串的话整页一行都没有，而它不报错。
+            pg.goto(base + '/watchlist.html', wait_until='networkidle')
+            pg.wait_for_selector('.wtab.on', timeout=40000)
+            pg.wait_for_timeout(1500)
+            tabs = [x.replace('\n', ' ') for x in
+                    pg.locator('.wtab').all_inner_texts()]
+            assert '持' in pg.locator('.wtab.on').inner_text(), \
+                '默认没落在第一个分组上：%s' % pg.locator('.wtab.on').inner_text()
+            assert pg.locator('.lvsec').first.locator(
+                'table.pkt tr').count() >= 2, '默认页签下一行都没有'
             # 实时价：与持仓页共用同一个库，页面侧不额外调接口
+            #   ★ 在【实盘持仓那个页签】上验 —— 手工加的票没进抓取轮转，
+            #     在它那一页看不到实时标记是正常的。
             _psrc = pg.evaluate("() => document.querySelector("
                                 "'.lvhead .lvtag.on, .lvhead .lvtag.warn')"
                                 "?.textContent || ''")
+            assert '数据日' in _psrc, '自选头上没有数据日+报价时间：%s' % _psrc
             if '实时' in _psrc:
                 assert pg.locator(
                     'table.pkt .lvwhy[title*="实时价"]').count() >= 1, \
                     '顶栏说是实时，表里却没标出哪些是实时价'
-            pg.locator('.wtab[data-g=""]').click()
-            pg.wait_for_timeout(2000)
-            # 自选 → 个股（限定在【盯盘表】里点 —— 变更历史那张表里也有
-            # 个股链接，从那儿点会跳到别的票，断言就对不上了）
+            # 切到手工组：行数要跟着变（页签是本地切的，不重新打接口）
+            n_auto = pg.locator('.lvsec').first.locator('table.pkt tr').count()
+            man = [i for i, x in enumerate(tabs) if '持' not in x
+                   and x.strip() != '＋']
+            assert man, '手工加的那只票没有自己的页签：%s' % tabs
+            pg.locator('.wtab[data-g]').nth(man[0]).click()
+            pg.wait_for_timeout(1200)
+            n_man = pg.locator('.lvsec').first.locator('table.pkt tr').count()
+            assert 1 < n_man < n_auto, \
+                '切页签后行数没变（%d -> %d）' % (n_auto, n_man)
+            # 自选 → 个股：手工组里只有 601857，所以点它必须落到 601857
             pg.locator('.lvsec').first.locator(
                 'a[href*="/stock.html"]').first.click()
             pg.wait_for_selector('#kcv', timeout=40000)
-            assert '/stock.html' in pg.url, '从自选点不到个股页：%s' % pg.url
+            assert '601857' in pg.url, '从自选点不到个股页：%s' % pg.url
 
             # ================= 对比 =================
             pg.goto(base + '/compare.html?codes=601857.XSHG,601088.XSHG',
@@ -4724,7 +4790,7 @@ def t_new_pages_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('四页真渲染：盘面（KPI 齐 + 分布图 %d 像素 + 翻日 %s→%s + '
                     '%d 个榜单）、板块（%d 类 / 申万 %d 行 / 概念 %d 行 / 点出成分）、'
-                    '自选（加入后渲染 + 变更历史 + 页签按账户分且切换生效）、'
+                    '自选（加入后渲染 + 页签按账户分【无「全部」】且切换生效）、'
                     '对比（曲线 %d 像素 + 读数 + '
                     '加减只数）；四页都能点到个股页；顶栏 6 个入口齐'
                     % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, nz2))
