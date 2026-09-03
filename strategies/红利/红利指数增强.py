@@ -253,6 +253,19 @@ def initialize(context):
     g.num_b = getattr(g, 'num_b', 5)   # 原版 3；实测 5 更优（3~8 差异 <0.7pp）
     g.backup_a = getattr(g, 'backup_a', 5)
     g.backup_b = getattr(g, 'backup_b', 5)
+    # ---- 持有缓冲区（单变量隔离「卖出条件放宽」这一件事）----
+    # 0 = 原版：不在 target 里就卖。
+    # N>0 = 已持有的票只要还在【自己那条腿的前 num_x + N】里就继续持有，
+    #       买入只补到 len(target_list) 只。第 11 名与第 10 名的差别通常
+    #       小于一次往返的成本。
+    # 🔴 **已被实测否证**（`strategies/缓冲区实测-2016-2026.md`）：
+    #   逐年独立、默认成本、100 万本金，+2/+3/+5/+10 **单调变差**
+    #   （年化 21.22% → 20.66 → 18.46 → 18.52 → 17.43；逐年差均值
+    #   −1.37 / −1.90 / −3.31 / −4.60pp，p 0.05~0.30）。+5/+10 的回撤确实
+    #   从 17.95% 降到 15.2%/15.0%，但夏普从 1.36 掉到 1.23/1.16。
+    # 🔴 刻意**不复用 backup_a/backup_b**：那两个是「炸板离场后再入场」的
+    #   候选池，改它会同时动两条规则 —— 单变量隔离的前提是只动一个。
+    g.hold_buffer = getattr(g, 'hold_buffer', 0)
     g.div_min = getattr(g, 'div_min', 0.03)
     g.div_top_pct = getattr(g, 'div_top_pct', 0.10)
     g.beta_win = getattr(g, 'beta_win', 252)
@@ -410,6 +423,7 @@ def initialize(context):
     g.n_stop = 0
     g.target_list = getattr(g, 'target_list', [])
     g.backup_list = getattr(g, 'backup_list', [])
+    g.buf_list = getattr(g, 'buf_list', [])
     g.high_limit = getattr(g, 'high_limit', set())
     g.blacklist = getattr(g, 'blacklist', set())
     g.n_exit = 0
@@ -456,7 +470,14 @@ def pick(context):
     for s in a[g.num_a:g.num_a + g.backup_a] + b[g.num_b:g.num_b + g.backup_b]:
         if s not in tgt and s not in bk:
             bk.append(s)
+    # 缓冲区：两条腿各自往下多取 hold_buffer 名（与 backup 分开算）
+    buf = []
+    if g.hold_buffer:
+        for s in (a[:g.num_a + g.hold_buffer] + b[:g.num_b + g.hold_buffer]):
+            if s not in buf:
+                buf.append(s)
     g.target_list, g.backup_list, g.blacklist = tgt, bk, set()
+    g.buf_list = buf
     log.info('[PICK] %s A池%d取%d / B池%d取%d -> 并集 %d 只',
              d, len(a), len(la), len(b), len(lb), len(tgt))
 
@@ -467,6 +488,13 @@ def trade(context):
         return
     tgt = set(stop_filter(context, g.target_list))
     held = set(context.portfolio.positions)
+    # ---- 缓冲区：已持有的票排名还够就不卖 ----
+    keep = set()
+    if g.hold_buffer:
+        buf = set(g.buf_list)
+        keep = {s for s in held if s in buf and s not in tgt}
+        if keep:
+            log.info('[BUF] 缓冲区留下 %d 只：%s', len(keep), sorted(keep))
     # ---- 仓位口径（g.equal_weight）----
     # 0 = 原版：只把腾出来的现金平分给【新买入】的票，已持有仓位一律不动
     #     → 反复入选的票权重持续变大（赢家滚雪球）
@@ -474,7 +502,7 @@ def trade(context):
     if g.equal_weight:
         per = context.portfolio.total_value / len(g.target_list)
         for s in list(context.portfolio.positions):
-            if s not in tgt and s not in g.high_limit:
+            if s not in tgt and s not in g.high_limit and s not in keep:
                 order_target_value(s, 0)
             elif s in tgt and context.portfolio.positions[s].value > per:
                 order_target_value(s, per)
@@ -484,12 +512,17 @@ def trade(context):
     # ★ 昨日涨停的持仓【豁免】本次调仓卖出，与原版
     #   g.sell_list = [s for s in hold_list if s not in target and s not in high_limit_list] 一致
     for s in list(context.portfolio.positions):
-        if s not in tgt and s not in g.high_limit:
+        if s not in tgt and s not in g.high_limit and s not in keep:
             order_target_value(s, 0)
     # ★ 原版**不做等权再平衡**：只把腾出来的现金平分给【新买入】的票，
     #   已持有的仓位一律不动，反复入选的票权重会持续变大（赢家滚雪球）。
     #   照抄「傻瓜基准」的 total_value/N + 削超配会低估 8.6pp。
     buy = [s for s in g.target_list if s not in held]
+    if g.hold_buffer:
+        # ★ 缓冲区留下的票占着名额 —— 买入要相应少买，否则现金不够、
+        #   后面几只只能部分成交（表现是"仓位对不上"而不报错）。
+        slots = len(g.target_list) - len(context.portfolio.positions)
+        buy = buy[:max(0, slots)]
     if not buy:
         # A-4：原版在此直接 return，卖出所得闲置到下月。
         if g.idle_fix and g.target_list:

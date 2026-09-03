@@ -135,6 +135,23 @@ def initialize(context):
     #   3.99pp 的差来自选股不同，不是补位。
     g.fill_paused = getattr(g, 'fill_paused', 0)
     g.fill_pool = getattr(g, 'fill_pool', 40)
+    # ---- 持有缓冲区（单变量隔离「卖出条件放宽」这一件事）----
+    # 0 = 原版：不在 target（前 stock_num）里就卖。
+    # N>0 = 已持有的票只要还在【前 stock_num + N】里就**继续持有**，
+    #       买入只补到 stock_num 只。目的：降低无谓换手 ——
+    #       第 11 名与第 10 名的差别通常小于一次往返的成本。
+    # 🔴 用【另一次更宽的查询】判"还在不在缓冲区里"，不是把 candidate_num 调大：
+    #   candidate_num 是"先截再过滤、不补位"的那个截断点，调大它会连**买入腿**
+    #   一起改（过滤掉的名额会被后面的票补上），那就同时动了两个变量。
+    #   多查一次的代价是每周一条 SQL。
+    g.hold_buffer = getattr(g, 'hold_buffer', 0)
+    # 缓冲区判据要不要也过【20 日涨停黑名单】：
+    #   0 = 只看排名（卖出问的是"它还够好吗"，黑名单是"再买"的抑制器）
+    #   1 = 也过黑名单与止损冷静期 —— 这样"唯一变的就是截断点 10 -> 10+N"
+    # ★ 存在的理由：0 那一版顺带把黑名单的**卖出**副作用也关掉了，
+    #   而涨停过的票正是刚涨完的票。不测这一版的话，"缓冲区变差"可能
+    #   是被"多留了刚涨完的票"这件事解释掉的 —— 那就归因错了。
+    g.hold_buffer_strict = getattr(g, 'hold_buffer_strict', 0)
     # ---- 还原「面板缺停牌股」这个历史 bug（单变量）----
     # 1 = 正确：候选宇宙含停牌股（聚宽 get_all_securities 的语义）
     # 0 = 复现 bug：宇宙只取面板当日有 K 线的行，停牌股整体缺席。
@@ -355,8 +372,37 @@ def rebalance(context):
         cand = [c for c in cand if c not in (seen & recent)]
     target = cand[:g.stock_num]
 
+    # ---- 缓冲区：已持有的票排名还够就不卖 ----
+    # ★ 判据用【原始排名】（不过 tradable/stop_filter）—— 卖出问的是
+    #   "它还够好吗"，不是"今天能不能买"。涨停豁免仍走 g.high_limit。
+    keep = set()
+    if g.hold_buffer and context.portfolio.positions:
+        wide = context.data.query(
+            SQL, sd=d, listed=g.listed_days,
+            cand=g.stock_num + g.hold_buffer,
+            pin='TRUE' if g.paused_in_pool else 'FALSE',
+            kcb='688%' if g.kcb_688_only else '68%',
+            pert=g.pert, salt=g.pert_salt, skip=g.skip_n,
+            pbcut=(str(int(g.pb_fixed)) if g.pb_fixed else 'floor(0.5 * n)'),
+            roecut=(str(int(g.roe_fixed)) if g.roe_fixed else 'floor(0.1 * n2)'),
+            excl=','.join("'%s'" % x for x in EXCL_IND))['jq_code'].tolist()
+        if g.hold_buffer_strict:
+            wide = stop_filter(context, wide)
+            if g.hold_history:
+                recent = context.data.had_limit_up(
+                    wide, context.data.nth_prev_day(
+                        context.current_date, g.limit_days), d)
+                seen = set().union(*g.hold_history)
+                wide = [c for c in wide if c not in (seen & recent)]
+        buf = set(wide[:g.stock_num + g.hold_buffer])
+        keep = {c for c in context.portfolio.positions
+                if c in buf and c not in target}
+        if keep:
+            log.info('[BUF] 缓冲区留下 %d 只：%s', len(keep), sorted(keep))
+
     for code in list(context.portfolio.positions):
-        if code not in target and code not in g.high_limit:
+        if (code not in target and code not in g.high_limit
+                and code not in keep):
             order_target_value(code, 0)
 
     # ★ 买入名额的分母是【目标池实际长度】，不是 g.stock_num。
