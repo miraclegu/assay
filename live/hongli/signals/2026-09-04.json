@@ -1,0 +1,216 @@
+{
+ "account": "hongli",
+ "built_at": "2026-09-03T18:13:18",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 61569.55,
+ "code_sha": "c04b095c",
+ "code_sha256": "c04b095cdd078955d510e48f664de24d085dcf9272d10bdba4721459456204ef",
+ "data_asof": "2026-09-03",
+ "data_fingerprint": {
+  "overall": "4489b4ee0e4e",
+  "parts": {
+   "index": {
+    "hash": "4a3330ea11e2",
+    "n_files": 24,
+    "newest_mtime": "2026-09-03T18:12:41",
+    "total_bytes": 64610424
+   },
+   "panel": {
+    "hash": "96e40cb53497",
+    "n_files": 24,
+    "newest_mtime": "2026-09-03T18:13:11",
+    "total_bytes": 1333467146
+   },
+   "std": {
+    "hash": "8072fbdd5271",
+    "n_files": 18,
+    "newest_mtime": "2026-09-03T18:13:16",
+    "total_bytes": 373598527
+   }
+  }
+ },
+ "days_until_rebalance": 18,
+ "for_date": "2026-09-04",
+ "freed_est": 0,
+ "held_codes": [
+  "600012.XSHG",
+  "600350.XSHG",
+  "600803.XSHG",
+  "601009.XSHG",
+  "601088.XSHG",
+  "601229.XSHG",
+  "601318.XSHG",
+  "601328.XSHG",
+  "601336.XSHG",
+  "601857.XSHG",
+  "601963.XSHG",
+  "601998.XSHG",
+  "603444.XSHG",
+  "603519.XSHG",
+  "603889.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "600012.XSHG",
+   "name": "皖通高速",
+   "shares": 3900
+  },
+  {
+   "code": "600350.XSHG",
+   "name": "山东高速",
+   "shares": 6300
+  },
+  {
+   "code": "600803.XSHG",
+   "name": "新奥股份",
+   "shares": 3500
+  },
+  {
+   "code": "601009.XSHG",
+   "name": "南京银行",
+   "shares": 5600
+  },
+  {
+   "code": "601088.XSHG",
+   "name": "中国神华",
+   "shares": 1300
+  },
+  {
+   "code": "601229.XSHG",
+   "name": "上海银行",
+   "shares": 6900
+  },
+  {
+   "code": "601318.XSHG",
+   "name": "中国平安",
+   "shares": 1100
+  },
+  {
+   "code": "601328.XSHG",
+   "name": "交通银行",
+   "shares": 9000
+  },
+  {
+   "code": "601336.XSHG",
+   "name": "新华保险",
+   "shares": 1000
+  },
+  {
+   "code": "601857.XSHG",
+   "name": "中国石油",
+   "shares": 5700
+  },
+  {
+   "code": "601963.XSHG",
+   "name": "重庆银行",
+   "shares": 5800
+  },
+  {
+   "code": "601998.XSHG",
+   "name": "中信银行",
+   "shares": 7300
+  },
+  {
+   "code": "603444.XSHG",
+   "name": "吉比特",
+   "shares": 100
+  },
+  {
+   "code": "603519.XSHG",
+   "name": "立霸股份",
+   "shares": 3800
+  },
+  {
+   "code": "603889.XSHG",
+   "name": "新澳股份",
+   "shares": 11000
+  }
+ ],
+ "is_rebalance_day": false,
+ "left_est": 61569.55,
+ "next_rebalance": "2026-10-08",
+ "no_price": [],
+ "params": {
+  "div_method": "fiscal_year"
+ },
+ "sell": [],
+ "upcoming": [
+  {
+   "date": "2026-09-07",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-08",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-09",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-10",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-11",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-09-14",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-15",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-16",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-17",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-18",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-09-21",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-22",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-23",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-24",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  }
+ ],
+ "warnings": []
+}

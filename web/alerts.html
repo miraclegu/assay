@@ -106,10 +106,17 @@ function editor() {
       <label>预计分红（每股，元）
         <input id="adiv" value="${f.div == null ? '' : f.div}" style="width:110px">
       </label>
-      ${sg ? `<span class="lvwhy">近 12 个月已公告合计
-        <b>${sg.per_share}</b>（${sg.n} 次，最近公告 ${esc(sg.last_pub)}）
-        <a href="#" id="ause">用它</a><br>
-        它只是<b>预填</b>：这一列填的是你的<b>预计</b>，不是数据。</span>` : ''}
+      ${sg ? `<span class="lvwhy">
+        ${sg.fy ? `<b>${sg.fy.per_share}</b> = ${esc(sg.fy.src)}
+          <a href="#" class="ause" data-w="fy">用它</a>
+          <span title="${esc(sg.fy.detail || '')}">（${esc(sg.fy.detail || '')}）</span><br>` : ''}
+        ${sg.r365 ? `<b>${sg.r365.per_share}</b> = 近 12 个月已公告（${
+          sg.r365.n} 次，最近 ${esc(sg.r365.last_pub)}）
+          <a href="#" class="ause" data-w="r365">用它</a><br>` : ''}
+        两个口径给出来让你挑：<b>年度合计</b>是"最近一个完整会计年度"，
+        <b>近 12 个月</b>会混入不同归属期（半年派的公司刚公告完中期时差得多
+        —— 实测海尔智家 1.1607 vs 0.8915）。
+        都只是<b>预填</b>：这一列填的是你的<b>预计</b>，不是数据。</span>` : ''}
       <label>「接近」阈值（%）
         <input id="anear" value="${f.near == null ? '' : (f.near * 100)}"
           style="width:70px" placeholder="${((V.near_default || 0) * 100).toFixed(0)}">
@@ -285,9 +292,10 @@ function wire() {
   $('#adiv').onchange = redraw;
   $$('.aby').forEach(e => e.onchange = redraw);
   $$('.av').forEach(e => e.onchange = redraw);
-  if ($('#ause')) $('#ause').onclick = ev => { ev.preventDefault(); pull();
-    FORM.div = (V.suggest[FORM.code] || {}).per_share;
-    FORM.div_src = '近 12 个月已公告合计'; render(); };
+  $$('.ause').forEach(a => a.onclick = ev => { ev.preventDefault(); pull();
+    const sg = (V.suggest || {})[FORM.code] || {}, w = sg[a.dataset.w];
+    if (!w) return;
+    FORM.div = w.per_share; FORM.div_src = w.src; render(); });
   $('#atadd').onclick = () => { pull();
     FORM.tiers.push({by: FORM.tiers.length && FORM.tiers[0].by || 'yield', v: ''});
     render(); };

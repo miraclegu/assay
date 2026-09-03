@@ -4519,12 +4519,35 @@ def t_alerts():
         # ---- 1) 分红预填：每 10 股 -> 每股 ----
         #   🔴 bonus_ratio_rmb 是"每 10 股派现"。不除 10 的话"预计分红"大 10 倍，
         #     目标价跟着小 10 倍，而它不报错 —— 只是那一行永远不会触发。
-        sg = al.suggest_div(['600900', '600036'])
+        sg = al.suggest_div(['600900', '600036', '600690', '600795', '000423'])
         cj = sg.get('600900.XSHG') or {}
         assert 0.5 < (cj.get('per_share') or 0) < 2.0, \
             ('长江电力近 12 个月每股分红应在 1 元附近（用户手填 1），实得 %s'
              ' —— 大 10 倍就是 bonus_ratio_rmb 没除 10' % cj.get('per_share'))
         assert (sg.get('600036.XSHG') or {}).get('per_share'), '招行没取到分红'
+        # 🔴 默认口径必须是【最近一个完整会计年度合计】，不是近 365 天。
+        #   逐只对用户手填的那张表 —— 半年派的公司上，r365 会漏掉中期分红：
+        #     海尔智家 手填 1.15 / FY 1.1607 / r365 0.8915（少 26%）
+        #     国电电力 手填 0.24 / FY 0.241  / r365 0.141 （少 41%）
+        #   而它不报错，只是目标价算高、那一行永远不会触发。
+        HAND = {'600690.XSHG': 1.15, '600795.XSHG': 0.24,
+                '600036.XSHG': 2.016, '600900.XSHG': 1.0,
+                '000423.XSHE': 2.7}
+        for c, want in HAND.items():
+            got = (sg.get(c) or {}).get('per_share')
+            assert got and abs(got / want - 1) < 0.02, \
+                ('%s 的默认预填应≈用户手填 %s（最近完整年度合计），实得 %s'
+                 % (c, want, got))
+            assert '年度合计' in ((sg.get(c) or {}).get('src') or ''), \
+                '默认口径不是"年度合计"：%s' % (sg.get(c) or {}).get('src')
+        # 两个口径都要给页面（让人挑），且在半年派的票上确实不同
+        for c in ('600690.XSHG', '600795.XSHG'):
+            fy = sg[c]['fy']['per_share']
+            r365 = sg[c]['r365']['per_share']
+            assert abs(fy / r365 - 1) > 0.2, \
+                ('%s 上两个口径应有明显差别（这条断言就是防止有人把默认'
+                 '悄悄换回 r365）：fy %s vs r365 %s' % (c, fy, r365))
+            assert sg[c]['fy'].get('detail'), '年度合计没给逐笔明细'
 
         # ---- 2) 两种输入方式互算，且存的是【填的那个】----
         al.set_row('000423', 2.7, [{'by': 'price', 'v': 49},
@@ -4631,6 +4654,8 @@ def t_alerts():
                 or {}).get('error'), '只读模式下应拒绝改买点清单'
         sv.ALLOW_LIVE = True
         return ('每 10 股 -> 每股（长江电力 %.2f，用户手填 1）；'
+                '默认口径=最近完整年度合计，逐只对上用户手填的 5 只'
+                '（半年派的海尔/国电上 r365 会少 26%%/41%%）；'
                 '填价出息率(2.7/49=5.51%%)、填率出目标价(2.7/6%%=45.00)且存的是'
                 '填的那个；改分红后另一个跟着变(45->50)；三档判定 hit/near/far'
                 '且按目标价降序；提醒一天只一次且去重落盘；append-only 改一行'
@@ -4915,7 +4940,21 @@ def t_alerts_ui():
             # 分红要【预填】—— 空着让人自己去查，等于把最烦的一步留给人
             assert float(pg.input_value('#adiv')) > 0, \
                 '预计分红没有预填：%r' % pg.input_value('#adiv')
-            assert '近 12 个月已公告' in ed, 'ⓘ没说这个预填是什么口径：%s' % ed[:120]
+            # 两个口径都要摆出来让人挑，且各有一个「用它」
+            assert '年度合计' in ed and '近 12 个月已公告' in ed, \
+                'ⓘ没把两个预填口径都给出来：%s' % ed[:200]
+            assert pg.locator('.ause').count() == 2, \
+                '两个口径应各有一个「用它」，实得 %d 个' % pg.locator('.ause').count()
+            _fy = pg.input_value('#adiv')
+            pg.locator('.ause[data-w="r365"]').click()
+            pg.wait_for_timeout(400)
+            assert pg.input_value('#adiv') != _fy or '近 12 个月' in \
+                pg.locator('.lvsec').first.inner_text(), \
+                '点了 r365 那个「用它」没换过去'
+            pg.locator('.ause[data-w="fy"]').click()
+            pg.wait_for_timeout(400)
+            assert pg.input_value('#adiv') == _fy, \
+                '点回年度合计没还原：%s vs %s' % (pg.input_value('#adiv'), _fy)
             assert '预填' in ed and '预计' in ed, \
                 '没写清"这是你的预计、预填只是参考"：%s' % ed[:160]
             for lab in ('预计分红', '接近', '备注', '按什么填', '数值',
@@ -4999,7 +5038,8 @@ def t_alerts_ui():
             assert ov <= 1, '1024 宽下 body 横滚了 %dpx' % ov
             assert not errs, 'JS 报错：%s' % errs[:3]
             br.close()
-        return ('空态 -> 搜票 -> 分红预填(近12个月已公告) -> 填目标价 49 当场'
+        return ('空态 -> 搜票 -> 分红预填给两个口径(年度合计/近12个月，各一个'
+                '「用它」且能来回切) -> 填目标价 49 当场'
                 '换算 2.7/49=5.51% -> 第二档改按股息率 6% 换算出 45.00 -> 保存；'
                 '表里给"目标价+股息率"、到价整行点亮且顶栏红点亮；'
                 '点名称进个股页；改一行回填的是【存的那个口径】'

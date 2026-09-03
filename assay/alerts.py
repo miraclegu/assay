@@ -24,13 +24,40 @@
 
 ## 分红只是【你的预计】，但给一个有依据的预填
 
-`suggest_div()` 给近 12 个月**已公告**的每股分红合计（口径与红利策略的
-`DIV_*` CTE 同源：按 `board_plan_pub_date` 可见、同一
-`(code, report_date, bonus_type)` 去重留流程最靠后那条）。
-实测与用户手填的一致：长江电力 0.79+0.21 = 1.00（他写 1）、
-东阿阿胶 1.4355+1.3448 = 2.78（他写 2.7）。
+`suggest_div()` 给**两个**口径（都与红利策略的 `DIV_*` CTE 同源：按
+`board_plan_pub_date` 可见、同一 `(code, report_date, bonus_type)` 去重
+留流程最靠后那条）：
+
+| 口径 | 是什么 | 用户手填的 8 只对得上吗 |
+|---|---|---|
+| `fy`（**默认**） | **最近一个完整会计年度**的分红合计（年度 + 中期 + 季度，按 `report_date` 的年份归拢） | **8/8 吻合** |
+| `r365` | 近 365 天**已公告**的合计（按 `board_plan_pub_date`） | 6/8 |
+
+🔴 **默认必须是 `fy`。** `r365` 的窗口会**混入不同归属期**：公司从年派改半年派
+（2024 年后大量银行/央企）时，窗口里可能出现两次或零次年度分红。实测对账：
+
+```
+            用户手填   FY2025 合计            近 365 天已公告
+海尔智家     1.15      1.1607 (0.2692+0.8915)  0.8915   ← 少了中期，差 26%
+国电电力     0.24      0.241  (0.100 +0.141)   0.141    ← 少了中期，差 41%
+东阿阿胶     2.7       2.7056 (1.2701+1.4355)  2.7803   ← 混进了 FY2026 中期
+招商银行     2.016     2.016  (1.013 +1.003)   2.016
+```
+
+★ **两个都给页面**，让人挑 —— 半年派的公司刚公告完中期时，"最近完整年度"
+是保守的、"近 12 个月"是激进的，哪个算"预计"是判断。
 🔴 但它**只是预填**，不覆盖你填的值 —— "预计分红"是判断，不是数据。
 换算出来的股息率也要跟着标出这个分红是**谁填的**（`div_src`）。
+
+## 外部现成的股息率（东财 f133）—— 只能当交叉校验，不能当口径
+
+`push2.eastmoney.com/api/qt/ulist.np/get&fields=f133` 免 token、可批量，
+一次就能拿到"股息率"。实测 2026-09-03 对这 8 只逐只对数：**7 只与
+`r365 / 现价` 吻合到 0.03pp**（所以它就是滚动 12 个月口径），
+**但招商银行 2.44% vs 应为 4.91% —— 差一倍**（它只算了年度那一次，
+漏掉中期分红）。
+🔴 而漏中期恰恰发生在**银行/央企**上，也就是红利策略的重仓处 ——
+"有值但对不上"比"没有值"更危险。所以本地自己算，f133 只适合当校验。
 
 ## 存哪 / 怎么存
 
@@ -197,6 +224,38 @@ def codes():
 # 🔴 `bonus_ratio_rmb` 是**每 10 股派现（元）**，不是每股 —— 要除 10。
 #   实测：长江电力 7.9 = 每股 0.79；东阿阿胶 13.4481 = 每股 1.3448。
 #   当成每股用会让"预计分红"大 10 倍，而它不报错，只是目标价高得离谱。
+# ---- 口径二：最近一个【完整会计年度】的合计（默认）----
+# 年度锚定用 `report_date` 月份 == 12（不依赖 bonus_type 的文本标签），
+# 再把同一年份的年度/中期/季度全部加起来。与红利策略 DIV_FISCAL_YEAR 同源。
+_SQL_DIV_FY = """
+WITH raw AS (
+  SELECT code, report_date, bonus_type, bonus_ratio_rmb, board_plan_pub_date,
+         row_number() OVER (
+           PARTITION BY code, report_date, bonus_type
+           ORDER BY CASE plan_progress
+                      WHEN '实施方案'     THEN 3
+                      WHEN '股东大会预案' THEN 2
+                      WHEN '董事会预案'   THEN 1
+                      ELSE 0 END DESC, board_plan_pub_date DESC) AS r
+  FROM read_parquet('%s/std/dividend.parquet')
+  WHERE code IN ('%s')
+    AND board_plan_pub_date <= DATE '%s'
+    AND board_plan_pub_date >= DATE '%s' - INTERVAL 800 DAY
+    AND bonus_cancel_pub_date IS NULL
+    AND (plan_progress IS NULL OR plan_progress NOT IN ('终止', '取消分红'))
+    AND bonus_ratio_rmb > 0
+), d AS (SELECT * FROM raw WHERE r = 1),
+fy AS (SELECT code, max(year(report_date)) AS y FROM d
+       WHERE month(report_date) = 12 GROUP BY 1)
+SELECT d.code, fy.y, sum(d.bonus_ratio_rmb) / 10.0 AS per_share, count(*) AS n,
+       max(d.board_plan_pub_date) AS last_pub,
+       string_agg(d.bonus_type || ' ' || strftime(d.report_date, '%%Y-%%m')
+                  || '=' || round(d.bonus_ratio_rmb / 10.0, 4), ' + ') AS detail
+FROM d JOIN fy ON d.code = fy.code AND year(d.report_date) = fy.y
+GROUP BY 1, 2
+"""
+
+# ---- 口径一：近 365 天已公告 ----
 _SQL_DIV = """
 WITH raw AS (
   SELECT code, report_date, bonus_type, bonus_ratio_rmb, board_plan_pub_date,
@@ -222,7 +281,13 @@ FROM raw WHERE r = 1 GROUP BY 1
 
 
 def suggest_div(codes_in, root=None, day=None):
-    """近 12 个月**已公告**的每股分红合计 —— 只是预填，不是"预计"。"""
+    """每股分红的**两个**预填口径 —— 只是预填，不是"预计"。
+
+    返回 `{code: {per_share, src, fy: {...}, r365: {...}}}`，
+    `per_share` / `src` 取**默认口径**（`fy` = 最近一个完整会计年度合计）。
+    🔴 默认不能用 `r365`：半年派的公司窗口会混入不同归属期，实测海尔智家
+      少 26%、国电电力少 41%（都是漏掉中期分红），而它不报错。
+    """
     from assay import stock as st
     want = [c for c in (st.norm_code(x) for x in (codes_in or [])) if c]
     if not want:
@@ -231,10 +296,24 @@ def suggest_div(codes_in, root=None, day=None):
         day, str) else day
     con = st.con()
     lake = st._lake(root)
-    rows = con.execute(_SQL_DIV % (lake, "','".join(want), d, d)).fetchall()
-    return {r[0]: {'per_share': round(r[1], 4), 'n': r[2],
-                   'last_pub': str(r[3])[:10],
-                   'src': '近 12 个月已公告合计'} for r in rows}
+    q = "','".join(want)
+    out = {}
+    for r in con.execute(_SQL_DIV_FY % (lake, q, d, d)).fetchall():
+        out.setdefault(r[0], {})['fy'] = {
+            'per_share': round(r[2], 4), 'year': r[1], 'n': r[3],
+            'last_pub': str(r[4])[:10], 'detail': r[5],
+            'src': '%d 年度合计' % r[1]}
+    for r in con.execute(_SQL_DIV % (lake, q, d, d)).fetchall():
+        out.setdefault(r[0], {})['r365'] = {
+            'per_share': round(r[1], 4), 'n': r[2],
+            'last_pub': str(r[3])[:10], 'src': '近 12 个月已公告合计'}
+    for c, v in out.items():
+        pick = v.get('fy') or v.get('r365') or {}
+        v['per_share'] = pick.get('per_share')
+        v['src'] = pick.get('src')
+        v['n'] = pick.get('n')
+        v['last_pub'] = pick.get('last_pub')
+    return out
 
 
 # ------------------------------------------------------------------- 估值
