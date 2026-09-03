@@ -2035,13 +2035,9 @@ def api_alerts(_q):
             _rt_ensure(a.codes())
         except Exception:                                   # noqa: BLE001
             pass
+        # ★ 分红由 valued() 自己解析（实际已公告的，不是账本字段），
+        #   所以这里不再单独调 suggest_div —— 同一份算两遍迟早不一致。
         v = a.valued()
-        # 分红预填一并给：用户填的那个数与"近 12 个月已公告"差得多时，
-        # 页面把后者作为提示显示出来（不覆盖 —— "预计分红"是判断不是数据）
-        try:
-            v['suggest'] = a.suggest_div([x['code'] for x in v['rows']])
-        except Exception:                                   # noqa: BLE001
-            v['suggest'] = {}
         v['day'] = datetime.now().date().isoformat()
         v['fired_today'] = [r for r in a.fired_log()
                             if str(r.get('ts', ''))[:10]
@@ -2101,9 +2097,10 @@ def api_alerts_act(_q, body):
         if act == 'remove':
             a.remove(b.get('code') or '')
         elif act == 'set':
-            a.set_row(b.get('code') or '', b.get('div'), b.get('tiers') or [],
-                      note=b.get('note') or '', near=b.get('near'),
-                      div_src=b.get('div_src') or '手填')
+            # ★ 刻意不接 div —— 分红不手填（"预计分红"没有价值：
+            #   猜出来的目标价看着和真的一样，而它错在你不会回头检查的地方）
+            a.set_row(b.get('code') or '', b.get('tiers') or [],
+                      note=b.get('note') or '', near=b.get('near'))
             _rt_ensure([b.get('code') or ''])
         else:
             return {'error': 'act 只能是 set / remove，收到 %r' % act}

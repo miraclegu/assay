@@ -433,6 +433,11 @@ table.lvt td{overflow-wrap:anywhere}
    一屏十几行时要逐行看那一列才知道哪行该动 */
 tr.ahit td{background:color-mix(in srgb,var(--up) 12%,transparent)}
 tr.anear td{background:color-mix(in srgb,var(--warn) 10%,transparent)}
+/* 只读的"数据给的那个数"：长得像输入框但明显不可填 ——
+   摆成输入框的话人会去点它，点了没反应比不给更糟 */
+.rov{font-family:"SF Mono",Menlo,monospace;font-size:14px;padding:3px 8px;
+  background:var(--panel2);border:1px dashed var(--line);border-radius:4px;
+  color:var(--fg);min-width:70px;text-align:right}
 .frow{display:flex;gap:8px;align-items:baseline;margin:0 0 6px;flex-wrap:wrap}
 .frow>label{flex:0 0 96px;text-align:right;color:var(--dim);font-size:12px}
 /* 标签把输入框包起来时改成【标签在上】—— 表单每一项都要有标签，

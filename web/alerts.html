@@ -12,8 +12,14 @@
 <script src="/common.js"></script>
 <script>
 /* ============ 股息率买点清单 ============
-   就是把用户手里那张 Excel 搬进来：一只票一行，一个「预计分红（每股）」，
+   就是把用户手里那张 Excel 搬进来：一只票一行，一个「实际分红（每股）」，
    再写几档想买的价；每档旁边是那个价对应的股息率。到价提醒。
+
+   🔴 分红这一列是**实际已公告**的（本地 std/dividend + 东财
+     RPT_SHAREBONUS_DET 合并，取最近一个完整会计年度的合计），
+     **不存在账本里、也不能手填** —— "预计分红"没有价值：猜出来的目标价
+     看着和真的一样，而它错在你不会回头检查的地方。
+     新公告一到，所有档位的目标价**自动跟着变**。
 
    ★ 它**不是策略**（没有回测、不产生委托）—— 是手工的挂单计划表。
      所以这一页不出现任何"回测/信号/持仓"，只回答两件事：
@@ -96,6 +102,11 @@ function head() {
     </div>`;
 }
 
+/* 分红要显示到【它本来的精度】：2.7056 写成 2.71 的话，与悬浮提示里的
+   "1.2701 + 1.4355" 对不上，看着像哪儿算错了。去掉末尾的 0。 */
+const divN = v => v == null ? '—'
+  : (+v).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+
 /* ---- 分红数据是什么时候更新的 ----
    ★ 必须显示：这一页的目标价全是"分红 ÷ 股息率"算出来的，
      分红过期就整页都是过期的数 —— 而它不报错。
@@ -122,28 +133,28 @@ function editor() {
   const f = FORM || {};
   const tiers = f.tiers || [];
   const sg = (V.suggest || {})[f.code];
+  const fy = sg && sg.fy;          /* 实际分红：只读，由数据来 */
   return `<div class="lvsec" style="margin-bottom:12px">
     <h3>${f.isnew ? '新增' : '修改'} ${esc(f.code || '')}
       <span class="lvwhy">${esc(f.name || '')}</span></h3>
     <div class="frow">
-      <label>预计分红（每股，元）
-        <input id="adiv" value="${f.div == null ? '' : f.div}" style="width:110px">
+      <label>实际分红（每股，元）
+        <div class="rov" id="adiv">${fy ? fy.per_share : '—'}</div>
       </label>
-      ${sg ? `<span class="lvwhy">
-        ${sg.fy ? `<b>${sg.fy.per_share}</b> = ${esc(sg.fy.src)}
-          <a href="#" class="ause" data-w="fy">用它</a>
-          <span title="${esc(sg.fy.detail || '')}">（${esc(sg.fy.detail || '')}）</span><br>` : ''}
-        ${sg.r365 ? `<b>${sg.r365.per_share}</b> = 近 12 个月已公告（${
-          sg.r365.n} 次，最近 ${esc(sg.r365.last_pub)}）
-          <a href="#" class="ause" data-w="r365">用它</a><br>` : ''}
-        ${(sg.ext && sg.ext.n_new) ? `<b style="color:var(--accent)">东财比本地新
+      <span class="lvwhy">
+        ${fy ? `<b>${esc(fy.src)}</b>：${esc(fy.detail || '')}<br>` :
+          '<b style="color:var(--warn)">查不到已公告的分红</b>'
+          + '（从不分红 / 数据还没到）—— 这一行只能按<b>目标价</b>填，'
+          + '按目标股息率填的档算不出目标价。<br>'}
+        ${sg && sg.r365 ? `另一个口径「近 12 个月已公告」= ${sg.r365.per_share}
+          （不参与目标价：半年派的公司刚公告完中期时它会混入不同归属期）<br>` : ''}
+        ${(sg && sg.ext && sg.ext.n_new) ? `<b style="color:var(--accent)">东财比本地新
           ${sg.ext.n_new} 条</b>：${(sg.ext.new || []).map(x =>
             esc(x.report_date + ' ' + x.per_share + '（' + (x.progress || '')
                 + '，公告 ' + x.plan_pub + '）')).join('、')}<br>` : ''}
-        两个口径给出来让你挑：<b>年度合计</b>是"最近一个完整会计年度"，
-        <b>近 12 个月</b>会混入不同归属期（半年派的公司刚公告完中期时差得多
-        —— 实测海尔智家 1.1607 vs 0.8915）。
-        都只是<b>预填</b>：这一列填的是你的<b>预计</b>，不是数据。</span>` : ''}
+        🔴 分红<b>不能手填也不存下来</b> —— "预计分红"没有价值，而存一份就会
+        过期。新公告一到，这一行所有档位的目标价自动跟着变。
+      </span>
       <label>「接近」阈值（%）
         <input id="anear" value="${f.near == null ? '' : (f.near * 100)}"
           style="width:70px" placeholder="${((V.near_default || 0) * 100).toFixed(0)}">
@@ -156,7 +167,7 @@ function editor() {
       <tr><th class="tx">档</th><th class="tx">按什么填</th><th class="rt">数值</th>
         <th class="rt">换算出来的</th><th class="tx">备注</th><th></th></tr>
       ${tiers.map((t, i) => {
-        const div = parseFloat(f.div) || 0;
+        const div = (fy && fy.per_share) || 0;
         const v = parseFloat(t.v) || 0;
         let other = '—';
         if (div > 0 && v > 0) {
@@ -191,7 +202,7 @@ function editor() {
 
 function table(rows) {
   if (!rows.length) return '<div class="none">清单是空的 —— '
-    + '右上角搜代码或名称加一只，然后填「预计分红」和几档想买的价</div>';
+    + '右上角搜代码或名称加一只 —— 分红自动取实际已公告的，你只写几档想买的价</div>';
   const nt = Math.max(1, ...rows.map(x => (x.tiers || []).length));
   const st = {hit: ['到价', 'var(--up)'], near: ['接近', 'var(--warn)'],
               far: ['', 'var(--dim)'], na: ['', 'var(--dim)']};
@@ -200,9 +211,9 @@ function table(rows) {
     <div class="pw"><table class="pkt">
       <tr><th class="tx">代码</th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">当日</th>
-        <th class="rt">预计分红</th><th class="rt">当前股息率</th>
+        <th class="rt">实际分红</th><th class="rt">当前股息率</th>
         ${Array.from({length: nt}, (_, i) => `<th class="rt">第 ${i + 1} 档</th>`).join('')}
-        <th class="tx">状态</th><th class="tx">备注</th><th class="tx"></th></tr>
+        <th class="tx">状态</th><th class="tx"></th></tr>
       ${rows.map(x => `<tr${x.state === 'hit' ? ' class="ahit"'
           : (x.state === 'near' ? ' class="anear"' : '')}>
         <td class="tx"><a href="${stockHref(x.code)}"
@@ -211,11 +222,17 @@ function table(rows) {
         <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit"
           >${esc(x.name || '')}</a>${x.missing
             ? '<span class="stale" title="面板里查不到这个代码 —— 可能填错了，或已退市/未上市。这一行刻意留着，不静默丢掉">查不到</span>' : ''}
-          ${x.is_st ? '<span class="stale">ST</span>' : ''}</td>
+          ${x.is_st ? '<span class="stale">ST</span>' : ''}
+          ${x.note ? `<span class="lvwhy" style="cursor:help"
+            title="${esc(x.note)}">✎</span>` : ''}</td>
         <td class="rt">${fmtN(x.price)}${x.rt_src ? `<span class="lvwhy"
           style="color:var(--accent)" title="盘中实时价（${esc(x.rt_at || '')}）">实</span>` : ''}</td>
         <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
-        <td class="rt">${fmtN(x.div)}</td>
+        <td class="rt" title="${x.div == null ? '查不到已公告的分红'
+          : esc((x.div_src || '') + '：' + (x.div_detail || ''))}"
+          >${x.div == null
+            ? '<span class="stale" title="从不分红 / 数据还没到 —— 按目标股息率填的档算不出目标价">查不到</span>'
+            : divN(x.div)}</td>
         <td class="rt">${x.yield_now == null ? '—'
           : (x.yield_now * 100).toFixed(2) + '%'}</td>
         ${Array.from({length: nt}, (_, i) => {
@@ -238,8 +255,8 @@ function table(rows) {
              ? `<b style="color:var(--warn)">接近 · 第 ${x.near + 1} 档</b>`
              : (x.next ? '<span class="lvwhy">还要跌 '
                  + (-x.next.gap * 100).toFixed(1) + '%</span>' : ''))}</td>
-        <td class="tx lvwhy">${esc(x.note || '')}</td>
-        <td class="tx"><a href="#" class="aed" data-c="${esc(x.code)}">改</a></td>
+        <td class="tx"><a href="#" class="aed" data-c="${esc(x.code)}"
+          title="${x.note ? '备注：' + esc(x.note) : '改这一行'}">改</a></td>
       </tr>`).join('')}
     </table></div>
   </div>`;
@@ -266,11 +283,21 @@ function foot() {
       每档<b>存的是你填的那个数</b>（目标价或目标股息率），另一个由分红
       <b>现算</b> —— 两个都存的话，改了分红以后另一个就是过期的，
       而它看着仍然像个正常数字。<br>
-      <b>预计分红是你的判断</b>，「近 12 个月已公告合计」只是预填
-      （口径与红利策略同源：按董事会预案公告日可见、同一
-      期次去重留流程最靠后那条）。分红改了、目标价跟着变，这是对的。<br>
+      🔴 <b>分红是【实际已公告】的，不存也不能手填</b>：本地
+      <code>std/dividend.parquet</code>（聚宽）与东财
+      <code>RPT_SHAREBONUS_DET</code> 合并，每天更新一次，取<b>最近一个完整
+      会计年度</b>的合计（口径与红利策略同源：按董事会预案公告日可见、
+      同一期次去重留流程最靠后那条）。
+      <b>"预计分红"没有价值</b> —— 猜出来的目标价看着和真的一样，
+      而它错在你不会回头检查的地方；存一份也会过期。
+      所以新公告一到，这张表<b>所有档位的目标价自动跟着变</b>。<br>
+      查不到已公告分红的票（从不分红 / 数据还没到）那一格标「查不到」，
+      按目标股息率填的档就<b>算不出目标价</b> —— 不猜一个数填上去。<br>
       账本 <b>append-only</b>（<code>live/alerts.jsonl</code>）：改一行是
       追加一条、删一行也是追加一条，当前清单由<b>重放</b>得出。<br>
+      <b>备注不占一列</b> —— 它是给自己看的一句话，长短不定，摆进表里会把
+      要扫的数字挤走。有备注的行名称后面带 <b>✎</b>，鼠标停上去就是；
+      要改点那一行的「改」。<br>
       到价提醒走 macOS 通知中心，<b>serve.py 开着时才有</b>；同一
       (票, 档, 类型) <b>一天只提醒一次</b> —— 价格在阈值上下抖一抖就发几十条
       的话，通知就没人看了。
@@ -284,18 +311,17 @@ function wire() {
       EDIT = r.code; FORM = formOf(r.code); render();
       return;
     }
-    /* 新增：先把分红预填拿回来 —— 空着一个"预计分红"让人自己去查，
-       等于把这一页最烦的一步留给人。 */
+    /* 新增：分红不用问人 —— 先把它的实际分红取回来【显示】出来，
+       人只填想买的价。 */
     let sg = null;
     try { sg = (await j('/api/alerts/suggest?code='
       + encodeURIComponent(r.code))).suggest; } catch (e) { sg = null; }
+    if (sg) V.suggest = Object.assign({}, V.suggest, {[r.code]: sg});
     EDIT = ''; FORM = {code: r.code, name: r.name || '', isnew: true,
-      div: sg ? sg.per_share : '', div_src: sg ? sg.src : '手填',
       note: '', near: null,
       tiers: [{by: 'yield', v: ''}, {by: 'yield', v: ''}, {by: 'yield', v: ''}]};
-    if (sg) V.suggest = Object.assign({}, V.suggest, {[r.code]: sg});
     render();
-    if ($('#adiv')) $('#adiv').focus();
+    if ($('.av')) $('.av').focus();
   }, placeholder: '加一只：代码或名称'});
 
   $('#asort').onclick = ev => { ev.preventDefault();
@@ -322,7 +348,6 @@ function wire() {
   /* 编辑器里的每一次输入都要**回写 FORM 再重渲染** —— 只改 DOM 的话，
      "换算出来的"那一列不会跟着动，而那一列正是这一页的意义。 */
   const pull = () => {
-    FORM.div = $('#adiv').value.trim();
     FORM.note = $('#anote').value;
     const nv = $('#anear').value.trim();
     FORM.near = nv === '' ? null : (parseFloat(nv) / 100);
@@ -331,13 +356,8 @@ function wire() {
     $$('.an').forEach(e => FORM.tiers[+e.dataset.i].note = e.value);
   };
   const redraw = () => { pull(); render(); };
-  $('#adiv').onchange = redraw;
   $$('.aby').forEach(e => e.onchange = redraw);
   $$('.av').forEach(e => e.onchange = redraw);
-  $$('.ause').forEach(a => a.onclick = ev => { ev.preventDefault(); pull();
-    const sg = (V.suggest || {})[FORM.code] || {}, w = sg[a.dataset.w];
-    if (!w) return;
-    FORM.div = w.per_share; FORM.div_src = w.src; render(); });
   $('#atadd').onclick = () => { pull();
     FORM.tiers.push({by: FORM.tiers.length && FORM.tiers[0].by || 'yield', v: ''});
     render(); };
@@ -358,9 +378,8 @@ function wire() {
       .filter(t => String(t.v).trim() !== '')
       .map(t => ({by: t.by, v: parseFloat(t.v), note: t.note || ''}));
     try {
-      await post('/api/alerts', {act: 'set', code: FORM.code, div: FORM.div,
-        tiers: tiers, note: FORM.note, near: FORM.near,
-        div_src: FORM.div_src || '手填'});
+      await post('/api/alerts', {act: 'set', code: FORM.code,
+        tiers: tiers, note: FORM.note, near: FORM.near});
       EDIT = null; FORM = null; await load();
       msg('已保存');
     } catch (e) { msg(String(e), true); }
@@ -371,9 +390,8 @@ function formOf(code) {
   const x = (V.rows || []).find(y => y.code === code) || {};
   /* 编辑时要拿【存的那个】—— 表里显示的是换算后的两个数，
      照着显示值回填会把"我填的是股息率"变成"我填的是价格"。 */
-  return {code: code, name: x.name || '', div: x.div, note: x.note || '',
+  return {code: code, name: x.name || '', note: x.note || '',
     near: x.near_used === (V.near_default) ? null : x.near_used,
-    div_src: x.div_src || '手填',
     tiers: (x.tiers || []).map(t => ({by: t.by,
       v: t.by === 'price' ? t.price : +(t.yield * 100).toFixed(4),
       note: t.note || ''}))};

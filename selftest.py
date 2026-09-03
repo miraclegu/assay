@@ -4502,7 +4502,8 @@ def t_alerts():
 
     这一条守四件事：
       ① 两种输入方式互算：填价出股息率、填率出目标价，且**存的是你填的那个**
-      ② 分红预填的口径（`bonus_ratio_rmb` 是每【10】股 —— 不除 10 会大 10 倍）
+      ② 分红的口径（`bonus_ratio_rmb` 是每【10】股 —— 不除 10 会大 10 倍），
+         且它**不存不手填**：新公告一到目标价要自动跟着变
       ③ 到价 / 接近 / 还差多少的判定
       ④ 提醒**一天只发一次**（不然价格在阈值上下抖一抖就是几十条通知）
     """
@@ -4540,17 +4541,18 @@ def t_alerts():
         EXT_HIT.append(sorted(cs))
         or {c: v for c, v in EXT_ROWS.items() if c in set(cs)})
     try:
-        # ---- 1) 分红预填：每 10 股 -> 每股 ----
-        #   🔴 bonus_ratio_rmb 是"每 10 股派现"。不除 10 的话"预计分红"大 10 倍，
+        # ---- 1) 分红（实际已公告）：每 10 股 -> 每股 ----
+        #   🔴 bonus_ratio_rmb 是"每 10 股派现"。不除 10 的话分红大 10 倍，
         #     目标价跟着小 10 倍，而它不报错 —— 只是那一行永远不会触发。
         sg = al.suggest_div(['600900', '600036', '600690', '600795', '000423'])
         cj = sg.get('600900.XSHG') or {}
         assert 0.5 < (cj.get('per_share') or 0) < 2.0, \
-            ('长江电力近 12 个月每股分红应在 1 元附近（用户手填 1），实得 %s'
+            ('长江电力每股分红应在 1 元附近（与用户手填的 1 一致），实得 %s'
              ' —— 大 10 倍就是 bonus_ratio_rmb 没除 10' % cj.get('per_share'))
         assert (sg.get('600036.XSHG') or {}).get('per_share'), '招行没取到分红'
         # 🔴 默认口径必须是【最近一个完整会计年度合计】，不是近 365 天。
-        #   逐只对用户手填的那张表 —— 半年派的公司上，r365 会漏掉中期分红：
+        #   逐只对用户手填的那张表（他手填的就是这个口径）—— 半年派的公司上
+        #   r365 会漏掉中期分红：
         #     海尔智家 手填 1.15 / FY 1.1607 / r365 0.8915（少 26%）
         #     国电电力 手填 0.24 / FY 0.241  / r365 0.141 （少 41%）
         #   而它不报错，只是目标价算高、那一行永远不会触发。
@@ -4560,7 +4562,7 @@ def t_alerts():
         for c, want in HAND.items():
             got = (sg.get(c) or {}).get('per_share')
             assert got and abs(got / want - 1) < 0.02, \
-                ('%s 的默认预填应≈用户手填 %s（最近完整年度合计），实得 %s'
+                ('%s 的分红应≈用户手填的 %s（最近完整年度合计），实得 %s'
                  % (c, want, got))
             assert '年度合计' in ((sg.get(c) or {}).get('src') or ''), \
                 '默认口径不是"年度合计"：%s' % (sg.get(c) or {}).get('src')
@@ -4574,9 +4576,9 @@ def t_alerts():
             assert sg[c]['fy'].get('detail'), '年度合计没给逐笔明细'
 
         # ---- 2) 两种输入方式互算，且存的是【填的那个】----
-        al.set_row('000423', 2.7, [{'by': 'price', 'v': 49},
-                                   {'by': 'price', 'v': 45}], note='东阿阿胶')
-        al.set_row('601318', 2.7, [{'by': 'yield', 'v': 6}])   # 6 == 6%
+        al.set_row('000423', [{'by': 'price', 'v': 49},
+                              {'by': 'price', 'v': 45}], note='东阿阿胶')
+        al.set_row('601318', [{'by': 'yield', 'v': 6}])        # 6 == 6%
         cur = {x['code']: x for x in al.current()}
         assert cur['000423.XSHE']['tiers'][0] == {'by': 'price', 'v': 49.0}, \
             '填的是价，存的却不是：%s' % cur['000423.XSHE']['tiers'][0]
@@ -4585,25 +4587,56 @@ def t_alerts():
         v = al.valued()
         r1 = [x for x in v['rows'] if x['code'] == '000423.XSHE'][0]
         r2 = [x for x in v['rows'] if x['code'] == '601318.XSHG'][0]
+        # ★ 分红是**实际已公告**的（不是手填的 2.7）—— 先把它钉住，
+        #   再验换算。这样换算错和分红错能分开定位。
+        assert abs(r1['div'] - 2.7056) < 1e-4, \
+            ('东阿阿胶的实际分红应是 2.7056（FY2025 = 1.2701 + 1.4355），'
+             '实得 %s' % r1['div'])
+        assert '年度合计' in (r1['div_src'] or ''), \
+            '分红来源没标出来：%s' % r1['div_src']
         t49 = [t for t in r1['tiers'] if t['price'] == 49][0]
-        assert abs(t49['yield'] - 2.7 / 49) < 1e-6, \
-            '2.7/49 应是 5.51%%，实得 %.4f' % t49['yield']
-        assert abs(r2['tiers'][0]['price'] - 45.0) < 0.01, \
-            '分红 2.7 / 目标股息率 6%% 应算出目标价 45.00，实得 %s' \
-            % r2['tiers'][0]['price']
-        # 🔴 改了分红，"另一个"必须跟着变 —— 这就是不把两个都存下来的原因
-        al.set_row('601318', 3.0, [{'by': 'yield', 'v': 6}])
-        r2b = [x for x in al.valued()['rows'] if x['code'] == '601318.XSHG'][0]
-        assert abs(r2b['tiers'][0]['price'] - 50.0) < 0.01, \
-            ('分红改成 3.0 后目标价应变成 50.00（两个都存的话这里还是 45，'
-             '而它看着仍然像个正常数字）：%s' % r2b['tiers'][0]['price'])
+        assert abs(t49['yield'] - r1['div'] / 49) < 1e-6, \
+            '%s/49 算错了：%.4f' % (r1['div'], t49['yield'])
+        assert abs(r2['tiers'][0]['price'] - r2['div'] / 0.06) < 0.01, \
+            '分红 %s / 目标股息率 6%% 应算出目标价 %.2f，实得 %s' \
+            % (r2['div'], r2['div'] / 0.06, r2['tiers'][0]['price'])
+        # 🔴 分红【不能手填、也不存在账本里】—— "预计分红"没有价值
+        #   （猜出来的目标价看着和真的一样，而它错在你不会回头检查的地方），
+        #   而存一份就会过期。判据：账本那一行里没有 div 字段。
+        _rec = [r for r in al.log() if r.get('code') == '601318.XSHG'][-1]
+        assert 'div' not in _rec, \
+            '账本里存了 div —— 它会过期，而过期的目标价看着完全正常：%s' % _rec
+        assert 'div' not in al.current()[0], \
+            'current() 又把 div 读出来了（老记录里可能还有这个字段）'
+        try:
+            al.set_row('601318', 2.7, [{'by': 'yield', 'v': 6}])
+            raise AssertionError('set_row 不该再接分红这个参数')
+        except TypeError:
+            pass
+        # 🔴 新公告一到，目标价要**自动跟着变** —— 这是"不存"换来的东西。
+        #   把桩里那只票的分红翻倍，同一个"目标股息率 6%"的档目标价必须翻倍。
+        _p0 = [x for x in al.valued()['rows']
+               if x['code'] == '601318.XSHG'][0]['tiers'][0]['price']
+        EXT_ROWS['601318.XSHG'] = [
+            {'report_date': '2025-12-31', 'per_share': 5.4,
+             'plan_pub': '2026-04-30', 'progress': '实施分配', 'src': '东财'}]
+        if os.path.isfile(al.ext_path()):
+            os.remove(al.ext_path())          # 装成新的一天
+        _p1 = [x for x in al.valued()['rows']
+               if x['code'] == '601318.XSHG'][0]['tiers'][0]['price']
+        assert _p1 > _p0 * 1.5, \
+            ('分红涨了，"目标股息率 6%%"那档的目标价没跟着涨（%s -> %s）——'
+             ' 说明分红被存了下来或者被缓存住了' % (_p0, _p1))
+        EXT_ROWS.pop('601318.XSHG')
+        if os.path.isfile(al.ext_path()):
+            os.remove(al.ext_path())
 
         # ---- 3) 到价 / 接近 / 还差多少 ----
         #   用真现价推出三档，判定必须落在预期的那一格上。
         px = [x for x in al.valued()['rows'] if x['code'] == '000423.XSHE'][0]
         p0 = px['price']
         assert p0, '取不到现价，没法验判定'
-        al.set_row('000423', 2.7, [
+        al.set_row('000423', [
             {'by': 'price', 'v': round(p0 * 1.05, 2)},      # 已跌破
             {'by': 'price', 'v': round(p0 * 0.99, 2)},      # 差 1% -> 接近
             {'by': 'price', 'v': round(p0 * 0.60, 2)},      # 差 40% -> 远
@@ -4641,7 +4674,7 @@ def t_alerts():
 
         # ---- 5) append-only：改一行是追加，当前清单靠重放 ----
         n_log = len(al.log())
-        al.set_row('000423', 2.7, [{'by': 'price', 'v': 40}])
+        al.set_row('000423', [{'by': 'price', 'v': 40}])
         assert len(al.log()) == n_log + 1, '改一行应当是追加一条'
         assert len(al.current()) == 2, '重放出的清单该还是 2 行'
         assert [t['v'] for t in
@@ -4653,12 +4686,11 @@ def t_alerts():
 
         # ---- 6) 非法输入要被拒（而不是存个看着正常的错值）----
         for bad, why in (
-                (('99', 1, [{'by': 'price', 'v': 10}]), '认不出的代码'),
-                (('600900', 0, [{'by': 'price', 'v': 10}]), '分红 0'),
-                (('600900', 1, []), '一档都没填'),
-                (('600900', 1, [{'by': 'yield', 'v': 60}]), '股息率 60%'),
-                (('600900', 1, [{'by': 'price', 'v': -1}]), '负的目标价'),
-                (('600900', 1, [{'by': 'nope', 'v': 1}]), 'by 不合法')):
+                (('99', [{'by': 'price', 'v': 10}]), '认不出的代码'),
+                (('600900', []), '一档都没填'),
+                (('600900', [{'by': 'yield', 'v': 60}]), '股息率 60%'),
+                (('600900', [{'by': 'price', 'v': -1}]), '负的目标价'),
+                (('600900', [{'by': 'nope', 'v': 1}]), 'by 不合法')):
             try:
                 al.set_row(*bad)
                 raise AssertionError('%s 应被拒' % why)
@@ -4723,7 +4755,7 @@ def t_alerts():
         if os.path.isfile(al.ext_path()):
             os.remove(al.ext_path())
         dz = al.suggest_div(['600900'])
-        assert dz['600900.XSHG']['per_share'], '外部挂了就没有预填了'
+        assert dz['600900.XSHG']['per_share'], '外部挂了就取不到分红了'
         assert dz['600900.XSHG']['ext']['err'], '外部失败没记下来（页面要显示）'
         al._ext_fetch = _keep
 
@@ -4735,17 +4767,17 @@ def t_alerts():
         # ---- 8) 只读模式接口层要拒（不能只靠页面）----
         sv.ALLOW_LIVE = False
         assert (sv.api_alerts_act({}, {'act': 'set', 'code': '600900',
-                                       'div': 1, 'tiers': [
-                                           {'by': 'price', 'v': 20}]})
+                                       'tiers': [{'by': 'price', 'v': 20}]})
                 or {}).get('error'), '只读模式下应拒绝改买点清单'
         sv.ALLOW_LIVE = True
-        return ('每 10 股 -> 每股（长江电力 %.2f，用户手填 1）；'
+        return ('每 10 股 -> 每股（长江电力 %.2f，与用户手填的 1 一致）；'
+                '分红不存不手填、新公告一到目标价自动跟着变；'
                 '默认口径=最近完整年度合计，逐只对上用户手填的 5 只'
                 '（半年派的海尔/国电上 r365 会少 26%%/41%%）；'
-                '填价出息率(2.7/49=5.51%%)、填率出目标价(2.7/6%%=45.00)且存的是'
-                '填的那个；改分红后另一个跟着变(45->50)；三档判定 hit/near/far'
+                '分红取实际已公告(东阿阿胶 2.7056)；填价出息率、填率出目标价，'
+                '存的是填的那个；三档判定 hit/near/far'
                 '且按目标价降序；提醒一天只一次且去重落盘；append-only 改一行'
-                '是追加、重放取最后一条；6 类非法输入被拒；'
+                '是追加、重放取最后一条；5 类非法输入被拒；'
                 '抓取范围含买点清单；只读模式拒写；'
                 '外部分红(东财 RPT_SHAREBONUS_DET)一天只抓一次、新票立刻补抓、'
                 'force 可绕过、缓存不落 std/、挂了退回本地；'
@@ -5035,33 +5067,27 @@ def t_alerts_ui():
             pg.wait_for_selector('#adiv', timeout=20000)
             pg.wait_for_timeout(500)
             ed = pg.locator('.lvsec').first.inner_text()
-            # 分红要【预填】—— 空着让人自己去查，等于把最烦的一步留给人
-            assert float(pg.input_value('#adiv')) > 0, \
-                '预计分红没有预填：%r' % pg.input_value('#adiv')
-            # 两个口径都要摆出来让人挑，且各有一个「用它」
-            assert '年度合计' in ed and '近 12 个月已公告' in ed, \
-                'ⓘ没把两个预填口径都给出来：%s' % ed[:200]
-            assert pg.locator('.ause').count() == 2, \
-                '两个口径应各有一个「用它」，实得 %d 个' % pg.locator('.ause').count()
-            _fy = pg.input_value('#adiv')
-            pg.locator('.ause[data-w="r365"]').click()
-            pg.wait_for_timeout(400)
-            assert pg.input_value('#adiv') != _fy or '近 12 个月' in \
-                pg.locator('.lvsec').first.inner_text(), \
-                '点了 r365 那个「用它」没换过去'
-            pg.locator('.ause[data-w="fy"]').click()
-            pg.wait_for_timeout(400)
-            assert pg.input_value('#adiv') == _fy, \
-                '点回年度合计没还原：%s vs %s' % (pg.input_value('#adiv'), _fy)
-            assert '预填' in ed and '预计' in ed, \
-                '没写清"这是你的预计、预填只是参考"：%s' % ed[:160]
-            for lab in ('预计分红', '接近', '备注', '按什么填', '数值',
+            # 🔴 分红是【数据给的】，不是输入框 —— "预计分红"没有价值，
+            #   而摆一个输入框在那里就是在邀请人去猜。
+            assert pg.evaluate(
+                "() => document.querySelector('#adiv').tagName") != 'INPUT', \
+                '分红又变成输入框了 —— 它不该能手填'
+            _dv = float(pg.locator('#adiv').inner_text())
+            assert _dv > 0, '分红没显示出来：%r' % pg.locator('#adiv').inner_text()
+            assert '年度合计' in ed, '没说分红是什么口径：%s' % ed[:200]
+            assert '不能手填' in ed or '不手填' in ed, \
+                '没写清分红为什么不能手填：%s' % ed[:200]
+            assert '近 12 个月已公告' in ed, \
+                '另一个口径也该显示出来（当参考）：%s' % ed[:240]
+            assert pg.locator('.ause').count() == 0, \
+                '还留着「用它」那种手填入口'
+            assert '预计分红' in ed, \
+                ('没写清为什么不给手填 —— "预计分红没有价值"这条要写在'
+                 '眼前，否则下一次又会有人加个输入框：%s' % ed[:200])
+            for lab in ('实际分红', '接近', '备注', '按什么填', '数值',
                         '换算出来的'):
                 assert lab in ed, '编辑器缺「%s」这个标签：%s' % (lab, ed[:200])
-            # 填第一档：目标价 49 -> 换算出 5.51%（分红按 2.7 填）
-            pg.fill('#adiv', '2.7')
-            pg.locator('#adiv').dispatch_event('change')
-            pg.wait_for_timeout(400)
+            # 填第一档：目标价 49 -> 换算出 分红/49（分红是数据给的）
             pg.locator('.aby').first.select_option('price')
             pg.wait_for_timeout(300)
             pg.locator('.av').first.fill('49')
@@ -5069,8 +5095,9 @@ def t_alerts_ui():
             pg.wait_for_timeout(400)
             row1 = pg.locator('.lvsec').first.locator(
                 'table.lvt tr').nth(1).inner_text()
-            assert '5.51%' in row1 and '2.7/49' in row1.replace(' ', ''), \
-                '填了目标价 49 却没换算出 2.7/49=5.51%%：%s' % row1
+            _wy = '%.2f%%' % (_dv / 49 * 100)
+            assert _wy in row1 and ('%s/49' % _dv) in row1.replace(' ', ''), \
+                '填了目标价 49 却没换算出 %s/49=%s：%s' % (_dv, _wy, row1)
             # 第二档改成按【目标股息率】填 6% -> 换算出 45.00 元
             pg.locator('.aby').nth(1).select_option('yield')
             pg.wait_for_timeout(300)
@@ -5079,8 +5106,9 @@ def t_alerts_ui():
             pg.wait_for_timeout(400)
             row2 = pg.locator('.lvsec').first.locator(
                 'table.lvt tr').nth(2).inner_text()
-            assert '45.00' in row2, \
-                '填了目标股息率 6%% 却没换算出目标价 45.00：%s' % row2
+            _wp = '%.2f' % (_dv / 0.06)
+            assert _wp in row2, \
+                '填了目标股息率 6%% 却没换算出目标价 %s：%s' % (_wp, row2)
             pg.click('#asave')
             pg.wait_for_selector('table.pkt', timeout=20000)
             pg.wait_for_timeout(800)
@@ -5095,12 +5123,34 @@ def t_alerts_ui():
             assert pg.locator('#adivref').count() == 1, \
                 '缺「刷新分红」（平时一天一次，刚出公告时要能手动催一次）'
             th = ' '.join(pg.locator('table.pkt th').all_inner_texts())
-            for k in ('代码', '名称', '现价', '预计分红', '当前股息率',
+            for k in ('代码', '名称', '现价', '实际分红', '当前股息率',
                       '第 1 档', '状态'):
                 assert k in th, '盯价表缺「%s」列：%s' % (k, th)
+            # ★ 能进 tooltip 的就别占列：备注是给自己看的一句话、长短不定，
+            #   摆进表里会把要扫的数字挤走。但**信息不能丢** ——
+            #   有备注的行要带 ✎ 且 title 里是原文。
+            assert '备注' not in th, '备注不该占一列：%s' % th
             r1 = pg.locator('table.pkt tr').nth(1).inner_text().replace('\n', ' ')
             assert '东阿阿胶' in r1, '保存后没渲染出来：%s' % r1
-            assert '5.51%' in r1 and '49.00' in r1, \
+            # 带备注的行：✎ 在，原文在 title 里（表里不占地方但查得到）
+            # ★ set 是【整行覆盖】—— 加备注也要把两档原样带上，
+            #   不然后面"回填的是哪一种口径"那条就没得验了
+            al.set_row('000423',
+                       [{'by': 'price', 'v': 49}, {'by': 'yield', 'v': 6}],
+                       note='这是一条很长的备注，用来验证它不会把表格撑开')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('table.pkt', timeout=20000)
+            pg.wait_for_timeout(600)
+            _nt = pg.locator('table.pkt tr').nth(1).inner_text()
+            assert '很长的备注' not in _nt, \
+                '备注原文又出现在表格里了：%s' % _nt.replace('\n', ' ')
+            _mk = pg.locator('table.pkt tr').nth(1).locator(
+                '[title*="很长的备注"]')
+            assert _mk.count() >= 1, \
+                '备注挪走了但没留标记 —— 那等于把它藏没了'
+            assert '✎' in pg.locator('table.pkt tr').nth(1).inner_text(), \
+                '有备注的行没带 ✎'
+            assert _wy in r1 and '49.00' in r1, \
                 '表里没给"目标价 + 那个价对应的股息率"：%s' % r1
             # 现价低于 49 -> 第一档必须点亮，且【整行】点亮
             v = al.valued()
@@ -5144,12 +5194,13 @@ def t_alerts_ui():
             assert ov <= 1, '1024 宽下 body 横滚了 %dpx' % ov
             assert not errs, 'JS 报错：%s' % errs[:3]
             br.close()
-        return ('空态 -> 搜票 -> 分红预填给两个口径(年度合计/近12个月，各一个'
-                '「用它」且能来回切) -> 填目标价 49 当场'
+        return ('空态 -> 搜票 -> 分红自动取实际已公告(只读、不是输入框，'
+                '另一口径当参考显示) -> 填目标价 49 当场'
                 '换算 2.7/49=5.51% -> 第二档改按股息率 6% 换算出 45.00 -> 保存；'
                 '表里给"目标价+股息率"、到价整行点亮且顶栏红点亮；'
                 '点名称进个股页；改一行回填的是【存的那个口径】'
-                '(price/yield 而不是换算值)；头上有分红更新状态与「刷新分红」；'
+                '(price/yield 而不是换算值)；备注不占列而是名称后的 ✎ + title；'
+                '头上有分红更新状态与「刷新分红」；'
                 '1024 宽无横滚；0 个 JS 错误')
     finally:
         httpd.shutdown()

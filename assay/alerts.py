@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-复刻用户手里那张 Excel：一只票一行，写一个「预计分红（每股）」，再写几档
+复刻用户手里那张 Excel：一只票一行，一个「实际分红（每股）」，再写几档
 想买的价格；每档旁边是那个价对应的股息率。价格跌到某一档就提醒。
 
     000423 东阿阿胶   2.7   2.7/49=5.5% 49买   2.7/45=6% 45买   2.7/43=6.2% 43买
@@ -22,7 +22,24 @@
 🔴 存 `by`（填的是哪个）+ `v`（填的那个数），另一个**永远由分红现算** ——
 两个都存下来的话，改了分红之后另一个就是过期的，而它看着仍然像个正常数字。
 
-## 分红只是【你的预计】，但给一个有依据的预填
+## 🔴 分红【不存、不手填】—— 每次读时从数据解析
+
+`live/alerts.jsonl` 里**没有 div 这个字段**。分红在 `valued()` 里现算：
+本地 `std/dividend.parquet`（聚宽）+ 东财 `RPT_SHAREBONUS_DET` 合并后取
+**最近一个完整会计年度的合计**。
+
+为什么不存、也不让手填：
+
+- **"预计分红"没有价值**。目标价要么按已公告的实际分红算，要么就是在猜；
+  猜出来的目标价看着和真的一样，而它错在一个你不会再回头检查的地方。
+- **存下来就会过期**。分红是每天可能变的（新公告），存一份的话
+  "股息率 6% 对应的目标价"会停在录入那天 —— 与"每档只存你填的那个、
+  另一个现算"完全同一个理由。
+- 所以新公告一到，这张表**所有档位的目标价自动跟着变**，不用去改任何一行。
+
+★ 拿不到分红的票（从不分红 / 数据还没到）：`by='yield'` 那种档**算不出
+目标价**，状态给 `na` 并在页面上说明白；`by='price'` 的档照常工作
+（只是那一格没有股息率）。**不猜一个数填上去。**
 
 `suggest_div()` 给**两个**口径（都与红利策略的 `DIV_*` CTE 同源：按
 `board_plan_pub_date` 可见、同一 `(code, report_date, bonus_type)` 去重
@@ -46,8 +63,9 @@
 
 ★ **两个都给页面**，让人挑 —— 半年派的公司刚公告完中期时，"最近完整年度"
 是保守的、"近 12 个月"是激进的，哪个算"预计"是判断。
-🔴 但它**只是预填**，不覆盖你填的值 —— "预计分红"是判断，不是数据。
-换算出来的股息率也要跟着标出这个分红是**谁填的**（`div_src`）。
+★ 默认口径是 `fy`。`r365` 仍然算出来给页面**当参考显示**（半年派的票刚
+公告完中期时两者差得多），但**不参与目标价** —— 一个口径就够，
+两个口径都能当基准的话，"这一档的目标价是按哪个算的"就成了要记的事。
 
 ## 分红也能从接口拿【最新的】—— 但要拿对那一个
 
@@ -153,10 +171,12 @@ def current():
             continue
         if c not in rows:
             order.append(c)
-        rows[c] = {'code': c, 'div': r.get('div'), 'tiers': r.get('tiers') or [],
+        # ★ 老记录里可能还有 div/div_src（手填时代留下的）—— **刻意不读**：
+        #   分红一律现算，读了就等于让一个过期的数悄悄活下来。
+        rows[c] = {'code': c, 'tiers': r.get('tiers') or [],
                    'note': r.get('note') or '', 'near': r.get('near'),
-                   'div_src': r.get('div_src') or '手填',
-                   'ts': r.get('ts'), 'added': rows.get(c, {}).get('added') or r.get('ts')}
+                   'ts': r.get('ts'),
+                   'added': rows.get(c, {}).get('added') or r.get('ts')}
     return [rows[c] for c in order if c in rows]
 
 
@@ -183,18 +203,16 @@ def _tier(t):
     return out
 
 
-def set_row(code, div, tiers, note='', near=None, div_src='手填'):
-    """加一行 / 改一行（整行覆盖语义，追加一条 `set`）。"""
+def set_row(code, tiers, note='', near=None):
+    """加一行 / 改一行（整行覆盖语义，追加一条 `set`）。
+
+    🔴 **没有 div 参数** —— 分红不存也不手填，`valued()` 每次从数据解析
+      （见模块 docstring）。存一份的话它会过期，而过期的目标价看着完全正常。
+    """
     from assay import stock as st
     jc = st.norm_code(code)
     if not jc:
         raise AlertError('认不出代码：%r' % code)
-    try:
-        div = float(div)
-    except Exception:                                       # noqa: BLE001
-        raise AlertError('预计分红填的不是数字：%r' % div)
-    if not (div > 0):
-        raise AlertError('预计分红要大于 0（每股多少元），收到 %s' % div)
     ts = [_tier(dict(t, i=i + 1)) for i, t in enumerate(tiers or [])]
     if not ts:
         raise AlertError('至少要填一档目标价或目标股息率 —— '
@@ -209,8 +227,7 @@ def set_row(code, div, tiers, note='', near=None, div_src='手填'):
     return _append({'uid': uuid.uuid4().hex[:12],
                     'ts': datetime.datetime.now().replace(
                         microsecond=0).isoformat(),
-                    'act': 'set', 'code': jc, 'div': round(div, 6),
-                    'div_src': div_src, 'tiers': ts,
+                    'act': 'set', 'code': jc, 'tiers': ts,
                     'note': str(note or '')[:200], 'near': near})
 
 
@@ -231,7 +248,7 @@ def codes():
     return [x['code'] for x in current()]
 
 
-# --------------------------------------------------------------- 分红预填
+# ------------------------------------------------------------- 分红（实际）
 # 口径与红利策略的 DIV_FISCAL_YEAR 同源：按【董事会预案公告日】可见
 # （预案就是公开信息，不是未来函数），同一 (code, report_date, bonus_type)
 # 只留流程最靠后的那条 —— JQ 的「董事会预案」记录数是实际事件数的 8.3 倍，
@@ -239,7 +256,7 @@ def codes():
 #
 # 🔴 `bonus_ratio_rmb` 是**每 10 股派现（元）**，不是每股 —— 要除 10。
 #   实测：长江电力 7.9 = 每股 0.79；东阿阿胶 13.4481 = 每股 1.3448。
-#   当成每股用会让"预计分红"大 10 倍，而它不报错，只是目标价高得离谱。
+#   当成每股用会让分红大 10 倍，而它不报错，只是目标价高得离谱。
 # ------------------------------------------------------- 分红：本地 + 外部
 # 本地那份的口径与红利策略的 DIV_* CTE 同源：按【董事会预案公告日】可见
 # （预案就是公开信息，不是未来函数），同一 (code, report_date) 只留流程最
@@ -248,7 +265,7 @@ def codes():
 #
 # 🔴 `bonus_ratio_rmb` / `PRETAX_BONUS_RMB` 都是**每 10 股派现（元）**，
 #   不是每股 —— 要除 10。实测：长江电力 7.9 = 每股 0.79。当成每股用会让
-#   "预计分红"大 10 倍、目标价小 10 倍，而它不报错，只是那一行永远不会触发。
+#   分红大 10 倍、目标价小 10 倍，而它不报错，只是那一行永远不会触发。
 _SQL_RAW = """
 SELECT code, report_date, bonus_type, bonus_ratio_rmb / 10.0 AS per_share,
        board_plan_pub_date, plan_progress
@@ -522,7 +539,7 @@ def ext_div(codes_in, root=None, day=None, force=False):
 
 
 def suggest_div(codes_in, root=None, day=None, ext=True):
-    """每股分红的**两个**预填口径 —— 只是预填，不是"预计"。
+    """每股分红的**两个**口径 —— 都是**已公告的实际分红**，不是预测。
 
     返回 `{code: {per_share, src, fy: {...}, r365: {...}, ext: {...}}}`，
     `per_share` / `src` 取**默认口径**（`fy` = 最近一个完整会计年度合计）。
@@ -599,6 +616,13 @@ def valued(root=None):
            'n_hit': 0, 'n_near': 0, 'near_default': NEAR}
     if not rows:
         return out
+    # 🔴 分红在这里**现算**（不是账本里的字段）：新公告一到，
+    #   所有档位的目标价自动跟着变。`suggest_div` 自带"一天一次"的节流。
+    try:
+        sug = suggest_div([x['code'] for x in rows], root=root)
+    except Exception as e:                                  # noqa: BLE001
+        sug, out['div_err'] = {}, '%s: %s' % (type(e).__name__, e)
+    out['suggest'] = sug
     con = st.con()
     p = st.panel(root)
     d = con.execute('SELECT max(date) FROM %s' % p).fetchone()[0]
@@ -640,7 +664,21 @@ def valued(root=None):
         pr, pc = it.get('price'), it.get('preclose')
         it['change_pct'] = (round((pr / pc - 1) * 100, 2)
                             if pr and pc else None)
-        div = it.get('div') or 0
+        # ---- 分红：实际已公告的，现算 ----
+        sg = sug.get(x['code']) or {}
+        fy, alt = sg.get('fy') or {}, sg.get('r365') or {}
+        div = fy.get('per_share') or 0
+        it['div'] = (round(div, 4) if div else None)
+        it['div_src'] = fy.get('src')
+        it['div_detail'] = fy.get('detail')
+        it['div_last_pub'] = fy.get('last_pub')
+        it['div_alt'] = alt.get('per_share')
+        it['div_alt_src'] = alt.get('src')
+        it['div_ext'] = sg.get('ext')
+        if not div:
+            # ★ 拿不到分红就说清楚，不猜一个数填上去 ——
+            #   `by='yield'` 的档算不出目标价，页面要给理由。
+            it['div_missing'] = True
         it['yield_now'] = (round(div / pr, 6) if pr and div else None)
         near = it.get('near') if it.get('near') is not None else NEAR
         it['near_used'] = near

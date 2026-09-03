@@ -1756,7 +1756,7 @@ function homeAlerts(o){
     `<div class="lvmsg bad">${esc((o||{}).error||'取不到买点清单')}</div>`);
   const rows=(o.rows||[]);
   if(!rows.length) return homeCard('买点清单', '/alerts.html',
-    '<div class="none">清单是空的 —— 去买点页填「预计分红 + 几档想买的价」</div>');
+    '<div class="none">清单是空的 —— 去买点页加几只票、写几档想买的价（分红自动填）</div>');
   const act=rows.filter(x=>x.state==='hit'||x.state==='near');
   /* 没有到价的就给"最接近的三只" —— 一块空卡片不如告诉人"还差多少" */
   const show=(act.length?act:rows.filter(x=>x.next)
