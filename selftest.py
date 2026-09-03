@@ -3812,9 +3812,18 @@ def t_stock_ui():
     import threading
     from http.server import ThreadingHTTPServer
 
+    import shutil
+    import tempfile
+
     from assay import server as sv
-    old_live = sv.ALLOW_LIVE
+    from assay import watchlist as wlmod
+    old_live, old_dir = sv.ALLOW_LIVE, wlmod.LIVE
     sv.ALLOW_LIVE = True                 # 自选星要能点
+    # 🔴 自选账本重定向到临时目录 —— 这个用例会真点那颗星，不重定向就会往
+    #   【真账本】里写测试记录。append-only 的账本本来就不该被测试污染，
+    #   而它每次跑留一对 add/remove，攒了 11 对才在提交时被发现。
+    tmpwl = tempfile.mkdtemp()
+    wlmod.LIVE = tmpwl
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -3944,7 +3953,8 @@ def t_stock_ui():
                     '切 KDJ 后读数跟着换、切区间画布变、切后复权有说明、'
                     '点星真进自选、旧 hash 链接跳新页' % nz1)
     finally:
-        sv.ALLOW_LIVE = old_live
+        sv.ALLOW_LIVE, wlmod.LIVE = old_live, old_dir
+        shutil.rmtree(tmpwl, ignore_errors=True)
         httpd.shutdown()
 
 
@@ -4983,7 +4993,23 @@ def t_page_inventory():
     所以这里核【路由与实现的对应关系】和【用例总数】——
     删代码时至少有一处会立刻叫。
     """
-    web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+    # 🔴 selftest 不许往【真账本】里写。live/ 下那些 jsonl 是 append-only 的
+    #    决策记录（成交流水 / 自选 / 费率 / 版本），被测试写进去就再也分不清
+    #    哪条是真的 —— 而 append-only 意味着不能删。
+    #    实测踩过：个股用例真点了那颗自选星，每跑一次留一对 add/remove，
+    #    攒了 11 对才在提交时看到 live/watchlist.jsonl 变更。
+    #    用例要写就重定向到临时目录（`wlmod.LIVE = tmp` / `lv.LIVE = tmp`）。
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_all = open(os.path.join(here, 'selftest.py'), encoding='utf-8').read()
+    for case_name, marker in (('个股页面', 'wlmod.LIVE = tmp'),
+                              ('新页面真实渲染', 'wl.LIVE = tmp'),
+                              ('自选：append-only', 'wl.LIVE = tmp')):
+        i = src_all.index("@case('" + case_name)
+        j = src_all.index('\n@case(', i + 10)
+        assert marker in src_all[i:j], \
+            ('用例「%s」会写自选账本却没重定向 LIVE —— 会污染真账本' % case_name)
+
+    web = os.path.join(here, 'web')
     html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
     js = html[html.index('<script>'):]
 
