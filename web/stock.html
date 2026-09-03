@@ -19,6 +19,10 @@
      不拖垮整页 —— 看 K 线的时候不该因为"解禁表读不了"整页白屏。 */
 let CODE = qs('code') || localStorage.getItem('skcode') || '';
 let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq', SUB = qs('sub') || 'macd';
+/* BOLL 叠主图：**默认关**。原来只要选了副图就无条件叠上去，于是主图有
+   7 条线；而 BOLL 中轨就是 MA20（同一条线画两遍），上下轨的橙色又与
+   MA5 撞色 —— 表现正是"5 日线看着有两条、两条都不对"。 */
+let BOLL = qs('boll') === '1';
 let BARS = null, IND = null, EVS = null, HOVER = null, SHOWEV = true;
 const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
 const SUBS = [['macd','MACD'],['kdj','KDJ'],['rsi','RSI'],['','无副图']];
@@ -127,6 +131,9 @@ function chartBox(k, ind) {
         title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
       <span class="lvwhy">|</span>
       ${SUBS.map(([s, t]) => `<a href="#" class="lvtag sb${SUB === s ? ' on' : ''}" data-s="${s}">${t}</a>`).join('')}
+      <span class="lvwhy">|</span>
+      <a href="#" class="lvtag${BOLL ? ' on' : ''}" id="bollt"
+        title="布林带（20±2σ）叠主图。默认关：主图已有 4 条均线，&#10;而 BOLL 中轨就是 MA20（同一条线），所以这里只画上下轨">BOLL</a>
       <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
     </h3>
     <div class="cvbox" id="cbox">
@@ -139,10 +146,13 @@ function chartBox(k, ind) {
       ${ie ? '<b style="color:var(--warn)">　副图取失败：' + esc(ind.error) + '</b>' : ''}
       ${FQ === 'bfq' ? '当前<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切后复权。'
                      : '当前<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'}
-      <br>事件三角：<span style="color:#e0a33c">▲除权除息</span>
-      <span style="color:#5b9cf0">▲财报公告</span>
-      <span style="color:#a06bf0">▲解禁</span>
-      <span style="color:#3ec8d8">▲股本变动</span>
+      <br>均线在图左上角有<b>图例</b>（色块 + 当前值，光标停哪天就显示那天的值）。
+      🔴 事件三角与均线<b>刻意不共用颜色</b> —— 原来四条均线的色值与四种事件
+      三角完全相同，图例写着"▲除权除息"用的正是 MA5 那个色。
+      <br>事件三角：<span style="color:#ff8fb1">▲除权除息</span>
+      <span style="color:#8ea9ff">▲财报公告</span>
+      <span style="color:#ffb066">▲解禁</span>
+      <span style="color:#9ad1ff">▲股本变动</span>
       —— 分红用<b>除权日</b>定位（那天价格才跳），财报用<b>公告日</b>（报告期那天市场还不知道）。
     </div>
   </div>`;
@@ -306,6 +316,10 @@ function nav(over) {
 }
 function wire() {
   wireStarsAll();
+  /* ★ geo（画布几何，命中测试用）在这里声明：几个 handler 都要更新它，
+     放到函数末尾声明的话，上面那些 handler 只能靠"点击总发生在 wire()
+     跑完之后"这个隐含前提 —— 那种依赖坏起来是静默的。 */
+  let geo = null;
   /* ★ 这些是 <a href="#">，必须 preventDefault —— 不拦的话会把 hash 改成 '#'，
      在独立页面上表现为滚到顶部 + URL 变脏。 */
   $$('#body .rg').forEach(e => e.onclick = ev => {
@@ -314,13 +328,24 @@ function wire() {
     ev.preventDefault(); FQ = e.dataset.f; nav({fq: FQ}); load(); });
   $$('#body .sb').forEach(e => e.onclick = ev => {
     ev.preventDefault(); SUB = e.dataset.s; nav({sub: SUB}); load(); });
+  if ($('#bollt')) $('#bollt').onclick = ev => {
+    ev.preventDefault();
+    BOLL = !BOLL;
+    nav({boll: BOLL ? '1' : ''});
+    /* ★ BOLL 的数据来自 indicators（副图那次请求就取回来了，在 IND 里）——
+       所以只**重画**，不重新取、也不重渲染整页。
+       ★ 高亮直接改 class：调 head() 是另一件事（它渲染的是页面头，
+         而且要 p/lk 两个参数），拿来当"刷新那个标签"用会报错。 */
+    ev.currentTarget.classList.toggle('on', BOLL);
+    if (BOLL && !IND) { load(); return; }
+    geo = redraw();
+  };
   const ck = $('#evck');
-  if (ck) ck.onchange = () => { SHOWEV = ck.checked; redraw(); };
-  redraw();
+  if (ck) ck.onchange = () => { SHOWEV = ck.checked; geo = redraw(); };
+  geo = redraw();
   const cv = $('#kcv');
   if (!cv) return;
   const tip = $('#ktip');
-  let geo = null;
   const hit = ev => {
     if (!geo) return null;
     const r = cv.getBoundingClientRect();
@@ -346,7 +371,8 @@ function wire() {
     if (q && SUB === 'macd') ln.push('DIF ' + (q.dif ?? '—') + '  DEA ' + (q.dea ?? '—') + '  MACD ' + (q.macd ?? '—'));
     if (q && SUB === 'kdj') ln.push('K ' + (q.k ?? '—') + '  D ' + (q.d ?? '—') + '  J ' + (q.jj ?? '—'));
     if (q && SUB === 'rsi') ln.push('RSI6 ' + (q.rsi6 ?? '—') + '  12 ' + (q.rsi12 ?? '—') + '  24 ' + (q.rsi24 ?? '—'));
-    if (q && q.mb != null) ln.push('BOLL ' + q.lb + ' / ' + q.mb + ' / ' + q.ub);
+    if (BOLL && q && q.mb != null)
+      ln.push('BOLL ' + q.lb + ' ~ ' + q.ub + '（中轨 ' + q.mb + ' = MA20）');
     const hitEv = (EVS || []).filter(x => x.date === b.date);
     hitEv.forEach(x => ln.push('◆ ' + x.label + ' ' + (x.detail || '').slice(0, 30)));
     tip.textContent = ln.join('\n');
@@ -367,8 +393,10 @@ function redraw() {
   const cv = $('#kcv');
   if (!cv || !BARS) return null;
   /* 主图叠 BOLL：把指标行的 ub/mb/lb 合进 bars —— 它们是同一条时间轴。 */
-  const bars = BARS.map((b, i) => (IND && IND[i]) ? Object.assign({}, b, {
-    ub: IND[i].ub, mb: IND[i].mb, lb: IND[i].lb}) : b);
+  /* ★ 只在开了 BOLL 时才合进去；**mb 刻意不带** —— 它等于 ma20，
+       带上就是同一条线画两遍（kchart 那边也不画中轨，两处都堵住）。 */
+  const bars = (BOLL && IND) ? BARS.map((b, i) => IND[i]
+    ? Object.assign({}, b, {ub: IND[i].ub, lb: IND[i].lb}) : b) : BARS;
   return drawKChart(cv, {bars: bars, events: SHOWEV ? EVS : [],
     sub: SUB ? IND : null, subKind: SUB, hover: HOVER});
 }

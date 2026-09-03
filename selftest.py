@@ -3929,6 +3929,53 @@ def t_stock():
         if x['high'] is not None:
             assert x['low'] <= x['open'] <= x['high'], 'OHLC 不自洽：%s' % x
             assert x['low'] <= x['close'] <= x['high'], 'OHLC 不自洽：%s' % x
+    # 🔴 BOLL 中轨 == MA20（收盘的 20 日均值），**同一条线**。
+    #   曾在主图上把它当成第三个系列画出来（还配了另一个颜色）——
+    #   表现就是"5 日线看着有两条、两条都不对"，而它不报错。
+    #   这条断言钉住"它们确实是一条线"，所以画图那边只该画一次。
+    _ind = st.indicators('601857.SH', n=120)['rows']
+    _d = [abs(x['ma20'] - y['mb']) for x, y in zip(b, _ind)
+          if x['ma20'] is not None and y['mb'] is not None]
+    assert _d and max(_d) < 0.005, \
+        'BOLL 中轨与 MA20 不是同一条线了（最大差 %.4f）—— 结论变了就得改画图' \
+        % max(_d)
+
+    # ---- 4b) 主图配色：任意两条线不许撞色 ----
+    #   🔴 判据用 RGB 欧氏距离量，不靠眼睛。踩过两处：
+    #     · ma5 #e0a33c 与 BOLL 中轨 #f9a06b 距离 53 —— 肉眼分不出
+    #     · 四条均线的 hex 与四种事件三角【完全相同】，而底部图例
+    #       写着"▲除权除息"用的正是 MA5 那个色
+    _kc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'web', 'kchart.js'), encoding='utf-8').read()
+    import re as _re4
+    _grab = lambda name: dict(_re4.findall(
+        r"(\w+):\s*'(#[0-9a-fA-F]{6})'",
+        _re4.search(name + r'\s*=\s*\{([^}]*)\}', _kc).group(1)))
+    _ma_c = _grab('MA_COLOR')
+    _ev_c = _grab('EV_COLOR')
+    _boll = _re4.search(r"BOLL_COLOR\s*=\s*'(#[0-9a-fA-F]{6})'", _kc).group(1)
+    assert len(_ma_c) == 4 and len(_ev_c) == 4, \
+        '取不到配色表：%s / %s' % (_ma_c, _ev_c)
+    _rgb = lambda h: tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+    _dist = lambda a, b_: sum(
+        (p - q) ** 2 for p, q in zip(_rgb(a), _rgb(b_))) ** 0.5
+    _lines = list(_ma_c.items()) + [('boll', _boll)]
+    for _i in range(len(_lines)):
+        for _j in range(_i + 1, len(_lines)):
+            _dd = _dist(_lines[_i][1], _lines[_j][1])
+            assert _dd >= 60, \
+                ('主图上 %s 与 %s 撞色（RGB 距离 %.0f < 60）—— '
+                 '两条线看着像一条' % (_lines[_i][0], _lines[_j][0], _dd))
+    _both = set(_ma_c.values()) & set(_ev_c.values())
+    assert not _both, \
+        '均线与事件三角共用了颜色 %s —— 图例会指错' % sorted(_both)
+    # 画图那边不许再把 mb 当一个系列
+    assert "'mb'" not in _kc, \
+        'kchart.js 又画 BOLL 中轨了 —— 它等于 MA20，会多出一条线'
+    _sh = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'web', 'stock.html'), encoding='utf-8').read()
+    assert 'mb: IND' not in _sh, \
+        'stock.html 又把 mb 合进 bars 了 —— 那就等于让 MA20 画两遍'
 
     # ---- 5) 复权：跨除权日的假跌幅 ----
     #   🔴 601088 有分红除权。不复权在除权日会掉一个坑，后复权不会。
@@ -3964,7 +4011,9 @@ def t_stock():
     return ('代码 7 种写法归一 + 5 种非法返 None；搜索按代码/名称/前缀命中且'
             '同类按市值降序；面板 %d 字段且 change_pct/turnover 量级自证'
             '（turnover=量×价/流通市值×100 精确吻合）；'
-            'K 线 %d 根、第一根就有 MA60（预热 %d 根）、ma20 复算一致；'
+            'K 线 %d 根、第一根就有 MA60（预热 %d 根）、ma20 复算一致、'
+            'BOLL 中轨==MA20（所以主图只画一次）、'
+            '主图 5 条线两两 RGB 距离 >=60 且与事件三角不共色；'
             '601088 后复权区间涨幅 %.1f%% vs 不复权 %.1f%%（除权坑）；'
             '财务 %d 个报告期不重复且公告日均晚于报告期'
             % (len(p), len(b), k['warmup_dropped'], rh_ * 100, rb_ * 100, len(rd)))
@@ -4074,6 +4123,43 @@ def t_stock_ui():
             assert 'undefined' not in tip and 'NaN' not in tip, \
                 '读数里有 undefined/NaN：%s' % tip
 
+            # ---- 均线图例：色块 + 名称 + 【那一天的值】 ----
+            #   🔴 光有名字不够 —— 几条颜色相近的线还是分不出谁是谁。
+            #     有了数字就能拿它跟纵轴对一下（也是这次"5 日线有两条"
+            #     那个问题最省事的自查手段）。
+            _lg = pg.evaluate("() => { const c=document.querySelector('#kcv'); const g=c.getContext('2d'); const r=c.width/c.clientWidth; const d=g.getImageData(50*r, 4*r, 340*r, 16*r).data; const s=new Set(); let n=0; for(let i=0;i<d.length;i+=4){ if(d[i+3]>200){ n++; s.add((d[i]>>4)+','+(d[i+1]>>4)+','+(d[i+2]>>4)); } } return [n, s.size]; }")
+            assert _lg[0] > 300, '图例区几乎没画东西：%s' % _lg
+            assert _lg[1] >= 4, \
+                '图例区颜色少于 4 种 —— 四条均线的色块/文字没分开：%s' % _lg
+            _ms = pg.evaluate('() => BARS[BARS.length-1].ma5')
+            assert _ms and _ms > 0, '取不到 ma5'
+
+            # ---- BOLL：默认【关】，开关生效 ----
+            #   🔴 原来只要选了副图就无条件叠 BOLL，主图上 7 条线；
+            #     而 BOLL 中轨就是 MA20（同一条线画两遍、两个颜色），
+            #     上下轨的橙色又与 MA5 撞色 —— 表现就是"5 日线看着有两条"。
+            assert 'on' not in (pg.locator('#bollt').get_attribute('class')
+                                or ''), 'BOLL 默认应该是关的'
+            assert pg.evaluate('() => BOLL') is False, 'BOLL 状态位不对'
+            # ★ 先把光标移开画布再量基线 —— 十字光标本身就画了几百个像素
+            #   （实测 417），拿"悬停时"的数当基线会让"关掉后回不到原样"
+            #   假失败一次。
+            pg.mouse.move(bb['x'] + bb['width'] / 2, bb['y'] - 40)
+            pg.wait_for_timeout(400)
+            _no = pg.evaluate(NZ)
+            pg.click('#bollt')
+            pg.wait_for_timeout(900)
+            _yes = pg.evaluate(NZ)
+            assert _yes > _no, \
+                '开了 BOLL 画布像素没变多（%d -> %d）' % (_no, _yes)
+            assert 'on' in (pg.locator('#bollt').get_attribute('class') or ''), \
+                'BOLL 开了但标签没点亮'
+            assert 'boll=1' in pg.url, 'BOLL 状态没进 URL（刷新就丢）'
+            pg.click('#bollt')
+            pg.wait_for_timeout(900)
+            assert abs(pg.evaluate(NZ) - _no) < 300, \
+                '关掉 BOLL 后画布没回到原样'
+
             # ---- 切副图 KDJ：读数跟着换 ----
             pg.locator('#body .sb[data-s="kdj"]').click()
             pg.wait_for_timeout(1800)
@@ -4125,6 +4211,8 @@ def t_stock_ui():
             return ('独立页 /stock.html：顶栏导航高亮、页上无 SQL 框、'
                     '搜索→键盘选中→跳转、8 个分区齐全、板块 chip 链到板块页、'
                     'Canvas 真有 %d 个像素、十字光标读出 OHLC+MA+MACD、'
+                    '均线图例带色块与当日值（≥4 色）、BOLL 默认关且开关改'
+                    '画布与 URL、'
                     '切 KDJ 后读数跟着换、切区间画布变、切后复权有说明、'
                     '点星真进自选、旧 hash 链接跳新页' % nz1)
     finally:

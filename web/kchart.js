@@ -7,7 +7,23 @@
    ★ 按 devicePixelRatio 放大再画，否则 Retina 上全是毛边。
    ★ 涨红跌绿（A 股习惯，与 :root 的 --up/--down 一致）。 */
 
-const MA_COLOR = {ma5: '#e0a33c', ma10: '#5b9cf0', ma20: '#a06bf0', ma60: '#3ec8d8'};
+/* 🔴 均线配色要【互相拉开】，也要与事件三角拉开。踩过的两处：
+     · ma5 #e0a33c 与 BOLL 中轨 #f9a06b 色距只有 53（肉眼难分）——
+       表现就是"5 日线看着有两条"，而其中一条其实是 MA20（见下）
+     · 四条均线的 hex 与四种事件三角【完全相同】，底部图例写着
+       "▲除权除息 ▲财报公告…" 用的正是均线那四个色
+   判据不靠眼睛：selftest 里按 RGB 欧氏距离量，任意两条 < 60 就算撞色。 */
+const MA_COLOR = {ma5: '#f5d33f', ma10: '#3d8bfd', ma20: '#c264e8',
+                  ma60: '#2fd6a8'};
+const MA_LABEL = {ma5: 'MA5', ma10: 'MA10', ma20: 'MA20', ma60: 'MA60'};
+/* 事件三角另成一族（与均线不共享任何色）。 */
+const EV_COLOR = {xr: '#ff8fb1', fin: '#8ea9ff', unlock: '#ffb066',
+                  share: '#9ad1ff'};
+/* BOLL 上下轨：单色 + 虚线 —— 它是"波动带"不是均线，形状上就该不一样。
+   🔴 **中轨刻意不画**：BOLL 中轨 = MA(20) 收盘均值，与 ma20 是同一条线
+     （实测最大差 0.001，纯舍入）。同一条线画两遍还配两个颜色，
+     就是"看着有两条、两条都不对"的来源。 */
+const BOLL_COLOR = '#7b8794';
 
 /* 主图 K 线 + 成交量 + 可选事件标记与副图。
    opts: {bars, events, sub, subKind, hover} —— hover 是索引或 null。
@@ -53,10 +69,12 @@ function drawKChart(cv, opts) {
     g.globalAlpha = 1;
     g.fillStyle = DIM; g.fillText(v.toFixed(2), PADL - 5, y + 3);
   }
-  /* BOLL 先画（在蜡烛下层） */
+  /* BOLL 上下轨先画（在蜡烛下层）。虚线 + 单色，且【不画中轨】。 */
   if (bars[0] && bars[0].ub !== undefined) {
-    [['ub', '#f97316'], ['mb', '#f9a06b'], ['lb', '#f97316']].forEach(([k, c]) => {
-      g.strokeStyle = c; g.globalAlpha = .55; g.lineWidth = 1; g.beginPath();
+    g.setLineDash([4, 3]);
+    ['ub', 'lb'].forEach(k => {
+      g.strokeStyle = BOLL_COLOR; g.globalAlpha = .8; g.lineWidth = 1;
+      g.beginPath();
       let st = false;
       bars.forEach((b, i) => {
         const v = b[k]; if (v == null) { st = false; return; }
@@ -64,6 +82,7 @@ function drawKChart(cv, opts) {
       });
       g.stroke(); g.globalAlpha = 1;
     });
+    g.setLineDash([]);
   }
   bars.forEach((b, i) => {
     if (b.close == null) return;
@@ -84,9 +103,12 @@ function drawKChart(cv, opts) {
       g.beginPath(); g.arc(x, volTop + volH + 4, 1.6, 0, 6.284); g.fill();
     }
   });
-  Object.keys(MA_COLOR).forEach(k => {
+  /* 均线：由长到短画 —— 短均线最活跃、要压在上层不被遮住。 */
+  ['ma60', 'ma20', 'ma10', 'ma5'].forEach(k => {
     if (bars[0] && bars[0][k] === undefined) return;
-    g.strokeStyle = MA_COLOR[k]; g.lineWidth = 1.1; g.beginPath();
+    g.strokeStyle = MA_COLOR[k];
+    g.lineWidth = (k === 'ma5' ? 1.5 : 1.1);
+    g.beginPath();
     let st = false;
     bars.forEach((b, i) => {
       const v = b[k]; if (v == null) { st = false; return; }
@@ -100,7 +122,7 @@ function drawKChart(cv, opts) {
   if (evs.length) {
     const at = {};
     bars.forEach((b, i) => { at[b.date] = i; });
-    const EC = {xr: '#e0a33c', fin: '#5b9cf0', unlock: '#a06bf0', share: '#3ec8d8'};
+    const EC = EV_COLOR;
     evs.forEach(e => {
       const i = at[e.date]; if (i == null) return;
       const x = X(i), y = PADT + mainH - 2;
@@ -155,14 +177,31 @@ function drawKChart(cv, opts) {
       });
     }
   }
+  /* ---- 图例：色块 + 名称 + 【那一天的值】 ----
+     ★ 光标停在哪天就显示那天的值，没停就显示最后一根。
+     🔴 值必须给 —— 只有名字的话，几条颜色相近的线还是分不出谁是谁；
+       有了数字就能拿它跟纵轴对一下，"哪条是 MA5"不用猜。 */
   g.textAlign = 'left'; g.font = '10px ui-monospace,Menlo,monospace';
   let lx = PADL + 2;
-  Object.keys(MA_COLOR).forEach(k => {
+  const lb = bars[(opts.hover != null && bars[opts.hover]) ? opts.hover
+                  : bars.length - 1] || {};
+  ['ma5', 'ma10', 'ma20', 'ma60'].forEach(k => {
     if (bars[0] && bars[0][k] === undefined) return;
     g.fillStyle = MA_COLOR[k];
-    const t = k.toUpperCase(); g.fillText(t, lx, PADT + 10);
-    lx += g.measureText(t).width + 10;
+    g.fillRect(lx, PADT + 3, 7, (k === 'ma5' ? 2.5 : 1.6));
+    lx += 10;
+    const t = MA_LABEL[k] + ' ' + (lb[k] == null ? '—' : lb[k].toFixed(2));
+    g.fillText(t, lx, PADT + 10);
+    lx += g.measureText(t).width + 9;
   });
+  if (bars[0] && bars[0].ub !== undefined) {
+    g.fillStyle = BOLL_COLOR;
+    g.fillRect(lx, PADT + 5, 3, 1.4); g.fillRect(lx + 4, PADT + 5, 3, 1.4);
+    lx += 10;
+    const t = 'BOLL ' + (lb.lb == null ? '—' : lb.lb.toFixed(2)) + '~'
+      + (lb.ub == null ? '—' : lb.ub.toFixed(2));
+    g.fillText(t, lx, PADT + 10);
+  }
   g.fillStyle = DIM; g.textAlign = 'center';
   [0, Math.floor(n / 2), n - 1].forEach(i => {
     if (bars[i]) g.fillText(bars[i].date.slice(2), X(i), H - 5);
