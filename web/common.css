@@ -517,3 +517,17 @@ table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}
 #top h1 a{color:var(--dim)}
 #top h1 a:hover{color:var(--fg)}
 #top h1 a.homeon{color:var(--accent)}
+
+/* 自选页签。★ 分组是"我要分别盯的几拨票"，用页签而不是 chip ——
+   chip 看着像筛选标签，页签才表示"这是几个并列的视图"。 */
+.wtabs{display:flex;gap:2px;align-items:flex-end;margin:10px 0 0;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+.wtab{padding:5px 12px;font-size:12px;color:var(--dim);text-decoration:none;
+  border:1px solid transparent;border-bottom:none;border-radius:6px 6px 0 0;
+  position:relative;top:1px;white-space:nowrap}
+.wtab:hover{color:var(--fg);background:var(--panel2)}
+.wtab.on{color:var(--fg);background:var(--panel2);border-color:var(--line);
+  border-bottom:1px solid var(--panel2)}
+.wtab .n{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
+.wtab .au{color:var(--accent);font-size:10px}
+.wtab.add{color:var(--dim);padding:5px 10px}

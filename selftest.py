@@ -4329,9 +4329,11 @@ def t_watchlist():
     import shutil
     import tempfile
 
+    from assay import live as lv
     from assay import server as sv
     from assay import watchlist as wl
     old_live, old_dir = sv.ALLOW_LIVE, wl.LIVE
+    sv.ALLOW_LIVE = True
     tmp = tempfile.mkdtemp()
     wl.LIVE = tmp
     try:
@@ -4379,6 +4381,78 @@ def t_watchlist():
         assert miss.get('missing'), '查不到的那行没标出来'
         assert [x for x in v['rows'] if x['code'] == '600519.XSHG'][0]['name'], \
             '正常的票应该有名称与行情'
+        # ---- 实盘持仓自动进自选，按账户分组 ----
+        #   ★ 幂等：再同步一次不该追加任何记录（持仓没变）。
+        #   🔴 只加不自动移 —— 卖光了标"已清仓"但留着，自动移出会把手写的
+        #      备注一起抹掉，而 append-only 的账本里删不掉记录、丢掉的是上下文。
+        import shutil as _sh
+        import tempfile as _tf
+        tmp2 = _tf.mkdtemp()
+        old_dir2 = wl.LIVE
+        wl.LIVE = tmp2
+        try:
+            r1 = wl.sync_live()
+            assert r1['added'], '持仓没同步进自选'
+            gs2 = {g['name']: g['n'] for g in wl.groups()}
+            assert all(wl.is_auto_group(k) for k in gs2), \
+                '自动同步应按账户建组（实盘·<账户名>）：%s' % list(gs2)
+            assert len(gs2) >= 2, '两个账户应各成一组：%s' % gs2
+            n_log = len(wl.log())
+            r2 = wl.sync_live()
+            assert not r2['added'] and not r2['regrouped'], '第二次同步不该有改动'
+            assert len(wl.log()) == n_log, \
+                '同步必须幂等 —— 第二次不该往 append-only 账本里追加'
+            # 手工分到别的组的，自动同步不该抢回去
+            code0 = r1['added'][0]['code']
+            wl.act('group', code0, group='我手工分的')
+            wl.sync_live()
+            now = {x['code']: x['group'] for x in wl.current()}
+            assert now[code0] == '我手工分的', \
+                '自动同步覆盖了手工分组 —— 那是用户的选择，不该被覆盖'
+            # 自选里有、但不在任何持仓里的自动组条目 -> 标已清仓、不移出
+            wl.act('add', '600519', group=wl.auto_group('不存在的账户'))
+            r3 = wl.sync_live()
+            assert any(x['code'] == '600519.XSHG' for x in r3['cleared']), \
+                '自动组里已清仓的没被标出来'
+            assert any(x['code'] == '600519.XSHG' for x in wl.current()), \
+                '🔴 已清仓的被自动移出了 —— 只该标记，不该移出'
+
+            # ---- 抓取范围去重（用户明确要的"不要重复调用"）----
+            codes = sv._rt_codes()
+            assert len(codes) == len(set(codes)), '_rt_codes 有重复！'
+            held = set()
+            for a in lv.load_accounts():
+                if not a.get('archived'):
+                    held |= set(lv.positions(a['id']))
+            watch = {x['code'] for x in wl.current()}
+            assert set(codes) == held | watch, \
+                '抓取范围应是【持仓 ∪ 自选】：少了 %s / 多了 %s' \
+                % (sorted((held | watch) - set(codes)), sorted(set(codes) - (held | watch)))
+            assert len(codes) < len(held) + len(watch), \
+                ('去重没生效 —— 持仓的票会被自动同步进自选，两边分别抓的话'
+                 '请求量直接翻倍（%d = %d + %d）' % (len(codes), len(held), len(watch)))
+
+            # ---- 自选也带实时价，且**读共享库**不自己打接口 ----
+            v2 = wl.valued()
+            assert 'price_src' in v2 and 'rt_n' in v2, '自选没给价来源'
+            for x in v2['rows']:
+                if x.get('rt_src'):
+                    assert x.get('rt_at'), '标了实时却没给时刻'
+                    # 涨跌幅要按实时价重算，不能留面板那个收盘值
+                    if x.get('preclose'):
+                        want = round((x['close'] / x['preclose'] - 1) * 100, 2)
+                        assert abs(x['change_pct'] - want) < 0.02, \
+                            ('涨跌幅没按实时价重算 —— 价变了幅没变，页面上'
+                             '前后矛盾：%s vs %s' % (x['change_pct'], want))
+            src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    'assay', 'watchlist.py'), encoding='utf-8').read()
+            assert 'realtime' in src and 'urllib' not in src, \
+                ('自选页不该自己去打行情接口 —— 要读 datalake/rt 那个共享库，'
+                 '否则同一只票会被抓好几遍')
+        finally:
+            wl.LIVE = old_dir2
+            _sh.rmtree(tmp2, ignore_errors=True)
+
         # 非法输入
         for bad in (('add', '99'), ('nope', '600519'), ('add', '')):
             try:
@@ -4395,9 +4469,13 @@ def t_watchlist():
         assert sv.api_watchlist_act({}, {'act': 'add', 'code': '601988'}).get('ok')
         assert len(wl.log()) == n_before + 1
         return ('append-only：4 次改动 + 移出后日志 5 条且 add 记录仍在；'
-                '重复加幂等不追加；重放出的分组/备注正确；'
-                '分组过滤；退市代码不静默丢掉而是标 missing；'
-                '3 类非法输入被拒；只读模式接口层拒写')
+                '重复加幂等不追加；重放出的分组/备注正确；分组过滤；'
+                '退市代码不静默丢掉而是标 missing；3 类非法输入被拒；'
+                '只读模式接口层拒写；持仓自动按账户分组同步且幂等、'
+                '不覆盖手工分组、已清仓只标记不移出；'
+                '抓取范围 = 持仓∪自选且去重（%d < %d+%d）；'
+                '自选带实时价且涨跌幅按实时价重算、不自己打接口'
+                % (len(codes), len(held), len(watch)))
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
         shutil.rmtree(tmp, ignore_errors=True)
@@ -4536,10 +4614,45 @@ def t_new_pages_ui():
             assert '中国石油' in t, '加进自选后没渲染出来：%s' % t[:200]
             assert '变更历史' in t, '没有 append-only 的变更历史'
             assert pg.locator('.lvsec table.pkt tr').count() >= 2, '盯盘表没行'
-            # 自选 → 个股
-            pg.locator('.lvsec a[href*="/stock.html"]').first.click()
+            # ---- 页签：多个分组并列，实盘账户组带「持」并排在前 ----
+            #   ★ 分组是"我要分别盯的几拨票"，用页签而不是 chip ——
+            #     chip 看着像筛选标签，页签才表示"几个并列的视图"。
+            pg.click('#wsync')                     # 把持仓同步进自选
+            pg.wait_for_timeout(3000)
+            tabs = [x.replace('\n', ' ') for x in
+                    pg.locator('.wtab').all_inner_texts()]
+            assert len(tabs) >= 4, '页签太少（应有 全部 + 各账户 + ＋）：%s' % tabs
+            assert '全部' in tabs[0], '第一个页签应是「全部」：%s' % tabs
+            assert tabs[-1].strip() == '＋', '最后应是新建页签：%s' % tabs
+            auto = [x for x in tabs if '持' in x]
+            assert len(auto) >= 2, \
+                '两个实盘账户应各成一个带「持」的页签：%s' % tabs
+            assert '持' in tabs[1], \
+                '实盘账户组应排在手工组前面（它们跟着持仓变）：%s' % tabs
+            # 切页签：行数要跟着变
+            n_all = pg.locator('.lvsec').first.locator('table.pkt tr').count()
+            pg.locator('.wtab[data-g]').nth(1).click()
+            pg.wait_for_timeout(2500)
+            n_one = pg.locator('.lvsec').first.locator('table.pkt tr').count()
+            assert 1 < n_one < n_all, \
+                '切到账户页签后行数没变少（%d -> %d）' % (n_all, n_one)
+            assert '持' in pg.locator('.wtab.on').inner_text(), '高亮没跟上'
+            # 实时价：与持仓页共用同一个库，页面侧不额外调接口
+            _psrc = pg.evaluate("() => document.querySelector("
+                                "'.lvhead .lvtag.on, .lvhead .lvtag.warn')"
+                                "?.textContent || ''")
+            if '实时' in _psrc:
+                assert pg.locator(
+                    'table.pkt .lvwhy[title*="实时价"]').count() >= 1, \
+                    '顶栏说是实时，表里却没标出哪些是实时价'
+            pg.locator('.wtab[data-g=""]').click()
+            pg.wait_for_timeout(2000)
+            # 自选 → 个股（限定在【盯盘表】里点 —— 变更历史那张表里也有
+            # 个股链接，从那儿点会跳到别的票，断言就对不上了）
+            pg.locator('.lvsec').first.locator(
+                'a[href*="/stock.html"]').first.click()
             pg.wait_for_selector('#kcv', timeout=40000)
-            assert '601857' in pg.url, '从自选点不到个股页'
+            assert '/stock.html' in pg.url, '从自选点不到个股页：%s' % pg.url
 
             # ================= 对比 =================
             pg.goto(base + '/compare.html?codes=601857.XSHG,601088.XSHG',
@@ -4611,7 +4724,8 @@ def t_new_pages_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('四页真渲染：盘面（KPI 齐 + 分布图 %d 像素 + 翻日 %s→%s + '
                     '%d 个榜单）、板块（%d 类 / 申万 %d 行 / 概念 %d 行 / 点出成分）、'
-                    '自选（加入后渲染 + 变更历史）、对比（曲线 %d 像素 + 读数 + '
+                    '自选（加入后渲染 + 变更历史 + 页签按账户分且切换生效）、'
+                    '对比（曲线 %d 像素 + 读数 + '
                     '加减只数）；四页都能点到个股页；顶栏 6 个入口齐'
                     % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, nz2))
     finally:

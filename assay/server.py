@@ -1433,11 +1433,24 @@ def api_live_tick(_q, body):
 
 def _live_loop():
     """守护线程：每 60s 看一次表。★ 幂等由 live.tick 保证（信号按
-    for_date 落盘，已存在就跳过），所以轮询频率高不会重复算。"""
+    for_date 落盘，已存在就跳过），所以轮询频率高不会重复算。
+
+    ★ 顺手把持仓同步进自选（`watchlist.sync_live` 也是幂等的）——
+      挂在这里而不是单独起一个线程：它依赖的就是持仓，而持仓变化只发生在
+      录入成交之后，跟着这条线走足够及时。
+    """
     import time
     m = _live()
     while True:
         try:
+            try:
+                r = _watch().sync_live()
+                if r['added'] or r['regrouped'] or r['cleared']:
+                    print('[watch] 自选同步：新加 %d 改组 %d 已清仓 %d'
+                          % (len(r['added']), len(r['regrouped']),
+                             len(r['cleared'])), flush=True)
+            except Exception as e:                          # noqa: BLE001
+                print('[watch] 同步异常: %s: %s' % (type(e).__name__, e), flush=True)
             for r in m.tick():
                 if r.get('error'):
                     print('[live] %s: %s' % (r.get('account'), r['error']), flush=True)
@@ -1465,10 +1478,16 @@ def _rt():
 
 
 def _rt_codes():
-    """要抓哪些 —— 所有未归档账户的当前持仓。
+    """要抓哪些 —— **持仓 ∪ 自选**，按代码去重。
 
-    ★ 只抓持仓，不抓自选/全市场：用户要的是"持仓的实时盈亏"。
-      范围越小越不容易触发限流，而限流是这条链上唯一的风险。
+    🔴 **去重是硬要求**（用户明确说"不要重复调用"）：持仓的票会被自动同步
+      进自选，所以一只票通常同时出现在持仓和自选里；同一只还可能被手工加进
+      多个分组。用 set 合并 —— 按"持仓一份、自选一份"分别抓的话，
+      请求量直接翻倍，而限流是这条链上唯一的风险。
+
+    ★ 自选页与持仓页读的是**同一个实时库**（`datalake/rt/`），
+      页面侧一次接口都不多打。这和 table-data-viewer 的
+      「全局共享行情缓存，跨所有页签复用」是同一个思路。
     """
     m = _live()
     out = set()
@@ -1479,6 +1498,10 @@ def _rt_codes():
             out.update(m.positions(a['id']))
         except Exception:                                   # noqa: BLE001
             pass
+    try:
+        out.update(x['code'] for x in _watch().current())
+    except Exception:                                       # noqa: BLE001
+        pass
     return sorted(out)
 
 
@@ -1903,6 +1926,18 @@ def api_watchlist_log(_q):
         return {'error': '%s: %s' % (type(e).__name__, e)}
 
 
+def api_watchlist_sync(_q, body):
+    """POST /api/watchlist/sync —— 立刻把持仓同步进自选。"""
+    if not ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
+    w = _watch()
+    try:
+        r = w.sync_live()
+        return dict(r, rows=w.valued().get('rows'), groups=w.groups())
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
 def api_watchlist_act(_q, body):
     """POST /api/watchlist —— 追加一条（add / remove / group / note）。
 
@@ -2189,6 +2224,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
                  '/api/watchlist': api_watchlist_act,
+                 '/api/watchlist/sync': api_watchlist_sync,
                  '/api/rt/poll': api_rt_poll,
                  '/api/live/backtest': api_live_backtest,
                  '/api/sync/run': api_sync_run}
