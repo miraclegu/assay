@@ -49,15 +49,31 @@
 🔴 但它**只是预填**，不覆盖你填的值 —— "预计分红"是判断，不是数据。
 换算出来的股息率也要跟着标出这个分红是**谁填的**（`div_src`）。
 
-## 外部现成的股息率（东财 f133）—— 只能当交叉校验，不能当口径
+## 分红也能从接口拿【最新的】—— 但要拿对那一个
 
-`push2.eastmoney.com/api/qt/ulist.np/get&fields=f133` 免 token、可批量，
-一次就能拿到"股息率"。实测 2026-09-03 对这 8 只逐只对数：**7 只与
-`r365 / 现价` 吻合到 0.03pp**（所以它就是滚动 12 个月口径），
-**但招商银行 2.44% vs 应为 4.91% —— 差一倍**（它只算了年度那一次，
-漏掉中期分红）。
-🔴 而漏中期恰恰发生在**银行/央企**上，也就是红利策略的重仓处 ——
-"有值但对不上"比"没有值"更危险。所以本地自己算，f133 只适合当校验。
+| 接口 | 给什么 | 能不能用 |
+|---|---|---|
+| 东财 `push2/ulist.np` `f133` | 一个现成的"股息率" | 🔴 **不能当口径**。实测 8 只里 7 只 = `r365/现价`，**招商银行 2.44% vs 应为 4.91%（差一倍）** —— 它只算了年度那一次、漏掉中期。而漏中期恰恰发生在银行/央企（红利策略重仓处）。"有值但对不上"比"没有值"更危险 |
+| 东财 `datacenter-web` `RPT_SHAREBONUS_DET` | **分红方案明细**：`REPORT_DATE`(归属报告期) / `PRETAX_BONUS_RMB`(每 10 股税前派现) / `PLAN_NOTICE_DATE` / `ASSIGN_PROGRESS` | ✅ **就用它**。字段与本地 `dividend` 一一对应，**口径仍是我们自己算的** |
+
+★ **关键是取【原始方案明细】而不是取现成的股息率** —— 别人的"股息率"里
+藏着别人的窗口与去重规则（f133 就是这样错的）。拿回 (报告期, 每股派现,
+公告日, 进度) 四个字段，套本地那套 `fy` / `r365` 聚合，口径就还是自己的。
+★ 它带的 `REPORT_DATE` 正是 **QMT 拿不到、导致红利指数增强不能原生移植**
+的那个字段（见数据字典索引 1「分红的归属报告期」）。
+实测 2026-09-03 逐只对数：8 只的 FY 合计与本地 **8/8 精确吻合到 0.0001**。
+
+🔴 **一天只调一次,而且已经有今天的就不调**（`ext_div`）：
+按**每只票**记 `fetched` 日期,当天抓过就跳过;没抓过的那几只**合并成一次
+批量请求**（`(SECURITY_CODE in (...))`，8 只 1 个请求）。
+新加进清单的票立刻抓一次(它一条都没有),同 `realtime._rt_ensure` 的思路。
+★ 缓存落 `datalake/rt/div_ext.json` —— 外部抓来的东西**不写进
+`std/dividend.parquet`**：那张表是 loader 链的产物,被外部数据污染之后
+"面板与 std 不一致"不报错。`rt/` 是既有的"外部抓来的、构建链一个脚本都不碰"
+那个目录。
+★ 合并按 `(code, 报告期)` 去重,**取进度更靠后的那条**（实施 > 股东大会 >
+董事会 > 预披露）;并把"外部比本地新的那几条"标出来给页面
+（`ext_new`）—— 数字从哪来必须看得见。
 
 ## 存哪 / 怎么存
 
@@ -224,95 +240,331 @@ def codes():
 # 🔴 `bonus_ratio_rmb` 是**每 10 股派现（元）**，不是每股 —— 要除 10。
 #   实测：长江电力 7.9 = 每股 0.79；东阿阿胶 13.4481 = 每股 1.3448。
 #   当成每股用会让"预计分红"大 10 倍，而它不报错，只是目标价高得离谱。
-# ---- 口径二：最近一个【完整会计年度】的合计（默认）----
-# 年度锚定用 `report_date` 月份 == 12（不依赖 bonus_type 的文本标签），
-# 再把同一年份的年度/中期/季度全部加起来。与红利策略 DIV_FISCAL_YEAR 同源。
-_SQL_DIV_FY = """
-WITH raw AS (
-  SELECT code, report_date, bonus_type, bonus_ratio_rmb, board_plan_pub_date,
-         row_number() OVER (
-           PARTITION BY code, report_date, bonus_type
-           ORDER BY CASE plan_progress
-                      WHEN '实施方案'     THEN 3
-                      WHEN '股东大会预案' THEN 2
-                      WHEN '董事会预案'   THEN 1
-                      ELSE 0 END DESC, board_plan_pub_date DESC) AS r
-  FROM read_parquet('%s/std/dividend.parquet')
-  WHERE code IN ('%s')
-    AND board_plan_pub_date <= DATE '%s'
-    AND board_plan_pub_date >= DATE '%s' - INTERVAL 800 DAY
-    AND bonus_cancel_pub_date IS NULL
-    AND (plan_progress IS NULL OR plan_progress NOT IN ('终止', '取消分红'))
-    AND bonus_ratio_rmb > 0
-), d AS (SELECT * FROM raw WHERE r = 1),
-fy AS (SELECT code, max(year(report_date)) AS y FROM d
-       WHERE month(report_date) = 12 GROUP BY 1)
-SELECT d.code, fy.y, sum(d.bonus_ratio_rmb) / 10.0 AS per_share, count(*) AS n,
-       max(d.board_plan_pub_date) AS last_pub,
-       string_agg(d.bonus_type || ' ' || strftime(d.report_date, '%%Y-%%m')
-                  || '=' || round(d.bonus_ratio_rmb / 10.0, 4), ' + ') AS detail
-FROM d JOIN fy ON d.code = fy.code AND year(d.report_date) = fy.y
-GROUP BY 1, 2
+# ------------------------------------------------------- 分红：本地 + 外部
+# 本地那份的口径与红利策略的 DIV_* CTE 同源：按【董事会预案公告日】可见
+# （预案就是公开信息，不是未来函数），同一 (code, report_date) 只留流程最
+# 靠后的那条 —— JQ 的「董事会预案」记录数是实际事件数的 8.3 倍，不去重会让
+# 股息率虚高。
+#
+# 🔴 `bonus_ratio_rmb` / `PRETAX_BONUS_RMB` 都是**每 10 股派现（元）**，
+#   不是每股 —— 要除 10。实测：长江电力 7.9 = 每股 0.79。当成每股用会让
+#   "预计分红"大 10 倍、目标价小 10 倍，而它不报错，只是那一行永远不会触发。
+_SQL_RAW = """
+SELECT code, report_date, bonus_type, bonus_ratio_rmb / 10.0 AS per_share,
+       board_plan_pub_date, plan_progress
+FROM read_parquet('%s/std/dividend.parquet')
+WHERE code IN ('%s')
+  AND board_plan_pub_date <= DATE '%s'
+  AND board_plan_pub_date >= DATE '%s' - INTERVAL %d DAY
+  AND bonus_cancel_pub_date IS NULL
+  AND (plan_progress IS NULL OR plan_progress NOT IN ('终止', '取消分红'))
+  AND bonus_ratio_rmb > 0
 """
-
-# ---- 口径一：近 365 天已公告 ----
-_SQL_DIV = """
-WITH raw AS (
-  SELECT code, report_date, bonus_type, bonus_ratio_rmb, board_plan_pub_date,
-         row_number() OVER (
-           PARTITION BY code, report_date, bonus_type
-           ORDER BY CASE plan_progress
-                      WHEN '实施方案'     THEN 3
-                      WHEN '股东大会预案' THEN 2
-                      WHEN '董事会预案'   THEN 1
-                      ELSE 0 END DESC, board_plan_pub_date DESC) AS r
-  FROM read_parquet('%s/std/dividend.parquet')
-  WHERE code IN ('%s')
-    AND board_plan_pub_date <= DATE '%s'
-    AND board_plan_pub_date >= DATE '%s' - INTERVAL 365 DAY
-    AND bonus_cancel_pub_date IS NULL
-    AND (plan_progress IS NULL OR plan_progress NOT IN ('终止', '取消分红'))
-    AND bonus_ratio_rmb > 0
-)
-SELECT code, sum(bonus_ratio_rmb) / 10.0 AS per_share, count(*) AS n,
-       max(board_plan_pub_date) AS last_pub
-FROM raw WHERE r = 1 GROUP BY 1
-"""
+WINDOW_DAYS = 800
+# 进度排序。★ 两个源的用词不一样（本地"实施方案" / 东财"实施分配"），
+#   两套都要认 —— 只认一套的话外部那条会被当成最低优先级，
+#   于是"更靠后的进度"选错，而它不报错。
+_RANK = {'实施方案': 3, '实施分配': 3, '股东大会预案': 2, '董事会预案': 1,
+         '预披露': 0}
 
 
-def suggest_div(codes_in, root=None, day=None):
+def _rank(p):
+    return _RANK.get((p or '').strip(), 0)
+
+
+def _bonus_type(report_date):
+    """归属报告期的月份决定它是年度/中期/季度 —— 不依赖文本标签。"""
+    m = int(str(report_date)[5:7])
+    return {12: '年度分红', 6: '中期分红'}.get(m, '季度分红')
+
+
+def _local_rows(codes_in, root=None, day=None):
+    """{code: [row]}，row = (报告期, 每股, 公告日, 进度, 来源)。"""
+    from assay import stock as st
+    d = _day(day)
+    con = st.con()
+    out = {}
+    for r in con.execute(_SQL_RAW % (st._lake(root), "','".join(codes_in), d, d,
+                                     WINDOW_DAYS)).fetchall():
+        out.setdefault(r[0], []).append(
+            {'report_date': str(r[1])[:10], 'per_share': round(r[3], 4),
+             'plan_pub': str(r[4])[:10], 'progress': r[5], 'src': '本地'})
+    return out
+
+
+def _merge_rows(local, ext):
+    """合并两个源。**同一次分红的身份是【预案公告日】，不是归属报告期。**
+
+    🔴 这条是踩出来的：同一次分红，两个源标的 `report_date` 可能**不一样**。
+      实测长江电力那次 0.21 元（公告 2024-12-14）：
+          本地（聚宽）report_date = 2024-09-30（季度分红）
+          东财        REPORT_DATE = 2024-06-30
+      按报告期去重的话它会变成**两条**，FY2024 从 0.943 变 1.153
+      （+22%），**而这不报错** —— 只是那一行的目标价被算高、永远不触发。
+
+    🔴 **公告日也可能不一样**：东阿阿胶 2026 中期那笔 1.3448，
+      本地（聚宽 `board_plan_pub_date`）是 **2026-08-21**（中期董事会预案），
+      东财 `PLAN_NOTICE_DATE` 是 **2026-04-25**（年报里先披露的分红计划）——
+      差了 4 个月。只按公告日去重的话它也会变成两条。
+
+    所以"同一次分红"的判据是**三条任一命中**（按这个顺序）：
+      ① `(报告期, 每股金额)` 相同 —— 挡公告日标注不同（东阿阿胶那种）
+      ② `(公告日, 每股金额)` 相同 —— 挡报告期标注不同（长江电力那种）
+      ③ `公告日` 相同但金额不同 —— 同一次，金额在实施时被修正了：
+         取**进度更靠后**那条的金额
+    剩下的才是本地真没有的新公告，加进来并标 `new=True`。
+
+    ★ 两边都有时**留本地的 `report_date`** —— 本地那份的口径对过账
+      （与 QMT `get_divid_factors` 12/12、与用户手填 8/8），
+      外部的标注只在"本地根本没有这条"时才用。
+    ★ 会不会把两笔真不同的分红并成一笔？要求金额也相同，
+      而"同一报告期两次金额完全相同的现金分红"实际上不存在。
+    """
+    out = {}
+    for code in set(list(local) + list(ext)):
+        rows = [dict(r) for r in (local.get(code) or [])]
+        by_rd, by_pub_amt, by_pub = {}, {}, {}
+
+        def _index(r):
+            by_rd.setdefault((r['report_date'], r['per_share']), r)
+            by_pub_amt.setdefault((r['plan_pub'], r['per_share']), r)
+            by_pub.setdefault(r['plan_pub'], r)
+
+        for r in rows:
+            _index(r)
+        for r in (ext.get(code) or []):
+            cur = (by_rd.get((r['report_date'], r['per_share']))
+                   or by_pub_amt.get((r['plan_pub'], r['per_share'])))
+            if cur is not None:                 # ①②同一次、同金额
+                if _rank(r['progress']) > _rank(cur['progress']):
+                    cur['progress'] = r['progress']
+                continue
+            cur = by_pub.get(r['plan_pub'])
+            if cur is not None:                 # ③同一次，金额被修正
+                if _rank(r['progress']) >= _rank(cur['progress']):
+                    cur['per_share'] = r['per_share']
+                    cur['progress'] = r['progress']
+                    cur['new'] = True
+                continue
+            nr = dict(r, new=True)              # 本地真没有的新公告
+            rows.append(nr)
+            _index(nr)
+        out[code] = sorted(rows, key=lambda x: x['report_date'], reverse=True)
+    return out
+
+
+def _agg(rows, day=None):
+    """两个口径都从**同一份行**上算 —— 分两套实现迟早分叉。
+
+    🔴 先按 `day` 砍掉**公告日晚于 as-of 的那些行**：外部缓存里可能有比
+      as-of 更新的公告（缓存是"今天"抓的，而 as-of 可以往回问），
+      不砍就是未来函数 —— 而它算出来的数看着完全正常。
+    """
+    d = _day(day)
+    rows = [x for x in rows if (x.get('plan_pub') or '') <= d]
+    fy = r365 = None
+    ys = [int(x['report_date'][:4]) for x in rows
+          if x['report_date'][5:7] == '12']
+    if ys:
+        y = max(ys)
+        pick = [x for x in rows if x['report_date'][:4] == str(y)]
+        fy = {'per_share': round(sum(x['per_share'] for x in pick), 4),
+              'year': y, 'n': len(pick),
+              'last_pub': max(x['plan_pub'] or '' for x in pick),
+              'src': '%d 年度合计' % y,
+              'detail': ' + '.join(
+                  '%s %s=%s%s' % (_bonus_type(x['report_date']),
+                                  x['report_date'][:7], x['per_share'],
+                                  '（东财新）' if x.get('new') else '')
+                  for x in sorted(pick, key=lambda x: x['report_date']))}
+    lo = (datetime.date.fromisoformat(d) - datetime.timedelta(days=365)
+          ).isoformat()
+    pick = [x for x in rows if (x['plan_pub'] or '') >= lo]
+    if pick:
+        r365 = {'per_share': round(sum(x['per_share'] for x in pick), 4),
+                'n': len(pick),
+                'last_pub': max(x['plan_pub'] or '' for x in pick),
+                'src': '近 12 个月已公告合计'}
+    return fy, r365
+
+
+def _day(day=None):
+    if isinstance(day, str):
+        return day
+    return (day or datetime.date.today()).isoformat()
+
+
+# ------------------------------------------------- 外部分红（东财，一天一次）
+# 🔴 取的是【原始方案明细】而不是别人算好的股息率：f133 那个"股息率"里藏着
+#   别人的窗口与去重规则，实测招商银行差一倍（见模块 docstring）。
+EXT_URL = ('https://datacenter-web.eastmoney.com/api/data/v1/get?'
+           'sortColumns=PLAN_NOTICE_DATE&sortTypes=-1&pageSize=200'
+           '&pageNumber=1&reportName=RPT_SHAREBONUS_DET'
+           '&columns=SECURITY_CODE,REPORT_DATE,PLAN_NOTICE_DATE,'
+           'ASSIGN_PROGRESS,PRETAX_BONUS_RMB&quoteColumns=&source=WEB'
+           '&client=WEB&filter=%s')
+EXT_FILE = 'div_ext.json'
+EXT_TIMEOUT = 12
+
+
+def ext_path(root=None):
+    """缓存落 `datalake/rt/`。
+
+    🔴 **不写进 `std/dividend.parquet`** —— 那张表是 loader 链的产物，
+      被外部数据污染之后"面板与 std 不一致"不报错。`rt/` 就是既有的
+      "外部抓来的、构建链一个脚本都不碰"那个目录（同 1 分钟线）。
+    """
+    from assay import stock as st
+    return os.path.join(st._lake(root), 'rt', EXT_FILE)
+
+
+def _ext_cache(root=None):
+    p = ext_path(root)
+    if not os.path.isfile(p):
+        return {'fetched': {}, 'rows': {}}
+    try:
+        with open(p, encoding='utf-8') as fh:
+            d = json.load(fh)
+        d.setdefault('fetched', {})
+        d.setdefault('rows', {})
+        return d
+    except Exception:                                       # noqa: BLE001
+        return {'fetched': {}, 'rows': {}}
+
+
+def _ext_save(d, root=None):
+    p = ext_path(root)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(d, fh, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def _ext_fetch(codes_in, day=None):
+    """一次批量请求覆盖多只（`SECURITY_CODE in (...)`）。"""
+    import urllib.parse
+    import urllib.request
+    d = _day(day)
+    since = (datetime.date.fromisoformat(d)
+             - datetime.timedelta(days=WINDOW_DAYS)).isoformat()
+    six = [c[:6] for c in codes_in]
+    flt = ('(SECURITY_CODE in ("%s"))(PLAN_NOTICE_DATE>=\'%s\')'
+           % ('","'.join(six), since))
+    req = urllib.request.Request(
+        EXT_URL % urllib.parse.quote(flt),
+        headers={'User-Agent': 'Mozilla/5.0',
+                 'Referer': 'https://data.eastmoney.com/'})
+    raw = urllib.request.urlopen(req, timeout=EXT_TIMEOUT).read()
+    o = json.loads(raw.decode('utf-8', 'replace'))
+    if not o.get('success'):
+        raise AlertError('东财分红接口返回失败：%s' % o.get('message'))
+    res = o.get('result') or {}
+    if (res.get('pages') or 1) > 1:
+        # ★ 分页了就明说 —— 悄悄只取第一页会让老的那几档消失，
+        #   而"少了一笔中期分红"的表现是目标价偏低，不报错。
+        raise AlertError('东财分红接口分页了（%s 页 / %s 条），'
+                         '把窗口或票数调小' % (res.get('pages'), res.get('count')))
+    out = {}
+    for r in (res.get('data') or []):
+        if not r.get('PRETAX_BONUS_RMB'):
+            continue          # 预披露只给比例、没有金额 —— 不是"已公告分红"
+        pub = (r.get('PLAN_NOTICE_DATE') or '')[:10]
+        if not pub or pub > d:
+            continue          # 🔴 公告日晚于今天的一律不要（未来函数）
+        jc = _jq(r['SECURITY_CODE'])
+        out.setdefault(jc, []).append({
+            'report_date': (r.get('REPORT_DATE') or '')[:10],
+            'per_share': round(float(r['PRETAX_BONUS_RMB']) / 10.0, 4),
+            'plan_pub': pub, 'progress': r.get('ASSIGN_PROGRESS'),
+            'src': '东财'})
+    return out
+
+
+def _jq(six):
+    from assay import stock as st
+    return st.norm_code(six)
+
+
+def ext_div(codes_in, root=None, day=None, force=False):
+    """外部分红明细，**一天最多一次**，已经有今天的就不再调用。
+
+    ★ 判据按【每只票】记（`fetched[code]`），所以：
+      · 当天抓过的跳过 —— 一天一次，多开几个标签页也不会变成一串请求
+      · 新加进清单的票**立刻抓**（它一条都没有）—— 同 `_rt_ensure` 的思路
+      · 没抓过的那几只**合并成一次批量请求**
+    ★ 抓失败不抛给页面：外部源挂了应该退回本地那份，而不是让整页打不开。
+      失败也记 `err` 并把 `fetched` 留空（下次还会试）。
+    """
+    d = _day(day)
+    cache = _ext_cache(root)
+    want = [c for c in (_jq(x) for x in (codes_in or [])) if c]
+    todo = [c for c in want
+            if force or cache['fetched'].get(c) != d]
+    out = {'rows': {c: cache['rows'].get(c) or [] for c in want},
+           'fetched': {c: cache['fetched'].get(c) for c in want},
+           'called': False, 'n_new': 0, 'err': None, 'day': d}
+    if not todo:
+        return out
+    try:
+        got = _ext_fetch(todo, day=d)
+        out['called'] = True
+        for c in todo:
+            cache['rows'][c] = got.get(c) or []
+            cache['fetched'][c] = d
+            out['rows'][c] = cache['rows'][c]
+            out['fetched'][c] = d
+        out['n_new'] = sum(len(v) for v in got.values())
+        _ext_save(cache, root)
+    except Exception as e:                                  # noqa: BLE001
+        out['err'] = '%s: %s' % (type(e).__name__, str(e)[:120])
+    return out
+
+
+def suggest_div(codes_in, root=None, day=None, ext=True):
     """每股分红的**两个**预填口径 —— 只是预填，不是"预计"。
 
-    返回 `{code: {per_share, src, fy: {...}, r365: {...}}}`，
+    返回 `{code: {per_share, src, fy: {...}, r365: {...}, ext: {...}}}`，
     `per_share` / `src` 取**默认口径**（`fy` = 最近一个完整会计年度合计）。
+
     🔴 默认不能用 `r365`：半年派的公司窗口会混入不同归属期，实测海尔智家
       少 26%、国电电力少 41%（都是漏掉中期分红），而它不报错。
+    ★ `ext=True` 时把外部（东财）明细并进来，**口径仍是这里算的** ——
+      外部只提供更新的原始行。`ext_div` 自己带"一天一次"的节流。
+    ★ 每只票带 `ext`：`{fetched, n_ext, new: [...]}` —— 哪几条是外部比本地
+      新的必须能看见（"数字从哪来"是这一页能不能信的前提）。
     """
     from assay import stock as st
     want = [c for c in (st.norm_code(x) for x in (codes_in or [])) if c]
     if not want:
         return {}
-    d = (day or datetime.date.today()).isoformat() if not isinstance(
-        day, str) else day
-    con = st.con()
-    lake = st._lake(root)
-    q = "','".join(want)
+    d = _day(day)
+    loc = _local_rows(want, root=root, day=d)
+    ex = {'rows': {}, 'fetched': {}, 'err': None, 'called': False}
+    if ext:
+        ex = ext_div(want, root=root, day=d)
+    merged = _merge_rows(loc, ex.get('rows') or {})
     out = {}
-    for r in con.execute(_SQL_DIV_FY % (lake, q, d, d)).fetchall():
-        out.setdefault(r[0], {})['fy'] = {
-            'per_share': round(r[2], 4), 'year': r[1], 'n': r[3],
-            'last_pub': str(r[4])[:10], 'detail': r[5],
-            'src': '%d 年度合计' % r[1]}
-    for r in con.execute(_SQL_DIV % (lake, q, d, d)).fetchall():
-        out.setdefault(r[0], {})['r365'] = {
-            'per_share': round(r[1], 4), 'n': r[2],
-            'last_pub': str(r[3])[:10], 'src': '近 12 个月已公告合计'}
-    for c, v in out.items():
-        pick = v.get('fy') or v.get('r365') or {}
+    for c in want:
+        rows = merged.get(c) or []
+        if not rows:
+            continue
+        fy, r365 = _agg(rows, day=d)
+        new = [x for x in rows if x.get('new')]
+        v = {'fy': fy, 'r365': r365,
+             'ext': {'fetched': (ex.get('fetched') or {}).get(c),
+                     'called': ex.get('called'), 'err': ex.get('err'),
+                     'n_new': len(new),
+                     'new': [{'report_date': x['report_date'],
+                              'per_share': x['per_share'],
+                              'plan_pub': x['plan_pub'],
+                              'progress': x['progress']} for x in new[:4]]}}
+        pick = fy or r365 or {}
         v['per_share'] = pick.get('per_share')
         v['src'] = pick.get('src')
         v['n'] = pick.get('n')
         v['last_pub'] = pick.get('last_pub')
+        out[c] = v
     return out
 
 

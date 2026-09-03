@@ -2042,10 +2042,34 @@ def api_alerts(_q):
             v['suggest'] = a.suggest_div([x['code'] for x in v['rows']])
         except Exception:                                   # noqa: BLE001
             v['suggest'] = {}
+        v['day'] = datetime.now().date().isoformat()
         v['fired_today'] = [r for r in a.fired_log()
                             if str(r.get('ts', ''))[:10]
                             == datetime.now().date().isoformat()]
         return v
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_alerts_refresh_div(_q, body):
+    """POST /api/alerts/refresh_div —— 手动重抓一次分红明细（绕过一天一次）。
+
+    ★ 平时是**一天一次**（`ext_div` 自己按每只票记 fetched 日期）；
+      这个按钮是"我知道刚出了公告"时用的，由人触发所以不需要节流。
+    """
+    a = _alerts()
+    try:
+        cs = a.codes()
+        if not cs:
+            return {'ok': True, 'n_codes': 0, 'n_rows': 0, 'n_new': 0}
+        r = a.ext_div(cs, force=True)
+        if r.get('err'):
+            return {'error': '外部分红接口失败：%s' % r['err']}
+        sg = a.suggest_div(cs)
+        return {'ok': True, 'n_codes': len(cs),
+                'n_rows': sum(len(v) for v in (r.get('rows') or {}).values()),
+                'n_new': sum((v.get('ext') or {}).get('n_new') or 0
+                             for v in sg.values())}
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
 
@@ -2422,6 +2446,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/fee_rate': api_live_fee_add,
                  '/api/sync/auto': api_sync_auto_set,
                  '/api/alerts': api_alerts_act,
+                 '/api/alerts/refresh_div': api_alerts_refresh_div,
                  '/api/watchlist': api_watchlist_act,
                  '/api/watchlist/sync': api_watchlist_sync,
                  '/api/rt/poll': api_rt_poll,

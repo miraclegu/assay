@@ -4515,6 +4515,30 @@ def t_alerts():
     sv.ALLOW_LIVE = True
     tmp = tempfile.mkdtemp()
     al.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    # 🔴 外部分红接口要打桩：不打的话 selftest 会真去打东财，
+    #    而"一天一次"的节流恰恰要在这里被验证（真打就验不了）。
+    #    桩里放的是**实测抓回来的真行**（含两处"标注与本地不同"的）。
+    EXT_HIT = []
+    _o_fetch, _o_extpath = al._ext_fetch, al.ext_path
+    _extcache = os.path.join(tmp, 'div_ext.json')
+    al.ext_path = lambda root=None: _extcache
+    EXT_ROWS = {'600900.XSHG': [
+        {'report_date': '2025-12-31', 'per_share': 0.79,
+         'plan_pub': '2026-04-30', 'progress': '实施分配', 'src': '东财'},
+        {'report_date': '2025-09-30', 'per_share': 0.21,
+         'plan_pub': '2025-12-31', 'progress': '实施分配', 'src': '东财'},
+        {'report_date': '2024-12-31', 'per_share': 0.733,
+         'plan_pub': '2025-04-30', 'progress': '实施分配', 'src': '东财'},
+        # ★ 同一次 0.21（公告 2024-12-14）：本地标 2024-09-30、东财标 2024-06-30
+        {'report_date': '2024-06-30', 'per_share': 0.21,
+         'plan_pub': '2024-12-14', 'progress': '实施分配', 'src': '东财'}],
+        '000423.XSHE': [
+        # ★ 同一次 1.3448（报告期都是 2026-06-30）：本地公告 08-21、东财 04-25
+        {'report_date': '2026-06-30', 'per_share': 1.3448,
+         'plan_pub': '2026-04-25', 'progress': '实施分配', 'src': '东财'}]}
+    al._ext_fetch = lambda cs, day=None: (
+        EXT_HIT.append(sorted(cs))
+        or {c: v for c, v in EXT_ROWS.items() if c in set(cs)})
     try:
         # ---- 1) 分红预填：每 10 股 -> 每股 ----
         #   🔴 bonus_ratio_rmb 是"每 10 股派现"。不除 10 的话"预计分红"大 10 倍，
@@ -4641,6 +4665,68 @@ def t_alerts():
             except al.AlertError:
                 pass
 
+        # ---- 6b) 外部分红：一天只抓一次，已经有今天的就不再调 ----
+        EXT_HIT.clear()
+        if os.path.isfile(al.ext_path()):
+            os.remove(al.ext_path())      # 装成"今天还没抓过"
+        al.suggest_div(['600900'])
+        assert EXT_HIT == [['600900.XSHG']], \
+            '第一次没去抓外部分红：%s' % EXT_HIT
+        d2 = al.suggest_div(['600900'])
+        assert len(EXT_HIT) == 1, \
+            ('同一天同一只票抓了 %d 次 —— 应该只抓一次（多开几个标签页'
+             '不该变成一串请求）' % len(EXT_HIT))
+        assert d2['600900.XSHG']['ext']['called'] is False, \
+            '第二次应该报"没调用"'
+        assert d2['600900.XSHG']['ext']['fetched'], '没记下抓取日期'
+        # 新加进来的票要立刻抓（它一条都没有）—— 同 _rt_ensure 的思路
+        al.suggest_div(['600900', '000423'])
+        assert EXT_HIT[-1] == ['000423.XSHE'], \
+            '只该补抓没抓过的那一只，实际抓了 %s' % EXT_HIT[-1]
+        # 手动刷新（force）要能绕过节流
+        al.ext_div(['600900'], force=True)
+        assert EXT_HIT[-1] == ['600900.XSHG'], 'force 没绕过一天一次'
+        # 🔴 缓存不许写进 std/dividend.parquet —— 那是 loader 链的产物，
+        #   被外部数据污染之后"面板与 std 不一致"不报错
+        assert 'std' not in _o_extpath(), \
+            '外部缓存落到 std/ 里去了：%s' % _o_extpath()
+
+        # ---- 6c) 合并去重：同一次分红，两个源的【标注可能不一样】----
+        #   🔴 两条都是实测踩出来的，按单一键去重都会双计而不报错：
+        #     ① 长江电力那次 0.21（公告 2024-12-14）：本地报告期 2024-09-30、
+        #        东财 2024-06-30 —— 按报告期去重 FY2024 从 0.943 变 1.153(+22%)
+        #     ② 东阿阿胶 2026 中期 1.3448：本地公告 2026-08-21（中期董事会预案）、
+        #        东财 2026-04-25（年报里先披露的计划）—— 按公告日去重会双计
+        loc = al._local_rows(['600900.XSHG'], day='2025-06-30')
+        mg = al._merge_rows(loc, EXT_ROWS)['600900.XSHG']
+        fy24, _ = al._agg(mg, day='2025-06-30')
+        assert abs(fy24['per_share'] - 0.943) < 1e-6, \
+            ('长江电力 FY2024 应是 0.943（0.21+0.733），实得 %s —— '
+             '差的那 0.21 是同一次分红被两个源的报告期标注拆成了两条'
+             % fy24['per_share'])
+        assert fy24['year'] == 2024, 'as-of 2025-06-30 的年度桶应是 2024'
+        n26 = [x for x in al._merge_rows(al._local_rows(['000423.XSHE']),
+                                         EXT_ROWS)['000423.XSHE']
+               if x['report_date'] == '2026-06-30']
+        assert len(n26) == 1, \
+            ('东阿阿胶 2026-06-30 那次分红被拆成了 %d 条（公告日标注不同）：%s'
+             % (len(n26), n26))
+        # as-of：外部缓存里比 as-of 更新的公告一律砍掉（否则是未来函数）
+        fy_now, _ = al._agg(mg)
+        assert fy_now['year'] >= 2025, 'as-of 今天时该用更新的年度桶'
+
+        # ---- 6d) 外部源挂了要退回本地，而不是让整页打不开 ----
+        def _boom(cs, day=None):
+            raise RuntimeError('模拟东财挂了')
+        _keep = al._ext_fetch
+        al._ext_fetch = _boom
+        if os.path.isfile(al.ext_path()):
+            os.remove(al.ext_path())
+        dz = al.suggest_div(['600900'])
+        assert dz['600900.XSHG']['per_share'], '外部挂了就没有预填了'
+        assert dz['600900.XSHG']['ext']['err'], '外部失败没记下来（页面要显示）'
+        al._ext_fetch = _keep
+
         # ---- 7) 抓取范围要带上它 ----
         #   不抓价，"到价提醒"就什么都不会发生。
         assert set(al.codes()) <= set(sv._rt_codes()), \
@@ -4660,10 +4746,16 @@ def t_alerts():
                 '填的那个；改分红后另一个跟着变(45->50)；三档判定 hit/near/far'
                 '且按目标价降序；提醒一天只一次且去重落盘；append-only 改一行'
                 '是追加、重放取最后一条；6 类非法输入被拒；'
-                '抓取范围含买点清单；只读模式拒写'
+                '抓取范围含买点清单；只读模式拒写；'
+                '外部分红(东财 RPT_SHAREBONUS_DET)一天只抓一次、新票立刻补抓、'
+                'force 可绕过、缓存不落 std/、挂了退回本地；'
+                '两个源的标注不同也不双计（长江电力报告期 09-30 vs 06-30 -> '
+                'FY2024 仍 0.943 而不是 1.153；东阿阿胶公告日 08-21 vs 04-25 '
+                '-> 2026 中期仍 1 条）'
                 % (cj.get('per_share') or 0))
     finally:
         sv.ALLOW_LIVE, al.LIVE = old_live, old_dir
+        al._ext_fetch, al.ext_path = _o_fetch, _o_extpath
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -4911,6 +5003,12 @@ def t_alerts_ui():
     sv.ALLOW_LIVE = True
     tmp = tempfile.mkdtemp()
     al.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    # 外部分红接口打桩：这个用例起的是同进程的服务，页面一开就会走
+    # suggest_div -> ext_div。真打东财会让用例依赖外网，且"一天一次"的
+    # 缓存会污染真 datalake/rt。
+    _o_fetch, _o_extpath = al._ext_fetch, al.ext_path
+    al.ext_path = lambda root=None: os.path.join(tmp, 'div_ext.json')
+    al._ext_fetch = lambda cs, day=None: {}
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -4988,6 +5086,14 @@ def t_alerts_ui():
             pg.wait_for_timeout(800)
 
             # ---- 表里那一行 ----
+            # ★ 分红的更新状态必须在页面上 —— 这一页的目标价全是
+            #   "分红 ÷ 股息率"算出来的，分红过期就整页都是过期的数。
+            _hd = pg.locator('.lvhead').inner_text()
+            assert '分红' in _hd and ('今天已更新' in _hd or '已更新' in _hd
+                                      or '取不到' in _hd), \
+                '头上没说分红是什么时候更新的：%s' % _hd.replace('\n', ' ')
+            assert pg.locator('#adivref').count() == 1, \
+                '缺「刷新分红」（平时一天一次，刚出公告时要能手动催一次）'
             th = ' '.join(pg.locator('table.pkt th').all_inner_texts())
             for k in ('代码', '名称', '现价', '预计分红', '当前股息率',
                       '第 1 档', '状态'):
@@ -5043,10 +5149,12 @@ def t_alerts_ui():
                 '换算 2.7/49=5.51% -> 第二档改按股息率 6% 换算出 45.00 -> 保存；'
                 '表里给"目标价+股息率"、到价整行点亮且顶栏红点亮；'
                 '点名称进个股页；改一行回填的是【存的那个口径】'
-                '(price/yield 而不是换算值)；1024 宽无横滚；0 个 JS 错误')
+                '(price/yield 而不是换算值)；头上有分红更新状态与「刷新分红」；'
+                '1024 宽无横滚；0 个 JS 错误')
     finally:
         httpd.shutdown()
         sv.ALLOW_LIVE, al.LIVE = old_live, old_dir
+        al._ext_fetch, al.ext_path = _o_fetch, _o_extpath
         shutil.rmtree(tmp, ignore_errors=True)
 
 

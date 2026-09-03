@@ -84,12 +84,35 @@ function head() {
       ${V.n_near ? `<span class="lvtag" title="现价在目标价上方 ${
         ((V.near_default || 0) * 100).toFixed(0)}% 以内"
         >${V.n_near} 只接近</span>` : ''}
+      ${divTag()}
       <span style="flex:1"></span>
+      <a href="#" class="chip" id="adivref"
+        title="立刻重抓一次分红明细（东财 RPT_SHAREBONUS_DET）——\n平时一天只抓一次，这个按钮是"我知道刚出了公告"时用的"
+        >↻ 刷新分红</a>
       <a href="#" class="chip${SORT === 'near' ? ' on' : ''}" id="asort"
         title="默认按接近度排（跌破的在最上面）；切成"我排的顺序"就是加入的先后"
         >${SORT === 'near' ? '按接近度' : '我排的顺序'}</a>
       <div id="aadd" style="flex:0 0 240px"></div>
     </div>`;
+}
+
+/* ---- 分红数据是什么时候更新的 ----
+   ★ 必须显示：这一页的目标价全是"分红 ÷ 股息率"算出来的，
+     分红过期就整页都是过期的数 —— 而它不报错。
+   ★ 判据来自服务端（每只票的 ext.fetched）—— 前端不自己判新旧。 */
+function divTag() {
+  const sg = V.suggest || {}, rows = V.rows || [];
+  const st = rows.map(x => (sg[x.code] || {}).ext || {});
+  const today = st.filter(x => x.fetched === V.day).length;
+  const nnew = st.reduce((a, x) => a + (x.n_new || 0), 0);
+  const err = (st.find(x => x.err) || {}).err;
+  if (err) return `<span class="lvtag warn" title="${esc(err)}"
+    >分红：外部源取不到，用本地那份</span>`;
+  if (!rows.length) return '';
+  return `<span class="lvtag${today === rows.length ? ' on' : ''}"
+    title="分红明细 = 本地 std/dividend.parquet（聚宽）+ 东财 RPT_SHAREBONUS_DET 合并；&#10;外部一天只抓一次，同一次分红按(报告期,金额)/(公告日,金额)去重"
+    >分红 ${today === rows.length ? '今天已更新' : today + '/' + rows.length + ' 已更新'}${
+      nnew ? ' · 外部新增 ' + nnew + ' 条' : ''}</span>`;
 }
 
 /* ---- 一行的编辑器 ----
@@ -113,6 +136,10 @@ function editor() {
         ${sg.r365 ? `<b>${sg.r365.per_share}</b> = 近 12 个月已公告（${
           sg.r365.n} 次，最近 ${esc(sg.r365.last_pub)}）
           <a href="#" class="ause" data-w="r365">用它</a><br>` : ''}
+        ${(sg.ext && sg.ext.n_new) ? `<b style="color:var(--accent)">东财比本地新
+          ${sg.ext.n_new} 条</b>：${(sg.ext.new || []).map(x =>
+            esc(x.report_date + ' ' + x.per_share + '（' + (x.progress || '')
+                + '，公告 ' + x.plan_pub + '）')).join('、')}<br>` : ''}
         两个口径给出来让你挑：<b>年度合计</b>是"最近一个完整会计年度"，
         <b>近 12 个月</b>会混入不同归属期（半年派的公司刚公告完中期时差得多
         —— 实测海尔智家 1.1607 vs 0.8915）。
@@ -273,6 +300,21 @@ function wire() {
 
   $('#asort').onclick = ev => { ev.preventDefault();
     SORT = SORT === 'near' ? 'mine' : 'near'; render(); };
+  $('#adivref').onclick = async ev => {
+    ev.preventDefault();
+    const m = $('#amsg');
+    m.className = 'lvmsg'; m.textContent = '重抓分红明细…';
+    try {
+      const r = await post('/api/alerts/refresh_div', {});
+      await load();
+      const m2 = $('#amsg');
+      m2.className = 'lvmsg ok';
+      m2.textContent = '已重抓：' + (r.n_codes || 0) + ' 只、'
+        + (r.n_rows || 0) + ' 条明细'
+        + (r.n_new ? '，其中 ' + r.n_new + ' 条比本地新' : '，与本地一致');
+    } catch (e) { const m2 = $('#amsg') || m;
+      m2.className = 'lvmsg bad'; m2.textContent = String(e); }
+  };
   $$('.aed').forEach(a => a.onclick = ev => { ev.preventDefault();
     EDIT = a.dataset.c; FORM = formOf(a.dataset.c); render(); });
   if (!$('#asave')) return;
