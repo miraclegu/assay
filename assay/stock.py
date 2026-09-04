@@ -698,10 +698,19 @@ def _runs_with(jc, limit=30):
     ★ 只读归档里的 trades，**不重跑回测** —— 重跑要几十秒，
       而这是页面上顺手看一眼的东西。
     """
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    runs = os.path.join(root, 'runs')
+    # 🔴 归档目录要走 `registry.RUNS`，不能自己拼 `<repo>/runs` ——
+    #   serve.py 的 `--runs` / `ASSAY_RUNS` 会改它（`registry.set_runs()`），
+    #   自己拼的话指定了别的归档盘时这里**静默返回空**，
+    #   页面上看着就是"这只票没被任何回测选过"。
+    #   ★ 必须 `registry.RUNS` **属性访问**：set_runs() 是重新赋值，
+    #     `from .registry import RUNS` 拿到的是副本。
+    from . import registry
+    runs = registry.RUNS
     if not os.path.isdir(runs):
-        return []
+        # 不静默返回 [] —— 那和"真的没有回测选过它"长得一模一样。
+        # 外层 links() 会把它转成 runs_error 给页面。
+        raise RuntimeError('归档目录不存在：%s'
+                           '（用 --runs 或 ASSAY_RUNS 指定）' % runs)
     dirs = []
     for dp, _dns, fns in os.walk(runs):
         if 'meta.json' in fns and 'trades.parquet' in fns:

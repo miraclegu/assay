@@ -6276,6 +6276,154 @@ def t_realtime():
             % (P['price_src'], P['rt_n'], len(P['items'])))
 
 
+@case('服务端拆分：路径基准 / 延迟导入层级 / 门面转发', tag='fast')
+def t_srv_split():
+    """server.py 按产品域拆进 srv/ 之后，三处**不报错**的坑，逐条钉住。
+
+    这三条都是实测踩到的，表现全是"接口静默返回空或 500"，而不是启动报错。
+    """
+    import importlib
+    from assay import server as sv
+    from assay.srv import base
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # ---- ① 路径基准：__file__ 跟着文件搬进了子目录 ----
+    #   🔴 HERE 照抄 dirname(__file__) 会变成 .../assay/srv，于是
+    #     picks.json / live/ / web/ 全解到不存在的路径。
+    #     实测：/api/marks 返回 {}（标记全丢）、7 个实盘接口 500。
+    assert base.HERE == os.path.join(here, 'assay'), \
+        'base.HERE 应指 assay 包目录，实际 %s' % base.HERE
+    assert base.WEB == os.path.join(here, 'web'), \
+        'base.WEB 错了：%s' % base.WEB
+    assert os.path.dirname(base.MARKS_FILE) == here, \
+        'picks.json 应在仓库根，实际 %s' % base.MARKS_FILE
+
+    # ---- ② 延迟导入的层级：`.` 也跟着文件变了 ----
+    #   🔴 base 里 `from . import live` 原来是 assay.live，搬进 srv/ 之后
+    #     `.` 变成 assay.srv → 返回**路由模块自己**，于是 m.LiveError
+    #     AttributeError。实测就是这么 500 的。
+    WRAP = {'_live': 'assay.live', '_rt': 'assay.realtime',
+            '_watch': 'assay.watchlist', '_alerts': 'assay.alerts',
+            '_market': 'assay.market'}
+    for fn, want in WRAP.items():
+        got = getattr(base, fn)().__name__
+        assert got == want, \
+            'base.%s() 应返回 %s，实际 %s —— 相对导入解错了层' % (fn, want, got)
+
+    # ---- ③ 门面必须【转发】而不是 re-export ----
+    #   🔴 ALLOW_BACKTEST / ALLOW_LIVE 是 serve() 会重新赋值的 bool。
+    #     `from .srv.base import ALLOW_LIVE` 拿到的是副本 —— serve() 改了值
+    #     外部读到的还是旧的，表现是"明明开了实盘，接口说功能没开"。
+    #   而且必须**双向**：外部有 `sv.ALLOW_LIVE = True` 这种赋值用法
+    #   （本文件 26 处，用来模拟启动模式）。PEP 562 的模块级 __getattr__
+    #   只拦【读】—— 赋值会在 server 模块 __dict__ 里建副本，之后读取
+    #   走正常查找、不再转发，各域读到的还是旧值。
+    #   实测这么挂掉 3 个用例（启动开关 / 自选 / 本条）。所以门面是
+    #   ModuleType 子类，__setattr__ 把这几个名字写回 base。
+    old = (base.ALLOW_BACKTEST, base.ALLOW_LIVE)
+    try:
+        base.ALLOW_BACKTEST, base.ALLOW_LIVE = True, True
+        assert sv.ALLOW_BACKTEST is True and sv.ALLOW_LIVE is True, \
+            '写 base 之后 sv.ALLOW_* 没跟着变 —— 门面成了 re-export'
+        sv.ALLOW_BACKTEST, sv.ALLOW_LIVE = False, False
+        assert base.ALLOW_BACKTEST is False and base.ALLOW_LIVE is False, \
+            ('写 sv.ALLOW_* 没写回 base —— 各域读的是 base，'
+             '于是"设置了却不生效"')
+        assert 'ALLOW_LIVE' not in vars(sv), \
+            'sv.__dict__ 里出现了 ALLOW_LIVE 副本 —— __setattr__ 没拦住'
+    finally:
+        base.ALLOW_BACKTEST, base.ALLOW_LIVE = old
+
+    # ---- 对外契约：selftest 自己用到的 sv.* 名字必须都还在 ----
+    #   ★ 直接从本文件的源码里**扫**出来，不照清单拼 ——
+    #     照清单拼的话，以后新用一个 sv.xxx 就不在保护范围内，而那不报错。
+    #   ★ 用 ast 扫 `sv.xxx` 的属性访问，**不用正则** —— 正则会把注释和
+    #     字符串里的 `sv.ALLOW_*` / `sv.xxx` 也当成真实用法
+    #     （第一版就是这么假失败的，报"门面少了 ALLOW_ 和 xxx"）。
+    import ast as _ast
+    _tree = _ast.parse(open(os.path.join(here, 'selftest.py'),
+                            encoding='utf-8').read())
+    used = sorted({n.attr for n in _ast.walk(_tree)
+                   if isinstance(n, _ast.Attribute)
+                   and isinstance(n.value, _ast.Name) and n.value.id == 'sv'})
+    miss = [n for n in used if not hasattr(sv, n)]
+    assert not miss, 'server 门面少了这些名字：%s' % miss
+
+    # ---- 🔴 未定义名字检测：搬运代码的头号风险 ----
+    #   拆分时把 `_JOBS` / `_DATE_RE` / `_run_job` 留在了 runs.py，而
+    #   live.py / sync.py 里仍裸用它们 —— **import 成功、45 个 GET 全对**，
+    #   因为那几行只在 POST 分支里走到。实测就是这么漏过去的。
+    #   ★ 所以这条不能靠"启动不报错"或"接口打得通"来代替：
+    #     它是**静态**扫每个模块里 Load 但未绑定的名字。
+    #   ★ `_run_job` 是作为 `Thread(target=_run_job)` 传递的，不是
+    #     `_run_job(` 调用形式 —— 按调用形式做替换的脚本会漏掉它。
+    import builtins
+    _BI = set(dir(builtins)) | {'__name__', '__file__', '__doc__'}
+
+    def _undef(path):
+        tt = _ast.parse(open(path, encoding='utf-8').read())
+        bound = set()
+        for n in _ast.walk(tt):
+            if isinstance(n, (_ast.Import, _ast.ImportFrom)):
+                for a in n.names:
+                    bound.add((a.asname or a.name).split('.')[0])
+            elif isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                _ast.ClassDef)):
+                bound.add(n.name)
+            elif isinstance(n, _ast.Assign):
+                for tg in n.targets:
+                    bound |= {k.id for k in _ast.walk(tg)
+                              if isinstance(k, _ast.Name)}
+            elif isinstance(n, (_ast.AnnAssign, _ast.AugAssign)):
+                bound |= {k.id for k in _ast.walk(n.target)
+                          if isinstance(k, _ast.Name)}
+            elif isinstance(n, _ast.arg):
+                bound.add(n.arg)
+            elif isinstance(n, _ast.ExceptHandler) and n.name:
+                bound.add(n.name)
+            elif isinstance(n, (_ast.For, _ast.comprehension)):
+                bound |= {k.id for k in _ast.walk(n.target)
+                          if isinstance(k, _ast.Name)}
+            elif isinstance(n, _ast.withitem) and n.optional_vars:
+                bound |= {k.id for k in _ast.walk(n.optional_vars)
+                          if isinstance(k, _ast.Name)}
+            elif isinstance(n, _ast.Global):
+                bound |= set(n.names)
+            elif isinstance(n, _ast.Lambda):
+                bound |= {a.arg for a in n.args.args}
+        loads = {k.id for k in _ast.walk(tt) if isinstance(k, _ast.Name)
+                 and isinstance(k.ctx, _ast.Load)}
+        return sorted(loads - bound - _BI)
+
+    pkg = os.path.join(here, 'assay')
+    scanned = 0
+    for r, _d, fs in os.walk(pkg):
+        if '__pycache__' in r:
+            continue
+        for f in sorted(fs):
+            if not f.endswith('.py'):
+                continue
+            u = _undef(os.path.join(r, f))
+            assert not u, ('%s 里有未定义的名字 %s —— 会在运行到那一行时'
+                           ' NameError（而 import 和大部分接口都不会报）'
+                           % (os.path.relpath(os.path.join(r, f), here), u))
+            scanned += 1
+
+    # ---- srv/ 的结构：每个域都在，且 server.py 只剩骨架 ----
+    DOMS = ('base', 'runs', 'docs', 'live', 'rt', 'sync', 'stock',
+            'market', 'watch')
+    for d in DOMS:
+        importlib.import_module('assay.srv.' + d)
+    sp = open(os.path.join(here, 'assay', 'server.py'), encoding='utf-8').read()
+    n = sp.count('\n')
+    assert n < 400, 'server.py 又长回去了（%d 行）—— 新接口该放 srv/ 对应域' % n
+    return ('HERE/WEB/picks.json 三个路径基准正确；5 个延迟导入封装都指向业务模块'
+            '（不是 srv 自己）；门面双向转发 ALLOW_*；'
+            '本文件用到的 %d 个 sv.* 名字全在；'
+            'assay/ %d 个模块零未定义名字；srv/ %d 个域可 import；'
+            'server.py 只剩 %d 行' % (len(used), scanned, len(DOMS), n))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

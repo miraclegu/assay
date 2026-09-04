@@ -53,6 +53,50 @@ assay 总览 │ 💰实盘 🎯买点 │ 🌡盘面 📈个股 🏭板块 ⭐�
 `#filter`/`#expand` 只在某个视图存在,别处 `$('#filter')` 是 `null`,
 抄一遍漏一处就是 TypeError 整页白屏。
 
+## 服务端也按【产品域】拆(`assay/srv/`)
+
+```
+assay/
+  server.py   243 行【骨架】：ROUTES/POSTS + Handler + serve() + 对外门面
+  srv/
+    base.py   可变模块级状态 + 被【2 个以上域】调用的通用件
+    runs.py  docs.py  live.py  rt.py  sync.py  stock.py  market.py  watch.py
+```
+
+★ 切点是**两轮客观分析**的结果(2026-09-04,2558 行 → 243):
+作者原有的 `# ==== ====` 段落标记给出 9 个域;再取「被 2 个以上段调用」的
+定义(12 个)+ 传递闭包(只多带出 `_current_fp` 一个)进 `base.py`。
+依赖是单向的:`server → srv.* → srv.base`;`srv/live.py` 与 `srv/watch.py`
+单向依赖 `srv/rt.py`(`_rt_ensure`),反向调用一律走 base 里的延迟导入封装
+(`_live` / `_rt` / `_watch` / `_alerts` / `_market`)—— **循环由此断开**。
+
+🔴 **搬运代码进子目录有三个坑,全都【不报错】,实测全踩了一遍:**
+
+| 坑 | 表现 |
+|---|---|
+| **`__file__` 深了一层** | `HERE = dirname(__file__)` 变成 `.../assay/srv`,于是 `picks.json`/`live/`/`web/` 全解到不存在的路径。**实测:`/api/marks` 返回 `{}`(标记全丢)、7 个实盘接口 500** |
+| **相对导入的 `.` 也跟着变** | base 里 `from . import live` 原本是 `assay.live`,搬进 `srv/` 后 `.` = `assay.srv` → 返回**路由模块自己** → `m.LiveError` AttributeError |
+| **留在别处的【变量】** | 拆分脚本按 `NAME(` 替换调用,漏了 `_DATE_RE` 这种变量和 `Thread(target=_run_job)` 这种传递。**import 成功、45 个 GET 全对**,因为那几行只在 POST 分支走到 |
+
+★ 所以验证**不能靠"启动不报错"或"接口打得通"**。做法是三层:
+① `git worktree add --detach /tmp/assay_old HEAD` 起旧版,**逐个路由对比响应**
+(45 GET + 16 POST);② 静态扫每个模块里 **Load 但未绑定的名字**(那三个变量就是
+这么抓到的);③ selftest 里把三个坑各钉一条断言 + 变异测试。
+🔴 对比时先做一次**同服务连打两次**的自证 —— 盘面/板块三个接口两版**自己就不稳定**
+(含实时成分),不先自证会把它们当成拆分引入的差异去查。
+
+🔴 **对外门面必须是 `ModuleType` 子类,不能只用 PEP 562 的模块级 `__getattr__`。**
+`assay.server` 是对外契约(selftest 用 28 个 `sv.*` 名字),其中
+`ALLOW_BACKTEST`/`ALLOW_LIVE` 是 **serve() 会重新赋值的 bool**,而外部也会
+写它(selftest 26 处 `sv.ALLOW_LIVE = True` 模拟启动模式)。
+`__getattr__` **只拦读**:一旦有人赋值,就在 server 的 `__dict__` 里建了副本,
+之后读取走正常查找、不再转发 —— 各域读到的还是 base 里的旧值,
+**「设置了却不生效」**。实测这么挂掉 3 个用例。所以真值只有一份(在 base),
+`__setattr__` 把白名单里那几个名字**写回 base**。
+★ 白名单只放"会被外部重新赋值"的;`ROUTES` 这种本模块自己的定义不能转走。
+★ dict/list 那些**原地修改**的容器(`_index`/`_cache`/`_RT`)没这个问题,
+可以直接 `from .base import`。
+
 ## 看板是【多个独立页面】,不是一个 html 包办
 
 ```
