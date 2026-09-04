@@ -77,6 +77,17 @@ assay/
 | **`__file__` 深了一层** | `HERE = dirname(__file__)` 变成 `.../assay/srv`,于是 `picks.json`/`live/`/`web/` 全解到不存在的路径。**实测:`/api/marks` 返回 `{}`(标记全丢)、7 个实盘接口 500** |
 | **相对导入的 `.` 也跟着变** | base 里 `from . import live` 原本是 `assay.live`,搬进 `srv/` 后 `.` = `assay.srv` → 返回**路由模块自己** → `m.LiveError` AttributeError |
 | **留在别处的【变量】** | 拆分脚本按 `NAME(` 替换调用,漏了 `_DATE_RE` 这种变量和 `Thread(target=_run_job)` 这种传递。**import 成功、45 个 GET 全对**,因为那几行只在 POST 分支走到 |
+| 🔴 **名字遮蔽** | `serve()` 里 `rt = base._rt()` 建了个局部变量(业务模块 `assay.realtime`),把模块级 `from .srv import ... rt`(路由模块)**遮蔽**掉 → `rt._RT` / `rt._rt_loop` 去 `assay.realtime` 找 → AttributeError。**「未定义名字检测」抓不到它**(名字是定义的,只是指向错的对象) |
+
+🔴🔴 **最贵的教训是【验证的漏洞】,不是这几个坑本身。**
+我全程用 `python3 serve.py --readonly` 验证 —— 而 `--readonly` **不走
+`ALLOW_LIVE` 那个分支**(起实盘线程 + 行情线程那段)。于是那几行代码
+**一次都没执行到**,45 个 GET + 16 个 POST + 54 项等价性全绿,
+直到用户真的敲 `python3 serve.py` 才在启动时崩掉。
+★ 所以拆完必须**两种模式各起一次**:`--readonly` 与不带参数(全功能)。
+现在 selftest 里钉了两条:通用的**名字遮蔽检测**,
+以及 `serve()` 全功能分支引用的名字(`rt._RT` / `rt._rt_loop` /
+`live._live_loop`)必须真的存在。
 
 ★ 所以验证**不能靠"启动不报错"或"接口打得通"**。做法是三层:
 ① `git worktree add --detach /tmp/assay_old HEAD` 起旧版,**逐个路由对比响应**

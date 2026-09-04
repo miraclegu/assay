@@ -4,7 +4,6 @@ import re
 import time
 from datetime import datetime
 
-from . import base
 from .base import (_repo_root)
 
 

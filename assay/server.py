@@ -213,12 +213,18 @@ def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):
         base._live_thread = threading.Thread(target=live._live_loop, daemon=True)
         base._live_thread.start()
         # 盘中 1 分钟线：只在 server 开着时跑，只抓持仓，只在交易时段
-        rt = base._rt()
+        # 🔴 局部变量**不能叫 `rt`** —— 模块级 `from .srv import ... rt` 是
+        #   路由模块 `assay.srv.rt`，而 `base._rt()` 返回的是业务模块
+        #   `assay.realtime`。同名会把模块级那个**遮蔽**掉，于是
+        #   `rt._RT` / `rt._rt_loop` 去 assay.realtime 找 -> AttributeError。
+        #   实测踩到：`--readonly` 不走这个分支，所以拆分时的验证全程没执行到
+        #   这几行，直到真正 `python3 serve.py` 才炸。
+        rtm = base._rt()                       # 业务模块 assay.realtime
         rt._RT['thread'] = threading.Thread(target=rt._rt_loop, daemon=True)
         rt._RT['thread'].start()
         print('盘中 1 分钟线：开启  时段 %s  存 %s'
               % (' / '.join('%s~%s' % (a.strftime('%H:%M'), b.strftime('%H:%M'))
-                            for a, b in rt.SESSIONS),
+                            for a, b in rtm.SESSIONS),
                  os.path.join(base._datalake_dir(), 'rt')))
     else:
         print('实盘模块：关闭（--live 开启）')

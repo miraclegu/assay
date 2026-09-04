@@ -6446,6 +6446,59 @@ def t_srv_split():
     assert lp.count('\n') < 100, \
         'live.py 应只剩门面（%d 行）—— 实现放 lv/ 对应域' % lp.count('\n')
 
+    # ---- 🔴 名字遮蔽：局部变量压掉同名的模块级 import ----
+    #   实测踩到：serve() 里 `rt = base._rt()` 建了个局部变量（业务模块
+    #   assay.realtime），把模块级 `from .srv import ... rt`（路由模块）
+    #   **遮蔽**掉了，于是 `rt._RT` / `rt._rt_loop` 去 assay.realtime 找
+    #   -> AttributeError。
+    #   ★ 「未定义名字检测」抓不到它 —— 名字是定义的，只是指向错的对象。
+    #   ★ 而且它只在 **--readonly 之外**的分支里（起实盘/行情线程那段），
+    #     拆分时全程用 --readonly 验证，恰好一次都没执行到。
+    for r, _d, fs in os.walk(pkg):
+        if '__pycache__' in r:
+            continue
+        for f in sorted(fs):
+            if not f.endswith('.py'):
+                continue
+            fp = os.path.join(r, f)
+            tt = _ast.parse(open(fp, encoding='utf-8').read())
+            mods = set()
+            for n in tt.body:
+                if isinstance(n, (_ast.Import, _ast.ImportFrom)):
+                    for a in n.names:
+                        mods.add(a.asname or a.name.split('.')[0])
+            for n in _ast.walk(tt):
+                if not isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue
+                for k in _ast.walk(n):
+                    hit = None
+                    if isinstance(k, _ast.Assign):
+                        for tg in k.targets:
+                            for x in _ast.walk(tg):
+                                if (isinstance(x, _ast.Name)
+                                        and isinstance(x.ctx, _ast.Store)
+                                        and x.id in mods):
+                                    hit = (x.id, x.lineno)
+                    elif isinstance(k, _ast.arg) and k.arg in mods:
+                        hit = (k.arg, getattr(k, 'lineno', 0))
+                    if hit:
+                        raise AssertionError(
+                            '%s 的 %s() 行%d：局部变量 `%s` 遮蔽了同名 import'
+                            ' —— 之后 `%s.xxx` 会去错的对象上找'
+                            % (os.path.relpath(fp, here), n.name, hit[1],
+                               hit[0], hit[0]))
+
+    # ---- serve() 全功能分支引用的名字必须真的存在 ----
+    #   `--readonly` 不走那段，所以它是拆分时最容易漏验的路径。
+    from assay.srv import live as _srvlive, rt as _srvrt
+    for _m, _n in ((_srvrt, '_RT'), (_srvrt, '_rt_loop'),
+                   (_srvlive, '_live_loop')):
+        assert hasattr(_m, _n), \
+            'serve() 会用 %s.%s，但它不存在' % (_m.__name__, _n)
+    assert not hasattr(base._rt(), '_rt_loop'), \
+        ('assay.realtime 也有了 _rt_loop —— 上面那条 hasattr 就失去意义了，'
+         '得换个判据')
+
     # ---- srv/ 的结构：每个域都在，且 server.py 只剩骨架 ----
     DOMS = ('base', 'runs', 'docs', 'live', 'rt', 'sync', 'stock',
             'market', 'watch')
