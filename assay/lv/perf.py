@@ -1,0 +1,389 @@
+"""lv/perf.py —— 权益与收益：TWR / 年化 / 回撤 / 当日盈亏 / 费用拖累。
+
+🔴 TWR 的起点是【开户那一刻的资金】，不是第一天的收盘；
+  当日现金流按【区间】取，不是"正好落在那天"（入金落在周末会被漏掉，
+  而漏掉的入金会被当成收益）。"""
+import datetime
+import os
+import re
+from ..feed import PanelFeed
+
+from . import base as _base
+from . import fee as _fee
+from . import pos as _pos
+from . import sig as _sig
+
+
+def _last_px(feed, codes, day):
+    """{code: (最新收盘, 那天的日期, 那天的昨收)}，按 <= day 取最近一条。
+    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。
+
+    ★ 一并带回 `preclose` 是为了算**当日涨跌**：面板里有这一列，
+      不用自己回去找上一个交易日（停牌股的"上一个交易日"还得逐只算）。"""
+    if not codes:
+        return {}
+    q = "','".join(codes)
+    rows = feed.con.execute("""
+        SELECT code, close_bfq, date, preclose FROM (
+          SELECT jq_code AS code, close_bfq, date, preclose,
+                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
+          FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+          WHERE jq_code IN ('%s') AND date <= DATE '%s'
+            AND date > DATE '%s' - INTERVAL 400 DAY
+        ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
+    return {r[0]: (r[1], r[2], r[3]) for r in rows}
+
+
+
+def positions_valued(aid, datalake=None):
+    """持仓 + 逐只估值 + 汇总。**页面主视图用的就是它。**
+
+    ★ 价格不再取自"今天的信号" —— 信号只覆盖它当天关心的票，
+      不在信号里的持仓就没有价格（原页面那一版正是这样，浮盈显示 —）。
+      这里按最新数据日独立取价，覆盖全部持仓。
+
+    ★ 成本给【三个】，因为它们回答的是三个不同问题：
+        · `cost`       成交均价 —— 喂给引擎 entry_price 的那个数（止损/吊灯
+                       /红利税档位读它）。也是能与回测 trades.ret 对照的口径
+                       （引擎的 ret 只含滑点、不含佣金）。
+        · `cost_net`   **摊薄成本** = (成交额 + 买入费) / 股数。
+                       券商 App 说的"摊薄成本价"就是这个，**浮盈按它算** ——
+                       费用是真金白银出去了，不算进成本等于把浮盈报高。
+        · `breakeven`  保本价 = 摊薄成本 / (1 − 卖出费率)。卖到这个价才不亏。
+
+    ★ 浮盈（`pnl`）按**摊薄成本**算，含买入费；再扣估算卖出费就是
+      `pnl_net`（全平落袋）。两者相减不会重复计费 —— 买入费只在成本里出现
+      一次，卖出费只在 pnl_net 里出现一次。
+
+    ★ 都不含【已收分红】：broker 里 entry_price 在除权时不缩，就是为了让
+      价差与分红分开记。分红到账走 cashflows。
+    """
+    book = _pos.fifo_lots(_base.fills(aid))
+    money = _pos.cash(aid)
+    out = {'items': [], 'cash': round(money, 2), 'market_value': 0.0,
+            'pnl': 0.0, 'cost': 0.0, 'equity': round(money, 2), 'asof': None}
+    if not book:
+        return out
+    feed = PanelFeed('2026-01-01', datetime.date.today().isoformat(),
+                     root=datalake)
+    day = feed.trading_days[-1]
+    out['asof'] = day.isoformat()
+    px = _last_px(feed, list(book), day)
+    nm = _sig._names(feed, list(book), day)
+    # ★ 盘中用【实时价】覆盖日线收盘 —— 这样持仓盈亏是活的。
+    #   取不到就用日线收盘（不是留空）：实时是锦上添花，
+    #   而"没有实时价"不该让整个持仓表变成 —。
+    #   来源逐只标出来（rt_src / rt_at），页面必须显示 —— 人分不清
+    #   "实时"和"昨收"的话，那是两个数量级的误解。
+    rtp = {}
+    try:
+        from assay import realtime as _rt
+        rtp = _rt.latest(list(book), root=datalake)
+    except Exception:                                       # noqa: BLE001
+        rtp = {}
+    mv = cst = cst_net = 0.0
+    for c, lots in sorted(book.items()):
+        sh = sum(l['shares'] for l in lots)
+        avg = sum(l['shares'] * l['price'] for l in lots) / sh
+        buy_fee = sum(l.get('fee') or 0 for l in lots)
+        avg_net = (sh * avg + buy_fee) / sh          # 摊薄成本
+        p, pd_, pc = px.get(c, (None, None, None))
+        rt_src = rt_at = None
+        r = rtp.get(c)
+        if r and r.get('price'):
+            p, rt_src, rt_at = r['price'], r.get('src') or 'rt', r.get('at')
+            # 🔴 盘中的「昨收」不能用面板那一行的 preclose —— 那是**面板
+            #   那一天**的昨收（面板到 09-02 时它是 09-01 收盘），而实时价
+            #   是 09-03 的，基准差一天。正确基准：快照自带的 preclose，
+            #   退一步用面板最新那天的**收盘**（= 今天的昨收）。
+            pc = r.get('preclose') or (px.get(c, (None,))[0])
+        v = (sh * p) if p else None
+        pnl = (v - sh * avg_net) if v is not None else None
+        # ★ 当日盈亏 = Σ 每一批 × (现价 − 基准)，基准分两种：
+        #     今天买的那批 -> 它自己的成交价（今天开盘时还没持有它，
+        #       拿昨收当基准会把"买入那一刻到现在"之外的涨幅也算进当日）
+        #     以前买的     -> 昨收
+        #   这是券商 App 的算法。按整只票统一用昨收算的话，建仓当天
+        #   那只票的当日盈亏会凭空多出一个开盘涨幅，而它不报错。
+        today = (rt_at[:10] if rt_at else (pd_.isoformat() if pd_ else None))
+        pnl_day = None
+        if p:
+            acc, ok = 0.0, True
+            for l in lots:
+                base = (l['price'] if (today and l['date'].isoformat() == today)
+                        else pc)
+                if base is None:
+                    ok = False
+                    break
+                acc += l['shares'] * (p - base)
+            pnl_day = round(acc, 2) if ok else None
+        out['items'].append({
+            'rt_src': rt_src, 'rt_at': rt_at,
+            'preclose': (round(pc, 3) if pc else None),
+            'chg_day': (round(p / pc - 1, 6) if p and pc else None),
+            'pnl_day': pnl_day,
+            'code': c, 'name': nm.get(c, ''), 'shares': sh,
+            'cost': round(avg, 4),                  # 成交均价（引擎口径）
+            'cost_net': round(avg_net, 4),          # 摊薄成本（含买入费）
+            'buy_fee': round(buy_fee, 2),
+            'price': (round(p, 3) if p else None),
+            'px_date': (pd_.isoformat() if pd_ else None),
+            'stale': bool(pd_ and pd_ != day),          # 停牌：价格不是当日的
+            'value': (round(v, 2) if v is not None else None),
+            'pnl': (round(pnl, 2) if pnl is not None else None),
+            'pnl_pct': (round(p / avg_net - 1, 6) if p and avg_net else None),
+            # 与回测 trades.ret 对照用的那个（只含滑点、不含佣金）
+            'ret_gross': (round(p / avg - 1, 6) if p and avg else None),
+            'entry': min(l['date'] for l in lots).isoformat(),
+        })
+        cst += sh * avg
+        cst_net += sh * avg_net
+        if v is not None:
+            mv += v
+    for it in out['items']:
+        it['weight'] = (round(it['value'] / (mv + money), 6)
+                        if it['value'] is not None and (mv + money) else None)
+    # ★ 浮盈是【纯价差】：成本取成交价，不含买入费；也没预留卖出费。
+    #   这是刻意的 —— 与引擎 trades 的 ret 口径一致（broker 里 entry_price
+    #   在除权时不缩，就为了让 pnl 只反映价差）。改了它，实盘与回测就没法比。
+    #   但"现在全平能落袋多少"是个真问题，所以另算一个【估算卖出费】：
+    #   按当前价、账户当期费率、卖出方向（含印花税）逐只估。
+    #   ⚠ 已付的买入费不在这里 —— 它已经从现金里扣过、已体现在权益和
+    #     账户累计收益（TWR）里。再减一次就是**重复计费**。
+    fee_m = _fee.fee_model_at(aid, day)
+    exit_fee = 0.0
+    for it in out['items']:
+        if it['price'] is None:
+            it['exit_fee_est'] = it['breakeven'] = None
+            continue
+        try:
+            f = _fee.estimate_fee('sell', it['shares'], it['price'], day, fee_m,
+                             it['code'])
+        except _base.LiveError:
+            f = None
+        it['exit_fee_est'] = (round(f, 2) if f is not None else None)
+        # 保本价：卖出费率按【当前市值】折算（最低佣金 binding 时费率更高，
+        # 所以这个数随价格变 —— 它是估算，不是常数）
+        rate = (f / (it['shares'] * it['price'])) if f else 0.0
+        it['breakeven'] = (round(it['cost_net'] / (1 - rate), 3)
+                           if rate < 0.5 else None)
+        if f:
+            exit_fee += f
+    out['exit_fee_est'] = round(exit_fee, 2)
+    # 当日盈亏汇总：有一只算不出来（无价 / 无昨收）就整体给 None ——
+    # 少了一只的合计看着像个正常数字，而它是错的。
+    dv = [x['pnl_day'] for x in out['items']]
+    out['pnl_day'] = (round(sum(dv), 2) if dv and all(x is not None for x in dv)
+                      else None)
+    out['market_value'] = round(mv, 2)
+    out['cost'] = round(cst, 2)                 # 成交额（不含费）
+    out['cost_net'] = round(cst_net, 2)         # 摊薄成本额（含买入费）
+    out['buy_fee'] = round(cst_net - cst, 2)
+    # ★ 浮盈按【摊薄成本】算 —— 含买入费。这是券商 App 的口径，也是
+    #   "我到底赚没赚"的口径。原来按成交额算，等于把浮盈报高了买入费那么多。
+    out['pnl'] = round(mv - cst_net, 2)
+    out['pnl_pct'] = round(mv / cst_net - 1, 6) if cst_net else None
+    # 与回测 trades.ret 对照用的（只含滑点、不含佣金）
+    out['pnl_gross'] = round(mv - cst, 2)
+    # 全平落袋 = 浮盈 − 估算卖出费。买入费已在浮盈里，不会重复。
+    out['pnl_net'] = round(mv - cst_net - exit_fee, 2)
+    # 买入费里有多少是【估算】的 —— 摊薄成本跟着就是估算，要标出来
+    out['fee_estimated_n'] = sum(
+        1 for r in _pos.active_fills(_base.fills(aid))
+        if r['side'] == 'buy' and r.get('fee_estimated'))
+    # 汇总层也要说清"这份估值用的是什么价"
+    n_rt = sum(1 for x in out['items'] if x.get('rt_src'))
+    out['rt_n'] = n_rt
+    out['rt_at'] = max([x['rt_at'] for x in out['items'] if x.get('rt_at')] or
+                       [None])
+    out['price_src'] = ('实时' if n_rt == len(out['items']) and n_rt
+                        else ('部分实时' if n_rt else '收盘'))
+    # ★ asof 是"这份估值用的是哪天/哪一刻的价"。全部实时时要写实时那一刻 ——
+    #   还写日线日的话，页面上会出现"估值日 09-02"配着 09-03 的实时价，
+    #   而人会以为看的是昨天的数。
+    out['asof_close'] = out['asof']
+    if n_rt and out['rt_at']:
+        out['asof'] = out['rt_at']
+    out['equity'] = round(mv + money, 2)
+    return out
+
+
+
+def equity_curve(aid, datalake=None):
+    """逐日权益曲线 + 收益统计。
+
+    权益 = 现金(as-of) + 持仓按当日**不复权收盘价**估值。
+    停牌当日无行情时按最后已知价挂账 —— 与引擎 broker 的做法一致。
+
+    ★ 收益用**时间加权（TWR）**，不是 `期末/期初 - 1`。
+      有入金出金时后者是错的：入金 5 万会让"收益"凭空变大，
+      而那不是你赚的。TWR 在每个有外部现金流的日子把区间切开：
+          r_t = (E_t − F_t) / E_{t−1} − 1        F_t = 当日净入金
+      再连乘。这也是能和回测年化直接比的那个口径。
+
+    ★ 已冲正的成对记录不参与（走 active_fills）—— 否则一笔"没发生"的交易
+      会在曲线上留下一个凭空的台阶。
+    """
+    acct = _base.get_account(aid)
+    rows = _pos.active_fills(_base.fills(aid))
+    flows = _pos.cashflows(aid)
+    init = float(acct.get('init_cash') or 0)
+    if not rows and not flows:
+        return {'dates': [], 'equity': [], 'stats': None,
+                'note': '还没有成交或现金流水'}
+    d0 = min([_base._d(r['trade_date']) for r in rows] +
+             [_base._d(f['date']) for f in flows])
+    feed = PanelFeed((d0 - datetime.timedelta(days=10)).isoformat(),
+                     datetime.date.today().isoformat(), root=datalake)
+    days = [d for d in feed.trading_days if d >= d0]
+    if not days:
+        return {'dates': [], 'equity': [], 'stats': None,
+                'note': '首笔成交日晚于最新行情日'}
+    codes = sorted({r['code'] for r in rows})
+    px = {}
+    if codes:
+        q = "','".join(codes)
+        for c, dd, p in feed.con.execute("""
+            SELECT jq_code, date, close_bfq
+            FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+            WHERE jq_code IN ('%s') AND date >= DATE '%s'
+        """ % (feed.root, q, days[0])).fetchall():
+            px[(c, dd)] = p
+    last = {}
+    flow_by_day = {}
+    for f in flows:
+        flow_by_day[_base._d(f['date'])] = flow_by_day.get(_base._d(f['date']), 0.0) \
+            + float(f.get('signed') or 0)
+
+    dates, eq, twr = [], [], []
+    # 🔴 起点是【开户那一刻的资金】，不是第一天的收盘。
+    #   原来 prev_e 从 None 起，于是**第一天的收益整个丢了**：红利 09-01 建仓
+    #   当天收盘 1,011,598（+1.16%），TWR 却从 09-02 才开始连乘，
+    #   算出 −0.78%，而实际净值是 1,003,698（+0.37%）——
+    #   页面上就成了"持仓浮盈 +3,698 / 累计收益 −0.78%"自相矛盾，**且不报错**。
+    prev_e = init
+    # ★ 当日现金流 F_t 取【上一条曲线日之后、到今天为止】的所有流水，
+    #   不是"正好落在今天那天"的 —— 入金落在周末/节假日时，
+    #   按精确日期取会漏掉它，而漏掉的入金会被当成收益（TWR 就白做了）。
+    prev_d = None
+    for d in days:
+        book = _pos.lots_asof(rows, d)
+        mv = 0.0
+        for c, lots in book.items():
+            p = px.get((c, d))
+            if p is None:
+                p = last.get(c)            # 停牌：按最后已知价挂账
+            else:
+                last[c] = p
+            if p is None:
+                continue
+            mv += sum(l['shares'] for l in lots) * p
+        e = _pos.cash_asof(init, rows, d, flows) + mv
+        f = sum(v for fd, v in flow_by_day.items()
+                if fd <= d and (prev_d is None or fd > prev_d))
+        if prev_e is not None and prev_e > 0:
+            twr.append((e - f) / prev_e - 1.0)
+        prev_e, prev_d = e, d
+        dates.append(d.isoformat())
+        eq.append(round(e, 2))
+
+    # ---- 盘中：给曲线补【今天】这一点 -------------------------------------
+    # 🔴 不补的话整块业绩指标停在昨收，而上面的总资产/持仓浮盈是实时的 ——
+    #    同一屏里两个口径，"累计收益 +0.74%" 配 "当日盈亏 +1,711" 对不上,
+    #    而这不报错。
+    # ★ 判据是"确实有实时价"（n_rt >= 1）：没有就不补 —— 补一个与昨收相同的
+    #   点等于凭空多出一个 0% 交易日，会把年化和回撤都稀释掉。
+    # ★ 面板已经有今天了（收盘后同步过）就不补：那一点是权威的日线，
+    #   实时价只是它的近似。
+    intraday = None
+    try:
+        from assay import realtime as _rt
+        rtp = _rt.latest(codes, root=datalake) if codes else {}
+        rtp = {c: v for c, v in rtp.items() if (v or {}).get('price')}
+        at = max([v.get('at') for v in rtp.values() if v.get('at')] or [None])
+        d_now = (datetime.date.fromisoformat(at[:10]) if at else None)
+        if rtp and d_now and days and d_now > days[-1]:
+            book = _pos.lots_asof(rows, d_now)
+
+            mv, n_rt = 0.0, 0
+            for c, lots in book.items():
+                r = rtp.get(c)
+                p = (r or {}).get('price') or last.get(c) or px.get((c, days[-1]))
+                if r and r.get('price'):
+                    n_rt += 1
+                if p is None:
+                    continue
+                mv += sum(l['shares'] for l in lots) * p
+            if n_rt:
+                e = _pos.cash_asof(init, rows, d_now, flows) + mv
+                f = sum(v for fd, v in flow_by_day.items()
+                        if fd <= d_now and (prev_d is None or fd > prev_d))
+                if prev_e is not None and prev_e > 0:
+                    twr.append((e - f) / prev_e - 1.0)
+                dates.append(d_now.isoformat())
+                eq.append(round(e, 2))
+                intraday = {'at': at, 'n_rt': n_rt, 'n_pos': len(book)}
+    except Exception:                                       # noqa: BLE001
+        intraday = None                 # 实时补点失败不该让整块业绩打不开
+
+    cum = 1.0
+    for r in twr:
+        cum *= (1.0 + r)
+    n = len(dates)
+    # ★ 峰值从【起点资金】起算 —— 第一天就跌的话，回撤该从起点量,
+    #   只看曲线上的点会把第一天的下跌算成"没有回撤"。
+    peak, mdd, mdd_at = init, 0.0, None
+    for d, v in zip(dates, eq):
+        peak = max(peak, v)
+        if peak > 0 and 1.0 - v / peak > mdd:
+            mdd, mdd_at = 1.0 - v / peak, d
+    yrs = n / 244.0
+    stats = {
+        'days': n,
+        'start': dates[0] if dates else None,
+        'end': dates[-1] if dates else None,
+        'equity_end': eq[-1] if eq else None,
+        'twr': round(cum - 1.0, 6),
+        # ★ 不到 20 个交易日不给年化：把两周的收益乘 12 倍是**误导**，
+        #   而那个数会被拿去跟回测年化比。宁可显示"—"。
+        'twr_annual': round(cum ** (1.0 / yrs) - 1.0, 6) if yrs > 0.08 else None,
+        'max_drawdown': round(mdd, 6),
+        'max_drawdown_at': mdd_at,
+        # 当前回撤：距历史最高还差多少。最大回撤是历史，这个是现在。
+        'drawdown_now': round(1.0 - eq[-1] / peak, 6) if peak > 0 else None,
+        # 最近一个交易日的涨跌（已剔除当日现金流，与 TWR 同口径）
+        'day_ret': round(twr[-1], 6) if twr else None,
+        'day_pnl': (round(eq[-1] - eq[-2] - flow_by_day.get(_base._d(dates[-1]), 0.0), 2)
+                    if len(eq) >= 2 else None),
+        'net_deposit': round(sum(flow_by_day.values()), 2),
+        'init_cash': init,
+        # 起点资金（开户那一刻）—— TWR 的第一个分母，页面上"累计收益"
+        # 那一格的金额就是 期末 − 起点 − 净入金。
+        'equity_start': round(init, 2),
+        # 已付手续费。**折成年化拖累要够长的样本才有意义** —— 见下。
+        'fee_paid': round(sum(float(r.get('fee') or 0) for r in rows), 2),
+        # 最后一点是不是盘中估的（None = 全是收盘价）。页面必须标出来：
+        # "累计收益"含不含今天的浮动，是两个不同的数。
+        'intraday': intraday,
+    }
+    # 费用占净投入的比例（不用权益做分母：权益含浮盈，会低估拖累）
+    base = init + stats['net_deposit']
+    stats['fee_pct'] = (round(stats['fee_paid'] / base, 6) if base > 0 else None)
+    # 🔴 年化拖累 = 按【当前交易频率】外推一年，费用会吃掉年化几个点。
+    #   与 twr_annual 同一条纪律：不到 20 个交易日不给 —— 开户两天就把
+    #   两笔建仓的费用乘 122 倍，得到的"年化拖累 1.72%"纯属外推，
+    #   而它会被拿去跟真实费率比。宁可只报绝对值。
+    # ★ 累计收益【也要给金额】：百分比是 TWR（入金不算收益），金额是
+    #   期末 − 起点 − 净入金 = 真正多出来的钱。只给百分比的话，
+    #   "累计收益 −0.78%" 旁边就没有能和"持仓浮盈 +3,698"对上的数。
+    #   🔴 两者分母不同是**正常的**：TWR 按整段资金的时间加权算，
+    #     而 浮盈% 的分母是投出去的那部分（闲置现金会摊薄前者）。
+    stats['pnl_total'] = round(eq[-1] - init - stats['net_deposit'], 2) if eq \
+        else None
+    stats['fee_drag_annual'] = (
+        round(stats['fee_pct'] * (244.0 / n), 6)
+        if stats['fee_pct'] is not None and yrs > 0.08 else None)
+    return {'dates': dates, 'equity': eq, 'stats': stats, 'note': None}
+
+
+# ============================ 交易日历 ============================

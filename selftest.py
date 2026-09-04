@@ -6276,7 +6276,7 @@ def t_realtime():
             % (P['price_src'], P['rt_n'], len(P['items'])))
 
 
-@case('服务端拆分：路径基准 / 延迟导入层级 / 门面转发', tag='fast')
+@case('模块拆分：路径基准 / 延迟导入层级 / 门面双向转发', tag='fast')
 def t_srv_split():
     """server.py 按产品域拆进 srv/ 之后，三处**不报错**的坑，逐条钉住。
 
@@ -6409,6 +6409,43 @@ def t_srv_split():
                            % (os.path.relpath(os.path.join(r, f), here), u))
             scanned += 1
 
+    # ---- live.py 的门面：🔴 LIVE 重定向必须真的生效 ----
+    #   selftest 靠 `lv.LIVE = 临时目录` 把写操作重定向掉、不污染真实账本
+    #   （本文件 3 处，那是那条纪律的实现手段）。
+    #   拆进 lv/ 之后，读取方（acct_dir / load_accounts / _save_accounts /
+    #   交易日历）都在 lv/base.py —— 门面若是 re-export，重定向就**静默失效**，
+    #   用例会把数据写进 live/ 真账本，**而它不报错**。
+    from assay import live as _lv
+    from assay.lv import base as _lvbase
+    assert _lvbase.HERE == os.path.join(here, 'assay'), \
+        'lv/base.py 的 HERE 应指 assay 包目录（__file__ 深了一层）：%s' % _lvbase.HERE
+    assert _lv.LIVE == os.path.join(here, 'live'), \
+        'lv.LIVE 应是 <repo>/live，实际 %s —— ROOT 算错了一层' % _lv.LIVE
+    assert os.path.isdir(_lv._lake()), 'lv._lake() 解不到 datalake：%s' % _lv._lake()
+    _old_live = _lv.LIVE
+    try:
+        _lv.LIVE = '/tmp/_probe_live_redirect'
+        assert _lvbase.LIVE == '/tmp/_probe_live_redirect', \
+            '写 lv.LIVE 没写回 lv.base —— 重定向会静默失效，用例会写真账本'
+        assert _lv.acct_dir('x') == '/tmp/_probe_live_redirect/x', \
+            'acct_dir 没跟着重定向 —— 读取方拿的是 base 里的旧值'
+        assert 'LIVE' not in vars(_lv), \
+            'live.__dict__ 里出现了 LIVE 副本 —— __setattr__ 没拦住'
+    finally:
+        _lv.LIVE = _old_live
+    # 本文件用到的 lv.* 名字也必须都还在（同样用 ast 扫，不照清单拼）
+    _lvused = sorted({n.attr for n in _ast.walk(_tree)
+                      if isinstance(n, _ast.Attribute)
+                      and isinstance(n.value, _ast.Name) and n.value.id == 'lv'})
+    _miss = [n for n in _lvused if not hasattr(_lv, n)]
+    assert not _miss, 'live 门面少了这些名字：%s' % _miss
+    LVDOMS = ('base', 'fee', 'px', 'pos', 'ver', 'sig', 'perf')
+    for d in LVDOMS:
+        importlib.import_module('assay.lv.' + d)
+    lp = open(os.path.join(here, 'assay', 'live.py'), encoding='utf-8').read()
+    assert lp.count('\n') < 100, \
+        'live.py 应只剩门面（%d 行）—— 实现放 lv/ 对应域' % lp.count('\n')
+
     # ---- srv/ 的结构：每个域都在，且 server.py 只剩骨架 ----
     DOMS = ('base', 'runs', 'docs', 'live', 'rt', 'sync', 'stock',
             'market', 'watch')
@@ -6420,8 +6457,11 @@ def t_srv_split():
     return ('HERE/WEB/picks.json 三个路径基准正确；5 个延迟导入封装都指向业务模块'
             '（不是 srv 自己）；门面双向转发 ALLOW_*；'
             '本文件用到的 %d 个 sv.* 名字全在；'
-            'assay/ %d 个模块零未定义名字；srv/ %d 个域可 import；'
-            'server.py 只剩 %d 行' % (len(used), scanned, len(DOMS), n))
+            'assay/ %d 个模块零未定义名字；srv/ %d + lv/ %d 个域可 import；'
+            'server.py 剩 %d 行 / live.py 剩 %d 行；'
+            'lv.LIVE 重定向双向生效（%d 个 lv.* 名字全在）'
+            % (len(used), scanned, len(DOMS), len(LVDOMS), n,
+               lp.count('\n'), len(_lvused)))
 
 
 @case('看板页面清单：每个路由都有实现', tag='fast')

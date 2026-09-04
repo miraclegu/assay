@@ -53,7 +53,7 @@ assay 总览 │ 💰实盘 🎯买点 │ 🌡盘面 📈个股 🏭板块 ⭐�
 `#filter`/`#expand` 只在某个视图存在,别处 `$('#filter')` 是 `null`,
 抄一遍漏一处就是 TypeError 整页白屏。
 
-## 服务端也按【产品域】拆(`assay/srv/`)
+## 服务端与实盘模块也按【产品域】拆(`assay/srv/` 与 `assay/lv/`)
 
 ```
 assay/
@@ -96,6 +96,65 @@ assay/
 ★ 白名单只放"会被外部重新赋值"的;`ROUTES` 这种本模块自己的定义不能转走。
 ★ dict/list 那些**原地修改**的容器(`_index`/`_cache`/`_RT`)没这个问题,
 可以直接 `from .base import`。
+
+### `live.py` 2290 行 → 门面 66 行 + `lv/` 七个域
+
+```
+assay/
+  live.py   66 行【门面】：ModuleType 子类，读写都转发到 lv/
+  lv/
+    base.py  异常/常量/LIVE/原子读写/账户/交易日历/代码归一化/读账本  495
+    fee.py   费率模型            px.py   取价与名称
+    pos.py   账本写入与重放       ver.py  版本绑定
+    sig.py   信号生成与落盘       perf.py 权益与收益(TWR)
+```
+
+依赖同样是干净的 DAG:`base → fee → px → pos → ver → sig → perf`。
+
+★ **切点的关键洞察不在段落标记里**:原来那个「费率模型」段有 **909 行**,
+看着像个大杂烩。做依赖分析时发现 `perf`/`sig` 从那段调的是
+`cash` / `cashflows` / `fifo_lots` / `active_fills` —— **那些是账务不是费率**。
+按实际内容把它细分成 4 类(代码归一化 / 费率 / 取价 / 持仓账务)之后,
+两个循环(`base ↔ fee`、`fill ↔ pos`)只靠**挪两处归属**就消掉了:
+533~708 的常量表与 `fills`(读账本)进 base、`add_fill` 并进 pos。
+
+🔴 **`lv.LIVE` 的重定向是这次最大的风险。** selftest 靠 `lv.LIVE = 临时目录`
+把写操作重定向掉、不污染真实账本(那条纪律的实现手段)。而读取方
+(`acct_dir` / `load_accounts` / `_save_accounts` / 交易日历)拆完都在
+`lv/base.py` —— 门面若是 re-export,**重定向静默失效,用例会把数据写进
+`live/` 真账本**。变异测试演示得很清楚:
+
+```
+lv.LIVE       = /tmp/_probe                        ← 设了
+base.LIVE     = <repo>/live                        ← 没跟着变
+acct_dir("x") = <repo>/live/x                      ← 🔴 还在写真账本
+```
+
+所以门面同样是 `ModuleType` 子类,`_FWD = ('LIVE',)`。
+★ 验证的最终判据是**跑完 selftest 后 `git status live/` 必须干净**。
+
+### 等价性验证:54 项关键函数逐位一致
+
+`live.py` 是账务计算,不能只验"跑得通"。做法是 `git worktree` 检出旧版,
+两个进程对**同一份账本**跑同样的调用,比 JSON 指纹:
+`fifo_lots` / `cash` / `cash_asof` / `positions` / `active_fills` /
+`replay_violation` / `equity_curve` / `positions_valued` / `versions` /
+`fee_rates` / `effective_rates` / `estimate_fee` / `fee_breakdown` /
+`infer_fee_model` / `check_price_in_range` / `normalize_code` / `day_price` …
+**48 + 6 项,指纹完全相同。**
+🔴 第一轮有 14 项"两版都报错" —— 那**不算一致,是没验到**(我把参数签名
+猜错了)。查签名改对之后才真正覆盖。"两边都失败"很容易被当成通过。
+
+### 🔴 又一个坑:`ast` 的 `col_offset` 是 **UTF-8 字节偏移**
+
+跨域引用要加 `_域.` 前缀,我用 ast 定位精确位置来改(比正则可靠 ——
+正则按 `NAME(` 只匹配调用形式,会漏掉变量引用和 `Thread(target=fn)`)。
+但 `col_offset` 是**字节**偏移,而 Python 字符串索引是**字符**:
+含中文的行上(`raise LiveError('mode 只能是 %s' % '/'.join(FEE_MODES))`),
+同一行第二个替换就错位,被我那个 `if s[col:col+len(nm)] == nm` 的保护分支
+**静默跳过**了。改成按 `line.encode('utf-8')` 做字节级替换才对。
+★ 教训有两条:**保护分支不该静默跳过**(该 assert),
+以及**光有"未定义名字检测"能兜住它** —— 那 4 个漏掉的名字就是它抓出来的。
 
 ## 看板是【多个独立页面】,不是一个 html 包办
 
