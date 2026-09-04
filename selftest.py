@@ -25,6 +25,22 @@ JQ = dict(slippage=0.0, commission=0.0003, min_commission=5.0, close_tax=0.001)
 CASES = []
 
 
+def _web_files(web, ext):
+    """递归收集 web/ 下的文件（相对 web 的路径）。
+
+    🔴 **必须递归**。web/ 分了子目录（shared/ 与 views/）之后，
+      `os.listdir` 只看一层 —— 漏掉的文件其**所有组合都不参与比对**，
+      而那不报错，只是保护范围悄悄缩小（同"直接扫目录而不是照清单拼"
+      那条：漏了不报错才是最贵的）。
+    """
+    out = []
+    for r, _d, fs in os.walk(web):
+        for f in fs:
+            if f.endswith(ext):
+                out.append(os.path.relpath(os.path.join(r, f), web))
+    return sorted(out)
+
+
 def case(name, tag='fast'):
     """tag 决定用例进哪一层，依据是【实测耗时】不是感觉：
 
@@ -3902,7 +3918,7 @@ def t_favicon():
     xml.dom.minidom.parseString(urllib.parse.unquote(m.group(1)))
 
     # 配色必须与 :root 一致 —— 改主题时最容易漏掉图标
-    css = open(os.path.join(web, 'common.css'), encoding='utf-8').read()
+    css = open(os.path.join(web, 'shared', 'common.css'), encoding='utf-8').read()
     for name in ('--accent', '--up'):
         mm = re.search(re.escape(name) + r':\s*(#[0-9a-fA-F]{3,8})', css)
         assert mm, 'CSS 里找不到 %s' % name
@@ -4034,7 +4050,7 @@ def t_stock():
     #     · 四条均线的 hex 与四种事件三角【完全相同】，而底部图例
     #       写着"▲除权除息"用的正是 MA5 那个色
     _kc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'web', 'kchart.js'), encoding='utf-8').read()
+                            'web', 'shared', 'kchart.js'), encoding='utf-8').read()
     import re as _re4
     _grab = lambda name: dict(_re4.findall(
         r"(\w+):\s*'(#[0-9a-fA-F]{6})'",
@@ -4396,7 +4412,7 @@ def t_query():
     assert not hasattr(sv, 'api_query'), '/api/query 还在'
     assert '/api/query' not in sv.ROUTES, '路由里还有 /api/query'
     web = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
-    for fn in sorted(f for f in os.listdir(web) if f.endswith(('.html', '.js'))):
+    for fn in _web_files(web, ('.html', '.js')):
         src = open(os.path.join(web, fn), encoding='utf-8').read()
         code = '\n'.join(ln for ln in src.split('\n')
                           if '//' not in ln and '/*' not in ln and '*' != ln.strip()[:1])
@@ -4895,9 +4911,10 @@ def t_serve_flags():
     #   判据用**源码**扫：`disabled` 只允许出现在"只读模式下不许写"那类
     #   （录成交、改设置），不允许挂在"功能没开"的按钮上 ——
     #   后者应当可点 + 说原因。
-    # ★ 实盘的视图逻辑在 web/live.js（index.html 已拆成骨架 + 5 个域文件）——
+    # ★ 实盘的视图逻辑在 web/views/live.js（index.html 已拆成骨架 + 域文件）——
     #   断言要跟着代码走，读 index.html 会永远查不到而假过（或假失败）。
-    lvjs = open(os.path.join(here, 'web', 'live.js'), encoding='utf-8').read()
+    lvjs = open(os.path.join(here, 'web', 'views', 'live.js'),
+                encoding='utf-8').read()
     bad = re.findall(r'\$\{\s*LV\.can_backtest\s*\?[^}]*disabled', lvjs)
     assert not bad, \
         ('「跑一次」那个按钮又按 can_backtest 设 disabled 了 —— '
@@ -6306,14 +6323,16 @@ def t_page_inventory():
     DOMS = ('app', 'home', 'live', 'live-fee', 'live-trade', 'live-strat',
             'runs', 'run-detail', 'sync')
     for d in DOMS:
-        fp = os.path.join(web, d + '.js')
-        assert os.path.isfile(fp), '缺 web/%s.js（index.html 拆分出来的域）' % d
-        assert '/%s.js' % d in html, 'index.html 没引用 %s.js' % d
+        fp = os.path.join(web, 'views', d + '.js')
+        assert os.path.isfile(fp), \
+            '缺 web/views/%s.js（index.html 拆分出来的域）' % d
+        assert '/views/%s.js' % d in html, \
+            'index.html 没引用 views/%s.js' % d
     assert '<script>' not in html, \
         ('index.html 里又出现内联 <script> —— 它应该只是骨架，'
          '视图逻辑放到对应的域文件里')
-    js = '\n'.join(open(os.path.join(web, d + '.js'), encoding='utf-8').read()
-                   for d in DOMS)
+    js = '\n'.join(open(os.path.join(web, 'views', d + '.js'),
+                        encoding='utf-8').read() for d in DOMS)
 
     # 🔴 【跨文件顶层重名 = 整页 SyntaxError】。所有 <script>（含 src= 引入的）
     #    共享同一个全局词法环境，重名直接
@@ -6329,10 +6348,10 @@ def t_page_inventory():
     import itertools
     # ★ 直接扫目录，而不是照着 DOMS 拼 —— 漏掉一个文件的话，
     #   "两两比对"就漏了它的所有组合，而那不会报错。
-    shared_files = sorted(f for f in os.listdir(web) if f.endswith('.js'))
-    assert set(d + '.js' for d in DOMS) <= set(shared_files), \
-        'DOMS 里列的文件不存在：%s' % sorted(
-            set(d + '.js' for d in DOMS) - set(shared_files))
+    shared_files = _web_files(web, '.js')
+    want = set(os.path.join('views', d + '.js') for d in DOMS)
+    assert want <= set(shared_files), \
+        'DOMS 里列的文件不存在：%s' % sorted(want - set(shared_files))
     syms = {f: top(open(os.path.join(web, f), encoding='utf-8').read())
             for f in shared_files}
     for a, b in itertools.combinations(shared_files, 2):
@@ -6341,8 +6360,21 @@ def t_page_inventory():
             ('%s 与 %s 顶层重名 %s —— 会 SyntaxError 导致整页白屏' % (a, b, dup))
     # 独立页面（自带内联 <script>）仍要与所有共享文件比
     allshared = set().union(*syms.values())
+    # 🔴 `.html` 一律在**根目录** —— `/stock.html?code=…` 是外部书签与跨页
+    #   链接的地址，属于产品契约。这里断言它没被挪进子目录：挪了的话旧书签
+    #   全部 404，而"点了没反应"是最难查的那种坏。
     pages = sorted(f for f in os.listdir(web)
                    if f.endswith('.html') and f != 'index.html')
+    stray = [f for f in _web_files(web, '.html') if os.sep in f]
+    assert not stray, '.html 必须留在 web/ 根目录（产品契约）：%s' % stray
+    # ★ 反过来：`.js`/`.css` 一律**不许**平铺在根 —— 否则下次新加的文件又会
+    #   散在根目录，而"目录结构慢慢退化"没有任何报错。
+    #   shared/ = 跨所有页面共享（含 6 个独立 .html）；views/ = 只服务 index.html
+    #   的 hash 视图。分目录依据仍是**产品域**，与 index.html 的拆分同一判据。
+    flat = [f for f in os.listdir(web) if f.endswith(('.js', '.css'))]
+    assert not flat, \
+        ('web/ 根目录不该有 .js/.css：%s —— 共享的放 shared/，'
+         'index.html 的视图放 views/' % sorted(flat))
     for fn in pages:
         src = open(os.path.join(web, fn), encoding='utf-8').read()
         inline = '\n'.join(re.findall(r'<script>(.*?)</script>', src, re.S))
@@ -6353,8 +6385,10 @@ def t_page_inventory():
     # 每个独立页面都必须引用共享资源，不能各带一份样式/辅助函数
     for fn in pages + ['index.html']:
         src = open(os.path.join(web, fn), encoding='utf-8').read()
-        assert '/common.css' in src, '%s 没引用 common.css' % fn
-        assert '/common.js' in src, '%s 没引用 common.js' % fn
+        assert '/shared/common.css' in src, \
+            '%s 没引用 shared/common.css' % fn
+        assert '/shared/common.js' in src, \
+            '%s 没引用 shared/common.js' % fn
         assert '<style>' not in src, \
             '%s 里还有内联 <style> —— 样式应集中在 common.css' % fn
 

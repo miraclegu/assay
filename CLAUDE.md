@@ -56,26 +56,48 @@ assay 总览 │ 💰实盘 🎯买点 │ 🌡盘面 📈个股 🏭板块 ⭐�
 ## 看板是【多个独立页面】,不是一个 html 包办
 
 ```
-web/common.css   共享样式（所有页面 <link> 它）
-web/common.js    共享 JS：$ / esc / j / post / 数字格式化 / cell / helpIcon /
+web/                        ← 🔴 **.html 全在根目录**，见下
+  index.html   32 行【骨架】：<head> + 四个容器 div + 11 个 <script src>
+  market.html  🌡 盘面        stock.html    📈 个股
+  sector.html  🏭 行业板块    watchlist.html ⭐ 自选
+  compare.html ⚖ 对比        alerts.html   🎯 买点（股息率买点清单）
+  favicon.svg
+
+  shared/                   跨【所有】页面共享（含 6 个独立 .html）
+    common.css   共享样式（所有页面 <link> 它）
+    common.js    $ / esc / j / post / 数字格式化 / cell / helpIcon /
                  normCode / boardTag / 顶栏导航 NAV / mountSearch / 自选星
-web/kchart.js    Canvas 画图：drawKChart（K线+量+副图+事件）/ drawLines（多股）
+    kchart.js    Canvas 画图：drawKChart（K线+量+副图+事件）/ drawLines（多股）
 
-web/index.html   32 行【骨架】：<head> + 四个容器 div + 11 个 <script src>
-  ├ app.js         128  骨架：hash 路由 + enterView/stopPoll/modal/card/tab
-  ├ home.js        243  总览首页
-  ├ live.js        480  实盘【主视图】：账户列表/待办/持仓/KPI/业绩/口径 ⓘ
-  │  ├ live-fee.js    396  ⚙ 设置与费率（照账单逐项填、append-only 版本历史）
-  │  ├ live-trade.js  236  ✎ 记一笔 + 成交流水独立页（录进去、查出来）
-  │  └ live-strat.js  204  策略与版本（源码快照/参数/绑定/触发回测）
-  ├ runs.js        532  回测归档【挑】：目录树 / 选中的规则 / 版本页
-  │  └ run-detail.js  580  【看】：概览/权益/收益热力四层/成交/持仓/拒单/源码
-  └ sync.js        402  数据同步 + 数据字典 + 自动同步开关
-
-web/market.html  🌡 盘面      web/stock.html   📈 个股
-web/sector.html  🏭 行业板块  web/watchlist.html ⭐ 自选
-web/compare.html ⚖ 对比      web/alerts.html  🎯 买点（股息率买点清单）
+  views/                    只服务 index.html 的 hash 视图
+    app.js         128  骨架：hash 路由 + enterView/stopPoll/modal/card/tab
+    home.js        243  总览首页
+    live.js        480  实盘【主视图】：账户列表/待办/持仓/KPI/业绩/口径 ⓘ
+      live-fee.js    396  ⚙ 设置与费率（照账单逐项填、append-only 版本历史）
+      live-trade.js  236  ✎ 记一笔 + 成交流水独立页（录进去、查出来）
+      live-strat.js  204  策略与版本（源码快照/参数/绑定/触发回测）
+    runs.js        532  回测归档【挑】：目录树 / 选中的规则 / 版本页
+      run-detail.js  580  【看】：概览/权益/收益热力四层/成交/持仓/拒单/源码
+    sync.js        402  数据同步 + 数据字典 + 自动同步开关
 ```
+
+★ **目录也按【产品域】分,与 index.html 的拆分同一判据**(2026-09-04,
+根目录 21 个文件平铺 → 8 个 + 2 个目录)。`shared/` 与 `views/` 的分界是
+**"谁在用"**:6 个独立 .html 也要 `common.css`/`common.js`/`kchart.js`,
+而 `live.js` 那批只有 index.html 用。
+🔴 **不分成 `js/` `css/`** —— 那是技术分层,与"按产品域拆"背道而驰,
+而且 `common.css` 与 `common.js` 是同一件事的两半(拆开只会两处都要改)。
+
+🔴 **`.html` 一律留在根目录,不进 `pages/`。**
+`/stock.html?code=601857.XSHG` 是**外部书签与跨页链接的地址,属于产品契约**
+—— 移进子目录会让所有旧书签 404,而"点了没反应"是最难查的那种坏
+(同 backLink 那条)。selftest 里两向都钉住:`.html` 不许出现在子目录、
+`.js`/`.css` 不许平铺在根(否则目录结构会慢慢退化,**而那不报错**)。
+★ 服务端**一行没改** —— `os.path.join(WEB, rel)` + `startswith(WEB)` 防穿越
+天然支持子目录。实测 `/shared/../../serve.py` 仍是 404。
+🔴 selftest 里凡是扫 web 目录的地方**必须递归**(`_web_files`)——
+`os.listdir` 只看一层,漏掉的文件其**所有组合都不参与比对**,
+而那不报错,只是保护范围悄悄缩小(同"直接扫目录而不是照清单拼"那条)。
 
 ★ **index.html 按【产品域】拆,不按技术分层**(2026-09-04,3183 行 → 32 行)。
 拆分点不是拍脑袋:先做依赖分析,发现**跨域调用几乎全是"路由 → 视图"这一个
