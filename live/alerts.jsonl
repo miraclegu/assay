@@ -22,3 +22,5 @@
 {"uid": "9ea20fb7d903", "ts": "2026-09-03T18:58:27", "act": "set", "code": "000807.XSHE", "tiers": [{"by": "price", "v": 25.38}], "note": "原表这行没写分红；改用 2025 年度合计 0.699（中期0.32+年度0.379）—— 之前填的 1.266 是近12个月口径，混进了 FY2026 中期", "near": null}
 {"uid": "fad7539baa3a", "ts": "2026-09-03T18:59:53", "act": "set", "code": "000423.XSHE", "tiers": [{"by": "price", "v": 50.0}, {"by": "price", "v": 45.0}, {"by": "price", "v": 43.0}], "note": "", "near": null}
 {"uid": "22c3592d1d5d", "ts": "2026-09-03T19:00:11", "act": "set", "code": "000423.XSHE", "tiers": [{"by": "price", "v": 49.0}, {"by": "price", "v": 45.0}, {"by": "price", "v": 43.0}], "note": "", "near": null}
+{"uid": "3e50eb25bd9d", "ts": "2026-09-04T12:03:03", "act": "set", "code": "000423.XSHE", "tiers": [{"by": "price", "v": 46.5}, {"by": "price", "v": 44.5}, {"by": "price", "v": 42.5}], "note": "", "near": null}
+{"uid": "0660e037395c", "ts": "2026-09-04T12:03:30", "act": "set", "code": "000423.XSHE", "tiers": [{"by": "price", "v": 47.5}, {"by": "price", "v": 45.5}, {"by": "price", "v": 42.5}], "note": "", "near": null}
