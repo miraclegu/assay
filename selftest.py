@@ -4895,14 +4895,16 @@ def t_serve_flags():
     #   判据用**源码**扫：`disabled` 只允许出现在"只读模式下不许写"那类
     #   （录成交、改设置），不允许挂在"功能没开"的按钮上 ——
     #   后者应当可点 + 说原因。
-    html = open(os.path.join(here, 'web', 'index.html'), encoding='utf-8').read()
-    bad = re.findall(r'\$\{\s*LV\.can_backtest\s*\?[^}]*disabled', html)
+    # ★ 实盘的视图逻辑在 web/live.js（index.html 已拆成骨架 + 5 个域文件）——
+    #   断言要跟着代码走，读 index.html 会永远查不到而假过（或假失败）。
+    lvjs = open(os.path.join(here, 'web', 'live.js'), encoding='utf-8').read()
+    bad = re.findall(r'\$\{\s*LV\.can_backtest\s*\?[^}]*disabled', lvjs)
     assert not bad, \
         ('「跑一次」那个按钮又按 can_backtest 设 disabled 了 —— '
          'disabled 的元素连 title 都不触发，点了没反应且看不到原因：%s' % bad)
     # 不可用时，怎么开必须【常驻可见】而不是藏在 title 里
-    assert 'readonly' in html and 'serve.py' in html, \
-        '页面上没有"怎么开"的常驻说明'
+    assert 'readonly' in lvjs and 'serve.py' in lvjs, \
+        'live.js 里没有"怎么开"的常驻说明'
     return ('默认全功能、--readonly 一起关两项、旧参数保留兼容；'
             'API 两种模式的 can_backtest/readonly 都对；'
             '页面不再按 can_backtest 设 disabled（点了没反应且无提示那条）')
@@ -6292,30 +6294,55 @@ def t_page_inventory():
 
     web = os.path.join(here, 'web')
     html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
-    js = html[html.index('<script>'):]
 
-    # 🔴 共享资源与页面内联脚本【顶层重名 = 整页 SyntaxError】。
-    #    两个 <script> 的顶层 const/let/function 共享同一个全局词法环境，
-    #    重名直接 "Identifier 'x' has already been declared"，
+    # ---- index.html 是【骨架】：hash 路由的几个视图各在自己的 .js 里 ----
+    #   ★ 拆分依据是**产品域**（app/home/live/runs/sync），不是技术分层 ——
+    #     依赖分析显示跨域调用几乎全是"路由 -> 视图"这一个方向。
+    #   ★ 断言只钉"文件在、被引用、没重名"这三件，不钉具体行数 ——
+    #     行数会随功能长，钉了只会天天误报。
+    DOMS = ('app', 'home', 'live', 'runs', 'sync')
+    for d in DOMS:
+        fp = os.path.join(web, d + '.js')
+        assert os.path.isfile(fp), '缺 web/%s.js（index.html 拆分出来的域）' % d
+        assert '/%s.js' % d in html, 'index.html 没引用 %s.js' % d
+    assert '<script>' not in html, \
+        ('index.html 里又出现内联 <script> —— 它应该只是骨架，'
+         '视图逻辑放到对应的域文件里')
+    js = '\n'.join(open(os.path.join(web, d + '.js'), encoding='utf-8').read()
+                   for d in DOMS)
+
+    # 🔴 【跨文件顶层重名 = 整页 SyntaxError】。所有 <script>（含 src= 引入的）
+    #    共享同一个全局词法环境，重名直接
+    #    "Identifier 'x' has already been declared" ——
     #    表现是**整页白屏、所有功能一起没了**。
     #    实测踩过：把 num() 搬进 common.js 时忘了删 index.html 那份，
     #    8 个 web 用例一起挂。
+    #    ★ 拆成 5 个域文件后组合数从 1 对变成 21 对，所以这里**两两全比**，
+    #      而不是只比"每个页面 vs common.js"。
     top = lambda t: set(re.findall(
         r'^(?:const|let|var|function|async function)\s+([A-Za-z_$][\w$]*)',
         t, re.M))
-    shared = open(os.path.join(web, 'common.js'), encoding='utf-8').read()
-    pages = ['index.html'] + sorted(
-        f for f in os.listdir(web)
-        if f.endswith('.html') and f != 'index.html')
+    import itertools
+    shared_files = ['common.js', 'kchart.js'] + [d + '.js' for d in DOMS]
+    syms = {f: top(open(os.path.join(web, f), encoding='utf-8').read())
+            for f in shared_files}
+    for a, b in itertools.combinations(shared_files, 2):
+        dup = sorted(syms[a] & syms[b])
+        assert not dup, \
+            ('%s 与 %s 顶层重名 %s —— 会 SyntaxError 导致整页白屏' % (a, b, dup))
+    # 独立页面（自带内联 <script>）仍要与所有共享文件比
+    allshared = set().union(*syms.values())
+    pages = sorted(f for f in os.listdir(web)
+                   if f.endswith('.html') and f != 'index.html')
     for fn in pages:
         src = open(os.path.join(web, fn), encoding='utf-8').read()
         inline = '\n'.join(re.findall(r'<script>(.*?)</script>', src, re.S))
-        dup = sorted(top(shared) & top(inline))
+        dup = sorted(top(inline) & allshared)
         assert not dup, \
-            ('%s 与 common.js 顶层重名 %s —— 会 SyntaxError 导致整页白屏'
+            ('%s 与共享 .js 顶层重名 %s —— 会 SyntaxError 导致整页白屏'
              % (fn, dup))
     # 每个独立页面都必须引用共享资源，不能各带一份样式/辅助函数
-    for fn in pages:
+    for fn in pages + ['index.html']:
         src = open(os.path.join(web, fn), encoding='utf-8').read()
         assert '/common.css' in src, '%s 没引用 common.css' % fn
         assert '/common.js' in src, '%s 没引用 common.js' % fn
@@ -6347,7 +6374,9 @@ def t_page_inventory():
     assert n >= 54, \
         ('用例只剩 %d 条，少于已知的 54 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
-    return ('%d 个页面函数与路由一一对应（%s）；用例 %d 条'
+    return ('index.html 拆成 5 个域文件（app/home/live/runs/sync）且全被引用、'
+            '骨架里无内联 script；7 个共享 .js 两两无顶层重名（21 对）；'
+            '%d 个页面函数与路由一一对应（%s）；用例 %d 条'
             % (len(defined), ' '.join(sorted(defined)), n))
 
 

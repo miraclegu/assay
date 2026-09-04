@@ -1,0 +1,243 @@
+/* ============ 总览首页 ============ */
+/* ============ 总览首页 ============
+   ★ 打开看板第一眼该回答的是「今天什么状态、要做什么」，
+     而不是一棵回测目录树 —— 那是做策略时才进的（已移到 #/runs）。
+
+   ★ 每一块都只给【摘要 + 一个入口】，不在首页重复做那一页的事：
+     首页做成小型全功能页的话，同一份数据两处渲染，迟早不一致。
+
+   ★ 五块并发拉，任何一块失败只让它自己显示错误 —— 数据同步挂了不该
+     让待办也看不见。 */
+async function showHome(){
+  stopPoll();
+  enterView();
+  $('#main').innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
+  const one=u=>j(u).catch(e=>({error:String(e)}));
+  const [accts, sync, mkt, watch, marks, alerts] = await Promise.all([
+    one('/api/live/accounts'), one('/api/sync'),
+    one('/api/market/overview?top=5'), one('/api/watchlist'), one('/api/marks'),
+    one('/api/alerts'),
+  ]);
+  const todo = [];
+  if(accts && !accts.error){
+    /* 逐账户拉一次详情才有待办清单与权益 —— 账户不多（个数级），
+       并发拉没问题。 */
+    const ds = await Promise.all((accts.accounts||[])
+      .filter(a=>!a.archived)
+      .map(a=>one('/api/live/account?id='+encodeURIComponent(a.id))
+        .then(o=>({acct:a, d:o}))));
+    ds.forEach(x=>todo.push(x));
+  }
+  $('#main').innerHTML=`
+    ${homeAlert(todo, sync)}
+    <div class="pgrid c2">
+      ${homeLive(accts, todo)}
+      ${homeMarket(mkt)}
+    </div>
+    <div class="pgrid c2" style="margin-top:14px">
+      ${homeAlerts(alerts)}
+      ${homeWatch(watch)}
+    </div>
+    <div class="pgrid c2" style="margin-top:14px">
+      ${homeData(sync)}
+    </div>
+    ${homeMarks(marks)}`;
+  document.querySelectorAll('#main [data-star]').forEach(e=>e.onclick=ev=>{
+    ev.preventDefault(); ev.stopPropagation();
+    toggleStar(e, e.dataset.star, !!e.dataset.on); });
+}
+
+/* 顶部横条：只在【真的要做什么】时出现。
+   ★ 没有待办就不显示 —— 常驻一条"一切正常"的横幅，等于教人忽略这个位置。 */
+function homeAlert(todo, sync){
+  const hit = todo.filter(x=>x.d && !x.d.error && x.d.alert);
+  const lag = (sync && !sync.error && sync.status && sync.status.leg_a_lag) || 0;
+  let h='';
+  if(hit.length) h+=`<div class="lvrb now"><b>今天有事要做</b> —— ${
+    hit.map(x=>`<a href="#/live/${esc(x.acct.id)}" style="color:inherit">${esc(x.acct.name)}</a>：${
+      esc((x.d.alert_why||[]).join('；'))}`).join('　·　')}</div>`;
+  if(lag) h+=`<div class="lvwarn"><b>行情数据落后 ${lag} 个交易日</b> ——
+    信号会用旧数据算。<a href="#/sync">去数据页同步 ›</a></div>`;
+  return h;
+}
+
+function homeLive(accts, todo){
+  if(!accts || accts.error) return homeCard('实盘', '#/live',
+    `<div class="lvmsg bad">${esc((accts||{}).error||'取不到账户')}</div>`);
+  const rows = todo.filter(x=>x.d && !x.d.error);
+  if(!rows.length) return homeCard('实盘', '#/live',
+    '<div class="none">还没有账户 —— 去实盘页建一个</div>');
+  return homeCard('实盘 · 今日待办与持仓', '#/live', `
+    <table class="pkt"><tr>
+      <th class="tx">账户</th><th class="rt">总资产</th><th class="rt">持仓浮盈</th>
+      <th class="rt">仓位</th><th class="tx">今天</th></tr>
+      ${rows.map(x=>{
+        const P=x.d.pos||{}, wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
+        const sg=x.d.signal||{};
+        const act=x.d.alert
+          ? `<b style="color:var(--warn)">${esc((x.d.alert_why||[]).join('；'))}</b>`
+          : `<span class="lvwhy">${sg.next_rebalance
+              ? '下次调仓 '+esc(sg.next_rebalance)
+                +(sg.days_until_rebalance!=null?`（${sg.days_until_rebalance} 个交易日）`:'')
+              : '没有要动的'}</span>`;
+        return `<tr>
+          <td class="tx">${x.d.alert?'<span class="adot"></span> ':''}<a
+            href="#/live/${esc(x.acct.id)}" style="color:inherit">${esc(x.acct.name)}</a>
+            <div class="lvwhy">${(P.items||[]).length} 只持仓</div></td>
+          <td class="rt">${num(P.equity,2)}</td>
+          <td class="rt" style="color:${upc(P.pnl)}">${P.pnl==null?'—':(P.pnl>=0?'+':'')+num(P.pnl,2)}
+            <div class="lvwhy">${ratv(P.pnl_pct)}</div></td>
+          <td class="rt">${wt==null?'—':(wt*100).toFixed(1)+'%'}</td>
+          <td class="tx">${act}</td></tr>`;}).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">浮盈按<b>摊薄成本</b>（含买入费）算。
+      调仓日是纯日历的，能提前算出来；清单要等前一交易日收盘。</div>`);
+}
+
+function homeMarket(o){
+  if(!o || o.error) return homeCard('盘面', '/market.html',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到盘面')}</div>`);
+  const rate = o.n ? (o.up/o.n*100) : null;
+  return homeCard(`盘面 · ${esc(o.date)}`, '/market.html', `
+    <div class="kpi" style="margin-bottom:8px">
+      ${cell('涨 / 跌',
+        `<span style="color:var(--up)">${num(o.up)}</span> / <span style="color:var(--down)">${num(o.down)}</span>`,
+        rate==null?'':'上涨占比 '+rate.toFixed(1)+'%')}
+      ${cell('涨停 / 跌停',
+        `<span style="color:var(--up)">${num(o.limit_up)}</span> / <span style="color:var(--down)">${num(o.limit_down)}</span>`,
+        '炸板 '+num(o.open_limit_up))}
+      ${cell('成交额', yiv(o.amount), '中位换手 '+pctn(o.median_turnover))}
+      ${cell('中位涨幅',
+        `<span style="color:${upc(o.median_change)}">${pctv(o.median_change)}</span>`, '')}
+    </div>
+    <div class="lvwhy" style="margin-bottom:4px">行业 · 领涨领跌</div>
+    ${(o.industries||[]).slice(0,3).map(x=>
+      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+        >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}
+    ${(o.industries||[]).slice(-2).map(x=>
+      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+        >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}`);
+}
+
+function homeWatch(w){
+  if(!w || w.error) return homeCard('自选', '/watchlist.html',
+    `<div class="lvmsg bad">${esc((w||{}).error||'取不到自选')}</div>`);
+  const rows=(w.rows||[]).filter(x=>x.change_pct!=null)
+    .sort((a,b)=>Math.abs(b.change_pct)-Math.abs(a.change_pct));
+  if(!rows.length) return homeCard('自选', '/watchlist.html',
+    '<div class="none">自选是空的 —— 在个股页或盘面榜单里点 ★ 加进来</div>');
+  return homeCard(`自选 · 异动前 ${Math.min(8,rows.length)}`, '/watchlist.html', `
+    <table class="pkt"><tr><th class="tx">名称</th><th class="rt">现价</th>
+      <th class="rt">涨跌</th><th class="rt">换手</th><th class="tx">分组</th></tr>
+      ${rows.slice(0,8).map(x=>`<tr>
+        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
+          style="color:inherit">${esc(x.name||x.code)}</a>
+          ${x.limit_up?'<span class="lvwhy" style="color:var(--up)">涨停</span>':''}
+          ${x.limit_down?'<span class="lvwhy" style="color:var(--down)">跌停</span>':''}</td>
+        <td class="rt">${fmtN(x.close)}</td>
+        <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
+        <td class="rt">${pctn(x.turnover)}</td>
+        <td class="tx lvwhy">${esc(x.group||'')}</td></tr>`).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">按<b>涨跌幅绝对值</b>排 ——
+      跌得多的和涨得多的一样需要知道。</div>`);
+}
+
+/* 买点到价 —— 首页只给【要动的那几行】。
+   ★ 不重复做那一页的事：这里不列每一档，只说"哪只、到了第几档、目标价"。
+     全清单在买点页（标题就是入口）。 */
+function homeAlerts(o){
+  if(!o || o.error) return homeCard('买点', '/alerts.html',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到买点清单')}</div>`);
+  const rows=(o.rows||[]);
+  if(!rows.length) return homeCard('买点清单', '/alerts.html',
+    '<div class="none">清单是空的 —— 去买点页加几只票、写几档想买的价（分红自动填）</div>');
+  const act=rows.filter(x=>x.state==='hit'||x.state==='near');
+  /* 没有到价的就给"最接近的三只" —— 一块空卡片不如告诉人"还差多少" */
+  const show=(act.length?act:rows.filter(x=>x.next)
+    .sort((a,b)=>b.next.gap-a.next.gap)).slice(0,6);
+  return homeCard(`买点${act.length?' · '+act.length+' 只到价/接近':' · 最接近的几只'}`,
+    '/alerts.html', `
+    <table class="pkt"><tr><th class="tx">名称</th><th class="rt">现价</th>
+      <th class="rt">股息率</th><th class="rt">目标</th><th class="tx">状态</th></tr>
+      ${show.map(x=>{
+        const t=(x.state==='hit'?x.tiers[x.hit]
+                :(x.state==='near'?x.tiers[x.near]:x.next))||{};
+        return `<tr${x.state==='hit'?' class="ahit"'
+          :(x.state==='near'?' class="anear"':'')}>
+        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
+          style="color:inherit">${esc(x.name||x.code)}</a></td>
+        <td class="rt">${fmtN(x.price)}</td>
+        <td class="rt">${x.yield_now==null?'—':(x.yield_now*100).toFixed(2)+'%'}</td>
+        <td class="rt">${fmtN(t.price)}<span class="lvwhy">${
+          t.yield==null?'':'/'+(t.yield*100).toFixed(2)+'%'}</span></td>
+        <td class="tx">${x.state==='hit'
+          ? `<b style="color:var(--up)">到价 · 第 ${x.hit+1} 档</b>`
+          : (x.state==='near'
+             ? `<b style="color:var(--warn)">接近 · 第 ${x.near+1} 档</b>`
+             : `<span class="lvwhy">还要跌 ${(-t.gap*100).toFixed(1)}%</span>`)}</td>
+      </tr>`;}).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">手工填的挂单计划（不是策略）——
+      到价会走系统通知，同一档一天只提醒一次。</div>`);
+}
+
+function homeData(o){
+  if(!o || o.error) return homeCard('数据', '#/sync',
+    `<div class="lvmsg bad">${esc((o||{}).error||'取不到数据状态')}</div>`);
+  const st=o.status||{};
+  const A=(st.items||[]).filter(x=>x.leg==='A');
+  const B=(st.items||[]).filter(x=>x.leg==='B');
+  const au=o.auto||{};
+  return homeCard('数据 · 新鲜度', '#/sync', `
+    <table class="pkt"><tr><th class="tx">项</th><th class="tx">最新</th>
+      <th class="tx">状态</th></tr>
+      ${A.map(x=>`<tr><td class="tx">${esc(x.name)}</td>
+        <td class="tx">${esc(x.max||'—')}</td>
+        <td class="tx">${x.lag_days?`<b style="color:var(--warn)">落后 ${x.lag_days} 交易日</b>`
+          :'<span style="color:var(--down)">最新</span>'}</td></tr>`).join('')}
+      <tr><td class="tx lvwhy" colspan="3">财务（事件驱动，不按交易日算落后）</td></tr>
+      ${B.slice(0,3).map(x=>`<tr><td class="tx">${esc(x.name)}</td>
+        <td class="tx">${esc(x.max||'—')}</td>
+        <td class="tx lvwhy">距今 ${x.days_since==null?'—':x.days_since} 天</td></tr>`).join('')}
+    </table>
+    <div class="lvwhy" style="margin-top:4px">
+      自动同步 <b>${au.on?'开 · 每日 '+esc(au.schedule||'?'):(au.supported===false?'不支持':'关')}</b>。
+      财务的"落后"<b>不按交易日算</b> —— 没公告的日子本来就没有新 pub_date。
+    </div>`);
+}
+
+function homeMarks(ms){
+  if(!ms || ms.error || !ms.length) return '';
+  const top=ms.slice().sort((a,b)=>(b.annual_return||-9)-(a.annual_return||-9)).slice(0,5);
+  return homeCard('选中的规则 · 年化前 5', '#/picks', `
+    <table class="pkt"><tr><th class="tx">策略 · 参数</th><th class="rt">年化</th>
+      <th class="rt">回撤</th><th class="rt">夏普</th><th class="tx">区间</th></tr>
+      ${top.map(r=>`<tr>
+        <td class="tx"><a href="#/run/${encodeURIComponent(r.run_id)}"
+          style="color:inherit">${esc(r.strategy||'')}</a>
+          <div class="lvwhy">${Object.entries(r.params||{}).slice(0,4)
+            .map(([k,v])=>esc(k+'='+v)).join(' ')||'默认参数'}</div></td>
+        <td class="rt"><b class="${sign(r.annual_return)}">${pct(r.annual_return,2)}</b></td>
+        <td class="rt neg">${pct(r.max_drawdown,2)}</td>
+        <td class="rt">${fmtN(r.sharpe)}</td>
+        <td class="tx lvwhy">${esc(r.start||'')}<br>~ ${esc(r.end||'')}</td></tr>`).join('')}
+    </table>`, 'wide');
+}
+
+/* 首页的一块。★ 标题本身就是入口 —— 首页只给摘要，要看全的点标题过去。
+   ★ 叫 homeCard 而不是 card —— 这个文件里已经有一个 `card(k,v,cls,note)`
+     （回测详情页的指标卡）。同名函数不会报错，**后定义的直接覆盖前面的**，
+     表现是首页渲染出一堆指标卡的骨架而内容全错位。 */
+function homeCard(title, href, body, cls){
+  return `<div class="lvsec ${cls||''}"><h3>
+      <a href="${href}" style="color:inherit;text-decoration:none">${esc(title)} ›</a>
+      <span style="flex:1"></span>
+      <a class="lvwhy" href="${href}">看全部 ›</a></h3>${body}</div>`;
+}
+
+/* 个股与查数据都已经不在这个文件里：
+   · 个股 -> 独立页 /stock.html（本文件的 #/stock 路由只做跳转，旧链接不失效）
+   · 查数据（只读 SQL 页）-> **已取消**。命令行工具仍在
+     `datalake/build/query.py`（`--sql-stdin` / `--schema`），
+     安全规则那三层也还在那里。 */
