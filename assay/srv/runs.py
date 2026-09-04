@@ -254,6 +254,25 @@ def api_trades(q):
 
 
 
+def _pruned(run_id, what):
+    """这份归档的 `what` 明细是不是被 prune_runs.py 清掉了。
+
+    🔴 **不写这个标记的话，"清理过"和"本来就没有"在页面上长得一模一样**
+      —— `_read()` 读不到 parquet 时返回空 DataFrame（不报错），
+      于是持仓页一片空白，人会以为"这次回测没持仓"。
+      所以 prune_runs.py 往 meta.json 写 `pruned: {'holdings': '日期'}`，
+      接口带出去，页面明说"明细已清理（重跑该回测可再生成）"。
+    """
+    d = _dir(run_id)
+    if d is None:
+        return None
+    try:
+        m = json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
+    except Exception:                                           # noqa: BLE001
+        return None
+    return (m.get('pruned') or {}).get(what)
+
+
 def api_holdings(q):
     """★ 分页返回，不按日筛选。全量 22k 行不能一次发 ——
     那是「能跑但很慢」的典型（前端渲染 22k 个 DOM 节点会卡死）。
@@ -266,7 +285,8 @@ def api_holdings(q):
     if df is None:
         return None
     if df.empty:
-        return {'total': 0, 'offset': 0, 'limit': 0, 'rows': [], 'n_days': 0}
+        return {'total': 0, 'offset': 0, 'limit': 0, 'rows': [], 'n_days': 0,
+                'pruned': _pruned(rid, 'holdings')}
     df = df.sort_values(['date', 'weight'], ascending=[False, False])
     total = len(df)
     try:
@@ -294,7 +314,8 @@ def api_day(q):
     d = (q.get('d') or '')[:10]
     if not d:
         return None
-    out = {'date': d, 'holdings': [], 'buys': [], 'sells': []}
+    out = {'date': d, 'holdings': [], 'buys': [], 'sells': [],
+           'holdings_pruned': _pruned(rid, 'holdings')}
     hd = _read(rid, 'holdings')
     if hd is not None and not hd.empty:
         sub = hd[hd['date'].astype(str).str[:10] == d]

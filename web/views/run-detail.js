@@ -396,7 +396,7 @@ async function drawDay(S){
       ${card('当日收益',_sn(S.dr[d],2)+'%',sign(S.dr[d]))}
       ${card('权益',money(e.equity[i]*(DATA.run.stats.cash||1)))}
       ${card('仓位',pct(pos,1))}
-      ${card('持仓',o.holdings.length+' 只')}
+      ${card('持仓', o.holdings_pruned ? '—' : o.holdings.length+' 只')}
       ${card('当日买入',o.buys.length+' 笔')}
       ${card('当日卖出',o.sells.length+' 笔')}
     </div>
@@ -422,7 +422,10 @@ async function drawDay(S){
     {k:'ret',t:'该笔最终',s:1,f:v=>_sn(v,2)+'%'},
   ],'当日买入 '+o.buys.length+' 笔'+(o.buys.length?
       '　（后两列是这笔【整笔】的最终结果，不是当日收益）':'（无）'));
-  tbl($('#d_hold'),o.holdings,[
+  if(o.holdings_pruned){
+    $('#d_hold').innerHTML=`<div class="warn">当天持仓明细已清理
+      （${esc(o.holdings_pruned)}）—— 重跑这次回测可再生成。</div>`;
+  } else tbl($('#d_hold'),o.holdings,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
     {k:'weight',t:'权重',f:v=>pct(v,1)},
     {k:'value',t:'市值',f:v=>money(v)},
@@ -497,6 +500,16 @@ async function paneTrades(){
 }
 async function paneHoldings(){
   const h=await j(`/api/holdings?id=${CUR}&offset=${HD.off}&limit=${HD.lim}`);
+  // 🔴 明细被 prune_runs.py 清掉时【必须明说】——`_read()` 读不到 parquet
+  //   返回的是空 DataFrame（不报错），于是这里会渲染出一张空表，
+  //   而"清理过"和"这次回测没持仓"在页面上长得一模一样。
+  if(h.pruned){
+    $('#p4').innerHTML=`<div class="warn">这次回测的<b>逐日持仓明细已清理</b>
+      （${esc(h.pruned)}，为省空间）。结论、权益曲线、成交记录都还在 ——
+      需要持仓明细的话<b>重跑这次回测</b>即可再生成
+      （源码快照与参数都在「源码」「元信息」两页）。</div>`;
+    return;
+  }
   const pg=Math.floor(h.off===undefined?HD.off/HD.lim:h.offset/h.limit)+1;
   const np=Math.max(1,Math.ceil(h.total/h.limit));
   // ★ 上下两套导航用 class 而不是 id —— 先前用 id="p*" 正则替换成 id="b*" 生成底部

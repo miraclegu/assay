@@ -626,6 +626,48 @@ QMT 探针只有一个文件 `assay/qmt/probe_all.py`（已定案的进 `CONFIRM
   **持有缓冲区(`hold_buffer`)已实测否证**:两条实盘线 8 个配置全部为负,
   换手降 30%、费用少付 19.5 万,收益仍然掉 —— 被压掉的那部分换手是赚钱的。
   详见 `strategies/缓冲区实测-2016-2026.md`。
+
+## 归档清理(`prune_runs.py`)
+
+    python3 assay/prune_runs.py                       # 预演，一个文件都不动
+    python3 assay/prune_runs.py --apply --backup FILE # 打包备份后执行
+
+2026-09-04 跑过一次:**889 MB → 153 MB(省 84%)**,归档 649 → 604。
+杠杆全在一个文件上 —— `holdings.parquet` 占 83%(749 MB),
+而**结论(meta+stats)只有 6 MB**。
+
+两类清理,判据都是可证的:
+
+| | 判据 |
+|---|---|
+| **整目录删** | 同 `(code_sha256, start, end, cash, cost, data_fingerprint, params)` 的多次回测,结果**必然逐位一致**。留最新一次(45 次 / 129 MB) |
+| **只删 `holdings.parquet`** | 结论、权益曲线、成交、源码快照全留 —— 等价性回归、个股页联动、指标对比都照旧,只有"看某天持仓"这一层不可用(565 个 / 616 MB) |
+
+🔴 **键里必须带 `data_fingerprint`** —— 不带的话"数据修正前后各跑一次"
+会被误判成重复,而那两份恰恰是要留的(实测差 4 次)。
+
+🔴 **完整保留三类**:`picks.json` 标记的(「★ 选中的规则」读它)、
+账户绑定版本回测过的(`versions.jsonl` 的 `main_sha256` join
+`meta.code_sha256` —— 那是"这个版本回测过没有"的唯一依据)、
+**实盘上线日之后的**。
+★ 最后那条的分界取 `live/accounts.json` 最早的 `created`(本机 2026-09-01),
+**不是"最近 N 天"** —— 本机所有归档都在 8~9 月,用"最近 30 天"会把
+全部 649 次都保护起来,等于没清。判据要对上"为什么保留"。
+
+🔴 **删了必须留痕,否则"空"与"本来就没有"分不出来。**
+`_read()` 读不到 parquet 时返回**空 DataFrame、不报错** —— 不写标记的话
+持仓页一片空白,人会以为"这次回测没持仓"。所以判据链是三段:
+① `prune_runs.py` 往 `meta.json` 写 `pruned: {'holdings': 日期}`
+② 接口带出去(`api_holdings` 的 `pruned` / `api_day` 的 `holdings_pruned`)
+③ 页面**明说**「明细已清理(重跑该回测可再生成)」
+★ 连那个「持仓 N 只」的 card 也要改成 `—` ——
+  显示 `0` 会被读成"那天空仓",又是一个静默错值。
+
+🔴 **变异测试踩到:字符串存在性检查抓不到"逻辑被绕过"。**
+断言写成 `assert 'h.pruned' in js` 时,把 `if(h.pruned){` 改成 `if(false){`
+**照样全绿** —— 因为提示文本里的 `${esc(h.pruned)}` 也含这个标识符。
+改成匹配**完整条件** `if(h.pruned){`(去空格后)才抓得到。
+
 - `python3 assay/selftest.py --fast`（约 20s）/ `--all`
 
 ## 每日数据同步

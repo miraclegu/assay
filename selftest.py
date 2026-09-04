@@ -6517,6 +6517,90 @@ def t_srv_split():
                lp.count('\n'), len(_lvused)))
 
 
+@case('归档清理：明细删了必须【明说】，不能显示成空', tag='fast')
+def t_pruned():
+    """`prune_runs.py` 把旧回测的 holdings.parquet 清掉了（900M -> 153M）。
+
+    🔴 危险在于 `_read()` 读不到 parquet 时返回**空 DataFrame、不报错** ——
+      所以"清理过"和"这次回测真的没持仓"在页面上长得一模一样。
+      判据链是三段，缺一段就退化成静默：
+        ① prune_runs.py 往 meta.json 写 pruned: {'holdings': 日期}
+        ② 接口把它带出去（api_holdings / api_day）
+        ③ 页面读到就明说，而不是渲染一张空表
+    """
+    import json as _js
+    from assay import server as sv
+    here = os.path.dirname(os.path.abspath(__file__))
+    runs = os.environ.get('ASSAY_RUNS') or os.path.join(here, 'runs')
+
+    # ① 找一个被清理的、一个完好的
+    pruned = full = None
+    for r, _d, fs in os.walk(runs):
+        if 'meta.json' not in fs:
+            continue
+        m = _js.load(open(os.path.join(r, 'meta.json'), encoding='utf-8'))
+        if (m.get('pruned') or {}).get('holdings') and not pruned:
+            pruned = m.get('run_id')
+        elif 'holdings.parquet' in fs and not full:
+            full = m.get('run_id')
+        if pruned and full:
+            break
+    if not pruned:
+        return '没有被清理的归档 —— 这条用例不适用（prune_runs.py 还没跑过）'
+
+    # ② 接口必须把 pruned 带出去；完好的那次必须是 None（否则判据反了）
+    h = sv.api_holdings({'id': pruned, 'limit': '2'})
+    assert h.get('pruned'), \
+        ('api_holdings 没带 pruned —— 页面会渲染一张空表，'
+         '而"清理过"和"没持仓"分不出来')
+    assert h.get('total') == 0, '被清理的归档 total 应为 0，实际 %s' % h.get('total')
+    if full:
+        h2 = sv.api_holdings({'id': full, 'limit': '2'})
+        assert not h2.get('pruned'), \
+            'holdings.parquet 还在的归档不该有 pruned 标记（判据反了）'
+        assert h2.get('total', 0) > 0, '完好的归档应该读到持仓行'
+
+    # ③ 页面必须有处理它的代码
+    js = open(os.path.join(here, 'web', 'views', 'run-detail.js'),
+              encoding='utf-8').read()
+    #   🔴 要匹配**完整的条件语句**，不能只查标识符出现过 ——
+    #     提示文本里也有 `${esc(h.pruned)}`，所以把 `if(h.pruned)` 改成
+    #     `if(false)` 时"h.pruned in js"照样成立。
+    #     实测：第一版就是这么漏过变异测试的（改成 if(false) 仍全绿）。
+    flat = js.replace(' ', '').replace('\n', '')
+    assert 'if(h.pruned){' in flat and '明细已清理' in js, \
+        'run-detail.js 没【按 pruned 分支】—— 清理过的归档会显示成空表'
+    assert 'if(o.holdings_pruned){' in flat, \
+        '「当天持仓」下钻没按 pruned 分支（api_day 那条链）'
+    # ★ 那个「持仓 N 只」的 card 不能显示 0 —— 0 会被读成"那天空仓"
+    assert "o.holdings_pruned ? '—'" in js, \
+        '「持仓」card 在明细清理时应显示 —，显示 0 会被误读成空仓'
+
+    # ④ 保留集必须完好：标记的、账户绑定的，holdings 都还在
+    marks = {}
+    mp = os.path.join(here, 'picks.json')
+    if os.path.isfile(mp):
+        marks = _js.load(open(mp, encoding='utf-8'))
+    for rid in marks:
+        d = sv._dir(rid)
+        assert d is None or os.path.isfile(os.path.join(d, 'holdings.parquet')), \
+            ('%s 被 picks.json 标记（「选中的规则」读它）却被清理了 —— '
+             'prune_runs.py 的保留集漏了它' % rid)
+    n_pruned = n_full = 0
+    for r, _d, fs in os.walk(runs):
+        if 'meta.json' not in fs:
+            continue
+        m = _js.load(open(os.path.join(r, 'meta.json'), encoding='utf-8'))
+        if (m.get('pruned') or {}).get('holdings'):
+            n_pruned += 1
+        elif 'holdings.parquet' in fs:
+            n_full += 1
+    return ('%d 次明细已清理 / %d 次完好；接口带 pruned 且完好的那次为 None；'
+            '页面三处都处理了（持仓页 / 当天持仓下钻 / 那个 card 不显示 0）；'
+            '%d 条标记的归档 holdings 都还在'
+            % (n_pruned, n_full, len(marks)))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
