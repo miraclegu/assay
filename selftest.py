@@ -2630,11 +2630,27 @@ def t_live_core():
         #   🔴 开户两天就把两笔建仓的费用乘 122 倍，会得出"年化拖累 1.72%"
         #      这种纯外推的数，而它会被拿去跟真实费率比。同 twr_annual 那条纪律。
         st9 = lv.equity_curve('t_twr')['stats']
-        assert st9['fee_paid'] > 0 and st9['fee_pct'] is not None,             '交易费用/占本金没给：%s' % st9
-        assert st9['days'] < 20 and st9['fee_drag_annual'] is None,             '不到 20 个交易日不该给年化拖累（%d 天给了 %s）'             % (st9['days'], st9['fee_drag_annual'])
-        assert abs(st9['fee_pct']
-                   - st9['fee_paid'] / (st9['init_cash'] + st9['net_deposit'])
-                   ) < 1e-9,             '占本金的分母应是【初始 + 净入金】（用权益会低估拖累）'
+        assert st9['fee_paid'] > 0 and st9['fee_pct'] is not None, \
+            '交易费用/占本金没给：%s' % st9
+        # 🔴 判据是"够不够 20 个交易日"，**不能假设这个测试账户一定不够** ——
+        #   它从 2026-08-10 建仓，样本长度随"今天是哪天"一直在涨，
+        #   写死 days < 20 的话总有一天会凭空失败（2026-09-04 就失败了一次）。
+        #   同自选那条：断言不该依赖跑测试的时刻。
+        if st9['days'] < 20:
+            assert st9['fee_drag_annual'] is None, \
+                '只有 %d 个交易日却给了年化拖累 %s' \
+                % (st9['days'], st9['fee_drag_annual'])
+        else:
+            assert st9['fee_drag_annual'] is not None, \
+                '够 %d 个交易日了却不给年化拖累' % st9['days']
+            assert abs(st9['fee_drag_annual']
+                       - st9['fee_pct'] * (244.0 / st9['days'])) < 1e-9, \
+                '年化拖累不是"占本金 × 244/交易日数"：%s' % st9['fee_drag_annual']
+        # 无论多长，twr_annual 与 fee_drag_annual 必须【同进同退】——
+        # 两个用同一条 20 日纪律，分头判就会出现"给了年化却不给拖累"
+        assert (st9['twr_annual'] is None) == (st9['fee_drag_annual'] is None), \
+            ('年化与年化拖累的门槛不一致：twr_annual=%s / fee_drag=%s（%d 天）'
+             % (st9['twr_annual'], st9['fee_drag_annual'], st9['days']))
 
         # ---- 4) 版本留痕：删掉 runs/ 也读得到 ----
         v = lv.versions('t_hit')
@@ -2779,6 +2795,76 @@ def t_live_ui():
             pg.click('#bb')
             pg.wait_for_timeout(1500)
             assert pg.locator('.stbox').count() == 0, '绑定后浮层该关掉'
+
+            # ---- 「用这个版本+参数跑一次」不许是个点了没反应的按钮 ----
+            #   🔴 踩过：没开 --allow-backtest 时它渲染成 disabled，而
+            #     **disabled 的元素连 title 提示都不触发** —— 于是用户看到的是
+            #     "选了策略、填了日期、点下去毫无反应，也没有任何说明"。
+            #     同 backLink 那条：给一个点了没反应的按钮比不给更糟。
+            pg.click('#lvstrat')
+            pg.wait_for_selector('.stbox', timeout=15000)
+            pg.wait_for_timeout(600)
+            _bt = pg.locator('#stbt')
+            assert _bt.count() == 1, '缺「跑一次」按钮'
+            assert _bt.get_attribute('disabled') is None, \
+                'disabled 的按钮点了没反应、也不显示 title —— 改成可点 + 说原因'
+            _cb = pg.evaluate('() => LV.can_backtest')
+
+            # 关掉网页回测，验"点了要有话说"（不是静默）
+            sv.ALLOW_BACKTEST = False
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#lvstrat', timeout=40000)
+            pg.wait_for_timeout(1200)
+            pg.click('#lvstrat')
+            pg.wait_for_selector('.stbox', timeout=15000)
+            pg.wait_for_timeout(600)
+            _box = pg.locator('#stwrap').inner_text()
+            assert '没开' in _box and 'serve.py' in _box, \
+                ('没开网页回测时，"怎么开"必须【常驻可见】而不是藏在 title 里：%s'
+                 % _box[-200:])
+            pg.locator('#stbt').click()
+            pg.wait_for_timeout(800)
+            _m = pg.locator('#stbmsg').inner_text()
+            assert 'serve.py' in _m or 'readonly' in _m, \
+                '点了之后没给出原因（静默）：%r' % _m
+            sv.ALLOW_BACKTEST = True
+
+            # 开着时：版本一致 -> 真能起 job；版本漂移 -> 给两条出路
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#lvstrat', timeout=40000)
+            pg.wait_for_timeout(1200)
+            pg.click('#lvstrat')
+            pg.wait_for_selector('#stbt', timeout=15000)
+            pg.wait_for_timeout(600)
+            assert '网页触发回测没开' not in pg.locator('#stwrap').inner_text(), \
+                '已经开了，不该还显示"怎么开"那条'
+            pg.fill('#stbs', '2026-06-01')
+            pg.fill('#stbe', '2026-06-30')
+            pg.fill('#stbc', '200000')
+            pg.locator('#stbt').click()
+            _ok = False
+            for _ in range(40):
+                pg.wait_for_timeout(3000)
+                _m = ' '.join(pg.locator('#stbmsg').inner_text().split())
+                if '完成' in _m or '失败' in _m or 'rc=' in _m:
+                    _ok = '完成' in _m
+                    break
+                if '已改动' in _m:      # 版本漂移：必须给出可操作的两条出路
+                    assert pg.locator('#stbrb').count() == 1, \
+                        '版本漂移只报错、没给「重新绑定」按钮'
+                    assert pg.locator('#stbcmd2').count() == 1, \
+                        '版本漂移没给可复制的命令行'
+                    _ok = 'drift'
+                    break
+            assert _ok, '点了「跑一次」之后既没跑完也没给说法：%r' % _m
+            assert _ok is not False, '回测失败了：%r' % _m
+            _btmsg = _m
+            # ★ 收尾必须等浮层【真的消失】—— 它是绝对定位的遮罩，
+            #   没关干净的话后面所有点击都会 timeout，而报错指向的是
+            #   被挡住的那个元素，完全看不出是浮层没关（已踩）。
+            pg.locator('#stclose').click()
+            pg.wait_for_selector('.stbox', state='detached', timeout=10000)
+            pg.wait_for_timeout(300)
 
             # ---- 主视图只有【待办 + 持仓】两块 ----
             pg.click('#lvtick')
@@ -3406,6 +3492,8 @@ def t_live_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
                     '流水独立页分页；策略单一入口(未绑定也能开)；'
+                    '「跑一次」不是 disabled 按钮（没开时常驻说明怎么开、'
+                    '点了也有话说；开了能起 job，版本漂移给「重新绑定」+命令行）；'
                     '持仓 %d 只全部取到现价 + 当日涨跌/当日盈亏（今天买的按成交价）'
                     '；口径说明进 ⓘ（点开有摊薄成本/保本价/全平落袋，主视图不占版面）'
                     '；费用三态；入金；'
@@ -4749,6 +4837,75 @@ def t_setup_tdx():
             '定时 PATH 首段是当前解释器%s；plist 带 EnvironmentVariables 且 '
             'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在'
             '%s' % (mine, ('；本地库 schema %s' % v) if v else ''))
+
+
+@case('启动开关：默认全功能 / --readonly / 按钮不许 disabled', tag='fast')
+def t_serve_flags():
+    """2026-09-04：废掉 `--live` 与 `--allow-backtest` 两个默认关的开关。
+
+    🔴 起因是一个真实的坏：忘了加 `--allow-backtest` 时，网页上
+      「用这个版本+参数跑一次」渲染成 **disabled** ——
+      **disabled 的元素连 title 提示都不触发**，所以用户看到的是
+      "选了策略、填了日期、点下去毫无反应，也没有任何说明"。
+      （同 backLink 那条：给一个点了没反应的按钮比不给更糟。）
+    """
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, 'serve.py'), encoding='utf-8').read()
+
+    # ---- ① 默认全功能，只有 --readonly 才关 ----
+    assert '--readonly' in src, '没有 --readonly'
+    assert 'full = not a.readonly' in src, '默认应当全开，只有 --readonly 才关'
+    assert 'allow_backtest=full' in src and 'allow_live=full' in src, \
+        '两个能力应当由同一个 --readonly 一起决定'
+    # ★ 旧命令必须还能用 —— launchd/文档/肌肉记忆里都有，
+    #   而"参数不认"会让服务直接起不来，那是最糟的失败方式。
+    for f in ('--live', '--allow-backtest'):
+        assert "'%s'" % f in src, '旧参数 %s 应保留兼容' % f
+
+    # ---- ② 真起两次服务，验能力开关 ----
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    old_ab, old_lv = sv.ALLOW_BACKTEST, sv.ALLOW_LIVE
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        import json as _j
+        import urllib.request as _u
+
+        def acc():
+            return _j.load(_u.urlopen('http://127.0.0.1:%d/api/live/accounts'
+                                      % port, timeout=30))
+        sv.ALLOW_BACKTEST = sv.ALLOW_LIVE = True
+        a = acc()
+        assert a['can_backtest'] is True and a['readonly'] is False, \
+            '全功能时两项都该开：%s' % {k: a[k] for k in ('can_backtest', 'readonly')}
+        sv.ALLOW_BACKTEST = sv.ALLOW_LIVE = False
+        b = acc()
+        assert b['can_backtest'] is False and b['readonly'] is True, \
+            '--readonly 时两项都该关：%s' % {k: b[k] for k in ('can_backtest', 'readonly')}
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_BACKTEST, sv.ALLOW_LIVE = old_ab, old_lv
+
+    # ---- ③ 🔴 页面上不许再出现 disabled 的功能按钮 ----
+    #   判据用**源码**扫：`disabled` 只允许出现在"只读模式下不许写"那类
+    #   （录成交、改设置），不允许挂在"功能没开"的按钮上 ——
+    #   后者应当可点 + 说原因。
+    html = open(os.path.join(here, 'web', 'index.html'), encoding='utf-8').read()
+    bad = re.findall(r'\$\{\s*LV\.can_backtest\s*\?[^}]*disabled', html)
+    assert not bad, \
+        ('「跑一次」那个按钮又按 can_backtest 设 disabled 了 —— '
+         'disabled 的元素连 title 都不触发，点了没反应且看不到原因：%s' % bad)
+    # 不可用时，怎么开必须【常驻可见】而不是藏在 title 里
+    assert 'readonly' in html and 'serve.py' in html, \
+        '页面上没有"怎么开"的常驻说明'
+    return ('默认全功能、--readonly 一起关两项、旧参数保留兼容；'
+            'API 两种模式的 can_backtest/readonly 都对；'
+            '页面不再按 can_backtest 设 disabled（点了没反应且无提示那条）')
 
 
 @case('买点清单：目标价/股息率互算 + 到价判定 + 提醒去重', tag='fast')

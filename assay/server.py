@@ -543,7 +543,7 @@ def api_version(q):
     # 复用它，不另造一套提示。
     if not ALLOW_BACKTEST:
         why = '服务以【只读模式】启动，网页触发回测已关闭。'\
-              '需要的话用 python3 serve.py --allow-backtest，'\
+              '这个服务是 --readonly 起的；去掉它重启即可，'\
               '或直接用命令行 python3 run.py <策略>'
         return dict(info, runnable=False, same_version=(cur == info['code_sha256']),
                     current_sha256=cur, current_params=cur_params,
@@ -558,7 +558,7 @@ def api_version(q):
 #   随时重启无代价；而 /api/backtest 会拉起 subprocess 跑回测，
 #   一旦开着，重启服务就等于打断正在跑的任务。把「读」和「会起进程的写」
 #   分开之后，日常看板可以随便重启（比如加了新接口之后）。
-#   要用网页触发回测：python3 serve.py --allow-backtest
+#   要用网页触发回测：python3 serve.py（默认全功能；--readonly 才关）
 ALLOW_BACKTEST = False
 
 # 这个端点会起子进程跑回测。三条约束：
@@ -605,7 +605,7 @@ def api_backtest(q, body):
     """
     if not ALLOW_BACKTEST:
         return {'error': '服务以只读模式启动，网页触发回测已关闭。'
-                         '用 python3 serve.py --allow-backtest 开启，'
+                         '这个服务是 --readonly 起的，去掉它重启即可，'
                          '或直接用命令行 python3 run.py <策略>'}
     sha = (body.get('sha') or '').strip().lower()
     info = _version_info(sha)
@@ -1030,7 +1030,9 @@ def api_live_accounts(_q):
     cal = dict(cal, authoritative=(cal.get('source') in m.AUTHORITATIVE_CAL))
     return {'accounts': out, 'readonly': not ALLOW_LIVE,
             'code': _code_stamp(),
-            # ★ 两个开关是独立的：--live 管账户/成交/信号，--allow-backtest 管
+            # ★ 2026-09-04 起默认全开，只有 --readonly 才关（见 serve.py）。
+            #   下面两个变量仍然独立，是为了让 --readonly 一次关掉两边：
+            #   --live 管账户/成交/信号，--allow-backtest 管
             #   起子进程跑回测。前端要分别置灰，否则按钮点了才知道被拒。
             'can_backtest': bool(ALLOW_BACKTEST and ALLOW_LIVE),
             'next_id': m.new_account_id(),
@@ -1249,10 +1251,14 @@ def api_live_backtest(_q, body):
     want = m._main_sha(aid, v)
     cur = hashlib.sha256(open(disk, 'rb').read()).hexdigest()
     if want and cur != want:
+        # ★ 除了说"不行"，还要给出【可操作的下一步】—— 前端据此渲染一个
+        #   「重新绑定」按钮和一条可复制的命令行（`drift` 这个字段就是判据）。
+        #   只抛一句话的话，人看到的是"点了报错"，仍然不知道该干什么。
         return {'error': '磁盘上的 %s 已改动（当前 %s ≠ 绑定版本 %s）。'
                          '现在跑会归档成【另一个版本】，看起来像"这个版本回测过"。'
-                         '要么先把账户重新绑到当前版本，要么用命令行显式跑。'
-                         % (rel, cur[:8], want[:8])}
+                         % (rel, cur[:8], want[:8]),
+                'drift': {'path': rel, 'disk_sha': cur[:8], 'bound_sha': want[:8],
+                          'params': v.get('params') or {}}}
     cmd = ['python3', 'run.py', rel]
     for k, val in (v.get('params') or {}).items():
         cmd += ['--param', '%s=%s' % (k, val)]

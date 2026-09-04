@@ -156,9 +156,9 @@ async function showLive(aid){
       （启动于 ${esc(new Date(CO.loaded_at*1000).toLocaleString('zh-CN'))}，
        代码已于 ${esc(new Date(CO.code_mtime*1000).toLocaleString('zh-CN'))} 更新）。<br>
       这种组合下页面会去读 API 还没有的字段，<b>渲染成一堆 undefined 而不报错</b>。
-      <code>Ctrl-C</code> 后重新 <code>python3 serve.py --live</code> 即可。</div>`;
+      <code>Ctrl-C</code> 后重新 <code>python3 serve.py</code> 即可。</div>`;
   if(o.readonly) head+=`<div class="lvwarn">服务以只读模式启动 —— 可以看，不能录入 / 建账户 / 重算。
-     用 <code>python3 serve.py --live</code> 开启。</div>`;
+     这个服务是 <code>--readonly</code> 起的 —— 去掉它重启即可。</div>`;
   /* ★ 告警点的判据由【服务端】给（a.alert，live.signal_alert）——
      前端硬编码判据坑过一次（把 tdx 日历误报成不权威，每次打开都弹假告警）。
      账户列表的点、待办要不要展开，读的是同一个字段。 */
@@ -1091,13 +1091,21 @@ async function openStrat(aid, sha){
              账户绑的是磁盘当前内容，而归档里没有同哈希的记录 ——
              也就是说你实盘在跑的这套代码+参数，没有对应的历史业绩。</div>`}
         <div class="lvform">
-          <input id="stbs" size="6" placeholder="起 YYYY-MM-DD" value="2019-01-01">
-          <input id="stbe" size="6" placeholder="止（默认今天）">
-          <input id="stbc" size="6" placeholder="本金" value="1000000">
-          <button class="btn" id="stbt" ${LV.can_backtest?'':'disabled'}
-            title="${LV.can_backtest?'':'需要 python3 serve.py --live --allow-backtest'}"
+          <label>起<input id="stbs" size="8" placeholder="YYYY-MM-DD" value="2019-01-01"></label>
+          <label>止<input id="stbe" size="8" placeholder="默认今天"></label>
+          <label>本金<input id="stbc" size="8" value="1000000"></label>
+          <button class="btn${LV.can_backtest?' on':''}" id="stbt"
             >用这个版本+参数跑一次</button>
         </div>
+        ${LV.can_backtest?'':`<div class="lvwarn" style="margin:6px 0 0">
+          <b>网页触发回测没开</b> —— 这个服务是用
+          <code>--readonly</code> 起的（只看不写）。<br>
+          要用就重启：<code>python3 serve.py</code>（默认就是全功能）<br>
+          不重启也能跑，命令行等价：
+          <code id="stbcmd">python3 run.py ${esc(v.strategy_path||'')}${
+            Object.entries(v.params||{}).map(([k,y])=>' --param '+esc(k)+'='+esc(y)).join('')}
+            --start 2019-01-01 --cash 1000000</code>
+          <a href="#" id="stbcp">复制</a></div>`}
         <div class="lvmsg" id="stbmsg"></div>
       </div>
     </div>
@@ -1131,6 +1139,13 @@ async function openStrat(aid, sha){
   document.onkeydown=ev=>{ if(ev.key==='Escape') $('#stclose').click(); };
   el.querySelectorAll('a.lvver').forEach(e=>e.onclick=ev=>{
     ev.preventDefault(); openStrat(aid, e.dataset.sha); });
+  if($('#stbcp')) $('#stbcp').onclick=ev=>{
+    ev.preventDefault();
+    const t=$('#stbcmd').textContent.replace(/\s+/g,' ').trim();
+    navigator.clipboard.writeText(t).then(
+      ()=>{ ev.target.textContent='已复制'; },
+      ()=>{ ev.target.textContent='复制不了，手选吧'; });
+  };
   const bb=$('#bb');
   if(bb) bb.onclick=async()=>{
     const m=$('#bmsg');
@@ -1141,12 +1156,58 @@ async function openStrat(aid, sha){
       $('#stclose').click(); showLive(aid);
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
   };
+  /* 🔴 按钮【不设 disabled】—— disabled 的元素在浏览器里连 title 提示都不
+     触发，于是"点了没反应而且看不到原因"，这是最难查的那种坏
+     （同 backLink 那条：给一个点了没反应的按钮比不给更糟）。
+     改成永远可点，点了就把原因说清楚。 */
   $('#stbt').onclick=async()=>{
-    const m=$('#stbmsg'); m.className='lvmsg'; m.textContent='已提交…';
+    const m=$('#stbmsg');
+    if(!LV.can_backtest){
+      m.className='lvmsg bad';
+      m.innerHTML='网页触发回测没开（这个服务是 <code>--readonly</code> 起的）'
+        +' —— 重启成 <code>python3 serve.py</code>，或用上面那条命令行。';
+      return;
+    }
+    m.className='lvmsg'; m.textContent='已提交…';
     try{
-      const r=await post('/api/live/backtest',{id:aid, sha:sha,
-        start:$('#stbs').value.trim(), end:$('#stbe').value.trim(),
-        cash:$('#stbc').value.trim()});
+      /* ★ 不走 post()：它遇到 error 直接 throw，会丢掉 `drift` 那个结构化字段，
+         而前端正是靠它渲染「重新绑定」按钮。只拿到一句话的话，
+         人看到的是"点了报错"，仍然不知道该干什么。 */
+      const rs=await fetch('/api/live/backtest',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:aid, sha:sha, start:$('#stbs').value.trim(),
+          end:$('#stbe').value.trim(), cash:$('#stbc').value.trim()})});
+      const r=await rs.json();
+      if(r.error){
+        m.className='lvmsg bad';
+        if(r.drift){
+          const d=r.drift;
+          const cmd='python3 run.py '+d.path
+            +Object.entries(d.params||{}).map(([k,y])=>' --param '+k+'='+y).join('')
+            +' --start '+($('#stbs').value.trim()||'2019-01-01')
+            +($('#stbe').value.trim()?' --end '+$('#stbe').value.trim():'')
+            +' --cash '+($('#stbc').value.trim()||'1000000');
+          m.innerHTML=esc(r.error)
+            +'<br>两条出路：<button class="btn" id="stbrb">重新绑定到磁盘当前版本</button>'
+            +' 或用命令行 <code id="stbcmd2">'+esc(cmd)+'</code>'
+            +' <a href="#" id="stbcp2">复制</a>';
+          $('#stbrb').onclick=async()=>{
+            if(!confirm('把账户绑到磁盘当前版本？\n\n会往 versions.jsonl 追加一行'
+              +'（append-only，旧版本仍然读得到）。\n'
+              +'实盘信号从此按新代码算。')) return;
+            try{
+              await post('/api/live/save',{id:aid, strategy_path:d.path,
+                params:d.params, reason:'网页：跑回测前重新绑定'});
+              $('#stclose').click(); showLive(aid);
+            }catch(e2){ m.textContent=String(e2); }
+          };
+          $('#stbcp2').onclick=ev2=>{ ev2.preventDefault();
+            navigator.clipboard.writeText($('#stbcmd2').textContent)
+              .then(()=>{ ev2.target.textContent='已复制'; },
+                    ()=>{ ev2.target.textContent='复制不了'; }); };
+        } else { m.textContent=r.error; }
+        return;
+      }
       m.textContent='跑中：'+r.cmd;
       const tick=async()=>{
         const o2=await j('/api/job?id='+r.job_id);
@@ -1156,7 +1217,13 @@ async function openStrat(aid, sha){
         m.innerHTML=o2.rc===0
           ?`完成 · <a href="#/run/${encodeURIComponent(o2.run_id||'')}">查看结果 →</a>`
           :('失败 rc='+o2.rc);
-        if(o2.rc===0) setTimeout(()=>openStrat(aid,sha), 1500);
+        /* 跑完刷新一下浮层（新归档要出现在"用这个版本跑过的回测"里）。
+           ★ 但先确认浮层【还开着】—— 用户可能已经关掉去做别的了，
+             而一个自己弹回来的浮层比不刷新更烦（同"手动展开的状态不持久化"
+             那条：不要替用户决定他现在该看什么）。 */
+        if(o2.rc===0) setTimeout(()=>{
+          if(document.querySelector('#stwrap .stbox')) openStrat(aid,sha);
+        }, 1500);
       };
       tick();
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
@@ -1422,7 +1489,7 @@ async function showSync(){
      froec 同日选股与聚宽只对上 6/10；补完升到 9/10。<br>
      去聚宽研究环境跑 <code>raw/jq/_ingest/extract_jq_increment.py</code>。</div>`;
   if(o.readonly) warn+=`<div class="lvwarn">只读模式 —— 可以看，不能手动触发。
-     用 <code>python3 serve.py --live</code> 开启。</div>`;
+     这个服务是 <code>--readonly</code> 起的 —— 去掉它重启即可。</div>`;
 
   /* 内部术语叫 A 腿 / B 腿（sync_status.py 的字段名就是 leg_a / leg_b），
      但【界面上不用】—— "腿"对着屏幕看的人没有意义。界面写
