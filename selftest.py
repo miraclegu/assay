@@ -6300,7 +6300,11 @@ def t_page_inventory():
     #     依赖分析显示跨域调用几乎全是"路由 -> 视图"这一个方向。
     #   ★ 断言只钉"文件在、被引用、没重名"这三件，不钉具体行数 ——
     #     行数会随功能长，钉了只会天天误报。
-    DOMS = ('app', 'home', 'live', 'runs', 'sync')
+    #   ★ 这张表是【唯一】的清单：加了新域文件就往这里加一行 ——
+    #     分两处写的话，"新文件没被 index.html 引用"或"断言没扫到它"
+    #     都不会报错，只是那部分功能悄悄不在保护范围内。
+    DOMS = ('app', 'home', 'live', 'live-fee', 'live-trade', 'live-strat',
+            'runs', 'run-detail', 'sync')
     for d in DOMS:
         fp = os.path.join(web, d + '.js')
         assert os.path.isfile(fp), '缺 web/%s.js（index.html 拆分出来的域）' % d
@@ -6323,7 +6327,12 @@ def t_page_inventory():
         r'^(?:const|let|var|function|async function)\s+([A-Za-z_$][\w$]*)',
         t, re.M))
     import itertools
-    shared_files = ['common.js', 'kchart.js'] + [d + '.js' for d in DOMS]
+    # ★ 直接扫目录，而不是照着 DOMS 拼 —— 漏掉一个文件的话，
+    #   "两两比对"就漏了它的所有组合，而那不会报错。
+    shared_files = sorted(f for f in os.listdir(web) if f.endswith('.js'))
+    assert set(d + '.js' for d in DOMS) <= set(shared_files), \
+        'DOMS 里列的文件不存在：%s' % sorted(
+            set(d + '.js' for d in DOMS) - set(shared_files))
     syms = {f: top(open(os.path.join(web, f), encoding='utf-8').read())
             for f in shared_files}
     for a, b in itertools.combinations(shared_files, 2):
@@ -6374,9 +6383,13 @@ def t_page_inventory():
     assert n >= 54, \
         ('用例只剩 %d 条，少于已知的 54 —— 是不是删代码时把某条一起切掉了？'
          '用 `git show HEAD:selftest.py | grep "^@case"` 对一下' % n)
-    return ('index.html 拆成 5 个域文件（app/home/live/runs/sync）且全被引用、'
-            '骨架里无内联 script；7 个共享 .js 两两无顶层重名（21 对）；'
-            '%d 个页面函数与路由一一对应（%s）；用例 %d 条'
+    # ★ 数字让它自己算 —— 写死的话下次再拆还得手改，而"忘了改"的表现是
+    #   报告串在说谎（它看着像验过了）。
+    return ('index.html 拆成 %d 个域文件且全被引用、骨架里无内联 script；'
+            '%d 个共享 .js 两两无顶层重名（%d 对）；'
+            '%%d 个页面函数与路由一一对应（%%s）；用例 %%d 条'
+            % (len(DOMS), len(shared_files),
+               len(shared_files) * (len(shared_files) - 1) // 2)
             % (len(defined), ' '.join(sorted(defined)), n))
 
 

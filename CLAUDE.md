@@ -61,19 +61,23 @@ web/common.js    共享 JS：$ / esc / j / post / 数字格式化 / cell / helpI
                  normCode / boardTag / 顶栏导航 NAV / mountSearch / 自选星
 web/kchart.js    Canvas 画图：drawKChart（K线+量+副图+事件）/ drawLines（多股）
 
-web/index.html   28 行【骨架】：<head> + 四个容器 div + 7 个 <script src>
-  ├ app.js       骨架：hash 路由 + enterView / stopPoll / modal / card / tab
-  ├ home.js      总览首页
-  ├ live.js      实盘（账户/成交/信号/费率/策略浮层/流水）
-  ├ runs.js      回测归档（目录树/详情/版本/选中的规则/图表/热力）
-  └ sync.js      数据同步 + 数据字典 + 自动同步开关
+web/index.html   32 行【骨架】：<head> + 四个容器 div + 11 个 <script src>
+  ├ app.js         128  骨架：hash 路由 + enterView/stopPoll/modal/card/tab
+  ├ home.js        243  总览首页
+  ├ live.js        480  实盘【主视图】：账户列表/待办/持仓/KPI/业绩/口径 ⓘ
+  │  ├ live-fee.js    396  ⚙ 设置与费率（照账单逐项填、append-only 版本历史）
+  │  ├ live-trade.js  236  ✎ 记一笔 + 成交流水独立页（录进去、查出来）
+  │  └ live-strat.js  204  策略与版本（源码快照/参数/绑定/触发回测）
+  ├ runs.js        532  回测归档【挑】：目录树 / 选中的规则 / 版本页
+  │  └ run-detail.js  580  【看】：概览/权益/收益热力四层/成交/持仓/拒单/源码
+  └ sync.js        402  数据同步 + 数据字典 + 自动同步开关
 
 web/market.html  🌡 盘面      web/stock.html   📈 个股
 web/sector.html  🏭 行业板块  web/watchlist.html ⭐ 自选
 web/compare.html ⚖ 对比      web/alerts.html  🎯 买点（股息率买点清单）
 ```
 
-★ **index.html 按【产品域】拆,不按技术分层**(2026-09-04,3183 行 → 28 行)。
+★ **index.html 按【产品域】拆,不按技术分层**(2026-09-04,3183 行 → 32 行)。
 拆分点不是拍脑袋:先做依赖分析,发现**跨域调用几乎全是"路由 → 视图"这一个
 方向**,反向只有 `enterView`/`stopPoll`/`modal`/`card`/`tab` 几个通用件 ——
 那几个本来就属于骨架,顺手归位。`autoTag/autoBtn/autoNote` 也从 live 挪到
@@ -83,10 +87,22 @@ sync(它们是"自动同步开关",只有 sync 在用)。
 而这个项目本来就是无构建、无 CDN 的单文件静态资源。
 ★ **hash 路由一行没动** —— 书签、深链接(`#/live/<id>/fills`)全部照旧。
 
-🔴 **拆完组合数从 1 对变成 21 对** —— "跨文件顶层重名 = 整页 SyntaxError"
-这条风险被放大了 7 倍,所以 selftest 里改成**两两全比**(原来只比
+**第二轮再拆**(同一天):`live.js` 与 `runs.js` 各按内部职责分开,边界仍然是
+"用户在做什么"——
+- `live.js` 照 CLAUDE.md 那张信息架构表分:**主视图(天天看)/ 三个浮层
+  (偶尔用)/ 独立页(成交流水)** —— 表本来就写好了,照着切即可
+- `runs.js` 分「**挑**哪一次回测」与「**看**这一次回测」
+
+最大的文件从 3183 → 580 行。★ 记一笔与成交流水放同一个文件:它们是
+同一件事的两头(录进去、查出来)。
+
+🔴 **拆完组合数从 1 对变成 55 对** —— "跨文件顶层重名 = 整页 SyntaxError"
+这条风险被放大了 55 倍,所以 selftest 里改成**两两全比**(原来只比
 "每个页面 vs common.js")。命名约定:实盘 `LV`/`lv` 开头、回测 `RUNS`/`pane`
 开头、同步 `SY` 开头。
+★ 那条断言**直接扫目录**而不是照清单拼,且**数字自己算** ——
+照清单拼会漏掉新文件的全部组合(而漏了不报错);数字写死的话下次再拆
+就得手改,而"忘了改"的表现是报告串在说谎(它看着像验过了)。
 🔴 **注释里别写连着的星号加斜杠** —— 拆分时我在 app.js 头部写了
 "前缀 LV*" 加斜杠,那两个字符恰好把块注释提前结束,后面的中文成了裸代码,
 **整个文件 SyntaxError**。`node --check` 当场抓到;不查的话表现是整页白屏。
