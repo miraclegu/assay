@@ -4958,6 +4958,68 @@ def t_setup_tdx():
         'tick plist 没指向 tick_daily.py 或丢了 PATH'
     assert m._times('07:00,08:00,09:00') == [(7, 0), (8, 0), (9, 0)], \
         '_times 解析不对'
+    # ---- 数据同步改成【轮询】：判据是"齐没齐"而不是"到点没到点" ----
+    rt = m._range_times(m.POLL_FROM, m.POLL_TO, m.POLL_EVERY)
+    assert len(rt) == 25 and rt[0] == (16, 0) and rt[-1] == (20, 0), \
+        '16:00~20:00 每 10 分钟应是 25 个点位，实得 %d 个' % len(rt)
+    assert (18, 10) in rt, \
+        ('轮询序列要覆盖原来那个 18:10 —— 覆盖了才能删掉独立的 sync timer，'
+         '少一处要对齐的时间常量')
+    jobs = m_st = open(os.path.join(os.path.dirname(here), 'datalake',
+                                    'setup_tdx.py'), encoding='utf-8').read()
+    assert "'--if-stale'" in jobs.split('JOBS = [')[1][:600], \
+        ('轮询必须带 --if-stale —— 不带的话每 10 分钟跑一次完整链，'
+         '而且数据齐了还在跑')
+    # 🔴 plist 必须能被【严格】解析：plutil -lint 会放过非法 XML
+    #   （XML 注释里不能有两个连字符，而 Apple 的解析器宽容、launchd 照跑，
+    #     Python 的 expat 直接拒绝 —— 严格的那个才是真判据）
+    import plistlib as _pl
+    for label, args, times, tag in (
+            (m.LABEL, ['/bin/bash', m.SH, '--if-stale'], rt, 'sync'),
+            (m.TICK_LABEL, ['python3', m.TICK_PY], m._times(m.TICK_AT),
+             'tick')):
+        xml = m._plist(label, args, times, tag)
+        try:
+            d = _pl.loads(xml.encode())
+        except Exception as e:                                  # noqa: BLE001
+            raise AssertionError(
+                '%s 的 plist 不是合法 XML（%s: %s）—— plutil -lint 会说 OK，'
+                '但那是宽容解析；注释里出现两个连字符就会这样'
+                % (tag, type(e).__name__, e))
+        cal = d['StartCalendarInterval']
+        cal = [cal] if isinstance(cal, dict) else cal
+        assert len(cal) == len(times), \
+            '%s 的点位数对不上：plist %d vs 期望 %d' % (tag, len(cal), len(times))
+    # ---- is_stale.py 的四条判据 ----
+    stale = open(os.path.join(os.path.dirname(here), 'datalake', 'build',
+                              'is_stale.py'), encoding='utf-8').read()
+    assert 'raw_holidays' in stale, \
+        ('判交易日要用 tdx.raw_holidays —— std/trading_calendar.parquet '
+         '**只到最后一个有数据的交易日**，用它会让每天都判成"不是交易日"，'
+         '于是轮询永远不干活，而日志里只有一行「今天不是交易日」')
+    #   ★ 用 ast 看**函数体**，不做子串匹配 —— 那个函数的 docstring 里
+    #     正好在**警告**不要用 trading_calendar，子串匹配会把警告也算成"用了"
+    #     （今天第三次踩这个坑了：断言别写成"字符串出现过"）。
+    import ast as _ast
+    _st = _ast.parse(stale)
+    _fn = [n for n in _ast.walk(_st)
+           if isinstance(n, _ast.FunctionDef) and n.name == '_is_trading_day']
+    assert _fn, 'is_stale.py 里没有 _is_trading_day'
+    _lits = [n.value for n in _ast.walk(_fn[0])
+             if isinstance(n, _ast.Constant) and isinstance(n.value, str)]
+    _code = ' '.join(_lits[1:])          # [0] 是 docstring
+    assert 'trading_calendar' not in _code, \
+        '_is_trading_day 的代码里还在读 trading_calendar.parquet'
+    assert 'raw_holidays' in _code, \
+        '_is_trading_day 应当查 raw_holidays（唯一含未来日的源）'
+    assert 'manifest.csv' in stale and 'snap_date' in stale, \
+        ('判据要含「今天的 PIT 快照抓过没有」—— daily_snapshot 漏一天'
+         '永久丢失，不能只判行情齐不齐')
+    assert 'MIN_RATIO' in stale and '0.95' in stale, \
+        ('行数判据要用"不少于上一交易日的 95%"而不是固定阈值 —— '
+         '新股上市/退市会让只数天天微变')
+    assert 'after' in stale and '15:00' in stale, \
+        '要有"过了收盘才抓"这条（盘中的 bar 是不完整的）'
     # plist 要能被系统解析（macOS 上真解一遍）
     if platform.system() == 'Darwin':
         import subprocess as _sp
