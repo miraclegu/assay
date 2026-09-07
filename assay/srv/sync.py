@@ -46,6 +46,12 @@ def api_sync(_q):
     # ★ 自动同步状态跟着一起给 —— 按钮的文字要照它显示（"开启"还是"关闭"），
     #   前端不能自己猜。也不该为这一个字段再打一次请求。
     out['auto'] = autosync_status()
+    # ★ 定时窗口与「实际装上的点位」一起给页面 —— 页面要能看出
+    #   "配置改了但 timer 没重装"（那不报错）
+    try:
+        out['sched'] = _setup_tdx().show_schedule()
+    except Exception as e:                                      # noqa: BLE001
+        out['sched'] = {'error': '%s: %s' % (type(e).__name__, e)}
     return out
 
 
@@ -111,6 +117,63 @@ def autosync_status():
         pass
     return out
 
+
+
+def _setup_tdx():
+    """把 datalake/setup_tdx.py 当模块用（窗口配置的读写校验都在那儿）。
+
+    ★ 判据只在那一处 —— 看板与命令行 `--install-timer` 必须用同一套，
+      分两处写就会出现"页面存下去的配置，装 timer 时又被判成不合法"。
+    """
+    import importlib.util
+    dl = base._datalake_dir()
+    p = os.path.join(dl, 'setup_tdx.py')
+    spec = importlib.util.spec_from_file_location('_setup_tdx_mod', p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def api_sync_schedule(_q):
+    """GET /api/sync/schedule —— 窗口配置 + **实际装上的点位**。
+
+    🔴 只回显配置是不够的：配置改了而 timer 没重装时，
+      "页面写着每小时一次、实际还是旧的"**不报错**。所以这里同时给出
+      已装 plist 里的点位数与 `match`，页面必须显示它
+      （同「已安装的 plist 与仓库正本不一致要报出来」那条）。
+    """
+    try:
+        return _setup_tdx().show_schedule()
+    except Exception as e:                                      # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_sync_schedule_set(_q, body):
+    """POST /api/sync/schedule —— 存配置**并立即重装** timer。
+
+    ★ 存完就装，不给"存了但没生效"留窗口。装完再读一次实际点位回给页面 ——
+      判据是"现在装上的是什么"，不是"我刚写了什么"。
+    """
+    if not base.ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py 开启'}
+    m = _setup_tdx()
+    sc = (body or {}).get('schedule') or {}
+    ok, why = m.check_schedule(sc)
+    if not ok:
+        return {'error': '配置不合法：%s' % why}
+    import subprocess
+    m.save_schedule(sc)
+    r = subprocess.run([sys.executable, os.path.join(
+        base._datalake_dir(), 'setup_tdx.py'), '--install-timer'],
+        capture_output=True, text=True, timeout=180)
+    out = m.show_schedule()
+    out['install_log'] = ((r.stdout or '') + (r.stderr or ''))[-1200:]
+    out['install_rc'] = r.returncode
+    bad = [k for k, v in out['installed'].items() if v.get('match') is False]
+    if r.returncode != 0 or bad:
+        out['error'] = ('存下了，但重装没成功（%s）—— 定时还是旧的。'
+                        '看 install_log' % (bad or 'rc=%d' % r.returncode))
+    return out
 
 
 def api_sync_auto(_q):
@@ -309,7 +372,7 @@ def api_sync_jq_upload(headers, raw):
         return {'error': '找不到 %s' % merge}
     cmd = ['python3', merge, dst, '--and-load']
     job_id = 'jq-%s' % datetime.now().strftime('%H%M%S')
-    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+    _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
                      'sha': None, 'run_id': None, 'rc': None}
     threading.Thread(target=_runs._run_job, args=(job_id, cmd, dl),
                      daemon=True).start()
@@ -352,7 +415,7 @@ def api_sync_run(_q, body):
     if (body or {}).get('no_live'):
         cmd.append('--no-live')
     job_id = 'sync-%s' % datetime.now().strftime('%H%M%S')
-    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+    _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
                      'sha': None, 'run_id': None, 'rc': None}
     threading.Thread(target=_runs._run_job, args=(job_id, cmd, dl),
                      daemon=True).start()

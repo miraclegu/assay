@@ -3883,9 +3883,39 @@ def t_sync_ui():
             #   "断言匹配到自己写的说明文案"上：B 腿那节的说明里正写着
             #   「B 腿的"落后"不按交易日算」，于是 `'落后' not in b_txt` 必然失败。
             #   要断言渲染结果就只看渲染结果，别把旁边的散文一起吃进来。
+            #   🔴 **不用位置索引 nth(0)/nth(1)** —— 这一页的 .lvsec 会
+            #     增加（加「定时窗口」那块时就把两条腿挤后了一位），
+            #     而错位的表现是"内容不对"而不是"找不到"，很难查。
+            #     按 h3 标题找那一节。
             secs = pg.locator('.lvsec')
-            a_cells = secs.nth(0).locator('table.lvt td').all_inner_texts()
-            b_cells = secs.nth(1).locator('table.lvt td').all_inner_texts()
+            def _sec(name):
+                for i in range(secs.count()):
+                    if name in secs.nth(i).locator('h3').inner_text():
+                        return secs.nth(i)
+                raise AssertionError('找不到「%s」这一节' % name)
+            a_cells = _sec('行情数据').locator('table.lvt td').all_inner_texts()
+            b_cells = _sec('财务数据').locator('table.lvt td').all_inner_texts()
+            # ---- 定时窗口那块要真的渲染出来（源码结构在 fast 层另有用例）----
+            _sw = _sec('定时窗口')
+            assert _sw.locator('input.syf').count() == 6, \
+                ('两个任务 × 从/到/间隔 = 6 个输入框，实得 %d'
+                 % _sw.locator('input.syf').count())
+            _swt = _sw.inner_text()
+            #   🔴 判据是**实际装上的点位**那两列，不是回显配置
+            assert '已装' in _swt and ('一致' in _swt or '未装' in _swt), \
+                ('定时窗口没显示"实际装上的点位/是否一致" —— '
+                 '只回显配置的话，"改了但没重装"看不出来：%s' % _swt[:200])
+            #   ★ 输入框的值不进 inner_text（那是属性），要按值取。
+            #     顺带钉住"补终点"在页面上确实是 09:20 而不是 09:00。
+            _sv = [_sw.locator('input.syf').nth(i).input_value()
+                   for i in range(6)]
+            assert _sv[0] and _sv[1] and _sv[2], \
+                '定时窗口的输入框是空的（服务端没给配置？）：%r' % (_sv,)
+            assert _sv[4] == '09:20', \
+                ('信号重算的窗口终点该是 09:20（开盘前最后一次），实得 %r'
+                 % _sv[4])
+            assert _sw.locator('#sysched').count() == 1, \
+                '少了「保存并重装」按钮 —— 配置改了没法生效'
             a_txt, b_txt = ' | '.join(a_cells), ' | '.join(b_cells)
             assert a_cells and b_cells, '两条腿的表格都要有行'
             assert '落后' in a_txt or '最新' in a_txt, \
@@ -3979,8 +4009,11 @@ def t_sync_ui():
                     '界面无"A 腿/B 腿"内部术语；日历来源可信；'
                     '只读拦住手动同步与上传；%s；'
                     '聚宽代码可取且 SINCE 按本地最落后表(%s)预填成 %s；'
+                    '定时窗口 6 个输入框可改、显示【已装】点位与是否一致'
+                    '（信号重算终点 %s，补的终点）、有「保存并重装」；'
                     '%d 份日志可点开'
-                    % (auto_note, sg.get('oldest'), sg.get('since'), n_log))
+                    % (auto_note, sg.get('oldest'), sg.get('since'),
+                       _sv[4], n_log))
     finally:
         httpd.shutdown()
         sv.ALLOW_LIVE = old
@@ -4947,8 +4980,11 @@ def t_setup_tdx():
         assert k in pl, 'plist 缺「%s」' % k
     # 🔴 tick 是**多时间点**的（07:00/08:00/09:00）—— StartCalendarInterval
     #   必须是 array。装三个 plist 会让"改一个点位"变成改三处。
-    tk = m._plist(m.TICK_LABEL, ['python3', m.TICK_PY],
-                  m._times(m.TICK_AT), 'tick')
+    #   ★ 时间点不再是写死的常量（TICK_AT / POLL_*），改成看板可配的
+    #     DEFAULT_SCHED + _manifest/schedule.json —— 用例跟着读配置。
+    _tk_d = m.DEFAULT_SCHED['tick']
+    _tk_t = m._range_times(_tk_d['from'], _tk_d['to'], _tk_d['every'])
+    tk = m._plist(m.TICK_LABEL, ['python3', m.TICK_PY], _tk_t, 'tick')
     assert '<array>' in tk.split('StartCalendarInterval')[1][:200], \
         '多时间点时 StartCalendarInterval 应是 array'
     for hh in (7, 8, 9):
@@ -4959,7 +4995,8 @@ def t_setup_tdx():
     assert m._times('07:00,08:00,09:00') == [(7, 0), (8, 0), (9, 0)], \
         '_times 解析不对'
     # ---- 数据同步改成【轮询】：判据是"齐没齐"而不是"到点没到点" ----
-    rt = m._range_times(m.POLL_FROM, m.POLL_TO, m.POLL_EVERY)
+    _sy_d = m.DEFAULT_SCHED['sync']
+    rt = m._range_times(_sy_d['from'], _sy_d['to'], _sy_d['every'])
     assert len(rt) == 25 and rt[0] == (16, 0) and rt[-1] == (20, 0), \
         '16:00~20:00 每 10 分钟应是 25 个点位，实得 %d 个' % len(rt)
     assert (18, 10) in rt, \
@@ -4976,8 +5013,7 @@ def t_setup_tdx():
     import plistlib as _pl
     for label, args, times, tag in (
             (m.LABEL, ['/bin/bash', m.SH, '--if-stale'], rt, 'sync'),
-            (m.TICK_LABEL, ['python3', m.TICK_PY], m._times(m.TICK_AT),
-             'tick')):
+            (m.TICK_LABEL, ['python3', m.TICK_PY], _tk_t, 'tick')):
         xml = m._plist(label, args, times, tag)
         try:
             d = _pl.loads(xml.encode())
@@ -6860,6 +6896,145 @@ def t_srv_split():
             'lv.LIVE 重定向双向生效（%d 个 lv.* 名字全在）'
             % (len(used), scanned, len(DOMS), len(LVDOMS), n,
                lp.count('\n'), len(_lvused)))
+
+
+@case('定时窗口配置：判据是【实际装上的点位】而不是回显配置', tag='fast')
+def t_schedule():
+    """轮询窗口可在看板改（时间范围 + 间隔），存完立即重装 launchd。
+
+    🔴 **只回显配置是不够的**：配置改了而 timer 没重装时，
+      "页面写着每小时一次、实际还是旧的"**不报错**。
+      所以判据必须是**已装 plist 里到底有几个点位**
+      （同 CLAUDE.md「已安装的 plist 与仓库正本不一致要报出来」那条）。
+    """
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    dlp = os.path.join(os.path.dirname(here), 'datalake', 'setup_tdx.py')
+    spec = importlib.util.spec_from_file_location('_st_probe', dlp)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+
+    # ---- ① 点位生成：间隔除不尽时要补上终点 ----
+    assert len(m._range_times('16:00', '20:00', 10)) == 25
+    t = m._range_times('07:00', '09:20', 60)
+    assert t == [(7, 0), (8, 0), (9, 0), (9, 20)], \
+        ('间隔除不尽时要补上终点 —— 否则窗口末尾那段（09:00~09:20）'
+         '等于没覆盖，而配置上写着管到 09:20。实得 %s' % t)
+    assert m._range_times('18:10', '18:10', 5) == [(18, 10)], \
+        '单点位（老命令 --at 18:10）要仍然可用'
+
+    # ---- ② 🔴 非法配置必须被拒，而不是装出一个不跑的 timer ----
+    #   launchd 对**空的** StartCalendarInterval 不报错，只是永远不触发 ——
+    #   表现是"配好了但数据再也不同步了"，几天后才发现。
+    good = {'sync': {'from': '16:00', 'to': '20:00', 'every': 10},
+            'tick': {'from': '07:00', 'to': '09:20', 'every': 60}}
+    ok, why = m.check_schedule(good)
+    assert ok, '正常配置被拒了：%s' % why
+    #   ★ 密集但合理的要放行：16:00~20:00 每 5 分钟 = 49 个点位，
+    #     低于上限。上限是防"配出几百个点位把 launchd 塞满"，不是限制频率。
+    ok, why = m.check_schedule(
+        dict(good, sync={'from': '16:00', 'to': '20:00', 'every': 5}))
+    assert ok, '每 5 分钟（49 个点位）被误拒了：%s' % why
+    BAD = [
+        ({'from': '20:00', 'to': '16:00', 'every': 10}, '起点晚于终点'),
+        ({'from': '16:00', 'to': '20:00', 'every': 0}, 'every=0'),
+        ({'from': '16:00', 'to': '20:00', 'every': 1}, 'every 低于下限'),
+        ({'from': '16:00', 'to': '20:00', 'every': 999}, 'every 超上限'),
+        ({'from': '00:00', 'to': '23:59', 'every': 5}, '点位数超上限'),
+        ({'from': '25:00', 'to': '20:00', 'every': 10}, '小时越界'),
+        ({'from': '1600', 'to': '20:00', 'every': 10}, '格式不对'),
+        ({'from': '16:00', 'to': '20:00'}, '缺 every'),
+        ({'from': '16:00', 'to': '20:00', 'every': '10'}, 'every 是字符串'),
+    ]
+    for bad, what in BAD:
+        ok, why = m.check_schedule(dict(good, sync=bad))
+        assert not ok, '「%s」这种配置被放过了：%r' % (what, bad)
+    #   ★ 空/缺段也要拒
+    for bad in ({}, {'sync': good['sync']}, None):
+        ok, _w = m.check_schedule(bad)
+        assert not ok, '缺段的配置被放过了：%r' % (bad,)
+
+    # ---- ③ show_schedule 必须给出「配置 vs 实际」的比对 ----
+    sc = m.show_schedule()
+    for k in ('schedule', 'installed', 'limits', 'exists'):
+        assert k in sc, 'show_schedule 少了 %s' % k
+    for key in ('sync', 'tick'):
+        d = sc['installed'][key]
+        for f in ('want_slots', 'got_slots', 'match', 'loaded', 'label'):
+            assert f in d, 'installed.%s 少了 %s' % (key, f)
+        assert d['match'] is not False, \
+            ('%s 的配置与实际装上的 timer 不一致（want %s / got %s）—— '
+             '跑一次 `python3 datalake/setup_tdx.py --install-timer`'
+             % (key, d['want_slots'], d['got_slots']))
+    #   🔴 上面那条只能抓"当前恰好不一致"，**抓不到判据本身坏了**
+    #     （把 match 写死成 True 时它照样绿 —— 变异测试抓到过）。
+    #     所以再注入一份**故意与已装 plist 不同**的配置：match 必须翻成 False。
+    if sc['installed']['sync']['got_slots'] is not None:
+        real_load = m.load_schedule
+        try:
+            m.load_schedule = lambda: (
+                {'sync': {'from': '01:00', 'to': '01:30', 'every': 30},
+                 'tick': sc['schedule']['tick']}, None)
+            d = m.show_schedule()['installed']['sync']
+            assert d['want_slots'] == 2 and d['match'] is False, \
+                ('注入一份与已装 timer 不同的窗口（01:00~01:30/30，2 个点位）后，'
+                 'match 仍然不是 False（want %s / got %s / match %r）—— '
+                 '这个判据是死的，"改了配置但没重装"就永远看不出来'
+                 % (d['want_slots'], d['got_slots'], d['match']))
+        finally:
+            m.load_schedule = real_load
+
+    # ---- ④ 接口两端都在 ----
+    from assay import server as sv
+    assert '/api/sync/schedule' in sv.ROUTES, 'GET /api/sync/schedule 没挂'
+    src = open(os.path.join(here, 'assay', 'server.py'),
+               encoding='utf-8').read()
+    assert 'api_sync_schedule_set' in src, 'POST 没挂'
+    syp = open(os.path.join(here, 'assay', 'srv', 'sync.py'),
+               encoding='utf-8').read()
+    #   🔴 不能用 `'--install-timer' in syp` —— 这个字面量在同一个文件的
+    #     **注释里也出现**（第 4 次踩这个坑），把真实调用改坏了它照样绿。
+    #     所以走 ast：注释不是 AST 节点，docstring 单独剔掉。
+    import ast as _ast
+    _fn = next((n for n in _ast.walk(_ast.parse(syp))
+                if isinstance(n, _ast.FunctionDef)
+                and n.name == 'api_sync_schedule_set'), None)
+    assert _fn is not None, 'POST 处理函数 api_sync_schedule_set 不见了'
+    _body = _fn.body
+    if (_body and isinstance(_body[0], _ast.Expr)
+            and isinstance(_body[0].value, _ast.Constant)):
+        _body = _body[1:]                      # 剔掉 docstring
+    _lit = {n.value for b in _body for n in _ast.walk(b)
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str)}
+    _call = {n.func.attr if isinstance(n.func, _ast.Attribute) else
+             getattr(n.func, 'id', '') for b in _body for n in _ast.walk(b)
+             if isinstance(n, _ast.Call)}
+    assert 'check_schedule' in _call, \
+        ('POST 要先校验再存 —— 不校验就能从页面存进 from>to 这种配置，'
+         '而它会装出一个**永不触发**的 timer 且不报错')
+    assert 'save_schedule' in _call, 'POST 没存配置'
+    assert '--install-timer' in _lit, \
+        ('POST 要「存配置 + 立即重装」，不给"存了但没生效"留窗口 —— '
+         '实际传给 setup_tdx.py 的参数里没有 --install-timer')
+    assert "out['sched']" in syp, \
+        'api_sync 要把窗口与实际点位带给页面'
+
+    # ---- ⑤ 页面必须显示【实际装上的】，不能只回显配置 ----
+    js = open(os.path.join(here, 'web', 'views', 'sync.js'),
+              encoding='utf-8').read()
+    flat = js.replace(' ', '').replace('\n', '')
+    assert 'got_slots' in js and 'i.match===false' in flat, \
+        ('页面没显示"实际装上的点位/是否一致" —— 只回显配置的话，'
+         '"改了但没重装"就看不出来')
+    assert '配置与实际装上的 timer 不一致' in js, '不一致要显红说清'
+    assert 'setTimeout(showSync' in flat.replace(' ', ''), \
+        ('保存后要**延迟**刷新 —— 立刻 showSync() 会把反馈连同 #syschedmsg '
+         '一起重渲染掉，点了按钮什么都看不到（实测踩过）')
+    return ('点位生成含补终点（07:00~09:20/60 -> 4 个）与单点位兼容；'
+            '%d 种非法配置全被拒（空的 StartCalendarInterval 会让 launchd '
+            '永不触发且不报错）；show_schedule 给出 want/got/match 且当前一致；'
+            'GET+POST 都挂且 POST 存完立即重装；页面显示实际点位并延迟刷新'
+            % (len(BAD) + 3))
 
 
 @case('信号重算：不一致必须留痕再覆盖', tag='fast')

@@ -16,6 +16,53 @@ function autoBtn(au, ro){
   return `<button class="btn" id="syauto" ${ro?'disabled':''}
     >${au.on?'关闭自动同步':'开启自动同步'}</button>`;
 }
+/* 定时窗口。🔴 **必须显示"实际装上的点位"**，不能只回显配置 ——
+   配置改了而 timer 没重装时，"页面写着每小时一次、实际还是旧的"不报错。
+   判据是服务端从已装 plist 里读出来的 got_slots / match。 */
+function schedBlock(sc, ro){
+  if(!sc) return '';
+  if(sc.error) return `<div class="lvwarn">定时窗口读不到：${esc(sc.error)}</div>`;
+  const L=sc.limits||{}, ins=sc.installed||{};
+  const row=(k,name,why)=>{
+    const d=(sc.schedule||{})[k]||{}, i=ins[k]||{};
+    const bad = i.match===false;
+    return `<tr class="${bad?'sybad':''}">
+      <td class="tx"><b>${name}</b><div class="lvwhy">${why}</div></td>
+      <td><input class="syf" data-k="${k}" data-f="from" value="${esc(d.from||'')}"
+            size="5" ${ro?'disabled':''}></td>
+      <td><input class="syf" data-k="${k}" data-f="to" value="${esc(d.to||'')}"
+            size="5" ${ro?'disabled':''}></td>
+      <td><input class="syf" data-k="${k}" data-f="every" value="${d.every||''}"
+            size="4" ${ro?'disabled':''}> 分</td>
+      <td class="rt">${i.want_slots==null?'—':i.want_slots}</td>
+      <td class="rt">${i.got_slots==null?'<span class="lvwhy">未装</span>':i.got_slots}</td>
+      <td>${i.match===true?'<span class="ok">✓ 一致</span>'
+            :i.match===false?'<b class="bad">🔴 不一致</b>'
+            :'<span class="lvwhy">—</span>'}</td></tr>`;
+  };
+  const drift=Object.keys(ins).filter(k=>ins[k].match===false);
+  return `<div class="lvsec"><h3>定时窗口
+      <span class="lvwhy">判据是「齐没齐」而不是「到点没到点」——
+        窗口内每隔一段问一次，齐了就秒退</span></h3>
+    ${drift.length?`<div class="lvwarn"><b>🔴 配置与实际装上的 timer 不一致</b>
+      （${esc(drift.join('、'))}）—— <b>定时跑的还是旧窗口</b>。
+      点「保存并重装」让它生效。</div>`:''}
+    <table class="lvt">
+      <tr><th>任务</th><th>从</th><th>到</th><th>间隔</th>
+          <th>点位</th><th>已装</th><th></th></tr>
+      ${row('sync','数据同步','抓当天行情/复权；判据见 build/is_stale.py 四条')}
+      ${row('tick','信号重算','出当天调仓清单；数据指纹没变就跳过')}
+    </table>
+    <div class="lvwhy">间隔 ${L.every_min||5}~${L.every_max||240} 分钟，
+      点位上限 ${L.max_slots||100} 个。间隔除不尽时会**补上终点**
+      （07:00~09:20 每 60 分钟 → 07:00 08:00 09:00 <b>09:20</b>），
+      否则窗口末尾那段等于没覆盖。
+      ${sc.exists?'':'　当前用的是默认值（还没存过配置）'}
+      ${sc.warn?'<br>⚠ '+esc(sc.warn):''}</div>
+    <div style="margin-top:8px">
+      <button class="btn" id="sysched" ${ro?'disabled':''}>保存并重装</button>
+      <span class="lvmsg" id="syschedmsg"></span></div></div>`;
+}
 function autoNote(au){
   if(!au) return '';
   let w='';
@@ -98,6 +145,7 @@ async function showSync(){
   </div>
   <div class="lvmsg" id="symsg"></div>
   ${autoNote(o.auto)}
+  ${schedBlock(o.sched, o.readonly)}
   <div class="lvgrid">
     <div class="lvsec"><h3>行情数据 · 全自动</h3>
       <table class="lvt"><tr><th>项</th><th>最新</th><th>状态</th></tr>
@@ -155,6 +203,30 @@ async function showSync(){
       m.textContent=(r.on?'自动同步已开启 —— 每日 '+(r.schedule||'?')+' 跑 sync_daily.sh'
                          :'自动同步已关闭 —— 记得每天手动点「立即同步」');
       showSync();
+    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
+  };
+  if($('#sysched')) $('#sysched').onclick=async()=>{
+    const m=$('#syschedmsg'), sc={};
+    $$('.syf').forEach(x=>{
+      sc[x.dataset.k]=sc[x.dataset.k]||{};
+      sc[x.dataset.k][x.dataset.f]=x.dataset.f==='every'
+        ? parseInt(x.value,10) : x.value.trim();
+    });
+    m.className='lvmsg'; m.textContent='保存并重装…';
+    try{
+      const r=await post('/api/sync/schedule',{schedule:sc});
+      if(r.error){ m.className='lvmsg bad'; m.textContent=r.error; }
+      else{
+        const ins=r.installed||{};
+        m.className='lvmsg ok';
+        m.textContent='已生效：'+Object.keys(ins).map(k=>
+          k+' '+ins[k].first+'~'+ins[k].last+' 共 '+ins[k].got_slots+' 个点位'
+        ).join('；');
+      }
+      /* ★ 延迟刷新：立刻 showSync() 会把这条反馈连同 #syschedmsg 一起
+         重渲染掉，点了按钮什么都看不到（实测就是这样）。
+         等两秒让人看到"装上了几个点位"，再刷新去掉那条不一致警告。 */
+      setTimeout(showSync, 2000);
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
   };
   $('#syrun').onclick=async()=>{
