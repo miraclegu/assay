@@ -884,7 +884,18 @@ def t_ui():
             dsel = pg.evaluate('DSEL')
             nh = pg.locator('#d_hold tbody tr').count()
             assert pg.locator('#day .cards .card').count() == 6, '当日概要卡不是 6 张'
-            assert nh >= 0 and pg.locator('#d_hold .note').count() == 1, '当日持仓表没渲染'
+            # 🔴 判据是「那一块必须**说清楚状态**」，不是「一定有表」：
+            #   `prune_runs.py` 会删掉旧归档的 holdings.parquet，那时页面
+            #   给的是「明细已清理（重跑可再生成）」的 .warn —— 显示成空表
+            #   才是 bug（会被读成"那天空仓"）。原来只认 `.note` 数量 == 1，
+            #   于是归档一被清理这条就失败，而失败的其实是断言本身。
+            _dh = pg.locator('#d_hold')
+            _pruned = _dh.locator('.warn').count()
+            assert _pruned or _dh.locator('.note').count() >= 1, \
+                '当日持仓那一块既没有表也没有说明 —— 空白会被读成"那天空仓"'
+            if _pruned:
+                assert '已清理' in _dh.inner_text(), \
+                    '明细被清理时必须明说，实得 %s' % _dh.inner_text()[:60]
             # 浏览器后退必须回到上一年详情页（而不是直接掉出详情）
             pg.go_back(); pg.wait_for_timeout(600)
             h = pg.evaluate('location.hash')
@@ -1682,6 +1693,110 @@ def _():
             shutil.move(bak, sv.MARKS_FILE)
         elif os.path.isfile(sv.MARKS_FILE):
             os.remove(sv.MARKS_FILE)
+
+
+@case('红利单腿基准：拆分忠实 / 不串腿 / both 不改原行为', tag='fast')
+def t_hongli_sleeve():
+    """袖A / 袖B 是【开关】不是【分叉】——三件事坏了都不报错。
+
+    ① 拆出来的袖A 必须就是组合里的前 num_a 只、袖B 是余下那几只：
+       `袖A ∪ 袖B 去重保序 == 组合 target_list`。拆歪了基准就没有意义。
+    ② 关掉的那条腿要连**候选池**一起清空（`a=[]`/`b=[]` 而不只是 `la`/`lb`），
+       否则 `backup_list` 还会从它那里取票，炸板再入场就买进"已经关掉那条腿"
+       选出来的股票 —— **而这不报错**，只是单腿基准被悄悄污染。
+    ③ `sleeve` 只接受 both/a/b，写错要当场报错而不是静默当成 both。
+
+    🔴 **跨多期比，且带一条防空转的守卫。** 只比一期时踩过：那一期袖B 的候选池
+      只有 4 只（< num_b=5），`b[num_b:]` 本来就是空的 —— 于是"不串腿"这条
+      **在那一期无论实现对错都成立**，变异测试全绿。守卫要求至少有一期
+      袖B 的池子深于 num_b，否则这条用例自己判失败。
+    """
+    import importlib.util
+    from assay.feed import PanelFeed
+    from assay.engine import Engine
+    from assay import api as _api
+
+    out = []
+    P = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     'strategies', '红利')
+    feed = PanelFeed('2026-01-01', '2026-09-05')      # 9 个调仓日
+
+    def _picks(fn, tag):
+        sp = importlib.util.spec_from_file_location('sleeve_%s' % tag,
+                                                    os.path.join(P, fn))
+        st = importlib.util.module_from_spec(sp)
+        sp.loader.exec_module(st)
+        # 🔴 薄壳的 initialize 调 _base.initialize，注册的是 **_base.pick** ——
+        #   钩子打在壳模块上不会被调用（第一版就是这么空转的）。
+        owner = getattr(st, '_base', st)
+        got = []
+        orig = owner.pick
+
+        def spy(ctx):
+            orig(ctx)
+            got.append((str(ctx.current_date),
+                        list(_api.g.target_list), list(_api.g.backup_list)))
+        owner.pick = spy
+        try:
+            Engine(st, feed, cash=1000000,
+                   params={'div_method': 'fiscal_year'}).run()
+        finally:
+            owner.pick = orig
+        assert got, '%s 在这个窗口里一次都没调仓 —— 用例是空转的' % fn
+        return got
+
+    both = _picks('红利指数增强.py', 'both')
+    a = _picks('红利低波袖A.py', 'a')
+    b = _picks('红利价值袖B.py', 'b')
+    assert len(both) == len(a) == len(b), \
+        '三次跑的调仓期数不一致：%d/%d/%d' % (len(both), len(a), len(b))
+
+    # ③ 非法值当场报错
+    try:
+        _picks_bad = importlib.util.spec_from_file_location(
+            'sleeve_bad', os.path.join(P, '红利指数增强.py'))
+        _m = importlib.util.module_from_spec(_picks_bad)
+        _picks_bad.loader.exec_module(_m)
+        Engine(_m, feed, cash=1000000,
+               params={'div_method': 'fiscal_year', 'sleeve': 'A'}).run()
+        raise AssertionError("sleeve='A'（大写）被静默接受了 —— 会当成 both 跑，"
+                             "而基准看着完全正常")
+    except AssertionError:
+        raise
+    except Exception:                                       # noqa: BLE001
+        pass
+
+    n_deep = 0
+    for (d0, t0, _), (d1, t1, b1), (d2, t2, b2) in zip(both, a, b):
+        assert d0 == d1 == d2, '调仓日对不齐：%s/%s/%s' % (d0, d1, d2)
+        assert t1, '%s 袖A 目标池是空的' % d0
+        # ①
+        assert t1 == t0[:len(t1)], \
+            ('%s 袖A 不等于组合的前 %d 只，拆分不忠实\n袖A =%s\n组合=%s'
+             % (d0, len(t1), t1, t0[:len(t1)]))
+        assert list(dict.fromkeys(t1 + t2)) == t0, \
+            ('%s 袖A ∪ 袖B 去重保序 != 组合\nA=%s\nB=%s\n组合=%s'
+             % (d0, t1, t2, t0))
+        # ② 关掉的腿连候选池一起清了 -> backup 只可能来自本腿，
+        #    所以条数不会超过本腿的 backup_a / backup_b（默认各 5）
+        assert len(b1) <= 5, \
+            ('%s 袖A 的 backup 有 %d 条（上限 5）—— 袖B 的候选池没被清空，'
+             '多出来的是：%s' % (d0, len(b1), b1[5:]))
+        assert len(b2) <= 5, \
+            ('%s 袖B 的 backup 有 %d 条（上限 5）—— 袖A 的候选池没被清空'
+             % (d0, len(b2)))
+        if len(b2) > 0:
+            n_deep += 1
+    # 🔴 防空转：袖B 的候选池必须至少有一期深于 num_b，否则 ② 那条
+    #   在每一期都恒真（没有 backup 可串），用例是假绿的
+    assert n_deep >= 1, \
+        ('这个窗口里袖B 一期都没有 backup（池子从没深过 num_b），'
+         '"不串腿"这条断言恒真 —— 换个窗口，否则它抓不到任何东西')
+    out.append('%d 期逐期核对：袖A == 组合前 %d 只、A∪B 去重 == 组合；'
+               '两腿 backup 各自 <=5（袖B 有 %d 期非空，非空转）；'
+               'sleeve 写错当场报错'
+               % (len(both), len(a[0][1]), n_deep))
+    return out
 
 
 @case('实盘：持仓重建 / 规则不重写 / 版本留痕', tag='fast')
@@ -2659,9 +2774,18 @@ def t_live_core():
         else:
             assert st9['fee_drag_annual'] is not None, \
                 '够 %d 个交易日了却不给年化拖累' % st9['days']
-            assert abs(st9['fee_drag_annual']
-                       - st9['fee_pct'] * (244.0 / st9['days'])) < 1e-9, \
-                '年化拖累不是"占本金 × 244/交易日数"：%s' % st9['fee_drag_annual']
+            # 🔴 比【取整后】的值，不要拿 1e-9 去比未取整的乘积 ——
+            #   `fee_drag_annual` 在 perf.py 里 round(..., 6)，6 位取整的
+            #   误差可达 5e-7，用 1e-9 必然失败。
+            #   ★ 这条 else 分支**在 2026-09-07 之前从没被执行过**
+            #     （测试账户 2026-08-10 建仓，days 一直 <20），所以这个
+            #     容差错了很久都没人发现 —— 同"先命中的校验会遮住后面那道，
+            #     被遮的那道可能从没执行过"。
+            assert st9['fee_drag_annual'] == round(
+                st9['fee_pct'] * (244.0 / st9['days']), 6), \
+                ('年化拖累不是"占本金 × 244/交易日数"：%s vs %s'
+                 % (st9['fee_drag_annual'],
+                    round(st9['fee_pct'] * (244.0 / st9['days']), 6)))
         # 无论多长，twr_annual 与 fee_drag_annual 必须【同进同退】——
         # 两个用同一条 20 日纪律，分头判就会出现"给了年化却不给拖累"
         assert (st9['twr_annual'] is None) == (st9['fee_drag_annual'] is None), \
@@ -2892,6 +3016,66 @@ def t_live_ui():
             assert nbuy == 10, '待办买入应 10 行，实得 %d' % nbuy
             assert '· 调仓日' in pg.locator('#lvbody').inner_text(), \
                 '没标出是不是调仓日'
+
+            # ---- 选股理由：【独立页】，一期一段按排名列出 ----
+            #   ★ 一开始做成浮层 + 一个 .lvwhy 小链接，实测**人找不到它**
+            #     （和旁边的"版本 9FB82061"长得一模一样）——
+            #     看不出能点的入口 = 没有入口。所以入口是按钮、内容是独立页
+            #     （同成交流水：会越来越长 -> 服务端分页）。
+            assert pg.locator('table.lvbuy span.lvq').count() == nbuy, \
+                '每一行买入都该有一个「?」标出选中理由'
+            # 当前账户 id 从侧栏高亮那一项取（这一段比下面的 `aid` 早）
+            _aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
+            _wbtn = pg.locator('#lvbody .lvhead a.btn', has_text='选股理由')
+            assert _wbtn.count() == 1, '账户页顶部缺「选股理由」按钮'
+            # 🔴 对不上任何一期的持仓**不许**有出处标记 —— 硬凑一个出处
+            #   比没有更糟（这些成交不是照信号做的）。
+            assert pg.locator('#lvbody table.lvpos a.lvq').count() == 0, \
+                '这些成交对不上任何一期信号，却给了"出处"标记'
+            _wbtn.click()
+            pg.wait_for_selector('.whysec', timeout=15000)
+            pg.wait_for_timeout(400)
+            assert '选股理由' in pg.locator('#main .lvhead h2').first.inner_text()
+            _secs = pg.locator('.whysec').count()
+            assert _secs >= 1, '选股理由页一段都没有'
+            # 默认只列【调仓日】—— 非调仓日不选股，列出来是空段，
+            # 会把真正要看的那期挤到第二页（实测踩过）
+            for _i in range(_secs):
+                _hd = pg.locator('.whysec .whyhd').nth(_i).inner_text()
+                assert '调仓日' in _hd and '非调仓日' not in _hd, \
+                    '默认应只列调仓日，实得：%s' % _hd.replace('\n', ' ')
+            _tbl = pg.locator('.whysec table.lvpoolt')
+            assert _tbl.count() >= 1, '调仓日那一段没有候选池表'
+            _rows = _tbl.first.locator('tr:not(.whygap)')
+            assert _rows.count() - 1 >= nbuy, \
+                '候选池 %d 行，少于买入的 %d 只 —— 买入的必须都在池子里' \
+                % (_rows.count() - 1, nbuy)
+            # 默认只到第 20 名（20 之后全是"没轮到"，看不出信息），
+            # 但"一定要显示"的（选中/持有/卖出/备选/被剔除）无论排第几都在，
+            # 中间跳号要有 .whygap 明说，不能让人以为数据缺了一块
+            _shown = _rows.count() - 1
+            assert _shown <= 60, '一组默认显示 %d 行，太多了' % _shown
+            # 按排名升序列出（用户要的就是"按排名依次"）
+            _ranks = [int((_rows.nth(k).inner_text() or '0').split('\t')[0].split('·')[0] or 0)
+                      for k in range(1, min(6, _rows.count()))]
+            assert _ranks == sorted(_ranks), '候选池没按排名升序：%s' % _ranks
+            # 🔴 `.pw` 里的 sticky 表头 top 必须是 0 —— 已经踩过三次：
+            #   写 52px 会把表头压到**第二行**上面（实测选股理由页表头夹在
+            #   第 1 行与第 3 行之间，第 2 行被盖住），而页面看着只是"有点怪"。
+            _sticky = pg.evaluate("""() => [...document.querySelectorAll('.pw table th')]
+                .map(th => getComputedStyle(th).top)""")
+            assert _sticky and set(_sticky) == {'0px'}, \
+                '.pw 里的表头 top 不是 0：%s（会把表头压到第二行上面）' % set(_sticky)
+            _hy = pg.locator('.whysec').first.inner_text()
+            for _k in ('流通市值', '市净率', 'ROE 加速度', '选中', '策略参数'):
+                assert _k in _hy, '选股理由页缺「%s」：%s' % (_k, _hy[:160])
+            assert 'undefined' not in _hy and 'NaN' not in _hy, \
+                '选股理由页有 undefined/NaN：%s' % _hy[:200]
+            _why_msg = ('选股理由独立页：%d 段（只列调仓日）、候选池 %d 行按排名升序、'
+                        '.pw 表头 top=0' % (_secs, _rows.count() - 1))
+            pg.click('a.lvtag[href="#/live/%s"]' % _aid)    # 回账户
+            pg.wait_for_selector('#lvrec', timeout=10000)
+            pg.wait_for_timeout(400)
 
             # ---- KPI 板：账户的数字集中一处，不再是顶栏一串标签 ----
             #   ★ 原来"我现在怎么样"要在标题、标签栏、持仓汇总三处来回凑。
@@ -3526,7 +3710,9 @@ def t_live_ui():
                     '改名；冲正追加并划掉；设置无 undefined 且每项有标签；'
                     '业绩板：盘中补点后标「今日/盘中时刻」、交易费用独立一格'
                     '（占本金，短样本不折年化）、ⓘ 说清 TWR/盘中/年化拖累；'
-                    '旧进程有横幅；归档后数据仍在；0 个 JS 错误' % n_pos)
+                    '旧进程有横幅；' + _why_msg + '（带流通市值/PB/ROE加速度，'
+                    '无 undefined，账户页入口是按钮不是小灰链接）；'
+                    '归档后数据仍在；0 个 JS 错误') % n_pos
     finally:
         httpd.shutdown()
         lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow
@@ -6268,11 +6454,84 @@ def t_realtime():
              '"估值日 09-02"配 09-03 的实时价：%s vs %s' % (P['asof'], P['rt_at']))
         assert P['asof_close'] and P['asof_close'] != P['asof'], \
             '收盘日要单独留一份（部分实时时要用它说明其余按哪天算）'
+    # ---- 并发落盘 / 坏文件自愈 / 接口逐腿降级（2026-09-07 生产事故）----
+    # 🔴 实测事故链：写当日文件的有【三个来源】，两个在 HTTP 请求线程上
+    #   （`_rt_ensure` / `_rt_catch_up`），而 `save()` 当时**没有锁**。
+    #   两个线程同时落盘 -> 落地一个头尾都是 PAR1、中间元数据是垃圾的 parquet
+    #   -> 此后每一轮读它都抛 TProtocolException -> `_rt_loop` catch 住继续转，
+    #   但 `rounds`/`last` 不再更新 -> **线程活着、每 60 秒失败一次，
+    #   连续 3.5 小时**（09:47 -> 13:20），页面上只表现为"实时不刷新"。
+    #   同时 `/api/rt/status` 整体 500，把**健康的快照腿**也一起藏了。
+    import threading as _th
+    from datetime import date as _date
+    import duckdb as _dk
+    _d = tempfile.mkdtemp(prefix='rtconc_')
+    os.makedirs(os.path.join(_d, 'rt', 'minute_1m'), exist_ok=True)
+    _day = '2026-09-07'
+    _p = rt.day_file(_date.fromisoformat(_day), root=_d)
+
+    def _row(i):
+        return {'code': '60%04d.XSHG' % i,
+                'datetime': '2026-09-07 10:%02d:00' % (i % 60),
+                'open': 1.0, 'close': 1.1, 'high': 1.2, 'low': 0.9,
+                'volume': i, 'amount': 1.0, 'avg': 1.0}
+
+    # ① 并发写：不许丢行、不许撕裂、不许残留 tmp
+    #   ★ 判据是**行数**而不是"没抛异常" —— 无锁版本一个异常都不抛，
+    #     它只是把别人写的行悄悄丢掉（实测 200 线程后只剩 1 行）。
+    _errs = []
+
+    def _w(i):
+        try:
+            rt.save([_row(i)], _day, root=_d)
+        except Exception as e:                              # noqa: BLE001
+            _errs.append('%s: %s' % (type(e).__name__, e))
+    _ts = [_th.Thread(target=_w, args=(i,)) for i in range(40)]
+    [t.start() for t in _ts]
+    [t.join() for t in _ts]
+    assert not _errs, '并发落盘抛异常：%s' % _errs[:3]
+    _n = _dk.connect().execute(
+        "SELECT count(*) FROM read_parquet('%s')" % _p).fetchone()[0]
+    assert _n == 40, ('并发落盘丢行：40 个线程各写 1 行，最终只有 %d 行 —— '
+                      'save() 的读-合并-写没有串行化' % _n)
+    _left = [f for f in os.listdir(os.path.dirname(_p)) if f.endswith('.tmp')]
+    assert not _left, '残留 tmp 文件：%s' % _left
+
+    # ② 坏文件必须【隔离 + 重建】，不能让异常冒出去
+    with open(_p, 'wb') as _f:              # 头尾像 parquet、中间是垃圾
+        _f.write(b'PAR1' + b'\x00' * 200 + b'PAR1')
+    try:
+        _dk.connect().execute("SELECT count(*) FROM read_parquet('%s')" % _p)
+        raise AssertionError('人造的坏文件居然读得动 —— 这条断言是空转的')
+    except AssertionError:
+        raise
+    except Exception:                                       # noqa: BLE001
+        pass
+    rt.save([_row(999)], _day, root=_d)     # 不许抛
+    _n2 = _dk.connect().execute(
+        "SELECT count(*) FROM read_parquet('%s')" % _p).fetchone()[0]
+    assert _n2 == 1, '坏文件没被隔离重建（重建后应只剩新写的 1 行，实得 %d）' % _n2
+    _q = os.path.join(os.path.dirname(_p), '_corrupt')
+    assert os.path.isdir(_q) and os.listdir(_q), \
+        '坏文件被直接丢弃了 —— 必须留证据，否则分不清撕裂写还是磁盘坏'
+
+    # ③ status() 一条腿坏了不能打挂整个接口，且要把坏腿【说出来】
+    with open(_p, 'wb') as _f:
+        _f.write(b'PAR1' + b'\x00' * 200 + b'PAR1')
+    _st = rt.status(day=_date.fromisoformat(_day), root=_d)
+    assert 'error' not in _st, 'status 被一条坏腿整体打挂了：%s' % _st.get('error')
+    assert _st['bar'].get('err'), \
+        '坏掉的 bar 腿没有 err 标记 —— 页面会以为"就是没有数据"'
+    assert 'snap' in _st, 'status 少了 snap 腿'
+    shutil.rmtree(_d, ignore_errors=True)
+
     return ('时段 11 个边界点（收盘留到 11:31/15:01）；bar 与快照两库分开且'
             '按键去重（重复写不翻倍）；最新价优先快照、缺了回落 bar、'
             '两库都没有的不顶价；last 取两库较新者；非时段不报落后；'
             'data:null 当失败且不打断整批；trends2 八字段位序与腾讯批量上限'
-            '写死在代码里；持仓估值 %s（%d/%d 实时）'
+            '写死在代码里；40 线程并发落盘不丢行/不撕裂/无残留 tmp；'
+            '坏文件隔离重建且留证；status 逐腿降级（坏腿标 err 不打挂接口）；'
+            '持仓估值 %s（%d/%d 实时）'
             % (P['price_src'], P['rt_n'], len(P['items'])))
 
 
@@ -6371,22 +6630,32 @@ def t_srv_split():
                                 _ast.ClassDef)):
                 bound.add(n.name)
             elif isinstance(n, _ast.Assign):
+                # 🔴 只认 **Store** 的名字。`_JOBS[job_id] = {...}` 的目标是
+                #   Subscript，里面那个 `_JOBS` 是 **Load** —— 不判 ctx 的话
+                #   它会被当成"绑定了 _JOBS"，于是这个检测器**恰好放过了
+                #   它当初为之而写的那个 bug**（srv/live.py 里裸用 _JOBS，
+                #   只在 POST 分支走到，import 与 45 个 GET 全绿）。
+                #   同理 `obj.attr = v` 的 `obj` 也是 Load。
                 for tg in n.targets:
                     bound |= {k.id for k in _ast.walk(tg)
-                              if isinstance(k, _ast.Name)}
+                              if isinstance(k, _ast.Name)
+                              and isinstance(k.ctx, _ast.Store)}
             elif isinstance(n, (_ast.AnnAssign, _ast.AugAssign)):
                 bound |= {k.id for k in _ast.walk(n.target)
-                          if isinstance(k, _ast.Name)}
+                          if isinstance(k, _ast.Name)
+                          and isinstance(k.ctx, _ast.Store)}
             elif isinstance(n, _ast.arg):
                 bound.add(n.arg)
             elif isinstance(n, _ast.ExceptHandler) and n.name:
                 bound.add(n.name)
             elif isinstance(n, (_ast.For, _ast.comprehension)):
                 bound |= {k.id for k in _ast.walk(n.target)
-                          if isinstance(k, _ast.Name)}
+                          if isinstance(k, _ast.Name)
+                          and isinstance(k.ctx, _ast.Store)}
             elif isinstance(n, _ast.withitem) and n.optional_vars:
                 bound |= {k.id for k in _ast.walk(n.optional_vars)
-                          if isinstance(k, _ast.Name)}
+                          if isinstance(k, _ast.Name)
+                          and isinstance(k.ctx, _ast.Store)}
             elif isinstance(n, _ast.Global):
                 bound |= set(n.names)
             elif isinstance(n, _ast.Lambda):
@@ -6439,7 +6708,7 @@ def t_srv_split():
                       and isinstance(n.value, _ast.Name) and n.value.id == 'lv'})
     _miss = [n for n in _lvused if not hasattr(_lv, n)]
     assert not _miss, 'live 门面少了这些名字：%s' % _miss
-    LVDOMS = ('base', 'fee', 'px', 'pos', 'ver', 'sig', 'perf')
+    LVDOMS = ('base', 'fee', 'px', 'pos', 'ver', 'sig', 'perf', 'explain')
     for d in LVDOMS:
         importlib.import_module('assay.lv.' + d)
     lp = open(os.path.join(here, 'assay', 'live.py'), encoding='utf-8').read()
@@ -6515,6 +6784,97 @@ def t_srv_split():
             'lv.LIVE 重定向双向生效（%d 个 lv.* 名字全在）'
             % (len(used), scanned, len(DOMS), len(LVDOMS), n,
                lp.count('\n'), len(_lvused)))
+
+
+@case('serve.py 的 stop/restart：判据是端口而不是 PID 文件', tag='fast')
+def t_serve_ctl():
+    """`serve.py --status/--stop/--restart`。
+
+    🔴 **不用 PID 文件**：它会陈旧（kill -9 / 机器重启 / 进程崩掉，文件都还在），
+      更糟的是 **PID 会被复用** —— 只看"文件里那个号还活着"就 kill，
+      有可能杀掉一个刚好复用了这个号的无关进程。
+      判据是"现在谁占着这个端口"（同 launchd 那条：判据是现在的状态、不是记录）。
+    """
+    import subprocess as sp
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, 'serve.py'), encoding='utf-8').read()
+
+    # ---- ① 三个动作都在，而且裸 `serve.py` 仍合法（用 flag 不用子命令）----
+    h = sp.run(['python3', 'serve.py', '--help'], cwd=here,
+               capture_output=True, text=True, timeout=60).stdout
+    for f in ('--status', '--stop', '--restart'):
+        assert f in h, 'serve.py 没有 %s' % f
+    assert '--readonly' in h and '--live' in h, \
+        '旧开关没了 —— "参数不认"会让服务直接起不来'
+
+    # ---- ② 🔴 不许出现 PID 文件 ----
+    for bad in ('pidfile', 'pid_file', '.pid'):
+        assert bad not in src, \
+            ('serve.py 里出现了 %r —— 判据应该是"谁占着端口"，'
+             'PID 文件会陈旧、而 PID 会被复用（可能杀错进程）' % bad)
+
+    # ---- ③ 🔴 必须验"是不是我们的进程"，否则会停掉别人的服务 ----
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location('_serve_probe',
+                                       os.path.join(here, 'serve.py'))
+    mod = _iu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)          # 只是 import，__main__ 不会跑
+    except SystemExit:
+        pass
+    assert mod._ours('python3 serve.py --port 8770'), \
+        '_ours 认不出我们自己的命令行'
+    for other in ('/usr/bin/nginx -g daemon off',
+                  'node /app/server.js', 'python3 -m http.server 8770'):
+        assert not mod._ours(other), \
+            '_ours 把 %r 也当成我们的了 —— 会停掉别人的服务' % other
+
+    # ---- ④ 🔴 stop 必须【轮询确认真的退出】，不能发完信号就返回 ----
+    body = src[src.index('def do_stop'):src.index('if __name__')]
+    assert 'SIGTERM' in body and 'SIGKILL' in body, \
+        'do_stop 应当先 SIGTERM、超时才升级 SIGKILL'
+    #   🔴 要检查**轮询循环体内**有确认，不能只查"文件里出现过" ——
+    #     `os.kill(pid, 0)` 在 do_stop 里有两处（轮询 + 强杀后再确认），
+    #     只查存在性时把轮询那处删掉照样全绿。
+    #     （同 pruned 那条用例踩过的坑：字符串存在性检查抓不到"逻辑被绕过"。）
+    poll = body[body.index('while time.time()'):body.index('else:')]
+    assert 'os.kill(pid, 0)' in poll, \
+        'do_stop 的轮询里没有确认进程退出 —— 「发了信号」不等于「停了」'
+    kill9 = body.split('SIGKILL')[-1]
+    assert 'os.kill(pid, 0)' in kill9, \
+        'SIGKILL 之后没再确认 —— 强杀也可能失败（僵尸、权限）'
+    assert '_who(port)' in body.split('SIGKILL')[-1], \
+        ('stop 结束前要再确认端口真的空了 —— 进程没了但端口还在 TIME_WAIT 时，'
+         '新进程 bind 会报 "Address already in use"，那个报错指不到真原因')
+
+    # ---- ⑤ 🔴 restart 没停干净就不许启动（否则 bind 失败）----
+    tail = src[src.index('if a.restart:'):]
+    assert 'sys.exit(rc)' in tail.split('---- 重新启动 ----')[0], \
+        'restart 在 stop 失败时仍会继续启动 —— 那会 bind 失败'
+
+    # ---- ⑥ --status 取的是 code 子对象，不是顶层 ----
+    st = src[src.index('def do_status'):src.index('def do_stop')]
+    assert "d.get('code')" in st, \
+        ('--status 应从 `code` 子对象取 loaded_at/code_mtime —— 取顶层会'
+         '拿到 None，表现是「该不该重启」这三行静默不打印（实测踩过）')
+
+    # ---- ⑦ 空端口上真跑一遍：--status 报未运行、--stop 说本来就没在跑 ----
+    #   ★ 用一个**没人用的高端口**，绝不碰 8770（那可能是用户正在用的看板）
+    port = '8799'
+    r1 = sp.run(['python3', 'serve.py', '--status', '--port', port], cwd=here,
+                capture_output=True, text=True, timeout=60)
+    assert r1.returncode == 1 and '未在运行' in r1.stdout, \
+        '空端口 --status 应报未运行、退出码 1，实际 %s / %r' \
+        % (r1.returncode, r1.stdout[:80])
+    r2 = sp.run(['python3', 'serve.py', '--stop', '--port', port], cwd=here,
+                capture_output=True, text=True, timeout=60)
+    assert r2.returncode == 0 and '本来就没在跑' in r2.stdout, \
+        '空端口 --stop 应幂等成功，实际 %s / %r' % (r2.returncode, r2.stdout[:80])
+    return ('三个动作齐（裸 serve.py 仍合法）；无 PID 文件；'
+            '_ours 认自己不认 nginx/node/http.server；'
+            'stop 先 TERM 后 KILL 且轮询确认 + 收尾查端口；'
+            'restart 没停干净不启动；--status 从 code 子对象取；'
+            '空端口上 --status=1 / --stop=0')
 
 
 @case('归档清理：明细删了必须【明说】，不能显示成空', tag='fast')
@@ -6601,6 +6961,445 @@ def t_pruned():
             % (n_pruned, n_full, len(marks)))
 
 
+@case('选股理由：捕获而非重算 / 投影不改行为 / 候选池自洽', tag='fast')
+def t_explain():
+    """实盘信号要说清「这只票为什么被选中」。三件事各有一条不报错的坏法：
+
+    1. **理由是【捕获】来的，不是照策略再算一遍。** 重算的那份迟早与策略分叉，
+       而分叉的解释**看着完全正常**。这里的判据是：挂上记账代理之后，
+       买/卖/持有清单必须与不挂时**逐位相同** —— 记账不许改变任何判定。
+    2. **策略 SQL 末层多返回几列不许改变选出的票。** 那是"投影"改动
+       （WHERE/ORDER/LIMIT 不动），但真出错的话是**静默换了几只票**。
+       这里直接把新 SQL 与"只返回 jq_code"的旧写法对跑同一天，
+       代码列表必须逐位相同。
+       ★ 全历史等价性（2016-01~2026-08 逐日权益 + 成交流水指纹逐位相同）
+         另跑过一次，那个太慢不放进 selftest。
+    3. **候选池要与清单自洽**：买入的票必须都在池子里且标成 buy；
+       名次必须是 1..n；有指标列时买入的那些必须真的带上了指标。
+
+    还钉一条**被这个功能抓出来的老 bug**：`nth_prev_day` 对"不在交易日表里
+    的日期"（实盘问的【下一个交易日】）会落到面板第一天，于是 froec 的
+    20 日涨停黑名单变成"2016 年以来涨停过吗" —— 几乎全命中，最近持有过的
+    候选被整片剔掉，**而这不报错**。
+    """
+    import datetime
+    import re as _re
+    import shutil
+    import tempfile
+
+    import assay.lv.explain as ex
+
+    def _flat(e):
+        """把「一条查询一组」的结构摊平成行 —— 断言里要按代码找。"""
+        return [x for g in (e.get('groups') or []) for x in (g.get('rows') or [])]
+    from assay import live as lv
+    from assay.feed import PanelFeed
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+
+    # ---- 0) nth_prev_day：表内日期与 _idx 等价；表外日期按位置插值 ----
+    feed = PanelFeed('2026-01-01', '2026-12-31')
+    days = feed.trading_days
+    for d in days[::37]:
+        assert feed.nth_prev_day(d, 20) == days[max(0, days.index(d) - 20)], \
+            'nth_prev_day 对表内日期的行为变了（回测会跟着变）：%s' % d
+    import importlib.util as _il
+
+    def _load(path, name):
+        sp = _il.spec_from_file_location(name, os.path.join(here, path))
+        m = _il.module_from_spec(sp)
+        sp.loader.exec_module(m)
+        return m
+
+    fut = days[-1] + datetime.timedelta(days=30)
+    assert feed.nth_prev_day(fut, 20) == days[-20], \
+        ('nth_prev_day(未来日, 20) 落到了 %s 而不是倒数第 20 天 %s —— '
+         '实盘的 20 日涨停黑名单会变成"有史以来涨停过吗"，'
+         '把最近持有过的候选整片剔掉，而这不报错'
+         % (feed.nth_prev_day(fut, 20), days[-20]))
+    out.append('nth_prev_day 表内等价、表外按位置插值（未来日 -> %s）' % days[-20])
+
+    # ---- 0b) 🔴 回测里那个兜底分支**一次都不该走到** ----
+    #      这条回答的是"那个 bug 有没有污染历史回测结果"。判据不是读代码觉得
+    #      不会（`Engine.run` 里 `ctx.current_date` 取自 feed.trading_days），
+    #      而是**逐次调用**统计：跑一段真回测，数"日期不在交易日表里"的次数。
+    #      实测全历史 2016-2026：froec 545 次调用、红利 0 次、sgmspeg_v0b 393 次，
+    #      **miss 全是 0** —— 回测结果没被影响过，归档不用重跑。
+    #      这里只跑一小段（保持 fast 层的耗时），够守住"将来别把非交易日
+    #      塞进 current_date"这条。
+    import bisect as _bs
+
+    from assay.broker import Cost as _Cost
+    from assay.engine import Engine as _Eng
+    _stat = {'calls': 0, 'miss': 0}
+    _orig_npd = PanelFeed.nth_prev_day
+
+    def _probe(self, d, n):
+        _stat['calls'] += 1
+        if self._idx.get(d) is None:
+            _stat['miss'] += 1
+        return _orig_npd(self, d, n)
+
+    PanelFeed.nth_prev_day = _probe
+    try:
+        _f2 = PanelFeed('2026-01-01', '2026-06-30')
+        _e2 = _Eng(_load('strategies/小市值/froec.py', '_ex_npd'), _f2,
+                   cash=200000, cost=_Cost(), params={})
+        _e2.run()
+    finally:
+        PanelFeed.nth_prev_day = _orig_npd
+    assert _stat['calls'] > 0, 'froec 半年应该调过 nth_prev_day —— 探针没生效？'
+    assert _stat['miss'] == 0, \
+        ('回测里有 %d 次 nth_prev_day 拿到了【不在交易日表里】的日期 —— '
+         '那个兜底分支会把窗口拉到面板第一天（实盘就是这么把 20 日涨停黑名单'
+         '变成"有史以来"的）。回测本来不该走到这里' % _stat['miss'])
+    out.append('回测里 nth_prev_day %d 次调用、0 次落到兜底分支（历史回测未受影响）'
+               % _stat['calls'])
+
+    d0 = days[-2]
+    froec = _load('strategies/小市值/froec.py', '_ex_froec')
+    kw = dict(sd=d0, listed=250, cand=10, pin='FALSE', kcb='68%', pert=0,
+              salt='a', skip=0, pbcut='floor(0.5 * n)', roecut='floor(0.1 * n2)',
+              excl=','.join("'%s'" % x for x in froec.EXCL_IND))
+    wide = feed.query(froec.SQL, **kw)
+    assert len(wide.columns) > 1, \
+        'froec 的 SQL 末层没有多返回指标列 —— 选股理由里就只有排名没有指标'
+    # 把末层投影换回"只要代码"，其余一个字不动
+    # ★ 必须锚在【行首】：SQL 里还有个缩进的 `SELECT jq_code, pb, …`（today CTE），
+    #   不锚的话正则会从那里一路吃到末层，把大半条 SQL 删掉（实测踩到）。
+    narrow_sql = _re.sub(r'(?ms)^SELECT jq_code,.*?^FROM roe_top',
+                         'SELECT jq_code\nFROM roe_top', froec.SQL)
+    assert narrow_sql != froec.SQL, '构造窄投影失败（SQL 结构变了？）'
+    narrow = feed.query(narrow_sql, **kw)
+    assert list(wide['jq_code']) == list(narrow['jq_code']), \
+        ('froec：多返回几列改变了选出的票！\n宽 %s\n窄 %s'
+         % (list(wide['jq_code']), list(narrow['jq_code'])))
+    out.append('froec 投影不变：%d 列 vs 1 列，%d 只逐位相同'
+               % (len(wide.columns), len(wide)))
+
+    hl = _load('strategies/红利/红利指数增强.py', '_ex_hl')
+    for tag, sqlname, cte in (('A', 'SQL_A', 'ranked'), ('B', 'SQL_B', 'base')):
+        raw = getattr(hl, sqlname).replace('{div}', hl.DIV_FISCAL_YEAR)
+        kw2 = dict(t1=d0, uni=hl.UNIVERSE, dmin=0.03, dtop=0.1, pe_lo=0, pe_hi=100,
+                   roe_lo=0.05, roe_hi=1.0, rev_lo=0.0, rev_hi=10.0,
+                   np_lo=0.0, np_hi=10.0, bmode='abs', broe=.3, brev=.3, bnp=.3)
+        if tag == 'A':
+            kw2.update(bw=252, bpct=1.0)   # 与策略默认 g.beta_win 一致
+        w = feed.query(raw, **kw2)
+        n_sql = _re.sub(r'(?m)^SELECT jq_code,.*? FROM ' + cte,
+                        'SELECT jq_code FROM ' + cte, raw)
+        assert n_sql != raw, '红利 %s 构造窄投影失败' % tag
+        n = feed.query(n_sql, **kw2)
+        assert list(w['jq_code']) == list(n['jq_code']), \
+            '红利 %s：多返回几列改变了选出的票' % tag
+        out.append('红利%s 投影不变（%d 只）' % (tag, len(w)))
+
+    # ---- 1b) 老快照（SQL 只返回代码）必须照样能解释，且**明说**没有指标 ----
+    #      账户绑的是版本快照，改了磁盘上的策略不会自动生效 —— 所以
+    #      "没有指标列"的信号会长期存在。那时不能崩，也不能装作有指标。
+    rec0 = ex.Recorder()
+    rec0.arm('rebalance')
+    rec0.add(kind='query', where='rebalance:1', sql_head='x', args={'cand': 10},
+             rows=[{'jq_code': '000001.XSHE'}, {'jq_code': '000002.XSHE'}])
+    e0 = ex.assemble(rec0, 'rebalance', picked=['000001.XSHE'], held=[], sold=[])
+    assert e0['captured'] and e0['pool_total'] == 2 and e0['n_groups'] == 1
+    assert _flat(e0)[0]['status'] == 'buy' and not _flat(e0)[0]['metrics']
+    assert any('没有指标列' in n or '指标' in n for n in e0['notes']), \
+        '老快照没有指标列时要明说，而不是画一张空表：%s' % e0['notes']
+    assert e0['groups'][0]['metric_meta'] == [], '没有指标就不该有表头'
+    out.append('老快照（无指标列）不崩且明说原因')
+
+    # ---- 2) 记账不许改变任何判定 + 候选池自洽 ----
+    tmp = tempfile.mkdtemp(prefix='selftest_why_')
+    old_live = lv.LIVE
+    lv.LIVE = tmp
+    try:
+        cal = os.path.join(here, 'live', 'trade_calendar.json')
+        if not os.path.exists(cal):
+            return '跳过（没有 live/trade_calendar.json）；' + '；'.join(out)
+        shutil.copy(cal, os.path.join(tmp, 'trade_calendar.json'))
+        # 找一个「下一个交易日就是调仓日」的 weekday —— 不写死星期几：
+        # 数据往前推一天这条就假失败了（本仓库踩过）
+        sig = None
+        for wd in (1, 2, 3, 4, 5):
+            aid = 'w%d' % wd
+            lv.upsert_account(aid, name='w', init_cash=400000)
+            lv.bind_version(aid, 'strategies/小市值/froec_traded.py',
+                            params={'weekday': wd, 'stop_loss': 0.35,
+                                    'stop_intraday': 1})
+            s = lv.build_signal(aid)
+            if s['is_rebalance_day']:
+                sig, sig_aid = s, aid
+                break
+        assert sig, '五个 weekday 都不是调仓日 —— 日历或 _due 有问题'
+        e = sig['explain']
+        assert e['captured'], '调仓日却没捕获到选股过程'
+        assert e['pool_total'] > 0, '调仓日候选池是空的'
+
+        # 2a) 挂记账代理前后，清单必须逐位相同（记账不许改判定）
+        _real = ex.attach
+        try:
+            ex.attach = lambda eng, br, rec=None: ex.Recorder()   # 不挂代理
+            bare = lv.build_signal(sig_aid)
+        finally:
+            ex.attach = _real
+        for k in ('buy', 'sell', 'hold'):
+            a = [(x['code'], x.get('shares')) for x in sig[k]]
+            b = [(x['code'], x.get('shares')) for x in bare[k]]
+            assert a == b, \
+                ('挂上选股理由的记账代理之后 %s 变了 —— 记账不许改变任何判定\n'
+                 '有代理 %s\n无代理 %s' % (k, a, b))
+        assert not bare['explain']['captured'], '对照组不该捕获到东西'
+        out.append('记账代理不改变买/卖/持有清单（%d 买 %d 持有）'
+                   % (len(sig['buy']), len(sig['hold'])))
+
+        # 2a2) 🔴 **卖出 + 持有不动 == 持仓只数**，调仓日也必须成立。
+        #      "持有不动"原来在调仓日走的是「targets ∩ 持仓」，而 targets 是从
+        #      **委托**反推的 —— 策略对"留着不动"的持仓根本不下委托，于是那些票
+        #      在页面上既不在卖出也不在持有不动，**凭空消失**（实测：10 只持仓
+        #      的账户在调仓日只显示"卖 2 只"，另外 8 只哪儿都不在）。
+        #      非调仓日那一支当初已因同一原因修过一次，这条把两支一起钉住。
+        lv.upsert_account('hold1', name='hold1', init_cash=2000000)
+        lv.bind_version('hold1', 'strategies/小市值/froec_traded.py',
+                        params={'weekday': int(sig_aid[1:]), 'stop_loss': 0.35,
+                                'stop_intraday': 1})
+        #      ★ 建仓价要用**当前参考价**，不能随手填 10.0 —— 填错价会触发
+        #        止损，三只全被卖掉，于是"留着不动"那一支根本没被走到，
+        #        断言就成了空转（同"两边都报错不算一致"那条）。
+        _held = [(b['code'], b['ref_price']) for b in sig['buy'][:3]]
+        for _c, _px in _held:
+            lv.add_fill('hold1', '2026-08-20', _c, 'buy', 100, _px, force_price=True)
+        s3 = lv.build_signal('hold1')
+        assert s3['is_rebalance_day'], '同一个 weekday 应当还是调仓日'
+        assert len(s3['sell']) + len(s3['hold']) == len(_held), \
+            ('卖出 %d + 持有不动 %d != 持仓 %d —— 有票在清单上凭空消失了'
+             % (len(s3['sell']), len(s3['hold']), len(_held)))
+        assert s3['hold'], \
+            ('这三只都被卖了 —— "留着不动"那一支没走到，上面那条断言等于空转。'
+             '换一组建仓价/持仓再试')
+        out.append('调仓日 卖%d+持有%d == 持仓%d'
+                   % (len(s3['sell']), len(s3['hold']), len(_held)))
+
+        # 2a3) 历史期：期数清单 / 持仓出处 / **事后复算 + 自证** ----
+        #      当前持仓来自上一个调仓日，而那一期的信号是这个功能上线【之前】
+        #      落的盘，里面没有理由 —— 只能事后复算。而复算出来的可能**不是
+        #      当时那一份**（面板会被修正），所以必须与当时存的清单对账。
+        import json as _json
+        m0 = lv.make_signal(sig_aid, force=True)          # 先落一份带理由的
+        _sp = lv.signal_path(sig_aid, m0['for_date'])
+        _raw = _json.load(open(_sp, encoding='utf-8'))
+        assert _raw.get('explain', {}).get('captured'), '落盘的信号里应带理由'
+        _hist = lv.explain_history(sig_aid)
+        assert [x for x in _hist if x['date'] == m0['for_date'] and x['has_explain']], \
+            'explain_history 没认出这一期有理由：%s' % _hist
+        # 模拟"老信号"：把 explain 抠掉
+        _raw.pop('explain')
+        with open(_sp, 'w', encoding='utf-8') as _f:
+            _json.dump(_raw, _f, ensure_ascii=False)
+        assert not [x for x in lv.explain_history(sig_aid)
+                    if x['date'] == m0['for_date'] and x['has_explain']], \
+            '抠掉 explain 之后 has_explain 还是 True —— 页面会显示一个空浮层'
+        _rc = lv.explain_recompute(sig_aid, m0['for_date'], force=True)
+        assert _rc['verified'] == 'same', \
+            ('同一份数据/版本/参数复算，结果却与当时不同 —— 复算不可信：%s'
+             % _rc['diff'])
+        assert _rc['explain'].get('captured') and _rc['explain']['pool_total'] > 0, \
+            '复算没算出候选池'
+        assert _rc['recomputed'] is True, '复算结果必须自己标出来'
+        out.append('事后复算 %s：与当时那份逐个相同（候选池 %d 只）'
+                   % (m0['for_date'], _rc['explain']['pool_total']))
+
+        # 🔴 变异测试：把当时那份信号的买入清单改掉一只，对账必须报 `differs`
+        #   —— 不然那条 `verified` 等于没写，而"复算"就会被当成"历史记录"。
+        _tamper = _json.load(open(_sp, encoding='utf-8'))
+        if _tamper.get('buy'):
+            _tamper['buy'] = _tamper['buy'][1:]           # 少一只
+            with open(_sp, 'w', encoding='utf-8') as _f:
+                _json.dump(_tamper, _f, ensure_ascii=False)
+            _rc2 = lv.explain_recompute(sig_aid, m0['for_date'], force=True)
+            assert _rc2['verified'] == 'differs' and _rc2['diff'].get('buy'), \
+                '当时那份被改过一只，对账却说"相同" —— verified 是空转的'
+            out.append('对账变异测试：改一只 -> differs')
+
+        # 🔴 复算结果的缓存必须**按绑定版本**分开 —— 重新绑定之后还返回旧的那份
+        #   是静默的（实测：给 SQL 加了组名注释、重绑之后，页面上组名死活不出来）。
+        import assay.lv.sig as _sigmod
+        _acct = lv.get_account(sig_aid)
+        _keys = [k for k in _sigmod._RECOMP if k[0] == sig_aid]
+        assert _keys and len(_keys[0]) == 3 and _keys[0][2] == _acct['code_sha256'], \
+            '复算缓存的键里没有绑定版本：%s' % (_keys[:1],)
+        _n0 = len(_sigmod._RECOMP)
+        lv.bind_version(sig_aid, 'strategies/小市值/froec.py',
+                        params={'weekday': int(sig_aid[1:])})
+        lv.explain_recompute(sig_aid, m0['for_date'])       # 不给 force
+        assert len(_sigmod._RECOMP) > _n0, \
+            '换了绑定版本，复算却命中了旧缓存 —— 页面会一直显示上一版的结果'
+        lv.bind_version(sig_aid, 'strategies/小市值/froec_traded.py',
+                        params={'weekday': int(sig_aid[1:]), 'stop_loss': 0.35,
+                                'stop_intraday': 1})        # 绑回去
+        out.append('复算缓存按绑定版本分开（重绑不会返回旧结果）')
+
+        # 🔴 复算结果必须**落盘**：只放进程内缓存的话，重启 serve.py 就没了，
+        #   人每次打开页面看到的都是"这一期没有留下选股理由"
+        #   （实测反馈：「我直接看不到上一期选股」）。
+        _side = _sigmod.explain_side_path(sig_aid, m0['for_date'])
+        assert os.path.exists(_side), '复算结果没落盘：%s' % _side
+        # 🔴 而且**不许与信号同层**：有三处在扫 signals/ 下的 *.json
+        #   （sig.latest_signal / px.latest_signal / explain_history），
+        #   同层的话它们会把这份派生物当成信号读进去，而排序取 [-1]，
+        #   出不出错**看日期字符串的运气**。
+        assert os.path.dirname(_side) != os.path.dirname(
+            _sigmod.signal_path(sig_aid, m0['for_date'])), \
+            '复算结果与信号同层 —— latest_signal 扫 *.json 会把它当信号读'
+        import assay.lv.px as _pxmod
+        _far = _sigmod.explain_side_path(sig_aid, '2099-01-01')
+        os.makedirs(os.path.dirname(_far), exist_ok=True)
+        with open(_far, 'w', encoding='utf-8') as _f:
+            _json.dump({'date': '2099-01-01'}, _f)
+        try:
+            for _fn, _nm in ((_sigmod.latest_signal, 'sig'), (_pxmod.latest_signal, 'px')):
+                assert (_fn(sig_aid) or {}).get('for_date') == m0['for_date'], \
+                    '%s.latest_signal 被旁挂的复算结果带歪了' % _nm
+            assert '2099-01-01' not in [x['date'] for x in lv.explain_history(sig_aid)], \
+                'explain_history 把旁挂当成了一期信号'
+        finally:
+            os.remove(_far)
+        # 落盘那份要能【绕开进程内缓存】被读回来 —— 不然重启后还是要重算
+        _sigmod._RECOMP.clear()
+        _back = lv.explain_recompute(sig_aid, m0['for_date'])
+        assert _back.get('recomputed') and _back.get('for_sha') == \
+            lv.get_account(sig_aid)['code_sha256'], '清了内存缓存后没能从盘上读回复算结果'
+        # 🔴 绑定版本变了就当它不存在：指标那一半可能来自当前版本，
+        #   拿旧版本算的指标显示成今天的，**不报错**
+        assert _sigmod.load_explain_side(sig_aid, m0['for_date'], 'deadbeef') is None, \
+            '换了绑定版本，旁挂的复算结果还被当成有效的'
+        out.append('复算结果落盘（%s）、重启后直接可读、换版本自动失效'
+                   % os.path.basename(os.path.dirname(_side)))
+
+        # 持仓出处：按信号买进来的票要对上那一期
+        lv.upsert_account('prov', name='prov', init_cash=2000000)
+        lv.bind_version('prov', 'strategies/小市值/froec_traded.py',
+                        params={'weekday': int(sig_aid[1:]), 'stop_loss': 0.35,
+                                'stop_intraday': 1})
+        lv.make_signal('prov', force=True)
+        _pd = lv.latest_signal('prov')['for_date']
+        for b in (lv.latest_signal('prov')['buy'] or [])[:2]:
+            lv.add_fill('prov', _pd, b['code'], 'buy', 100, b['ref_price'],
+                        force_price=True)
+        _ent = lv.entry_signals('prov')
+        assert _ent and all(v == _pd for v in _ent.values()), \
+            ('持仓的出处没对上那一期（建仓日 == 信号的 for_date）：%s' % _ent)
+        out.append('持仓出处对上建仓那一期（%s）' % _pd)
+
+        # 2b) 候选池与清单自洽
+        pool = {x['code']: x for x in _flat(e)}
+        for b in sig['buy']:
+            assert b['code'] in pool, \
+                '买入 %s 不在候选池里 —— 理由就成了空白' % b['code']
+            assert pool[b['code']]['status'] == 'buy', \
+                '%s 在池子里的状态是 %s，不是 buy' % (b['code'],
+                                                pool[b['code']]['status'])
+            assert b.get('why'), '买入 %s 没有理由' % b['code']
+        for _g in e['groups']:
+            _rk = [x['rank'] for x in _g['rows']]
+            assert _rk == sorted(_rk), '第 %d 组名次不是升序：%s' % (_g['step'], _rk)
+        # 2c) 指标必须真的带上了（新绑定的版本有指标列）
+        metr = pool[sig['buy'][0]['code']]['metrics'] if sig['buy'] else {}
+        for k in ('pb', 'floatmv', 'roe_inc'):
+            assert k in metr, '买入的票缺指标 %s（末层 SELECT 没带出来？）' % k
+        assert e['groups'][0]['metric_meta'], 'metric_meta 是空的 —— 页面不知道怎么画'
+        labs = {m['key']: m for m in e['groups'][0]['metric_meta']}
+        assert labs['floatmv']['label'] != 'floatmv', '指标标签没翻译'
+        assert labs.get('pb_rn', {}).get('kind') == 'rank', \
+            '名次列没和总数列配对，会占两列且看不懂'
+        out.append('候选池自洽：%d 只，买入的都带指标（pb/floatmv/roe_inc）'
+                   % e['pool_total'])
+
+        # 2c2) 🔴 多条查询（红利 A/B 两袖并集）：一只票可能在 A 里排 250、
+        #      在 B 里排 1，而它是**被 B 选中的**。只留第一次出现的名次会给出
+        #      一个"看着合理但解释错了"的理由（"第 250/331 名"却买了它）。
+        #      ★ monthday 直接**算**出来（下个交易日是当月第几个交易日），
+        #        不要循环试 1..21 —— 那要跑二十几次 build_signal。
+        nxt = datetime.date.fromisoformat(sig['for_date'])
+        cal = [d for d in lv.calendar_days() if (d.year, d.month) == (nxt.year, nxt.month)]
+        md = cal.index(nxt) + 1
+        lv.upsert_account('hl2', name='hl2', init_cash=1000000)
+        lv.bind_version('hl2', 'strategies/红利/红利指数增强.py',
+                        params={'div_method': 'fiscal_year', 'monthday': md})
+        s2 = lv.build_signal('hl2')
+        assert s2['is_rebalance_day'], \
+            'monthday=%d 应当让 %s 成为调仓日（月内第几个交易日算错了）' % (md, nxt)
+        e2 = s2['explain']
+        assert len([x for x in e2['steps'] if x['kind'] == 'query']) >= 2, \
+            '红利应有 A/B 两条查询'
+        # 🔴 两袖必须是**两组**，各自的排名、指标列、条件都独立。
+        #   合并成一张表实测坏三处：B 袖 6 只被去重并进 A 袖（B 组 0 行）、
+        #   B 选中的票显示成 A 的第 233/332 名、两袖指标不同导致整列空白。
+        assert e2['n_groups'] >= 2, '红利应有 A/B 两组，实得 %d' % e2['n_groups']
+        _g1, _g2 = e2['groups'][0], e2['groups'][1]
+        assert _g1['rows'] and _g2['rows'], \
+            '有一组是空的（%d / %d 行）—— 小的那组被全局截断吃掉了' \
+            % (len(_g1['rows']), len(_g2['rows']))
+        _k1 = {m['key'] for m in _g1['metric_meta']}
+        _k2 = {m['key'] for m in _g2['metric_meta']}
+        assert _k1 != _k2, '两组的指标列一样？两袖本来用的是不同指标'
+        # 🔴 落盘截断时"一定保留"的不只是买卖持有：**策略点过名的**（备选/
+        #   缓冲区/目标池）和**被剔除的**也要留 —— 只按名次切会把排在 40 名的
+        #   备选切掉，而那恰恰是"差一点就选上"的那些。
+        _bk = [x for x in _g1['rows'] if 'backup_list' in (x.get('in_sets') or [])]
+        assert _bk, 'A 组里一个备选都没留下 —— 被名次截断切掉了？'
+        for _g in (_g1, _g2):
+            for _r in _g['rows']:
+                assert _r['metrics'], \
+                    '第 %d 组有行没有指标 —— 合并列会让整列空白' % _g['step']
+            assert _g.get('sql') and _g.get('args'), \
+                '第 %d 组没有条件（SQL / 入参）—— "策略的条件有哪些"就答不上' % _g['step']
+        _codes2 = {x['code'] for x in _g2['rows']}
+        both = [x for x in _g1['rows'] if x['code'] in _codes2]
+        assert both, '两袖并集里应有票同时出现在 A 与 B'
+        pick2 = {b['code']: b['why'] for b in s2['buy']}
+        cross = [c for c in pick2 if c in {x['code'] for x in both}]
+        if cross:
+            w = pick2[cross[0]]
+            assert w.count('组第') >= 2, \
+                ('%s 同时在两组里，理由必须把两组的名次都带上，实得 %s'
+                 % (cross[0], w))
+            out.append('两袖分组：%s 的理由带上了两组名次（%s）' % (cross[0], w))
+        # 指标列也要合并过来（B 袖的 totalmv/inc_* 与 A 袖的 dy/beta 同表）
+        assert {'dy', 'beta'} <= _k1 and {'totalmv', 'inc_return'} <= _k2, \
+            'A 袖该有 dy/beta、B 袖该有 totalmv/净资产收益率：%s / %s' \
+            % (sorted(_k1), sorted(_k2))
+        for _g in (_g1, _g2):
+            _rm = [m for m in _g['metric_meta'] if m['kind'] == 'rank']
+            assert _rm, '第 %d 组没有名次列' % _g['step']
+            assert set(_rm[0]['of']) & {'bn', 'n'}, \
+                ('名次列要与"总数"列配对，否则会留下一列没人认领的裸数字：%s'
+                 % _rm)
+        # 组名来自 SQL 首行注释（注释改不了行为，却让"这是哪一袖"看得见）
+        assert '袖A' in (_g1.get('sql_head') or ''), \
+            'A 组没有名字（SQL 首行注释）：%r' % _g1.get('sql_head')
+        assert '袖B' in (_g2.get('sql_head') or ''), \
+            'B 组没有名字：%r' % _g2.get('sql_head')
+        out.append('两组各自的条件与指标齐全（%s / %s）'
+                   % (_g1['sql_head'][:12], _g2['sql_head'][:12]))
+
+        # 2d) 步骤里要有"这一步进多少出多少"，且 20 日窗口是【20 日】
+        hl_step = [x for x in e['steps'] if x['kind'] == 'had_limit_up']
+        if hl_step:
+            st = hl_step[0]
+            span = (datetime.date.fromisoformat(st['args']['end'])
+                    - datetime.date.fromisoformat(st['args']['start'])).days
+            assert span < 60, \
+                ('20 日涨停黑名单的窗口是 %d 天（%s ~ %s）—— nth_prev_day 又落回'
+                 '面板第一天了' % (span, st['args']['start'], st['args']['end']))
+            out.append('涨停黑名单窗口 %d 天（不是 10 年）' % span)
+    finally:
+        lv.LIVE = old_live
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(out)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
@@ -6646,7 +7445,7 @@ def t_page_inventory():
     #     分两处写的话，"新文件没被 index.html 引用"或"断言没扫到它"
     #     都不会报错，只是那部分功能悄悄不在保护范围内。
     DOMS = ('app', 'home', 'live', 'live-fee', 'live-trade', 'live-strat',
-            'runs', 'run-detail', 'sync')
+            'live-why', 'runs', 'run-detail', 'sync')
     for d in DOMS:
         fp = os.path.join(web, 'views', d + '.js')
         assert os.path.isfile(fp), \
@@ -6736,6 +7535,19 @@ def t_page_inventory():
             assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
     # 流水是独立页，单独核（它的路由带参数）
     assert 'showFills' in defined and '/fills' in js, '成交流水独立页不见了'
+    # 选股理由也是独立页（同成交流水：会越来越长 -> 服务端分页）
+    assert 'showWhy' in defined and '/why' in js, '选股理由独立页不见了'
+    # 🔴 后台复算时页面必须**说出来**并自己回来看：不说的话那一段就是一句
+    #   "没有理由"，人会当成功能坏了；不轮询的话它会一直停在"正在复算…"，
+    #   **两种都不报错**。
+    # 🔴 断言要匹配**完整条件**，不能只查标识符在不在：`explain_pending`
+    #   在轮询那行也出现，只查名字的话把 `if(p.explain_pending){` 改成
+    #   `if(false){` 照样全绿（同 prune_runs 的 `h.pruned` 那条）。
+    _js0 = re.sub(r'\s+', '', js)
+    assert 'if(p.explain_pending){' in _js0 and 'whypend' in js, \
+        '选股理由页没有"正在事后复算"这一态 —— 历史那几期会显示成"没有理由"'
+    assert re.search(r'explain_pending\)[\s\S]{0,400}?setTimeout', js), \
+        '有后台复算在跑却不自动回来看 —— 页面会一直停在"正在复算…"'
 
     # 用例总数 —— 删代码时把整条用例切掉过一次
     n = len(CASES)
