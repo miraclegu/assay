@@ -30,7 +30,8 @@ function schedBlock(sc, ro){
       <td class="tx"><b>${name}</b><div class="lvwhy">${why}</div></td>
       <td><input class="syf" data-k="${k}" data-f="from" value="${esc(d.from||'')}"
             size="5" ${ro?'disabled':''}></td>
-      <td><input class="syf" data-k="${k}" data-f="to" value="${esc(d.to||'')}"
+      <td>${i.wrap?'<span class="lvwhy">次日</span> ':''}<input class="syf"
+            data-k="${k}" data-f="to" value="${esc(d.to||'')}"
             size="5" ${ro?'disabled':''}></td>
       <td><input class="syf" data-k="${k}" data-f="every" value="${d.every||''}"
             size="4" ${ro?'disabled':''}> 分</td>
@@ -44,6 +45,11 @@ function schedBlock(sc, ro){
   return `<div class="lvsec"><h3>定时窗口
       <span class="lvwhy">判据是「齐没齐」而不是「到点没到点」——
         窗口内每隔一段问一次，齐了就秒退</span></h3>
+    ${Object.keys(ins).some(k=>ins[k].wrap)?`<div class="hint">
+      标「次日」的是**跨午夜**窗口（16:00 一直开到次日 09:20）——
+      launchd 只认「几点几分」、每天都触发，所以跨天对它不是特例。
+      非交易日那些点位由 tick_daily.py 的判据①拦掉（不是交易日就什么都不做）。
+      </div>`:''}
     ${drift.length?`<div class="lvwarn"><b>🔴 配置与实际装上的 timer 不一致</b>
       （${esc(drift.join('、'))}）—— <b>定时跑的还是旧窗口</b>。
       点「保存并重装」让它生效。</div>`:''}
@@ -220,7 +226,8 @@ async function showSync(){
         const ins=r.installed||{};
         m.className='lvmsg ok';
         m.textContent='已生效：'+Object.keys(ins).map(k=>
-          k+' '+ins[k].first+'~'+ins[k].last+' 共 '+ins[k].got_slots+' 个点位'
+          k+' '+ins[k].first+'~'+(ins[k].wrap?'次日 ':'')+ins[k].last
+          +' 共 '+ins[k].got_slots+' 个点位'
         ).join('；');
       }
       /* ★ 延迟刷新：立刻 showSync() 会把这条反馈连同 #syschedmsg 一起

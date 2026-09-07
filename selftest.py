@@ -4995,6 +4995,9 @@ def t_setup_tdx():
     assert m._times('07:00,08:00,09:00') == [(7, 0), (8, 0), (9, 0)], \
         '_times 解析不对'
     # ---- 数据同步改成【轮询】：判据是"齐没齐"而不是"到点没到点" ----
+    assert m.DEFAULT_SCHED['tick']['from'] == '16:00', \
+        ('信号重算的窗口要从 16:00 开始 —— 公告集中在 16:00~22:00，'
+         '而人常在晚上手动导聚宽增量，只开早上的话要等到 07:00 才算得进去')
     _sy_d = m.DEFAULT_SCHED['sync']
     rt = m._range_times(_sy_d['from'], _sy_d['to'], _sy_d['every'])
     assert len(rt) == 25 and rt[0] == (16, 0) and rt[-1] == (20, 0), \
@@ -6922,6 +6925,22 @@ def t_schedule():
          '等于没覆盖，而配置上写着管到 09:20。实得 %s' % t)
     assert m._range_times('18:10', '18:10', 5) == [(18, 10)], \
         '单点位（老命令 --at 18:10）要仍然可用'
+    # ---- ①b 跨午夜：16:00 ~ 次日 09:20 ----
+    #   🔴 launchd 的 StartCalendarInterval 只是一组 (Hour, Minute)、
+    #     每天都触发，所以跨天对它不是特例 —— 点位要**回绕**过 00:00。
+    assert m._span('16:00', '09:20') == 1040, \
+        '跨午夜的跨度算错了（16:00 到次日 09:20 = 17 小时 20 分）'
+    assert m._span('16:00', '20:00') == 240, '不跨午夜的跨度算错了'
+    wrap = m._range_times('16:00', '09:20', 60)
+    assert len(wrap) == 19, '16:00~次日09:20 每 60 分该是 19 个点位，实得 %d' \
+        % len(wrap)
+    assert wrap[0] == (16, 0) and wrap[-1] == (9, 20), \
+        '跨午夜的首尾点位不对：%s -> %s' % (wrap[0], wrap[-1])
+    assert (0, 0) in wrap and (23, 0) in wrap and (9, 0) in wrap, \
+        '跨午夜的点位没有回绕过 00:00：%s' % (wrap,)
+    assert len(set(wrap)) == len(wrap), '跨午夜的点位有重复：%s' % (wrap,)
+    assert all(0 <= h <= 23 and 0 <= mm <= 59 for h, mm in wrap), \
+        '跨午夜算出了非法的时刻（小时越界）：%s' % (wrap,)
 
     # ---- ② 🔴 非法配置必须被拒，而不是装出一个不跑的 timer ----
     #   launchd 对**空的** StartCalendarInterval 不报错，只是永远不触发 ——
@@ -6935,8 +6954,15 @@ def t_schedule():
     ok, why = m.check_schedule(
         dict(good, sync={'from': '16:00', 'to': '20:00', 'every': 5}))
     assert ok, '每 5 分钟（49 个点位）被误拒了：%s' % why
+    #   ★ 跨午夜要放行（信号重算的默认窗口就是 16:00 ~ 次日 09:20）
+    for WRAP_OK in ({'from': '16:00', 'to': '09:20', 'every': 60},
+                    {'from': '20:00', 'to': '16:00', 'every': 60}):
+        ok, why = m.check_schedule(dict(good, tick=WRAP_OK))
+        assert ok, '跨午夜窗口 %s 被拒了：%s' % (WRAP_OK, why)
     BAD = [
-        ({'from': '20:00', 'to': '16:00', 'every': 10}, '起点晚于终点'),
+        #   ★ 原来这里有一条 `20:00~16:00 -> 起点晚于终点` ——
+        #     它现在是**合法的跨午夜窗口**，断言跟着改了（见下面的 WRAP_OK）。
+        ({'from': '16:00', 'to': '09:20', 'every': 5}, '跨午夜时点位数超上限'),
         ({'from': '16:00', 'to': '20:00', 'every': 0}, 'every=0'),
         ({'from': '16:00', 'to': '20:00', 'every': 1}, 'every 低于下限'),
         ({'from': '16:00', 'to': '20:00', 'every': 999}, 'every 超上限'),
@@ -6960,12 +6986,20 @@ def t_schedule():
         assert k in sc, 'show_schedule 少了 %s' % k
     for key in ('sync', 'tick'):
         d = sc['installed'][key]
-        for f in ('want_slots', 'got_slots', 'match', 'loaded', 'label'):
+        for f in ('want_slots', 'got_slots', 'match', 'loaded', 'label',
+                  'wrap'):
+            #   🔴 `wrap`：**分不出"跨午夜"和"填反了"**，所以判据不在
+            #     校验里而在显示上 —— 页面写成「16:00 ~ 次日 09:20」，
+            #     填反了那个"次日"和点位数会当场看出来。
             assert f in d, 'installed.%s 少了 %s' % (key, f)
         assert d['match'] is not False, \
             ('%s 的配置与实际装上的 timer 不一致（want %s / got %s）—— '
              '跑一次 `python3 datalake/setup_tdx.py --install-timer`'
              % (key, d['want_slots'], d['got_slots']))
+    assert sc['installed']['tick']['wrap'] is True, \
+        '信号重算的默认窗口是跨午夜的（16:00 ~ 次日 09:20），wrap 该为 True'
+    assert sc['installed']['sync']['wrap'] is False, \
+        '数据同步的窗口不跨午夜，wrap 该为 False'
     #   🔴 上面那条只能抓"当前恰好不一致"，**抓不到判据本身坏了**
     #     （把 match 写死成 True 时它照样绿 —— 变异测试抓到过）。
     #     所以再注入一份**故意与已装 plist 不同**的配置：match 必须翻成 False。
@@ -7027,13 +7061,36 @@ def t_schedule():
         ('页面没显示"实际装上的点位/是否一致" —— 只回显配置的话，'
          '"改了但没重装"就看不出来')
     assert '配置与实际装上的 timer 不一致' in js, '不一致要显红说清'
+    assert 'i.wrap' in js and '次日' in js, \
+        ('页面要把跨午夜写成「16:00 ~ **次日** 09:20」—— '
+         '光写 16:00~09:20 看着像填反了')
+    #   🔴 又不能用"函数体里出现过「次日」" —— 我自己写的注释里就有它
+    #     （第 5 次踩这个坑）。走 ast 只看**字符串常量**。
+    _dl = open(os.path.join(os.path.dirname(here), 'datalake',
+                            'setup_tdx.py'), encoding='utf-8').read()
+    _it = next((n for n in _ast.walk(_ast.parse(_dl))
+                if isinstance(n, _ast.FunctionDef)
+                and n.name == 'install_timer'), None)
+    assert _it is not None, 'install_timer 不见了'
+    _its = {n.value for n in _ast.walk(_it)
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str)}
+    assert any('次日' in x for x in _its), \
+        '命令行装 timer 的回显也要说「次日」（跨午夜时）'
+    #   ★ 默认窗口的定案值也在这条用例里钉住（它是"窗口"的一部分）
+    assert m.DEFAULT_SCHED['tick']['from'] == '16:00', \
+        ('信号重算的窗口要从 16:00 开始 —— 公告集中在 16:00~22:00，'
+         '而人常在晚上手动导聚宽增量，只开早上的话要等到 07:00 才算得进去')
     assert 'setTimeout(showSync' in flat.replace(' ', ''), \
         ('保存后要**延迟**刷新 —— 立刻 showSync() 会把反馈连同 #syschedmsg '
          '一起重渲染掉，点了按钮什么都看不到（实测踩过）')
     return ('点位生成含补终点（07:00~09:20/60 -> 4 个）与单点位兼容；'
+            '跨午夜回绕正确（16:00~次日09:20/60 -> 19 个点位，含 00:00~09:00 '
+            '且小时不越界）且校验放行、页面与命令行都标「次日」'
+            '（分不出"跨午夜"与"填反了"，所以判据在显示上不在校验里）；'
             '%d 种非法配置全被拒（空的 StartCalendarInterval 会让 launchd '
-            '永不触发且不报错）；show_schedule 给出 want/got/match 且当前一致；'
-            'GET+POST 都挂且 POST 存完立即重装；页面显示实际点位并延迟刷新'
+            '永不触发且不报错）；show_schedule 给出 want/got/match/wrap '
+            '且当前一致；GET+POST 都挂且 POST 存完立即重装；'
+            '页面显示实际点位并延迟刷新'
             % (len(BAD) + 3))
 
 
