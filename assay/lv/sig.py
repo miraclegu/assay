@@ -16,6 +16,7 @@ from ..engine import Engine
 from ..feed import PanelFeed
 
 from . import base as _base
+from . import explain as _explain
 from . import pos as _pos
 from . import ver as _ver
 
@@ -250,23 +251,50 @@ def _twopass(codes, px, money):
 
 
 
-def build_signal(aid, datalake=None):
-    """算出【下一个交易日】的待办。返回可直接落盘的 dict。"""
-    acct = _base.get_account(aid)
-    if not acct.get('code_sha256'):
-        raise _base.LiveError('账户 %s 还没绑定策略版本' % aid)
-    book = _pos.fifo_lots(_base.fills(aid))
-    money = _pos.cash(aid)
+def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
+    """算出【下一个交易日】的待办。返回可直接落盘的 dict。
 
-    today = datetime.date.today().isoformat()
+    ## 三个可选参数只为【复算历史某一期】（`explain_recompute`）
+
+    `asof` = 用哪一天的收盘数据（把面板截到那天）；`code_sha` / `params` =
+    用当时那个版本与参数。三个都从那一期的信号文件里取 —— 信号里本来就
+    存着 `data_asof` / `code_sha256` / `params`，所以复算是**照当时的账**重跑，
+    不是照今天的账。
+
+    🔴 复算出来的东西**不许写回信号文件**。信号是 append-only 的证据：
+      「当时说了什么」。把今天算的东西塞进去就是在篡改记录 ——
+      而面板会被修正（本项目修过 volume 74,952 行、复权因子），
+      所以复算结果**可能与当时不同**。判据不靠猜：`explain_recompute` 会把
+      复算出的买/卖/持有与信号里存的逐个比，不一致就明说"这不是当时那份"。
+
+    ★ 持仓与现金也要按 `t1` 收盘后的状态取（`lots_asof` / `cash_asof`），
+      不能用今天的 —— 09-01 那期是建仓日，当天买入的票在**发信号那一刻
+      还不存在**。用今天的持仓复算，会得出"它当时就持有这 10 只"的荒唐结论。
+    """
+    acct = _base.get_account(aid)
+    sha = code_sha or acct.get('code_sha256')
+    if not sha:
+        raise _base.LiveError('账户 %s 还没绑定策略版本' % aid)
+    rows0 = _base.fills(aid)
+
+    end = _base._d(asof).isoformat() if asof else datetime.date.today().isoformat()
     feed = PanelFeed(acct.get('warmup_start') or _base.DEFAULT_WARMUP_START,
-                     today, root=datalake)
+                     end, root=datalake)
     t1 = feed.trading_days[-1]                    # 最新数据日
     t0 = feed.prev_trading_day(t1)
     t = _base.next_trading_day(t1)                      # 下一个交易日；拿不到就报错
 
-    mod, full_sha = _load_snapshot(aid, acct['code_sha256'])
-    eng = Engine(mod, feed, cash=money, cost=Cost(), params=acct.get('params') or {})
+    if asof:
+        book = _pos.lots_asof(rows0, t1)
+        money = _pos.cash_asof(float(acct.get('init_cash') or 0), rows0, t1,
+                               _pos.cashflows(aid))
+    else:
+        book = _pos.fifo_lots(rows0)
+        money = _pos.cash(aid)
+
+    mod, full_sha = _load_snapshot(aid, sha)
+    eng = Engine(mod, feed, cash=money, cost=Cost(),
+                 params=(acct.get('params') if params is None else params) or {})
     rb = RecordingBroker(eng.pf, feed, eng.cost)
     eng.broker = rb
     # ★ Context 里存的字段名是 `_broker`。写 ctx.broker 只会凭空多出一个
@@ -274,11 +302,14 @@ def build_signal(aid, datalake=None):
     #   于是 context.tradable() 会拿 DATE 'None' 去查行情。
     #   这类"设了个没人读的属性"是静默失败，必须直接写 _broker。
     eng.ctx._broker = rb
+    # 选股理由的记账代理。**只记不改**：ctx.data 换成透传的 RecordingFeed、
+    # filter_tradable 换成记账包装，判定一律还是原来那套（见 lv/explain.py）。
+    rec = _explain.attach(eng, rb)
     eng._boot()
     try:
         _extend_ordinals(eng, feed, _base.calendar_days())
         # --- 1) 重放 warmup：建起逐日累积的路径状态（黑名单/冷静期/峰值）---
-        rows = _base.fills(aid)
+        rows = rows0
         init = float(acct.get('init_cash') or 0)
         warm = feed.trading_days[-WARMUP_DAYS:]
         _replay(eng, feed, rows, init, warm[:-1], _pos.cashflows(aid))
@@ -290,14 +321,20 @@ def build_signal(aid, datalake=None):
         eng.pf.cash = money
         rb.start_day(t1)                          # 刷新 last_price / 处理当日除权
         n0 = len(rb.orders)
+        # ★ 记账从这里才开始 —— 前面 warmup 重放了 30 天，每天都记的话步骤表里
+        #   会有几百条无关调用，而要看的是最后这两轮（离场检查 + 调仓）。
+        rec.arm('exit')
         exit_orders = _run_tasks(eng, feed, t1, {'d'})
         # --- 3) 调仓检查：下一个交易日是不是调仓日 ---
+        rec.arm('rebalance')
         rebal_orders = _run_tasks(eng, feed, t, {'w', 'm'}, data_day=t1)
+        rec.disarm()
         is_rebal = bool(rebal_orders)
         # --- 4) 未来调仓日：纯日历，可以提前很久算出来 ---
         cal_days = _base.calendar_days()
         upcoming = upcoming_rebalance(eng, feed, t, cal_days)
         held_after = dict(eng.pf.positions)        # RecordingBroker 不成交，等于真实持仓
+        g_params, g_sets = _explain.g_state(eng)
     finally:
         api._unbind()
 
@@ -321,10 +358,15 @@ def build_signal(aid, datalake=None):
 
     # 卖出腾出的现金按 T-1 收盘估（真实成交价当然不同，这里只为算买入股数）
     freed = sum(sells[c] * (px.get(c, (0, 0, 0))[2] or 0) for c in sells)
-    # ★ 非调仓日 targets 是空的 —— 这时"持有不动"必须是【全部持仓减去要卖的】，
-    #   照 targets 算会显示成 0 只，看着像空仓。
-    keep = ([c for c in targets if c in book and c not in sells] if is_rebal
-            else [c for c in book if c not in sells])
+    # 🔴 "持有不动"就是【全部持仓 − 要卖的】，**两种日子同一个定义**。
+    #   原来调仓日走的是「targets ∩ 持仓」那一支，而 `targets` 是从**委托**
+    #   反推的 —— 策略对"留着不动"的持仓根本不下委托（froec 的 _do_buy 只买
+    #   `need` = 目标 − 已持有），于是那些票在 targets 里没有，
+    #   在页面上**既不在卖出也不在持有不动**，凭空消失。
+    #   实测（真实 froec 的 10 只持仓 + 调仓日）：卖 2 只，另外 8 只哪儿都不在。
+    #   ★ 非调仓日那一支当初已经因为同一个原因修过一次（targets 是空的，
+    #     照它算会显示成空仓）—— 修的是同一件事的另一半，这次一起收干净。
+    keep = [c for c in book if c not in sells]
     buys = [c for c in targets if c not in book or c in sells]
     buy_px = {c: (px.get(c, (0, 0, 0))[2] or 0) for c in buys}
     bad_px = [c for c in buys if not buy_px[c]]
@@ -342,6 +384,40 @@ def build_signal(aid, datalake=None):
     if (datetime.date.today() - t1).days > 4:
         warn.append('最新数据日是 %s，距今 %d 天 —— datalake 可能没刷新'
                     % (t1, (datetime.date.today() - t1).days))
+
+    # ---- 选股理由：把记下来的过程拼成「候选池 + 每只票为什么」----
+    # ★ 状态只从三个**事实**推：买了 / 持有着 / 卖了。不从"排名够不够"推
+    #   —— 那是策略的规则，复述一遍就等于又抄了一份（见 lv/explain.py）。
+    expl = _explain.assemble(rec, 'rebalance', picked=list(plan), held=keep,
+                             sold=list(sells), names=names,
+                             params=g_params, g_sets=g_sets)
+    # ★ 候选池里大部分票不在买卖持有清单里，`names` 里没有它们 —— 不补的话
+    #   表上从第 11 行起「名称」列全是代码，看着像数据缺失。一次查完（几百个
+    #   代码一条 SQL），不要每行去查。
+    _need = sorted({e['code'] for g in (expl.get('groups') or [])
+                    for e in (g.get('rows') or []) if not e.get('name')})
+    if _need:
+        _nm = _names(feed, _need, t1)
+        for g in expl['groups']:
+            for e in g['rows']:
+                if not e.get('name'):
+                    e['name'] = _nm.get(e['code'], '')
+    # ★ 一只票可能在多组里各有一行（红利 A/B 两袖）—— 理由要把两组的名次
+    #   都带上，只报第一组会给出"第 245/332 名"这种看着莫名其妙的解释。
+    why_of = {}
+    for _g in (expl.get('groups') or []):
+        for _e in _g.get('rows') or []:
+            why_of.setdefault(_e['code'], []).append(_e)
+
+    def _why(c):
+        e = why_of.get(c)
+        if e:
+            return _explain.why_line(e, expl.get('n_groups') or 1)
+        # ★ "不在候选池里"本身就是理由（调仓换出的票几乎都是这种）——
+        #   返回空串会让页面上那一格空着，看着像没算出来。
+        if expl.get('captured') and expl.get('pool_total'):
+            return '不在本期候选池'
+        return ''
 
     nxt_rb = next((x for x in upcoming if x['is_rebal']), None)
     if is_rebal:
@@ -361,21 +437,30 @@ def build_signal(aid, datalake=None):
         'days_until_rebalance': days_until,
         'account': aid, 'for_date': t.isoformat(), 'data_asof': t1.isoformat(),
         'built_at': _base._now(), 'code_sha256': full_sha, 'code_sha': full_sha[:8],
-        'params': acct.get('params') or {},
+        'params': (acct.get('params') if params is None else params) or {},
+        # ★ 复算出来的东西必须**自己标出来**：它与当时那份可能不同
+        #   （面板被修正过），而两份长得一模一样。
+        'recomputed': bool(asof),
         'is_rebalance_day': is_rebal,
         'cash': round(money, 2), 'freed_est': round(freed, 2),
         'left_est': round(left, 2),
         'sell': [{'code': c, 'name': names.get(c, ''), 'shares': sells[c],
-                  'reason': reason[c],
+                  'reason': reason[c], 'why': _why(c),
                   'ref_price': round(px.get(c, (0, 0, 0))[2] or 0, 2)}
                  for c in sorted(sells)],
         'buy': [{'code': c, 'name': names.get(c, ''), 'shares': plan[c][0],
                  'limit': plan[c][1], 'amount': round(plan[c][0] * plan[c][1], 2),
-                 'ref_price': round(buy_px[c], 2)}
+                 'ref_price': round(buy_px[c], 2), 'why': _why(c)}
                 for c in sorted(plan, key=lambda x: -plan[x][0] * plan[x][1])],
         'hold': [{'code': c, 'name': names.get(c, ''),
-                  'shares': sum(l['shares'] for l in book[c])} for c in sorted(keep)],
+                  'shares': sum(l['shares'] for l in book[c]),
+                  'why': _why(c)} for c in sorted(keep)],
         'no_price': bad_px,
+        # ★ 选股理由**与信号存在一起**：信号是每天一个 JSON、append-only 的证据，
+        #   理由不跟着存的话，事后复盘只能看到"当时买了这几只"，
+        #   而"当时为什么"要重跑策略才知道 —— 那时数据已经变了，重跑得出的
+        #   理由**不是当时那个**（面板每天在长，as-of 的口径也会变）。
+        'explain': expl,
         'data_fingerprint': fp,
         'held_codes': sorted(held_after),
     }
@@ -410,6 +495,41 @@ def load_signal(aid, for_date):
 
 
 
+def explain_side_path(aid, for_date):
+    """事后复算出来的选股理由，落在 `signals/_explain/<date>.json`。
+
+    🔴 **不写回信号文件**：那是 append-only 的证据（当时说了什么）。
+      复算是**派生物**（现在照当时的账重算一遍），两者必须分开存 ——
+      混在一起之后"这份理由是当时留下的还是后来算的"就分不出来了。
+    ★ 但也**必须落盘**：只放进程内缓存的话，重启 serve.py 就没了，
+      人每次打开页面都要点一次"复算"，而**页面上看着就是"没有理由"**
+      （实测用户反馈：「我直接看不到上一期选股」）。
+    🔴 **放【子目录】而不是与信号同名同层**（`<date>.explain.json`）：
+      有三处在扫 `signals/` 下的 `*.json`（`sig.latest_signal` /
+      `px.latest_signal` / `explain_history`），同层的话它们会把这份派生物
+      当成信号读进去 —— `latest_signal` 取 `sorted(...)[-1]`，
+      **哪个排最后取决于日期字符串**，也就是说它会不会出错**看运气**。
+      挪进子目录之后 `os.listdir` 只看一层，结构上就撞不上。
+    """
+    return os.path.join(_base.acct_dir(aid), 'signals', '_explain', '%s.json' % for_date)
+
+
+
+def load_explain_side(aid, for_date, sha=None):
+    """读旁挂的复算结果。**绑定版本变了就当没有**。
+
+    复算里"指标"那一半可能来自账户**当前绑定**的版本（`metrics_from`），
+    所以版本一换，这份就不是当前该显示的那份了 —— 返回 None 让它重算。
+    不校验的话页面上是**旧版本算出来的指标**，而它不报错。
+    """
+    d = _base._read_json(explain_side_path(aid, for_date), None)
+    if not d:
+        return None
+    sha = sha if sha is not None else (_base.get_account(aid) or {}).get('code_sha256')
+    return d if d.get('for_sha') == sha else None
+
+
+
 def latest_signal(aid):
     d = os.path.join(_base.acct_dir(aid), 'signals')
     if not os.path.isdir(d):
@@ -419,20 +539,263 @@ def latest_signal(aid):
 
 
 
+def rev_path(aid, for_date, n):
+    """被覆盖掉的那一版存这儿。**append-only：已有的 rev 永不重写。**"""
+    return os.path.join(_base.acct_dir(aid), 'signals',
+                        '%s.rev%d.json' % (for_date, n))
+
+
+def _lst(sig, k):
+    """把 buy/sell/hold 归成可比较的集合 —— 只看【决策】，不看时间戳。"""
+    out = set()
+    for x in (sig.get(k) or []):
+        if isinstance(x, dict):
+            out.add((x.get('code'), x.get('shares')))
+        else:
+            out.add((str(x), None))
+    return out
+
+
+def signal_diff(old, new):
+    """两版信号的差异。`changed` 只看决策清单，不看指纹与时间。
+
+    ★ 数据变了但决策没变是**常态**（多数公告不影响选股结果），
+      那种情况不该产生"重算过"的噪声 —— 见 make_signal 里的分支。
+    """
+    d = {'changed': False, 'data_fp_changed': False}
+    for k in ('buy', 'sell', 'hold'):
+        a, b = _lst(old, k), _lst(new, k)
+        add = sorted(c for c, _s in b - a)
+        rem = sorted(c for c, _s in a - b)
+        if add or rem:
+            d['changed'] = True
+        d[k + '_added'] = add
+        d[k + '_removed'] = rem
+    fa = (old.get('data_fingerprint') or {})
+    fb = (new.get('data_fingerprint') or {})
+    fa = fa.get('overall') if isinstance(fa, dict) else fa
+    fb = fb.get('overall') if isinstance(fb, dict) else fb
+    d['data_fp_changed'] = (fa != fb)
+    d['data_fp_old'], d['data_fp_new'] = fa, fb
+    return d
+
+
 def make_signal(aid, datalake=None, force=False):
-    """算并落盘。已经算过就直接返回，除非 force。"""
+    """算并落盘。已经算过就直接返回，除非 force。
+
+    🔴 **force 重算时，结果与旧版不同就必须留痕再覆盖。**
+      A 股公告集中在 16:00~22:00，而其中「实施风险警示(ST)」「停牌」这类是
+      **次日就生效**的 —— T-1 晚 20:00 公告，T 日开盘简称就变 ST、
+      涨跌幅限制变 5%。所以早上重算出来的清单可能与昨晚那份不一样。
+      而人**可能已经按昨晚那份准备好委托了** —— 静默覆盖等于让他拿着
+      一份已经作废的清单去下单。所以：
+        · 旧版归档成 `<date>.rev<N>.json`（append-only，已有的 rev 不重写）
+        · 主文件记 `revisions`，页面显红说清差异
+      ★ 数据变了但**决策没变**时只记一次 `recomputed_at`，不产生 revision
+        —— 否则每天几条"重算过"的噪声，人就不看这个提示了
+        （同"假告警看多了就不看告警"）。
+    """
     try:
         sig = build_signal(aid, datalake=datalake)
     except _base.LiveError as e:
         return {'account': aid, 'error': str(e), 'built_at': _base._now()}
     p = signal_path(aid, sig['for_date'])
-    if os.path.exists(p) and not force:
-        old = _base._read_json(p, None)
-        if old:
-            return old
+    old = _base._read_json(p, None) if os.path.exists(p) else None
+    if old and not force:
+        return old
+    if old:
+        d = signal_diff(old, sig)
+        revs = list(old.get('revisions') or [])
+        if d['changed']:
+            n = 1 + max([r.get('rev', 0) for r in revs] or [0])
+            rp = rev_path(aid, sig['for_date'], n)
+            if not os.path.exists(rp):          # append-only
+                _base._atomic_write(rp, json.dumps(
+                    old, ensure_ascii=False, indent=1, sort_keys=True))
+            revs.append({'rev': n, 'built_at': old.get('built_at'),
+                         'replaced_at': _base._now(),
+                         'archived': os.path.basename(rp), 'diff': d})
+        else:
+            sig['recomputed_at'] = list(old.get('recomputed_at') or []) \
+                + [_base._now()]
+        sig['revisions'] = revs
     _base._atomic_write(p, json.dumps(sig, ensure_ascii=False, indent=1, sort_keys=True))
     return sig
 
+
+
+def explain_history(aid):
+    """这个账户有哪些期的信号、哪些期有选股理由。
+
+    页面用它做期数切换。**老信号没有 `explain`** —— 那个功能是 2026-09-05 才加的，
+    在那之前落盘的信号里没有理由。这里如实标出 `has_explain`，
+    让页面能给出"这一期没有留下理由，可以事后复算"这句话，
+    而不是显示一个空浮层（空白会被读成"功能坏了"）。
+    """
+    d = os.path.join(_base.acct_dir(aid), 'signals')
+    out = []
+    if not os.path.isdir(d):
+        return out
+    for f in sorted(x for x in os.listdir(d) if x.endswith('.json')):
+        sg = _base._read_json(os.path.join(d, f), None) or {}
+        if not sg.get('for_date'):
+            continue
+        e = sg.get('explain') or {}
+        src = 'signal' if e.get('captured') else None
+        if not src:
+            side = load_explain_side(aid, sg['for_date'])
+            if side:
+                e, src = (side.get('explain') or {}), 'recomputed'
+        out.append({
+            'date': sg['for_date'], 'data_asof': sg.get('data_asof'),
+            'is_rebalance': bool(sg.get('is_rebalance_day')),
+            'has_explain': bool(src),
+            'explain_from': src,
+            'pool_total': e.get('pool_total') or 0,
+            'n_buy': len(sg.get('buy') or []), 'n_sell': len(sg.get('sell') or []),
+            'n_hold': len(sg.get('hold') or []),
+            'code_sha': sg.get('code_sha'),
+        })
+    return out
+
+
+def entry_signals(aid, book=None):
+    """每只持仓是【哪一期】买进来的：{code: 那一期的 for_date}。
+
+    ★ 判据是**建仓日**（FIFO 第一批的成交日），而信号的 `for_date` 就是
+      那个交易日 —— 信号说的是"下一个交易日的待办"，你照着它在那天成交。
+      所以直接按日期对上即可，不用再猜。
+    ★ 对不上的（手工买的、信号之外的成交）返回 None，**不硬凑一期** ——
+      给一个错的出处比没有出处更糟。
+    """
+    book = book if book is not None else _pos.fifo_lots(_base.fills(aid))
+    have = {x['date'] for x in explain_history(aid)}
+    out = {}
+    for c, lots in book.items():
+        if not lots:
+            continue
+        d = min(_base._d(l['date']) for l in lots).isoformat()
+        out[c] = d if d in have else None
+    return out
+
+
+_RECOMP = {}          # 进程内缓存：(aid, date) -> 复算结果。**不落盘**
+
+
+def explain_recompute(aid, date, datalake=None, force=False):
+    """事后复算某一期的选股理由，并**自证它是不是当时那一份**。
+
+    做法：从那一期的信号里取回 `data_asof` / `code_sha256` / `params`，
+    照当时的账重跑一遍（面板截到 `data_asof`、持仓与现金按那天收盘后的状态、
+    版本与参数用当时那套）。
+
+    🔴 **然后必须验一次**：复算出的买/卖/持有与信号里存的逐个比 ——
+      一致（`same`）才说明面板没被动过、这份理由就是当时那份；
+      不一致（`differs`）说明面板被修正过或别的什么变了，
+      **那这份理由不是当时的**，页面要照实说，不能拿它当历史证据。
+      本项目修过 volume 74,952 行、复权因子 —— "数据后来变了"不是假想。
+
+    ★ 结果**不写回信号文件**（那是 append-only 的证据），而是落在旁边的
+      `<date>.explain.json`（见 `explain_side_path`）：进程内缓存活不过重启，
+      而这一期的理由是**看历史必看的东西**，不该每次打开页面都重算一遍。
+    """
+    # 🔴 缓存键必须带**账户当前绑的版本**：复算的"指标"那一半会用当前版本
+    #   （见下面的 metrics_from），重新绑定之后结果就变了 —— 键里不带版本的话
+    #   页面上还是旧的那份，**而它不报错**（实测：给 SQL 加了组名注释、重绑之后，
+    #   页面上组名死活不出来，就是这个缓存）。
+    sha = (_base.get_account(aid) or {}).get('code_sha256')
+    key = (aid, str(date), sha)
+    if not force:
+        if key in _RECOMP:
+            return _RECOMP[key]
+        side = load_explain_side(aid, str(date), sha)
+        if side:
+            _RECOMP[key] = side
+            return side
+    old = load_signal(aid, str(date))
+    if not old:
+        raise _base.LiveError('没有 %s 这一期的信号' % date)
+    if not old.get('data_asof'):
+        raise _base.LiveError('%s 这一期的信号里没有 data_asof，没法复算' % date)
+    got = build_signal(aid, datalake=datalake, asof=old['data_asof'],
+                       code_sha=old.get('code_sha256'), params=old.get('params'))
+
+    def _codes(sg, k):
+        return sorted(x['code'] for x in (sg.get(k) or []))
+
+    def _cmp(sg):
+        d = {}
+        for k in ('buy', 'sell', 'hold'):
+            a, b = _codes(old, k), _codes(sg, k)
+            if a != b:
+                d[k] = {'当时': a, '复算': b,
+                        '多出': sorted(set(b) - set(a)),
+                        '少了': sorted(set(a) - set(b))}
+        return d
+
+    diff = _cmp(got)
+    metrics_from = 'as-bound'
+    # ★ 老版本的策略 SQL 只返回代码，复算出来只有排名没有指标 —— 而"这只票
+    #   当时凭什么被选中"恰恰要看指标。这时**再用磁盘上的当前版本复算一遍**：
+    #   它与当时那版只差「末层多 SELECT 几列」（投影改动，selftest 每次都验
+    #   行与行序逐位相同），所以选出来的票必然一样。
+    #   🔴 但不靠"必然"，靠**对账**：两次都要与当时那份信号逐个相同，
+    #     才用带指标的那一份，并且明确标出指标是哪个版本给的。
+    #     对不上就退回忠实版（宁可没有指标，不给一份可能是别的规则算出来的）。
+    def _pool_of(sg):
+        # explain 现在是**按查询分组**的（一条查询一组），没有扁平的 pool 了
+        return [e for g in ((sg.get('explain') or {}).get('groups') or [])
+                for e in (g.get('rows') or [])]
+
+    if not diff:
+        pool = _pool_of(got)
+        if pool and not any(x.get('metrics') for x in pool):
+            cur = _base.get_account(aid).get('code_sha256')
+            if cur and cur != old.get('code_sha256'):
+                try:
+                    got2 = build_signal(aid, datalake=datalake,
+                                        asof=old['data_asof'], code_sha=cur,
+                                        params=old.get('params'))
+                    if not _cmp(got2):
+                        got, metrics_from = got2, 'current'
+                except Exception:                          # noqa: BLE001
+                    pass
+    # 指标缺席时把**该怎么办**说清楚。默认那句 notes 说的是"改策略 SQL"，
+    # 而这一期的真正原因是"当时绑的那个版本不返回指标列" —— 出路是重新绑定，
+    # 不是再改一次 SQL。说错出路比不说更浪费时间。
+    _e = got.get('explain') or {}
+    if metrics_from == 'as-bound' and _pool_of(got) \
+            and not any(x.get('metrics') for x in _pool_of(got)):
+        _e.setdefault('notes', []).append(
+            '这一期用的是当时绑定的版本（%s），它的查询只返回代码、不返回指标列。'
+            '在策略浮层里重新绑定一次新版本之后：以后的信号自带指标，'
+            '这一期再复算也会自动用新版本补上指标（并与当时那份对账）。'
+            % (old.get('code_sha') or ''))
+    res = {
+        'date': old['for_date'], 'data_asof': old['data_asof'],
+        'recomputed': True,
+        'verified': 'same' if not diff else 'differs',
+        'diff': diff,
+        # 指标是哪个版本给的：as-bound = 当时绑的那版；
+        # current = 当时那版不返回指标列，改用磁盘上的当前版本复算
+        # （与当时那份逐个对账一致才用）
+        'metrics_from': metrics_from,
+        'explain': got.get('explain') or {},
+        'buy': got.get('buy') or [], 'sell': got.get('sell') or [],
+        'hold': got.get('hold') or [],
+        'code_sha': old.get('code_sha'), 'params': old.get('params') or {},
+        # 这份是**哪个绑定版本**下算出来的。版本一换，`load_explain_side`
+        # 就当它不存在（指标那一半可能来自当前版本）
+        'for_sha': sha,
+        'computed_at': _base._now(),
+    }
+    _RECOMP[key] = res
+    try:
+        _base._atomic_write(explain_side_path(aid, res['date']),
+                            json.dumps(res, ensure_ascii=False, indent=1, sort_keys=True))
+    except Exception:                                       # noqa: BLE001
+        pass          # 落盘只是省下次的时间，失败不该让这次的结果作废
+    return res
 
 
 def due_now(acct, now=None):

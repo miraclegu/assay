@@ -113,6 +113,9 @@ async function loadLive(aid){
   const b=$('#lvbody'); b.innerHTML='<div class="none">读取中…</div>';
   let o; try{ o=await j('/api/live/account?id='+encodeURIComponent(aid)); }
   catch(e){ b.innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
+  /* 期数清单（浮层的期数切换 + 持仓行上的"出处"都用它）。★ 只是清单，
+     某一期的完整理由按需再拉 —— 复算一期要重放 30 天 warmup。 */
+  await lvWhyLoad(aid);
   LVO=o;
   const a=o.account, sig=o.signal, ro=LV.readonly, P=o.pos||{};
   const it=P.items||[];
@@ -130,13 +133,19 @@ async function loadLive(aid){
     <button class="btn" id="lvtick" ${ro?'disabled':''}>立即重算</button>
     <button class="btn" id="lvrec" ${ro?'disabled':''}>✎ 记一笔</button>
     <a class="btn" href="#/live/${a.id}/fills">流水${o.n_fills==null?'':' '+o.n_fills}</a>
+    <!-- 🔴 做成按钮而不是小灰链接：一开始放在待办标题行里、样式与旁边的
+         "版本 9FB82061" 一模一样，实测**人找不到它** ——
+         看不出能点的入口 = 没有入口（同 backLink 那条的反面）。 -->
+    <a class="btn" href="#/live/${a.id}/why">选股理由</a>
     <button class="btn" id="lvset">⚙</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
   ${kpiHtml(o)}
   ${sigHtml(sig, o.alert, o.alert_why)}
   <div class="lvsec"><h3>当前持仓
-      ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}`:''}</h3>
+      ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}
+        ${Object.keys((LVWHYH||{}).entry||{}).length
+          ?'<span class="lvwhy">名称后的 <b>?</b> 进它建仓那一期的选股理由</span>':''}`:''}</h3>
     ${it.length?`<table class="lvt lvpos">
       <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
           <th class="rt">成本</th>
@@ -147,7 +156,7 @@ async function loadLive(aid){
           <th class="tx">建仓</th></tr>
       ${it.map(x=>`<tr>
         <td>${skLink(x.code, x.code)}</td>
-        <td class="tx">${skLink(x.code, x.name||'')}</td>
+        <td class="tx">${skLink(x.code, x.name||'')}${lvHoldMark(aid, x.code)}</td>
         <td class="rt">${num(x.shares)}</td>
         <td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee,2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost,4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven==null?'—':num(x.breakeven,3)}（含估算卖出费 ${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}）">${num(x.cost_net,3)}</td>
         <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
@@ -395,6 +404,33 @@ function sigHtml(s, alert, alertWhy){
   if(!s) return '<div class="lvsec" style="margin-bottom:14px"><h3>今日待办</h3><div class="none">还没有信号 —— 点「立即重算」</div></div>';
   if(s.error) return `<div class="lvwarn"><b>出信号失败</b><br>${esc(s.error).replace(/\n/g,'<br>')}</div>`;
   const w=(s.warnings||[]).map(x=>`<div class="lvwarn">${esc(x)}</div>`).join('');
+  /* 🔴 早上重算出来的清单与昨晚【不一致】时必须显红说清差异 ——
+     人可能已经按昨晚那份准备好委托了（A 股公告集中在 16:00~22:00，
+     其中 ST/停牌是次日生效的，18:10 那份算不到）。
+     静默覆盖等于让他拿着一份已经作废的清单去下单。
+     ★ 只在"决策变了"时显红；数据变了而清单没变只记 recomputed_at，
+       不在这里出现 —— 天天一条"重算过"的话，人就不看这个位置了。 */
+  const revs=s.revisions||[];
+  const rv=revs.length?`<div class="lvwarn"><b>⚠️ 这份清单被重算过
+      ${revs.length} 次，与最初那份不一致</b>${revs.map(r=>{
+        const d=r.diff||{}, seg=[];
+        for(const k of ['buy','sell','hold']){
+          const nm={buy:'买入',sell:'卖出',hold:'持有'}[k];
+          if((d[k+'_added']||[]).length) seg.push(`${nm}新增 ${d[k+'_added'].join('、')}`);
+          if((d[k+'_removed']||[]).length) seg.push(`${nm}移除 ${d[k+'_removed'].join('、')}`);
+        }
+        return `<div style="margin-top:4px">第 ${r.rev} 版（${esc((r.built_at||'').slice(5,16))}
+          → 被 ${esc((r.replaced_at||'').slice(5,16))} 覆盖）：${
+          seg.length?esc(seg.join('；')):'（清单未变，只是指纹变了）'}
+          <span class="lvwhy">　旧版留在 signals/${esc(r.archived||'')}</span></div>`;
+      }).join('')}<div style="margin-top:4px">如果已按之前那份准备了委托，
+      <b>请照现在这份核对</b>。</div></div>`:'';
+  /* 数据动过但清单没变 —— 低调说一句就够，不用警告样式 */
+  const rc=(!revs.length&&(s.recomputed_at||[]).length)
+    ? `<div class="lvwhy" style="margin:4px 0">数据更新后重算过
+        ${s.recomputed_at.length} 次，清单未变（最近 ${
+        esc((s.recomputed_at[s.recomputed_at.length-1]||'').slice(5,16))}）。</div>`
+    : '';
   const why={stop:'止损', limit_up_exit:'炸板离场', rebalance_out:'调仓换出'};
   /* ★ 调仓日是【纯日历】的，可以提前很久算出来；清单不是（要 T-1 收盘数据）。
      这两件事在页面上必须分清楚 —— 否则会以为提前几天就能看到买什么。
@@ -428,7 +464,9 @@ function sigHtml(s, alert, alertWhy){
     : ((s.sell||[]).length+(s.buy||[]).length
         ? (s.sell||[]).length+' 卖 / '+(s.buy||[]).length+' 买'
         : '没有要动的');
-  return w+`<div class="lvsec${alert?' lvalert':''}" style="margin-bottom:14px">
+  /* ★ rv（清单被改过）放在 w 之后、正文之前 —— 它是「这份清单还能不能照着
+     下单」的前提，不能藏在下面。 */
+  return w+rv+`<div class="lvsec${alert?' lvalert':''}" style="margin-bottom:14px">
     <h3>${alert?'<span class="adot"></span> ':''}${esc(s.for_date)} 待办
         ${s.is_rebalance_day?'· 调仓日':'· 非调仓日'}
         <span class="lvtag">数据 ${esc(s.data_asof)} 收盘</span>
@@ -438,26 +476,27 @@ function sigHtml(s, alert, alertWhy){
     ${open?'':`<div class="lvwhy" style="padding:2px 0">${esc(sum)}${
        rb?' · 下次调仓 '+esc(rb)+(du!=null?'（还有 '+du+' 个交易日）':''):''}</div>`}
     <div style="display:${open?'':'none'}">
-    ${banner}${strip}
+    ${rc}${banner}${strip}
     <div class="lvgrid">
       <div><b style="color:var(--up)">卖出 ${(s.sell||[]).length} 只</b>
         ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th>代码</th><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">参考价</th><th class="tx">原因</th></tr>
-          ${s.sell.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}</td>
+          ${s.sell.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}${lvWhyMark(x)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.ref_price,2)}</td><td class="lvwhy tx">${esc(why[x.reason]||x.reason)}</td></tr>`).join('')}</table>`
           :'<div class="none">无</div>'}</div>
       <div><b style="color:var(--down)">买入 ${(s.buy||[]).length} 只</b>
         ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th>代码</th><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">限价</th><th class="rt">金额</th></tr>
-          ${s.buy.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}</td>
+          ${s.buy.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}${lvWhyMark(x)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.limit,2)}</td><td class="rt">${num(x.amount)}</td></tr>`).join('')}</table>
-          <div class="lvwhy">限价 = T-1 收盘 × 1.05（防高开买不进）；twopass 分配，估余 ${num(s.left_est)}</div>`
+          <div class="lvwhy">限价 = T-1 收盘 × 1.05（防高开买不进）；twopass 分配，估余 ${num(s.left_est)}
+            ${(s.explain||{}).captured?'· 名称后的 <b>?</b> 是选中理由，逐只指标看顶上的「选股理由」':''}</div>`
           :'<div class="none">无</div>'}</div>
       <div><b>持有不动 ${(s.hold||[]).length} 只</b>
         <div class="lvwhy" style="margin-top:4px">${(s.hold||[]).map(x=>
-          skLink(x.code, x.name||x.code)).join('、')||'无'}</div></div>
+          skLink(x.code, x.name||x.code)+lvWhyMark(x)).join('、')||'无'}</div></div>
     </div></div></div>`;
 }
 

@@ -4938,12 +4938,26 @@ def t_setup_tdx():
     assert pth.split(':')[0] == mine, \
         '定时 PATH 的第一段应是当前解释器的目录（%s），实得 %s' % (mine, pth)
     assert pth.count(mine) == 1, 'PATH 里重复了当前解释器目录：%s' % pth
-    pl = m._plist(18, 10)
+    # ★ 签名跟着「装两个 timer」改了：_plist(label, args, times, tag)
+    pl = m._plist(m.LABEL, ['/bin/bash', m.SH], [(18, 10)], 'sync')
     assert 'EnvironmentVariables' in pl and mine in pl, \
         'plist 丢了 EnvironmentVariables/PATH —— 这正是踩过的那个坑'
     for k in ('StartCalendarInterval', '<key>Hour</key><integer>18',
               '<key>Minute</key><integer>10', m.SH, m.ROOT):
         assert k in pl, 'plist 缺「%s」' % k
+    # 🔴 tick 是**多时间点**的（07:00/08:00/09:00）—— StartCalendarInterval
+    #   必须是 array。装三个 plist 会让"改一个点位"变成改三处。
+    tk = m._plist(m.TICK_LABEL, ['python3', m.TICK_PY],
+                  m._times(m.TICK_AT), 'tick')
+    assert '<array>' in tk.split('StartCalendarInterval')[1][:200], \
+        '多时间点时 StartCalendarInterval 应是 array'
+    for hh in (7, 8, 9):
+        assert '<key>Hour</key><integer>%d</integer>' % hh in tk, \
+            'tick plist 少了 %02d:00 这个点位' % hh
+    assert 'tick_daily.py' in tk and 'EnvironmentVariables' in tk, \
+        'tick plist 没指向 tick_daily.py 或丢了 PATH'
+    assert m._times('07:00,08:00,09:00') == [(7, 0), (8, 0), (9, 0)], \
+        '_times 解析不对'
     # plist 要能被系统解析（macOS 上真解一遍）
     if platform.system() == 'Darwin':
         import subprocess as _sp
@@ -6784,6 +6798,166 @@ def t_srv_split():
             'lv.LIVE 重定向双向生效（%d 个 lv.* 名字全在）'
             % (len(used), scanned, len(DOMS), len(LVDOMS), n,
                lp.count('\n'), len(_lvused)))
+
+
+@case('信号重算：不一致必须留痕再覆盖', tag='fast')
+def t_signal_revision():
+    """早上重算出来的清单可能与昨晚不一样（当晚公告里 ST/停牌是次日生效的）。
+
+    🔴 **人可能已经按昨晚那份准备好委托了** —— 静默覆盖等于让他拿着一份
+      已经作废的清单去下单。所以：旧版归档成 rev、主文件记 revisions。
+    ★ 但数据变了而**决策没变**是常态，那种情况只记一次 recomputed_at ——
+      否则每天几条"重算过"的噪声，人就不看这个提示了
+      （同"假告警看多了就不看告警"）。
+    """
+    import json as _js
+    import tempfile
+    from assay import live as lv
+    from assay.lv import base as _b, sig as _sig
+
+    old_live = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='sigrev_')
+    try:
+        lv.LIVE = tmp                      # 🔴 不许写真实账本
+        assert _b.LIVE == tmp, 'LIVE 重定向没生效'
+        aid = 'probe'
+        os.makedirs(os.path.join(tmp, aid, 'signals'))
+        FD = '2026-09-07'
+
+        def mk(buy, fp):
+            return {'account': aid, 'for_date': FD, 'built_at': '2026-09-06T18:12:00',
+                    'buy': [{'code': c, 'shares': 100} for c in buy],
+                    'sell': [], 'hold': [],
+                    'data_fingerprint': {'overall': fp}}
+
+        # 昨晚那份
+        _b._atomic_write(_sig.signal_path(aid, FD),
+                         _js.dumps(mk(['A', 'B'], 'fp_old'), ensure_ascii=False))
+        # 让 build_signal 返回"早上算出来的不同结果"
+        orig = _sig.build_signal
+        _sig.build_signal = lambda a, datalake=None: mk(['A', 'C'], 'fp_new')
+        try:
+            r = _sig.make_signal(aid, force=True)
+        finally:
+            _sig.build_signal = orig
+
+        # ---- ① 旧版必须被归档 ----
+        rp = _sig.rev_path(aid, FD, 1)
+        assert os.path.isfile(rp), '旧版没归档成 rev1 —— 覆盖掉就找不回来了'
+        arch = _js.load(open(rp, encoding='utf-8'))
+        assert [x['code'] for x in arch['buy']] == ['A', 'B'], \
+            'rev1 里不是旧版内容：%s' % arch.get('buy')
+
+        # ---- ② 主文件必须记 revisions，且 diff 说清差异 ----
+        revs = r.get('revisions') or []
+        assert len(revs) == 1, 'revisions 应有 1 条，实际 %d' % len(revs)
+        d = revs[0]['diff']
+        assert d['buy_added'] == ['C'] and d['buy_removed'] == ['B'], \
+            'diff 没说清差异：%s' % d
+        assert d['changed'] is True and d['data_fp_changed'] is True
+
+        # ---- ③ 🔴 append-only：再算一次，已有的 rev1 不许被重写 ----
+        st1 = os.stat(rp).st_mtime_ns
+        _sig.build_signal = lambda a, datalake=None: mk(['A', 'D'], 'fp_new2')
+        try:
+            r2 = _sig.make_signal(aid, force=True)
+        finally:
+            _sig.build_signal = orig
+        assert os.stat(rp).st_mtime_ns == st1, \
+            'rev1 被重写了 —— 归档必须 append-only（那是唯一的回滚凭据）'
+        assert os.path.isfile(_sig.rev_path(aid, FD, 2)), '第二次没归档成 rev2'
+        assert len(r2.get('revisions') or []) == 2, \
+            '两次不一致应有 2 条 revision'
+
+        # ---- ④ 结果【相同】时不许产生 revision（否则全是噪声）----
+        cur = _js.load(open(_sig.signal_path(aid, FD), encoding='utf-8'))
+        same = dict(cur)
+        same['data_fingerprint'] = {'overall': 'fp_same_data_changed'}
+        _sig.build_signal = lambda a, datalake=None: same
+        try:
+            r3 = _sig.make_signal(aid, force=True)
+        finally:
+            _sig.build_signal = orig
+        assert len(r3.get('revisions') or []) == 2, \
+            '决策没变却又产生了 revision —— 那会变成天天有的噪声'
+        assert r3.get('recomputed_at'), \
+            '决策没变时应当记一次 recomputed_at（数据确实动过）'
+
+        # ---- ⑤ 不加 force 时不许动已有信号 ----
+        _sig.build_signal = lambda a, datalake=None: mk(['Z'], 'fp_x')
+        try:
+            r4 = _sig.make_signal(aid, force=False)
+        finally:
+            _sig.build_signal = orig
+        assert [x['code'] for x in r4['buy']] != ['Z'], \
+            '没加 force 却重算并覆盖了'
+        n_rev = len([f for f in os.listdir(os.path.join(tmp, aid, 'signals'))
+                     if '.rev' in f])
+        assert n_rev == 2, 'rev 文件数应为 2，实际 %d' % n_rev
+    finally:
+        lv.LIVE = old_live
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- ⑥ tick_daily.py 的三道判据都在（它是 launchd 的入口）----
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, 'tick_daily.py'), encoding='utf-8').read()
+    assert '_is_trading_day' in src, 'tick_daily 少了「今天是交易日吗」'
+    assert 'leg_a_lag' in src, \
+        ('tick_daily 少了「A 腿数据到最新交易日了吗」—— 拆成两个时间点之后，'
+         '同步一慢就会拿旧数据算出一份看着正常的信号')
+    assert 'fingerprint' in src, 'tick_daily 少了「指纹变了吗」'
+    body = src[src.index('def _leg_a_ok'):src.index('def _now_fp')]
+    assert 'return None' in body and 'ss.collect()' in body, \
+        '新鲜度判据应取 sync_status.collect() 那一处，且判不出时返回 None'
+    tail = src[src.index('if not ok:'):]
+    assert 'return 3' in tail.split('# ---- 判据 3')[0], \
+        'A 腿落后时必须拒绝重算（非零退出码），而不是继续算'
+    # ---- ⑦ 🔴 页面必须【显红说清差异】—— 留痕了但页面不说等于没留痕 ----
+    #   ★ 匹配**结构**而不是"标识符出现过"：今天踩过两次这个坑
+    #     （`assert 'h.pruned' in js` 时把 if(h.pruned) 改成 if(false) 照样全绿）。
+    js = open(os.path.join(here, 'web', 'views', 'live.js'),
+              encoding='utf-8').read()
+    flat = js.replace(' ', '').replace('\n', '')
+    assert 'constrevs=s.revisions||[]' in flat, \
+        'live.js 没读 s.revisions —— 留痕了但页面不说，等于没留痕'
+    assert 'revs.length?' in flat and '被重算过' in js, \
+        'revision 提示要按 revs.length 分支并说清「被重算过」'
+    assert 'lvwarn' in js.split('const rv=')[1][:400], \
+        'revision 提示必须用警告样式（它是"能不能照着下单"的前提）'
+    assert '请照现在这份核对' in js, \
+        '要明说「如果已按之前那份准备了委托，请照现在这份核对」'
+    assert 'r.archived' in js, '要写清旧版存在哪个文件（唯一的回滚凭据）'
+    assert 'returnw+rv+' in flat, \
+        'rv 必须拼在正文之前 —— 藏在下面等于没提示'
+    #   数据动过但清单没变：低调显示，**不许**用警告样式
+    rcseg = js.split('const rc=')[1][:320]
+    assert 'recomputed_at' in rcseg and 'lvwhy' in rcseg, \
+        '「重算过但清单未变」应低调显示（lvwhy）'
+    assert 'lvwarn' not in rcseg, \
+        ('「清单未变」用了警告样式 —— 那会变成天天有的噪声，'
+         '人就不看这个位置了（同"假告警看多了就不看告警"）')
+
+    # ---- ⑧ 两个 timer 必须一起装 ----
+    st = open(os.path.join(os.path.dirname(here), 'datalake', 'setup_tdx.py'),
+              encoding='utf-8').read()
+    assert 'TICK_LABEL' in st and 'tick_daily.py' in st, \
+        ('setup_tdx.py 没装「信号重算」的 timer —— 漏装的表现是'
+         '**信号永远是昨晚 18:10 那份**，不报错')
+    assert 'def _times(' in st, '多时间点要能解析（07:00,08:00,09:00）'
+    jobs = st[st.index('JOBS = ['):st.index('if osname ==', st.index('JOBS = ['))]
+    assert 'LABEL' in jobs and 'TICK_LABEL' in jobs, \
+        'JOBS 里要同时有 sync 与 tick —— 清单只写一处，分开写会漏'
+    for tag in ('sync', 'tick'):
+        assert "'%s'" % tag in jobs, 'JOBS 少了 %s' % tag
+    #   ★ 判据是 launchctl 里到底有没有，不是命令返回码
+    assert "launchctl', 'list'" in st, \
+        '装完要用 launchctl list 复查（launchctl 对"已是这个状态"会报错退出）'
+    return ('归档 rev1/rev2 且 append-only（旧的不被重写）；diff 说清 '
+            'buy_added/buy_removed；决策没变只记 recomputed_at 不产生噪声；'
+            '不加 force 不动已有信号；tick_daily 三道判据都在且 A 腿落后时拒算；'
+            '页面按 revs.length 显红说清差异 + 清单未变时只低调显示；'
+            'setup_tdx 的 JOBS 同时装 sync 与 tick 并用 launchctl list 复查')
 
 
 @case('serve.py 的 stop/restart：判据是端口而不是 PID 文件', tag='fast')
