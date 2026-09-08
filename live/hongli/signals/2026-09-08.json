@@ -1,36 +1,36 @@
 {
  "account": "hongli",
- "built_at": "2026-09-07T16:13:41",
+ "built_at": "2026-09-08T16:06:07",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 61569.55,
  "code_sha": "edbdaeb0",
  "code_sha256": "edbdaeb00fe58a560712f687b7712b43113ad113e9f0088c168cc3fef12864a7",
- "data_asof": "2026-09-04",
+ "data_asof": "2026-09-07",
  "data_fingerprint": {
-  "overall": "9f634a743ff6",
+  "overall": "e172be97a1bb",
   "parts": {
    "index": {
-    "hash": "f7e5f402fc42",
+    "hash": "e442ed65966b",
     "n_files": 24,
-    "newest_mtime": "2026-09-07T16:12:09",
-    "total_bytes": 64622062
+    "newest_mtime": "2026-09-08T16:03:53",
+    "total_bytes": 64634651
    },
    "panel": {
-    "hash": "9d28a1ec6202",
+    "hash": "83cf4a0e2de7",
     "n_files": 24,
-    "newest_mtime": "2026-09-07T16:13:00",
-    "total_bytes": 1336991944
+    "newest_mtime": "2026-09-08T16:05:23",
+    "total_bytes": 1337404330
    },
    "std": {
-    "hash": "c2140e695e6f",
+    "hash": "785e25344c4a",
     "n_files": 18,
-    "newest_mtime": "2026-09-07T16:13:33",
-    "total_bytes": 373580298
+    "newest_mtime": "2026-09-08T16:05:58",
+    "total_bytes": 373747940
    }
   }
  },
- "days_until_rebalance": 17,
+ "days_until_rebalance": 16,
  "explain": {
   "captured": false,
   "codes_total": 0,
@@ -96,7 +96,7 @@
   "set_labels": {},
   "steps": []
  },
- "for_date": "2026-09-07",
+ "for_date": "2026-09-08",
  "freed_est": 0,
  "held_codes": [
   "600012.XSHG",
@@ -216,18 +216,20 @@
  },
  "recomputed": false,
  "recomputed_at": [
-  "2026-09-07T14:50:02",
-  "2026-09-07T16:02:47",
-  "2026-09-07T16:13:41"
+  "2026-09-07T17:00:07",
+  "2026-09-07T18:00:06",
+  "2026-09-07T18:30:45",
+  "2026-09-07T18:51:36",
+  "2026-09-07T19:00:07",
+  "2026-09-07T20:15:23",
+  "2026-09-07T21:02:34",
+  "2026-09-07T22:00:08",
+  "2026-09-07T23:00:06",
+  "2026-09-08T16:06:07"
  ],
  "revisions": [],
  "sell": [],
  "upcoming": [
-  {
-   "date": "2026-09-08",
-   "is_rebal": false,
-   "wday": 2
-  },
   {
    "date": "2026-09-09",
    "is_rebal": false,
@@ -297,6 +299,11 @@
    "date": "2026-09-29",
    "is_rebal": false,
    "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
   }
  ],
  "warnings": []
