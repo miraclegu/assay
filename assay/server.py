@@ -66,6 +66,7 @@ ROUTES = {
     '/api/live/strategy': live.api_live_strategy,
     '/api/live/equity': live.api_live_equity,
     '/api/live/intraday': live.api_live_intraday,
+    '/api/live/trades_of': live.api_live_trades_of,
     '/api/live/fills': live.api_live_fills,
     '/api/sync': sync.api_sync,
     '/api/sync/auto': sync.api_sync_auto,

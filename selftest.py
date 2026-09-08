@@ -9437,6 +9437,182 @@ def t_zb_ui():
     return '；'.join(notes)
 
 
+@case('个股速览浮层：点了不跳走 / 买卖点画在成交价上（playwright）', tag='web')
+def t_stockpop():
+    """用户的原话是"点击股票名称就真的跳转到个股页面了，然后无法直接返回"，
+    以及"其他地方可能也有这样的情况，也要做成这样的效果"。所以这条要验
+    **每一类页面**都不跳走，而不是只验实盘页。
+
+    钉五件事，每件都对应一种**不报错的**坏法：
+      ① 点了 URL **不变** + 浮层可见 —— "跳走了"和"浮层没弹"都是静默的坏
+      ② 买卖点画在**成交价的位置**上，且 hover 出得来读数（价/量/账户）
+      ③ 引了 stockpop 的页面**必须也引 kchart** —— 实测踩到：盘面/自选/
+         买点/板块四个页面原本没有 kchart.js，点开浮层就是
+         `drawKChart is not defined`，而浮层照样弹出、只是**一片空白**
+      ④ 浮层固定 `bfq`：成交价是不复权实际价，切后复权标记会整体飘走
+      ⑤ 入口只走统一 helper —— 裸 `href="/stock.html?code="` 一处都不许剩，
+         否则那一处会**继续跳走**，而它不报错
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    # ---- ⑤ 静态：入口只有一个定义点，页面里不许有裸链接 ----
+    # 🔴 判据匹配**结构**（`href=` 才是链接），不是"字符串出现过" ——
+    #   头一版写成 `'stock.html?code=' in line` 就被 index.html 里
+    #   HTML 注释块中反引号包着的那句路径说明打挂了。同 h.pruned 那条。
+    import re as _re
+    HREF = _re.compile(r'''href=["']/stock\.html\?code=''')
+    for f in _web_files('web', '.js') + _web_files('web', '.html'):
+        t = _io.open(os.path.join('web', f), encoding='utf-8').read()
+        for ln, line in enumerate(t.splitlines(), 1):
+            if not HREF.search(line):
+                continue
+            assert 'spHref' in line or 'stockHref' in line, \
+                ('%s:%d 有裸的个股页链接 —— 那一处会【继续跳走】，'
+                 '而它不报错：%s' % (f, ln, line.strip()[:90]))
+    # ③ 引了 stockpop 的页面必须也引 kchart（浮层要画 K 线）
+    pops = []
+    for f in sorted(g for g in os.listdir('web') if g.endswith('.html')):
+        t = _io.open(os.path.join('web', f), encoding='utf-8').read()
+        if 'shared/stockpop.js' not in t:
+            continue
+        pops.append(f)
+        assert 'shared/kchart.js' in t, \
+            '%s 引了 stockpop 却没引 kchart —— 点开浮层是 drawKChart ' \
+            'is not defined，而浮层照样弹出、只是一片空白' % f
+        assert t.index('shared/stockpop.js') > t.index('shared/common.js'), \
+            '%s 里 stockpop.js 必须在 common.js 之后（它用 esc/num/j/_tipAt）' % f
+    assert len(pops) >= 7, '只有 %d 个页面有浮层：%s' % (len(pops), pops)
+    # ④ 固定 bfq
+    sp = _io.open('web/shared/stockpop.js', encoding='utf-8').read()
+    assert "const SP_FQ = 'bfq'" in sp.replace('"', "'"), \
+        '浮层必须固定不复权 —— 成交价是不复权实际价，切后复权标记会整体飘走'
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            # ---- ① 每一类页面都不跳走 ----
+            PAGES = [('/#/live', '实盘'), ('/market.html', '盘面'),
+                     ('/watchlist.html', '自选'), ('/alerts.html', '买点'),
+                     ('/sector.html?kind=sw&code=801230', '板块成分'),
+                     ('/stock.html?code=601857.XSHG', '个股同行业')]
+            for path, label in PAGES:
+                pg = b.new_page(viewport={'width': 1400, 'height': 900})
+                errs = []
+                pg.on('pageerror', lambda e: errs.append(str(e)))
+                pg.goto('http://127.0.0.1:%d%s' % (port, path))
+                pg.wait_for_timeout(3800)
+                v = pg.locator('a[data-sp]:visible')
+                assert v.count(), '%s 页一个浮层入口都没有' % label
+                url0 = pg.url
+                v.first.scroll_into_view_if_needed()
+                v.first.click()
+                pg.wait_for_timeout(3800)
+                assert pg.url == url0, \
+                    '%s 页点了就跳走了（%s -> %s）—— 那正是要修的毛病' \
+                    % (label, url0, pg.url)
+                box = pg.locator('#spwrap')
+                assert box.count() and box.is_visible(), \
+                    '%s 页浮层没弹出来或不可见（同 .pane 那次样式表 ' \
+                    'display:none）' % label
+                title = pg.locator('#sptitle').inner_text()
+                assert title and title != '', '%s 页浮层标题是空的' % label
+                assert not errs, '%s 页有 JS 错误：%s' % (label, errs[:2])
+                # Esc 关得掉
+                pg.keyboard.press('Escape')
+                pg.wait_for_timeout(400)
+                assert pg.locator('#spwrap').count() == 0, \
+                    '%s 页 Esc 关不掉浮层' % label
+                notes.append('%s %d入口' % (label, v.count()))
+                pg.close()
+
+            # ---- ② 买卖点：位置 + hover 读数（用实盘页，它有真成交）----
+            pg = b.new_page(viewport={'width': 1400, 'height': 900})
+            pg.goto('http://127.0.0.1:%d/#/live' % port)
+            pg.wait_for_timeout(3800)
+            # 找一只**有成交**的（持仓表里的都有）
+            v = pg.locator('a[data-sp]:visible')
+            v.first.scroll_into_view_if_needed()
+            v.first.click()
+            pg.wait_for_timeout(4500)
+            d = pg.evaluate("""() => {
+              const h = (SP.geo && SP.geo.trHits) ? SP.geo.trHits : [];
+              const ts = SP.trades || [];
+              const bs = SP.bars || [];
+              const at = {}; bs.forEach((x, i) => { at[x.date] = i; });
+              return {nh: h.length, nt: ts.length,
+                      first: h[0] ? {x: h[0].x, y: h[0].y, price: h[0].t.price,
+                                     date: h[0].t.date} : null,
+                      idx: ts[0] ? at[ts[0].date] : null,
+                      lo: Math.min(...bs.map(x => x.low)),
+                      hi: Math.max(...bs.map(x => x.high))};
+            }""")
+            assert d['nt'], '这只票没有实盘成交 —— 换一个入口再验'
+            assert d['nh'] == d['nt'], \
+                '成交 %d 笔但只画出 %d 个标记' % (d['nt'], d['nh'])
+            # 🔴 判据必须是"**y 随价格变**"，不是"y 不等于某个值"。
+            #   头一版写成 `abs(y - 画布中线) > 4 or ...`，把 Y(price) 改成
+            #   `PADT + mainH - 2`（像事件三角那样钉在底部）**照样全绿** ——
+            #   那个 or 让它几乎永远成立。现在构造两笔不同价的成交，
+            #   断言高价那笔的 y 更小、且差值与价差成比例。
+            f = d['first']
+            probe = pg.evaluate("""() => {
+              const bs = SP.bars, lo = Math.min(...bs.map(x => x.low)),
+                    hi = Math.max(...bs.map(x => x.high));
+              const dt = bs[bs.length - 3].date;
+              const p1 = lo + (hi - lo) * 0.2, p2 = lo + (hi - lo) * 0.8;
+              const cv = document.getElementById('spcv');
+              const mk = px => {
+                const g = drawKChart(cv, {bars: bs, trades:
+                  [{date: dt, side: 'buy', shares: 100, price: px}]});
+                return g.trHits.length ? g.trHits[0].y : null;
+              };
+              return {y_low: mk(p1), y_high: mk(p2), lo: lo, hi: hi,
+                      h: cv.height};
+            }""")
+            assert probe['y_low'] is not None and probe['y_high'] is not None, \
+                '构造的成交点没画出来：%r' % probe
+            assert probe['y_high'] < probe['y_low'] - 20, \
+                ('买卖点的 y 不随成交价变（低价 y=%.0f / 高价 y=%.0f）—— '
+                 '它被钉在了固定高度上，而"画在成交价的位置"正是它与'
+                 '事件三角的区别' % (probe['y_low'], probe['y_high']))
+            # 差值应当约等于 60% 的主图高度（两个探针取的是 20% / 80% 分位）
+            dy = probe['y_low'] - probe['y_high']
+            assert dy > probe['h'] * 0.25, \
+                '价差 60%% 只换来 %.0fpx 的 y 差（画布 %.0f）—— 比例不对' \
+                % (dy, probe['h'])
+            # hover 上去要有读数
+            cv = pg.locator('#spcv')
+            bb = cv.bounding_box()
+            sc = pg.evaluate("() => { const c = document.getElementById('spcv');"
+                             "  return c.width / c.offsetWidth; }")
+            pg.mouse.move(bb['x'] + f['x'] / sc, bb['y'] + f['y'] / sc)
+            pg.wait_for_timeout(600)
+            tip = pg.locator('#sptip')
+            assert tip.is_visible(), 'hover 到买卖点上没有读数浮窗'
+            txt = tip.inner_text()
+            for want in ('买入', str(f['date'])):
+                assert want in txt, 'hover 读数少了「%s」：%r' % (want, txt)
+            assert ('%.2f' % f['price']) in txt.replace(',', ''), \
+                'hover 读数里没有成交价 %.2f：%r' % (f['price'], txt)
+            notes.append('买卖点 %d 个 · hover 出价/量/账户' % d['nh'])
+            b.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

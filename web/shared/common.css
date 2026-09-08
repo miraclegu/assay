@@ -664,3 +664,47 @@ svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
 #zbbox .zbft{padding:8px 12px;display:flex;gap:14px;
   border-top:1px solid var(--line);background:rgba(0,0,0,.12)}
 #zbbox .zbft a{font-size:12px}
+
+/* 个股速览浮层。★ 遮罩 + 居中盒子，与实盘的 ⚙设置/✎记一笔同一形态 ——
+   同一个页面上的浮层该长得一样，不然每个都要重新认一遍。 */
+#spwrap{position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.55);
+  display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;
+  overflow-y:auto}
+#spwrap .spbox{background:var(--panel);border:1px solid var(--line);
+  border-radius:12px;width:min(920px,100%);box-shadow:0 18px 50px rgba(0,0,0,.5)}
+#spwrap .sphd{display:flex;align-items:center;gap:10px;padding:11px 14px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+#spwrap .sphd b{font-size:15px}
+#spwrap .spgrow{flex:1}
+#spwrap .spdim{color:var(--dim);font-size:12px}
+#spwrap .spx{cursor:pointer;color:var(--dim);font-size:18px;line-height:1;
+  padding:0 3px}
+#spwrap .spx:hover{color:var(--fg)}
+#spwrap .spns{display:flex;gap:4px}
+#spwrap .spns a{font-size:12px;padding:2px 7px;border:1px solid var(--line);
+  border-radius:5px;color:var(--dim);text-decoration:none}
+#spwrap .spns a.on{color:var(--fg);border-color:var(--accent,#6aa7ff)}
+#spwrap .spbody{padding:12px 14px 14px}
+/* KPI 一行 6 格，窄屏折行 —— 🔴 子项要 min-width:0，里面有宽表时
+   grid 子项默认 min-width:auto 不收缩，`.pw` 的 overflow-x 就形同虚设。 */
+#spwrap .spkpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
+  gap:8px 14px;margin-bottom:10px;font-variant-numeric:tabular-nums}
+#spwrap .spkpi>*{min-width:0}
+#spwrap .spkpi span.spdim{display:block;font-size:11px}
+#spwrap .spnote{grid-column:1/-1}
+#spwrap .spcv{position:relative;width:100%}
+#spwrap .spcv canvas{display:block;width:100%}
+#spwrap .sptip{position:fixed;display:none;z-index:8100;pointer-events:none;
+  background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+  padding:6px 9px;font-size:12px;line-height:1.5;
+  font-variant-numeric:tabular-nums;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+#spwrap .spmt{margin:14px 0 6px;font-weight:600;font-size:13px}
+#spwrap table.spt{font-size:12px}
+#spwrap .spbox>.spbody>*{min-width:0}
+/* ★ 链接看得出能点，但不抢眼 —— 表格里成片的蓝色会盖住要扫的数字。
+   虚下划线表示"点了有别的动作"（不是普通跳转）。 */
+a.spl{color:inherit;text-decoration:none;border-bottom:1px dotted var(--dim)}
+a.spl:hover{color:var(--accent,#6aa7ff);border-bottom-color:currentColor}
+/* ★ 同行业表里**当前这只票**要标出来（原来是内联 style，改走 class）——
+   不标的话"它排第几"这个信息就得自己数。 */
+a.spl.accent{color:var(--accent)}

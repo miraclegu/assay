@@ -350,16 +350,13 @@ async function liveEquityTag(aid){
 }
 
 
-/* ---- 实盘里的代码/名称 -> 个股页 ------------------------------------
-   ★ 用 `target="_blank"` 新标签页打开：实盘页往往一直开着（待办、持仓、
-     正在录一半的成交），跳走再回来这些状态就没了。新标签页天然满足
-     "能返回到当前实盘页面"。
-   ★ 代码与名称都可点 —— 只有代码可点的话，习惯认名字的人会以为不能点。 */
-const skLink=(code, text, cls)=>code
-  ? `<a href="/stock.html?code=${encodeURIComponent(code)}" target="_blank"
-       rel="noopener" class="${cls||''}" style="color:inherit"
-       title="在新标签页打开个股：${esc(code)}">${esc(text==null?code:text)}</a>`
-  : esc(text||'');
+/* ---- 实盘里的代码/名称 -> 个股速览【浮层】 ---------------------------
+   🔴 原来是 `target="_blank"` 新标签页，理由是"实盘页一直开着（待办、
+     正在录一半的成交），跳走再回来状态就没了"。浮层同样满足这一点，
+     而且**不用手动关标签**、Esc 就回到原位。
+   ★ 实现在 `shared/stockpop.js`（`spLink`）—— 盘面/自选/买点那些页面
+     也要同样的效果，所以放共享层，不放实盘页。 */
+const skLink=(code, text, cls)=>spLink(code, text, cls)
 
 /* ★ 数据日与报价时间写在【同一个标签】里，紧跟账户名。
      原来数据日在账户后面、"实时 09-03 13:19"在持仓浮盈下面 —— 两处各写

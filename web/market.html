@@ -10,6 +10,8 @@
 </div>
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 盘面（某天的全市场） ============
    ★ 所有接口都带 date —— "今天涨了多少家"只在盘后有意义，而复盘要看的
@@ -177,8 +179,7 @@ function ranks(o) {
           <th class="rt">${esc(ex[0])}</th></tr>
         ${(r.rows || []).map(x => `<tr>
           <td class="tx">${starHtml(x.code, false)}</td>
-          <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit"
-              title="${esc(x.code)}">${esc(x.name || x.code)}</a>
+          <td class="tx">${spLink(x.code, x.name || x.code)}
             ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
             ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}
             <div class="lvwhy" style="white-space:nowrap;overflow:hidden;

@@ -16,23 +16,6 @@ function _money(v, dp){
   return v.toFixed(dp==null?0:2);
 }
 
-/* 把浮窗放到光标旁边，**放不下就翻到另一侧**。
-   🔴 原来固定放右下（clientX+12）—— 光标移到图的最右边时浮窗整块跑到
-     视口外面，读数看不见（而这正是最需要看读数的位置：曲线的最新一天）。
-   ★ 必须**先填内容再量尺寸**：offsetWidth 在设置 textContent 之前是旧值，
-     用它算翻转会翻错边（第一版就这么错过）。
-   ★ 最后再把坐标钳进视口 —— 极窄屏下两侧都放不下时，宁可压着光标也要
-     让它可见。 */
-function _tipAt(tip, cx, cy){
-  tip.style.display='block';
-  const w=tip.offsetWidth, h=tip.offsetHeight;
-  const W=window.innerWidth, H=window.innerHeight, M=12;
-  let x=cx+M, y=cy+10;
-  if(x+w > W-4) x=cx-w-M;          // 右边放不下 -> 翻到光标左侧
-  if(y+h > H-4) y=cy-h-10;         // 下边放不下 -> 翻到光标上方
-  tip.style.left=Math.max(4, Math.min(x, W-w-4))+'px';
-  tip.style.top=Math.max(4, Math.min(y, H-h-4))+'px';
-}
 
 function lineChart(el,series,opt){
   opt=opt||{}; const W=1160,H=opt.h||330,L=54,R=16,T=opt.t||22,B=26;

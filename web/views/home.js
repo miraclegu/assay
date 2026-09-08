@@ -130,8 +130,7 @@ function homeWatch(w){
     <table class="pkt"><tr><th class="tx">名称</th><th class="rt">现价</th>
       <th class="rt">涨跌</th><th class="rt">换手</th><th class="tx">分组</th></tr>
       ${rows.slice(0,8).map(x=>`<tr>
-        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
-          style="color:inherit">${esc(x.name||x.code)}</a>
+        <td class="tx">${spLink(x.code, x.name||x.code)}
           ${x.limit_up?'<span class="lvwhy" style="color:var(--up)">涨停</span>':''}
           ${x.limit_down?'<span class="lvwhy" style="color:var(--down)">跌停</span>':''}</td>
         <td class="rt">${fmtN(x.close)}</td>
@@ -165,8 +164,7 @@ function homeAlerts(o){
                 :(x.state==='near'?x.tiers[x.near]:x.next))||{};
         return `<tr${x.state==='hit'?' class="ahit"'
           :(x.state==='near'?' class="anear"':'')}>
-        <td class="tx"><a href="/stock.html?code=${encodeURIComponent(x.code)}"
-          style="color:inherit">${esc(x.name||x.code)}</a></td>
+        <td class="tx">${spLink(x.code, x.name||x.code)}</td>
         <td class="rt">${fmtN(x.price)}</td>
         <td class="rt">${x.yield_now==null?'—':(x.yield_now*100).toFixed(2)+'%'}</td>
         <td class="rt">${fmtN(t.price)}<span class="lvwhy">${

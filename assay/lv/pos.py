@@ -363,3 +363,35 @@ def cash(aid, asof=None):
 
 
 # ============================ 权益与收益 ============================
+
+
+def trades_of(code, aids=None):
+    """某只票在【全部账户】的成交（给个股浮层画买卖点用）。
+
+    ★ 不带账户参数也能用：浮层会在盘面/自选/买点页上被打开，那时"当前是
+      哪个账户"是不存在的概念 —— 而"我在这只票上买卖过没有"恰恰是那时
+      最想知道的事。所以默认扫全部非归档账户，逐笔标出自哪个账户。
+    🔴 **冲正过的成对记录必须剔掉**（`active_fills`）：照单全收的话图上会
+      出现一对"买了又卖了"的标记，而实际什么都没发生 —— 同 fifo_lots
+      那条（成本价和建仓日会直接喂给止损判定）。
+    """
+    code = _base.normalize_code(code)
+    out = []
+    for a in _base.load_accounts():
+        if a.get('archived'):
+            continue
+        if aids and a['id'] not in aids:
+            continue
+        rows = active_fills(_base.fills(a['id']))
+        for i, r in enumerate(rows):
+            if _base.normalize_code(r.get('code') or '') != code:
+                continue
+            out.append({
+                'account': a['id'], 'account_name': a.get('name'),
+                'date': r.get('trade_date'), 'side': r.get('side'),
+                'shares': r.get('shares'), 'price': r.get('price'),
+                'fee': r.get('fee'), 'note': r.get('note') or '',
+                'seq': i,          # 账本行序 —— 同日多笔的先后（不能用 ts，秒精度会撞）
+            })
+    out.sort(key=lambda x: (x['date'] or '', x['account'], x['seq']))
+    return out

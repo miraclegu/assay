@@ -131,6 +131,40 @@ function drawKChart(cv, opts) {
       g.lineTo(x + 3.2, y + 5.4); g.closePath(); g.fill();
     });
   }
+  /* 买卖点：画在**成交价的位置**上，不是主图底部。
+     ★ 与事件三角刻意不同族：事件回答"那天发生了什么"（固定在底部按日期
+       排开就够），买卖点回答"我在**哪个价位**进出的" —— 位置本身就是信息，
+       钉在底部等于把它扔掉。
+     🔴 成交价是**不复权**实际价，所以浮层固定用 bfq。切到后复权时标记会
+       整体飘走，**而它不报错** —— 判据写在调用方（stockpop 固定 bfq）。
+     ★ 同日多笔各画一个：最低佣金按成交笔收，分笔录入就是对的（见 CLAUDE.md），
+       图上也该看得出"那天分了两笔"。 */
+  const trs = opts.trades || [];
+  const trHits = [];
+  if (trs.length) {
+    const at = {};
+    bars.forEach((b, i) => { at[b.date] = i; });
+    const bySlot = {};
+    trs.forEach(t => {
+      const i = at[t.date];
+      if (i == null || t.price == null) return;
+      const k = i + '|' + t.side;
+      bySlot[k] = (bySlot[k] || 0) + 1;
+      const dup = bySlot[k] - 1;               // 同日同向的第 n 笔，错开一点
+      const buy = t.side === 'buy';
+      const x = X(i), y = Y(+t.price);
+      const off = 7 + dup * 8;
+      const ty = buy ? y + off : y - off;      // 买在下方、卖在上方（不挡住 K 线）
+      g.fillStyle = buy ? UP : DN;
+      g.beginPath();
+      if (buy) { g.moveTo(x, y + 2); g.lineTo(x - 4.6, ty + 3); g.lineTo(x + 4.6, ty + 3); }
+      else { g.moveTo(x, y - 2); g.lineTo(x - 4.6, ty - 3); g.lineTo(x + 4.6, ty - 3); }
+      g.closePath(); g.fill();
+      g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = .8; g.stroke();
+      trHits.push({x: x, y: ty, r: 8, t: t});
+    });
+  }
+
   /* 副图 */
   if (sub) {
     const rows = opts.sub;
@@ -212,7 +246,7 @@ function drawKChart(cv, opts) {
     g.beginPath(); g.moveTo(x, PADT); g.lineTo(x, subTop + (sub ? subH : 0) || volTop + volH);
     g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
   }
-  return {PADL, PADR, step, n, X};
+  return {trHits: trHits, PADL, PADR, step, n, X};
 }
 
 /* 多股归一涨幅折线（对比页用）。series: [{code,name,ret:[...]}] */

@@ -776,3 +776,23 @@ def _live_loop():
 # ★ 只有 server 开着才跑（用户明确要的）。这件事**漏了不要紧** ——
 #   trends2 每次给全天、快照下一分钟就补上，而实时盈亏只在看页面时才有意义。
 #   （对比 daily_snapshot.py 那种"漏一天永久丢失"的，才必须挂 launchd。）
+
+def api_live_trades_of(q):
+    """GET /api/live/trades_of?code= —— 某只票在【全部账户】的成交。
+
+    给个股浮层画买卖点用。★ 不带 `id`：浮层会在盘面/自选/买点页上打开，
+      那时"当前是哪个账户"不存在，而"我在这只票上买卖过没有"正是那时
+      最想知道的事。逐笔标出自哪个账户。
+    🔴 **浮层固定用不复权 K 线**，所以这里直接给成交价、不做复权换算：
+      成交价是不复权实际价，切到后复权就会把标记画到错误价位上，
+      **而它不报错**，只是看着像"买在了那根阴线上面"。要看后复权的
+      去完整个股页（浮层里有出口）。
+    """
+    code = q.get('code') or ''
+    if not code:
+        return {'error': '缺 code'}
+    m = _live()
+    try:
+        return {'code': m.normalize_code(code), 'trades': m.trades_of(code)}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}

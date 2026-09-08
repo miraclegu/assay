@@ -10,6 +10,8 @@
 </div>
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 自选 ============
    ★ 账本 **append-only**（live/watchlist.jsonl），与实盘同一套纪律：
@@ -182,9 +184,8 @@ function table(w) {
       ${rows.map(x => `<tr>
         <td class="tx"><a href="#" class="chip wgr" data-c="${esc(x.code)}"
           data-g="${esc(x.group)}" title="点击改分组">${esc(x.group)}</a></td>
-        <td class="tx"><a href="${stockHref(x.code)}"
-          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0,6))}</a></td>
-        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+        <td class="tx">${spLink(x.code, x.code.slice(0,6))}</td>
+        <td class="tx">${spLink(x.code, x.name || '')}
           ${x.missing ? '<span class="stale" title="面板里查不到 —— 可能已退市或还没上市。这一行刻意留着，不静默丢掉">查不到行情</span>' : ''}
           ${x.is_st ? '<span class="stale">ST</span>' : ''}
           ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}

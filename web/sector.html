@@ -10,6 +10,8 @@
 </div>
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 行业 / 板块 ============
    ★ 两个来源：申万一级（随面板每日同步、带 PIT）与通达信板块
@@ -111,9 +113,8 @@ function members(mem) {
         <th class="rt">PE</th><th class="rt">PB</th><th class="tx">行业</th></tr>
       ${rows.map(x => `<tr>
         <td class="tx">${starHtml(x.code, false)}</td>
-        <td class="tx"><a href="${stockHref(x.code)}"
-          style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(x.code.slice(0,6))}</a></td>
-        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit">${esc(x.name || '')}</a>
+        <td class="tx">${spLink(x.code, x.code.slice(0,6))}</td>
+        <td class="tx">${spLink(x.code, x.name || '')}
           ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
           ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
         <td class="rt">${fmtN(x.close)}</td>

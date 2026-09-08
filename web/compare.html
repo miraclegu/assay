@@ -11,6 +11,7 @@
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
 <script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 多股对比 ============
    🔴 一律**后复权**：不复权跨除权日有假跌幅，对比图上会看成"这只票那天崩了"。
@@ -108,9 +109,8 @@ function table() {
         v.forEach(x => { peak = Math.max(peak, x); mdd = Math.max(mdd, (peak - x) / (1 + peak)); });
         return `<tr>
           <td class="tx"><span style="color:${PAL[i % PAL.length]}">━</span> ${starHtml(s.code, false)}</td>
-          <td class="tx"><a href="${stockHref(s.code)}"
-            style="font-family:'SF Mono',Menlo,monospace;color:inherit">${esc(s.code.slice(0,6))}</a></td>
-          <td class="tx"><a href="${stockHref(s.code)}" style="color:inherit">${esc(s.name || '')}</a></td>
+          <td class="tx">${spLink(s.code, s.code.slice(0,6))}</td>
+          <td class="tx">${spLink(s.code, s.name || '')}</td>
           <td class="rt"><b style="color:${upc(v.length ? v[v.length-1] : null)}">${ratv(v.length ? v[v.length-1] : null)}</b></td>
           <td class="rt" style="color:var(--down)">${v.length ? '−' + (mdd*100).toFixed(2) + '%' : '—'}</td>
           <td class="rt" style="color:var(--up)">${ratv(v.length ? Math.max(...v) : null)}</td>

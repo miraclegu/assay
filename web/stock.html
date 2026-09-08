@@ -11,6 +11,7 @@
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
 <script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 个股 ============
    ★ 这一页【不出现 SQL】—— 它回答固定的几个问题，接口也是固定形状的。
@@ -234,7 +235,7 @@ function sectorBox(sc, pe) {
           <th class="rt">PB</th><th class="rt">ROE</th></tr>
         ${peers.map(x => `<tr${x.code === CODE ? ' style="background:var(--panel2)"' : ''}>
           <td class="tx">${starHtml(x.code, false)}</td>
-          <td class="tx"><a href="${stockHref(x.code)}" style="color:${x.code === CODE ? 'var(--accent)' : 'inherit'}">${esc(x.name || x.code)}</a></td>
+          <td class="tx">${spLink(x.code, x.name || x.code, 'accent')}</td>
           <td class="rt">${fmtN(x.close)}</td>
           <td class="rt" style="color:${upc(x.change_pct)}">${pctv(x.change_pct)}</td>
           <td class="rt">${yiv(x.floatmv)}</td>

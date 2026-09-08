@@ -10,6 +10,8 @@
 </div>
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 股息率买点清单 ============
    就是把用户手里那张 Excel 搬进来：一只票一行，一个「实际分红（每股）」，
@@ -216,11 +218,8 @@ function table(rows) {
         <th class="tx">状态</th><th class="tx"></th></tr>
       ${rows.map(x => `<tr${x.state === 'hit' ? ' class="ahit"'
           : (x.state === 'near' ? ' class="anear"' : '')}>
-        <td class="tx"><a href="${stockHref(x.code)}"
-          style="font-family:'SF Mono',Menlo,monospace;color:inherit"
-          >${esc(x.code.slice(0, 6))}</a></td>
-        <td class="tx"><a href="${stockHref(x.code)}" style="color:inherit"
-          >${esc(x.name || '')}</a>${x.missing
+        <td class="tx">${spLink(x.code, x.code.slice(0, 6))}</td>
+        <td class="tx">${spLink(x.code, x.name || '')}${x.missing
             ? '<span class="stale" title="面板里查不到这个代码 —— 可能填错了，或已退市/未上市。这一行刻意留着，不静默丢掉">查不到</span>' : ''}
           ${x.is_st ? '<span class="stale">ST</span>' : ''}
           ${x.note ? `<span class="lvwhy" style="cursor:help"
