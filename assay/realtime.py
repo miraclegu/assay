@@ -55,6 +55,7 @@ import json
 import os
 import threading
 import time
+import uuid
 import urllib.request
 
 import duckdb
@@ -72,8 +73,35 @@ HDR = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'}
 #    解析器按 8 段读会把"收"当成"开"、把均价读成越界 —— 踩过。
 COLS = ('datetime', 'open', 'close', 'high', 'low', 'volume', 'amount', 'avg')
 
-_lock = threading.Lock()
+_lock = threading.Lock()          # 只保护 host 轮询下标（下面那 3 行）
 _host_i = 0
+
+# 🔴 **落盘要串行**。写当日文件的有【三个来源】，其中两个在 HTTP 请求线程上：
+#      ① 轮询线程 `_rt_loop` -> poll_once
+#      ② 请求线程 `_rt_ensure`   -> ensure_codes   （加自选 / 打开自选页 / 实盘接口）
+#      ③ 请求线程 `_rt_catch_up` -> ensure_fresh
+#   `save()` 是"读当日文件 -> 合并 -> COPY 到 tmp -> rename"，没有锁的话：
+#     · 两个线程 COPY 到**同一个 tmp 路径**，先 rename 的那个拿到对方写了一半的
+#       文件 -> 落地一个**头尾都是 PAR1、中间元数据是垃圾**的 parquet。
+#       实测 2026-09-07 09:43 就这么坏了一次（2078 字节，duckdb 报
+#       TProtocolException），此后 bar 腿每轮失败、连续 3.5 小时，
+#       **而轮询线程活着、只是 rounds 不再增长** —— 页面上就是"实时不刷新"。
+#     · 即使 tmp 名唯一，两个线程各自读到旧文件、各写自己那份合并结果，
+#       后 rename 的覆盖前一个 -> 前者抓到的行**凭空消失且不报错**。
+#   ★ 两条的分工是**变异测试量出来的**，别记反：
+#     · **写锁是根本修复。** 去掉它跑 200 线程并发写：最终只剩 **1 行**
+#       （应有 200），且日志里刷几十次"隔离重建" —— 精确复现生产事故。
+#     · **唯一 tmp 名在有锁的前提下是冗余的**（改回固定名、200 行完好，
+#       变异测试抓不到）。保留它防的是**跨进程**：锁只在进程内有效，
+#       而重启时 `pkill` 没杀干净就会有两个 serve.py 同时跑
+#       （CLAUDE.md 已记"改了抓取范围必须重启"这条纪律）。
+#   锁只圈住落盘（毫秒级），网络请求在锁外，不会互相拖住。
+_wlock = threading.Lock()
+
+
+def _tmp_path(p):
+    """唯一的临时文件名 —— 固定用 `p + '.tmp'` 会被并发写者互相踩。"""
+    return '%s.%d.%s.tmp' % (p, os.getpid(), uuid.uuid4().hex[:8])
 
 
 class RTError(Exception):
@@ -285,6 +313,53 @@ def fetch(codes, root=None, sleep=SLEEP, on_progress=None):
             'bars': len(rows), 'day': day, 'preclose': pre}
 
 
+def quarantine(p):
+    """把读不动的文件挪进 `_corrupt/`，返回新路径（挪不动就返回 None）。
+
+    ★ **不删** —— 坏文件是证据（这次就是靠那 2078 字节确认了"头尾都是 PAR1、
+      中间是垃圾"，从而定位到并发写同一个 tmp）。删了就只剩"读不出来"这一个
+      症状，分不清是撕裂写还是磁盘坏。
+    """
+    try:
+        d = os.path.join(os.path.dirname(p), '_corrupt')
+        os.makedirs(d, exist_ok=True)
+        q = os.path.join(d, '%s.%s.bad' % (os.path.basename(p),
+                                           time.strftime('%H%M%S')))
+        os.replace(p, q)
+        return q
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _merge_existing(con, p):
+    """把已有的当日文件读进 `all_`。返回 True = 读到了，False = 从零开始。
+
+    🔴 **读不动就隔离掉、当作没有**，不要把异常抛出去。理由是这条链的
+      失败模式：一个坏文件会让**此后每一轮**都在同一处抛异常，而
+      `_rt_loop` catch 住之后 `rounds` / `last` 不再更新 —— 线程活着、
+      每 60 秒失败一次，页面上只表现为"实时不刷新"。实测这样连续失败了
+      3.5 小时（2026-09-07 09:47 -> 13:20）。
+    ★ 自愈是安全的：trends2 **每次返回当天全量**，快照也是按分钟去重覆盖写，
+      所以重建一遍就补回来了（这也是 bar 腿"漏了不要紧"的同一个理由）。
+      唯一代价是丢掉隔离前那一段还没被这一轮覆盖到的行 —— 对 bar 是 0
+      （全量重取），对快照是当天已过去的分钟。
+    """
+    if not os.path.isfile(p):
+        return False
+    try:
+        con.execute("CREATE TABLE all_ AS SELECT * FROM read_parquet('%s')" % p)
+        return True
+    except Exception as e:                                  # noqa: BLE001
+        q = quarantine(p)
+        print('[rt] 当日文件读不动，已隔离并重建：%s -> %s（%s: %s）'
+              % (p, q, type(e).__name__, str(e)[:80]), flush=True)
+        try:                       # 隔离后 all_ 可能已被半建出来
+            con.execute('DROP TABLE IF EXISTS all_')
+        except Exception:                                   # noqa: BLE001
+            pass
+        return False
+
+
 # ---------------------------------------------------------------- 落盘
 def save(rows, day, root=None):
     """写当日 parquet。**按 (code, datetime) 去重**，同一天可以反复写。
@@ -296,22 +371,22 @@ def save(rows, day, root=None):
     if not rows:
         return None
     p = day_file(datetime.date.fromisoformat(day), root)
-    con = duckdb.connect(':memory:')
-    con.register('new', _to_arrow(rows))
-    if os.path.isfile(p):
-        con.execute("CREATE TABLE all_ AS SELECT * FROM read_parquet('%s')" % p)
-        con.execute('INSERT INTO all_ SELECT * FROM new')
-    else:
-        con.execute('CREATE TABLE all_ AS SELECT * FROM new')
-    tmp = p + '.tmp'
-    con.execute("""
-        COPY (SELECT code, datetime, open, close, high, low, volume, amount, avg
-              FROM (SELECT *, row_number() OVER
-                      (PARTITION BY code, datetime ORDER BY volume DESC) rn
-                    FROM all_) WHERE rn = 1
-              ORDER BY code, datetime)
-        TO '%s' (FORMAT PARQUET)""" % tmp)
-    os.replace(tmp, p)          # 先写 tmp 再 rename，同 _save_marks
+    with _wlock:                       # 见 _wlock 的注释：三个线程会同时写这个文件
+        con = duckdb.connect(':memory:')
+        con.register('new', _to_arrow(rows))
+        if _merge_existing(con, p):
+            con.execute('INSERT INTO all_ SELECT * FROM new')
+        else:
+            con.execute('CREATE TABLE all_ AS SELECT * FROM new')
+        tmp = _tmp_path(p)
+        con.execute("""
+            COPY (SELECT code, datetime, open, close, high, low, volume, amount, avg
+                  FROM (SELECT *, row_number() OVER
+                          (PARTITION BY code, datetime ORDER BY volume DESC) rn
+                        FROM all_) WHERE rn = 1
+                  ORDER BY code, datetime)
+            TO '%s' (FORMAT PARQUET)""" % tmp)
+        os.replace(tmp, p)      # 先写 tmp 再 rename，同 _save_marks
     return p
 
 
@@ -346,20 +421,20 @@ def save_snap(rows, root=None):
         return None
     day = out[0]['minute'][:10]
     p = day_file(datetime.date.fromisoformat(day), root, kind='snap_1m')
-    con = duckdb.connect(':memory:')
-    con.register('new', pa.table({k: [r[k] for r in out] for k in SNAP_COLS}))
-    if os.path.isfile(p):
-        con.execute("CREATE TABLE all_ AS SELECT * FROM read_parquet('%s')" % p)
-        con.execute('INSERT INTO all_ SELECT * FROM new')
-    else:
-        con.execute('CREATE TABLE all_ AS SELECT * FROM new')
-    tmp = p + '.tmp'
-    con.execute("""
-        COPY (SELECT %s FROM (SELECT *, row_number() OVER
-                  (PARTITION BY code, minute ORDER BY ts DESC) rn FROM all_)
-              WHERE rn = 1 ORDER BY code, minute)
-        TO '%s' (FORMAT PARQUET)""" % (', '.join(SNAP_COLS), tmp))
-    os.replace(tmp, p)
+    with _wlock:                       # 同 save()：请求线程与轮询线程会撞
+        con = duckdb.connect(':memory:')
+        con.register('new', pa.table({k: [r[k] for r in out] for k in SNAP_COLS}))
+        if _merge_existing(con, p):
+            con.execute('INSERT INTO all_ SELECT * FROM new')
+        else:
+            con.execute('CREATE TABLE all_ AS SELECT * FROM new')
+        tmp = _tmp_path(p)
+        con.execute("""
+            COPY (SELECT %s FROM (SELECT *, row_number() OVER
+                      (PARTITION BY code, minute ORDER BY ts DESC) rn FROM all_)
+                  WHERE rn = 1 ORDER BY code, minute)
+            TO '%s' (FORMAT PARQUET)""" % (', '.join(SNAP_COLS), tmp))
+        os.replace(tmp, p)
     return p
 
 
@@ -462,8 +537,18 @@ def status(day=None, root=None):
         out[key]['exists'] = os.path.isfile(p)
         if not out[key]['exists']:
             continue
-        r = con.execute("SELECT count(DISTINCT code), count(*), max(%s) "
-                        "FROM read_parquet('%s')" % (col, p)).fetchone()
+        # 🔴 **一条腿坏了不能把整个接口打挂。** 实测 2026-09-07：bar 库当日
+        #   文件被并发写坏，这个查询直接抛 TProtocolException，`/api/rt/status`
+        #   整体返回 error —— 于是页面连**健康的快照腿**都看不到，
+        #   表现成"实时数据全没了"，而真实情况是只有 bar 腿坏了。
+        # ★ 所以逐腿 try，坏的那条标 `err` 让页面**说出来**，
+        #   而不是让两条腿一起消失。
+        try:
+            r = con.execute("SELECT count(DISTINCT code), count(*), max(%s) "
+                            "FROM read_parquet('%s')" % (col, p)).fetchone()
+        except Exception as e:                              # noqa: BLE001
+            out[key]['err'] = '%s: %s' % (type(e).__name__, str(e)[:120])
+            continue
         out[key].update(codes=r[0], rows=r[1], last=r[2])
         if r[2] and (out['last'] is None or r[2] > out['last']):
             out['last'] = r[2]

@@ -209,16 +209,43 @@ def upcoming_rebalance(eng, feed, from_day, days, n=LOOKAHEAD_DAYS):
     返回 [{date, wday, is_rebal}]，只含 from_day 之后的交易日。
     """
     fut = [d for d in days if d > from_day][:n]
-    out = []
-    for d in fut:
-        due = False
-        for t, freq, func, wd, md, ev, off in eng._tasks:
-            if freq in ('w', 'm') and eng._due(0, d, freq, wd, md, ev, off):
-                due = True
-                break
-        out.append({'date': d.isoformat(), 'wday': d.isoweekday(),
-                    'is_rebal': due})
-    return out
+    return [{'date': d.isoformat(), 'wday': d.isoweekday(),
+             'is_rebal': is_rebalance_day(eng, d)} for d in fut]
+
+
+def is_rebalance_day(eng, d):
+    """`d` 是不是调仓日 —— **纯日历判据**（run_weekly/run_monthly 的序号）。
+
+    🔴 **不能从"策略下了几个调仓委托"反推。** 原来 `make_signal` 里写的是
+      `is_rebal = bool(rebal_orders)`，于是调仓日**什么都不用动**时
+      （目标池恰好等于当前持仓）策略一个委托都不下 -> 判成"今天不是调仓日"
+      -> 页面显示「下次调仓 09-15」，而今天就是调仓日。
+
+    ★ 原版下永远不暴露:调仓日总会卖掉几只（黑名单剔除、排名掉出），
+      所以 `rebal_orders` 从来不空。2026-09-08 开 `lu_buy_only=1` 之后
+      第一次出现"调仓日零委托"，这个 bug 才现形。
+    ★ 与 CLAUDE.md 里「调仓日的'持有不动'从**委托**反推」是**同一个根因**
+      的另一半 —— 那次修的是清单，这次是"是不是调仓日"本身。
+      判据要问日历，不要问策略做了什么。
+
+    🔴 **调用前必须先 `_extend_ordinals`。** `Engine._build_ordinals` 只覆盖
+      `feed.trading_days`，而实盘问的正是**下一个交易日**（它没有行情、不在
+      面板里）。`_due` 对表外日期取 `(0, 0)` -> 与任何 weekday 都不等 ->
+      **静默返回 False**，也就是静默说"今天不是调仓日"。
+      所以这里宁可抛错也不返回一个看着正常的 False。
+    """
+    for _t, freq, _func, wd, md, ev, off in eng._tasks:
+        if freq not in ('w', 'm'):
+            continue
+        table = eng._wk_ord if freq == 'w' else eng._mo_ord
+        if d not in table:
+            raise _base.LiveError(
+                '%s 不在日历序号表里（freq=%s）—— 调 is_rebalance_day 之前'
+                '要先 _extend_ordinals(eng, feed, calendar_days())。'
+                '静默返回 False 就是静默说"今天不是调仓日"。' % (d, freq))
+        if eng._due(0, d, freq, wd, md, ev, off):
+            return True
+    return False
 
 
 
@@ -329,7 +356,8 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
         rec.arm('rebalance')
         rebal_orders = _run_tasks(eng, feed, t, {'w', 'm'}, data_day=t1)
         rec.disarm()
-        is_rebal = bool(rebal_orders)
+        # 🔴 日历判据，**不是** `bool(rebal_orders)` —— 见 is_rebalance_day()
+        is_rebal = is_rebalance_day(eng, t)
         # --- 4) 未来调仓日：纯日历，可以提前很久算出来 ---
         cal_days = _base.calendar_days()
         upcoming = upcoming_rebalance(eng, feed, t, cal_days)
@@ -540,8 +568,20 @@ def latest_signal(aid):
 
 
 def rev_path(aid, for_date, n):
-    """被覆盖掉的那一版存这儿。**append-only：已有的 rev 永不重写。**"""
-    return os.path.join(_base.acct_dir(aid), 'signals',
+    """被覆盖掉的那一版存这儿。**append-only：已有的 rev 永不重写。**
+
+    🔴 **必须放子目录 `signals/_rev/`，不能与信号同层。**
+      有三处在扫 `signals/` 下的 `*.json`（`sig.latest_signal` /
+      `px.latest_signal` / `explain_history`），而前两者取
+      `sorted(...)[-1]` —— `'2026-09-08.rev1.json'` 排在
+      `'2026-09-08.json'` **后面**（`'r' > '.'`），于是"最新信号"读到的是
+      **被归档的旧版**。实测：页面上仍显示改规则前的「卖出 2 只」，
+      而磁盘上的主文件早就是「卖出 0 只」了 —— 接口不报错，只是给了旧数据。
+    ★ 与 CLAUDE.md 里「选股理由的旁挂必须放子目录、不能是
+      `<date>.explain.json`」是**同一个坑**，我加 revision 时又踩了一次。
+      放进子目录之后 `os.listdir` 只看一层，结构上就撞不上。
+    """
+    return os.path.join(_base.acct_dir(aid), 'signals', '_rev',
                         '%s.rev%d.json' % (for_date, n))
 
 
@@ -609,12 +649,18 @@ def make_signal(aid, datalake=None, force=False):
         if d['changed']:
             n = 1 + max([r.get('rev', 0) for r in revs] or [0])
             rp = rev_path(aid, sig['for_date'], n)
+            os.makedirs(os.path.dirname(rp), exist_ok=True)
             if not os.path.exists(rp):          # append-only
                 _base._atomic_write(rp, json.dumps(
                     old, ensure_ascii=False, indent=1, sort_keys=True))
             revs.append({'rev': n, 'built_at': old.get('built_at'),
                          'replaced_at': _base._now(),
-                         'archived': os.path.basename(rp), 'diff': d})
+                         # ★ 存**相对账户目录的完整路径**，页面直接显示。
+                         #   只存 basename 的话页面要自己拼 'signals/'，
+                         #   而归档搬进 _rev/ 子目录之后那个拼法就错了 ——
+                         #   提示里给出一个找不到的路径，比不给更糟。
+                         'archived': os.path.relpath(
+                             rp, _base.acct_dir(aid)), 'diff': d})
         else:
             sig['recomputed_at'] = list(old.get('recomputed_at') or []) \
                 + [_base._now()]

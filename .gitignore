@@ -21,3 +21,8 @@ signal*.csv
 # live/ 本身【要】入版本控制（账户/成交/版本快照是决策证据，见 assay/live.py），
 # 只排掉 import 快照时生成的字节码。
 live/**/__pycache__/
+
+# 事后复算出来的选股理由：**派生物**，不是证据（证据是 signals/<date>.json 本身）。
+# 它按【当前绑定版本】算，重绑一次就整份重生成 —— 入库只会制造无意义的 diff。
+# 删了也不丢东西：下次打开选股理由页会自动重算（见 srv/live.py `_explain_kick`）。
+live/*/signals/_explain/

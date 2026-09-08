@@ -11,7 +11,8 @@ from datetime import date, datetime
 
 from .. import registry
 from . import base
-from .base import (HERE, _BOOT_TS, _live, _parse_note, _parse_params, _scan, _staleness, _watch)
+from . import base as _base
+from .base import (HERE, _live, _parse_note, _parse_params, _scan, _staleness, _watch)
 from . import rt as _rt  # _rt_catch_up, _rt_ensure
 from . import runs as _runs  # _DATE_RE, _JOBS, _run_job
 
@@ -33,14 +34,32 @@ def _live_err(fn, *a, **kw):
 #   这里把服务端代码的 mtime 暴露出去，页面自己比对并明说"请重启"。
 
 def _code_stamp():
+    """进程启动时间 vs **整个包**的最新代码 mtime。
+
+    🔴 原来只 stat `server.py` 与 `live.py` 两个文件 —— 而实现早就拆进了
+      `srv/` 与 `lv/`（server.py 只剩 280 行骨架、live.py 只剩 66 行门面）。
+      于是改任何一个域文件都**不会**触发"请重启 serve.py"的横幅，
+      而那正是这个横幅存在的全部理由（新页面 + 旧 API = 满屏 undefined
+      且不报错）。判据要跟着代码一起搬，不然它只是看着还在。
+    """
     out = []
-    for f in ('server.py', 'live.py'):
-        p = os.path.join(HERE, f)
-        try:
-            out.append(int(os.path.getmtime(p)))
-        except OSError:
-            out.append(0)
-    return {'loaded_at': int(_BOOT_TS), 'code_mtime': max(out)}
+    for r, _d, fs in os.walk(HERE):
+        if '__pycache__' in r:
+            continue
+        for f in fs:
+            if f.endswith('.py'):
+                try:
+                    out.append(int(os.path.getmtime(os.path.join(r, f))))
+                except OSError:
+                    pass
+    if not out:
+        out = [0]
+    # 🔴 读 `_base._BOOT_TS` 而不是 import 进来的副本。
+    #   `from .base import _BOOT_TS` 抄的是**那一刻的值**，之后谁改 base 的
+    #   都不会跟着变 —— selftest 正是靠「把 _BOOT_TS 调早」来模拟"进程比代码旧"，
+    #   而那个模拟一直是**空转的**（断言够不着，因为前面先挂在 _JOBS 上）。
+    #   同 CLAUDE.md 里门面那条：re-export 拿到的是副本，转发才是引用。
+    return {'loaded_at': int(_base._BOOT_TS), 'code_mtime': max(out)}
 
 
 
@@ -79,6 +98,20 @@ def api_live_accounts(_q):
                          'authoritative_until': cal.get('authoritative_until'),
                          'warn': cal.get('warn'), 'error': cal.get('error')}}
 
+
+
+def _rt_live():
+    """现在是不是"盘中"（交易日 + 交易时段）—— 页面据此决定要不要轮询。
+
+    ★ 取 assay/realtime.py 的 in_session / is_trading_day，**不另写判据**。
+      拿不到（比如实时模块没起）就返回 None -> 页面按"不确定"处理：
+      仍然轮一次但不持续，宁可少轮也不要谎报"盘中"。
+    """
+    try:
+        rt = base._rt()
+        return bool(rt.in_session() and rt.is_trading_day())
+    except Exception:                                       # noqa: BLE001
+        return None
 
 
 def api_live_account(q):
@@ -130,6 +163,15 @@ def api_live_account(q):
             # ★ 待办要不要默认展开、账户列表的红点，同一个判据
             #   （live.signal_alert）—— 判据分两处写就一定会分叉
             'alert': alert, 'alert_why': why,
+            # ★ 现在是不是盘中 —— **页面靠它决定要不要继续轮询**。
+            #   🔴 判据必须由服务端给：前端硬编码交易时段的话，
+            #     改了时段（或遇到半日市）就会静默轮空/白轮，
+            #     而"多轮几次"不报错、"该轮没轮"更不报错。
+            #     （同"权不权威由服务端给"那条：前端硬编码过一次
+            #      `source !== 'jq.get_all_trade_days'`，弹了一整页假告警。）
+            #   ★ 与 /api/rt/status 的 in_session / trading_day 同一处实现
+            #     （realtime.in_session / is_trading_day），不另写。
+            'rt_live': _rt_live(),
         }
     return _live_err(_go)
 
@@ -189,11 +231,67 @@ def api_live_fills(q):
 
 
 
+def api_live_intraday(_q):
+    """GET /api/live/intraday —— 盘中炸板扫描（**全部**非归档账户）。
+
+    ★ 不带 `id`：这个提示要在**任何页面**都能看到（浮窗挂在 common.js 里），
+      而那时页面不知道"当前是哪个账户" —— 所以一次扫完所有账户。
+    ★ `fire()` 负责去重（同一只票一天只报一次，落盘）；返回里
+      `fresh` 是本次新增的、`items` 是当前全部状态（含还封着的）——
+      "一条都没有"要能分出"没有涨停持仓"和"链条没工作"。
+    """
+    m = _live()
+    from ..lv import intraday as _in
+    out = {'accounts': [], 'fresh': [], 'session': None, 'scan_from': None}
+    try:
+        out['scan_from'] = _in.SCAN_FROM.strftime('%H:%M')
+    except Exception:                                       # noqa: BLE001
+        pass
+    for a in m.load_accounts():
+        if a.get('archived'):
+            continue
+        try:
+            r = _in.scan(a['id'])
+        except Exception as e:                              # noqa: BLE001
+            out['accounts'].append({'id': a['id'], 'name': a.get('name'),
+                                    'error': '%s: %s' % (type(e).__name__, e)})
+            continue
+        if out['session'] is None:
+            out['session'] = r.get('session')
+        fresh = _in.fire(a['id'], r.get('items') or []) if r.get('items') else []
+        for x in fresh:
+            x = dict(x)
+            x['account'] = a['id']
+            x['account_name'] = a.get('name')
+            out['fresh'].append(x)
+        out['accounts'].append({'id': a['id'], 'name': a.get('name'),
+                                'skipped': r.get('skipped'),
+                                'at': r.get('at'),
+                                'items': r.get('items') or []})
+    return out
+
+
 def api_live_equity(q):
-    """GET /api/live/equity?id= —— 逐日权益曲线 + 时间加权收益。"""
+    """GET /api/live/equity?id=&bench=sh000001,sh000905
+    —— 逐日权益曲线 + 时间加权收益（+ 可选的基准指数,对齐到同一日期轴）。
+
+    ★ 基准跟权益曲线**同一次请求**给：日期轴天然对齐，前端不用自己拼；
+      另开一个接口的话两边取到的交易日可能差一天，而那种错不报错。
+    ★ 可选清单（`benchmarks`）总是带上 —— 前端不该硬编码有哪些指数
+      可选（本地缺哪个只有服务端知道，见 lv/perf.py 的 BENCHMARKS）。
+    """
     m = _live()
     aid = (q.get('id') or '').strip()
-    return _live_err(lambda: m.equity_curve(aid))
+    codes = [x.strip() for x in (q.get('bench') or '').split(',') if x.strip()]
+
+    def _go():
+        out = m.equity_curve(aid)
+        from ..lv import perf as _perf
+        out['benchmarks'] = _perf.BENCHMARKS
+        if codes and out.get('dates'):
+            out['bench'] = _perf.bench_curves(out['dates'], codes)
+        return out
+    return _live_err(_go)
 
 
 
@@ -203,6 +301,149 @@ def api_live_signal(q):
     d = (q.get('date') or '').strip()
     return _live_err(lambda: (m.load_signal(aid, d) if d else m.latest_signal(aid))
                      or {'error': '还没有信号 —— 点「立即重算」'})
+
+
+
+# ★ 后台事后复算：历史那几期（早于这个功能）没有留下选股理由，要重放 30 天
+#   warmup 才能补出来，约 1~3 秒 —— 太慢，不能在请求里同步跑。
+#   🔴 但也**不能只给一个按钮**：实测用户打开页面看到的就是"没有理由"，
+#     而"要点一下才有"这件事页面说了他也不会当回事（实测反馈：
+#     「我直接看不到上一期选股」）。所以**打开就自动开算**，页面显示
+#     「正在复算…」并轮询；算完落盘（`signals/_explain/`），以后直接就有。
+_EXP_JOBS = {}                       # (aid, date) -> 'running' | 'done' | 'err:...'
+_EXP_LOCK = threading.Lock()
+
+
+def _explain_kick(aid, day):
+    """开一个后台复算（同一期同时只会有一个）。返回当前状态。"""
+    key = (aid, day)
+    with _EXP_LOCK:
+        st = _EXP_JOBS.get(key)
+        if st == 'running':
+            return st
+        _EXP_JOBS[key] = 'running'
+
+    def _run():
+        try:
+            _live().explain_recompute(aid, day)
+            _EXP_JOBS[key] = 'done'
+        except Exception as e:                              # noqa: BLE001
+            # 失败必须留下原因：这一格在页面上是"正在复算…"，
+            # 不写状态的话它会一直转，而**没有任何报错**
+            _EXP_JOBS[key] = 'err:%s' % e
+    threading.Thread(target=_run, daemon=True).start()
+    return 'running'
+
+
+def _explain_attach(aid, r, sg):
+    """给一期补上选股理由：信号里有就用信号里的，没有就用旁挂的复算结果；
+    再没有、且是调仓日，就**开一个后台复算**并标 `explain_pending`。"""
+    e = sg.get('explain') or {}
+    if e.get('captured'):
+        return dict(r, explain=e, explain_from='signal')
+    m = _live()
+    side = m.load_explain_side(aid, r['date'])
+    if side:
+        return dict(r, explain=side.get('explain') or {}, explain_from='recomputed',
+                    verified=side.get('verified'), metrics_from=side.get('metrics_from'),
+                    diff=side.get('diff') or {}, computed_at=side.get('computed_at'))
+    if not r.get('is_rebalance'):
+        return dict(r, explain={}, explain_from=None)
+    st = _explain_kick(aid, r['date'])
+    return dict(r, explain={}, explain_from=None,
+                explain_pending=(st == 'running'),
+                explain_err=(st[4:] if str(st).startswith('err:') else None))
+
+
+def api_live_explain(q):
+    """GET /api/live/explain?id=&date=&recompute=0|1 —— 某一期的选股理由。
+
+    不带 `date` 就给最近一期。`recompute=1` 时**事后复算**那一期
+    （老信号里没有理由 —— 这个功能是后加的），复算结果带 `verified`：
+    `same` = 复算出的买/卖/持有与当时存的逐个相同，说明面板没被动过、
+    这就是当时那份；`differs` = 不是当时那份，页面必须照实说。
+
+    ★ 复算要重放 30 天 warmup，约 1~3 秒，所以**只在人点了才算**，
+      不在账户接口里顺手带出来。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    d = (q.get('date') or '').strip()
+
+    def _go():
+        sg = (m.load_signal(aid, d) if d else m.latest_signal(aid)) or {}
+        if not sg.get('for_date'):
+            return {'error': '没有这一期的信号'}
+        e = sg.get('explain') or {}
+        force = q.get('recompute') in ('1', 'true')
+        if not e.get('captured') and not force:
+            # 旁挂的复算结果（`signals/_explain/`）算数 —— 不然重启一次
+            # serve.py 就又要人点一遍
+            side = m.load_explain_side(aid, sg['for_date'])
+            if side:
+                return dict(side, is_rebalance=bool(sg.get('is_rebalance_day')))
+        if e.get('captured') or not force:
+            return {'date': sg['for_date'], 'data_asof': sg.get('data_asof'),
+                    'code_sha': sg.get('code_sha'), 'params': sg.get('params') or {},
+                    'is_rebalance': bool(sg.get('is_rebalance_day')),
+                    'recomputed': bool(sg.get('recomputed')),
+                    'explain': e, 'buy': sg.get('buy') or [],
+                    'sell': sg.get('sell') or [], 'hold': sg.get('hold') or []}
+        r = m.explain_recompute(aid, sg['for_date'])
+        r['is_rebalance'] = bool(sg.get('is_rebalance_day'))
+        return r
+    return _live_err(_go)
+
+
+
+def api_live_explains(q):
+    """GET /api/live/explains?id=&offset=&limit=&full=1 —— 期数清单（可带内容）。
+
+    - 不带 `full`：只给清单（日期 / 调仓日 / 有没有理由 / 买卖几只），
+      账户页拿它标持仓的"出处"，很便宜。
+    - `full=1`：连**这一页那几期的完整理由**一起给 —— 选股理由是**独立页**，
+      一期一段列出来（同成交流水那条：会越来越长，所以**服务端分页**）。
+
+    🔴 一次只给一页。红利一期的候选池有几百只，全给会让这个接口越用越慢，
+      而"慢"在本地是最容易被忽略的坏。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+
+    def _go():
+        rows = m.explain_history(aid)
+        rows.reverse()                       # 最近的在最上面
+        n_all = len(rows)
+        # 🔴 默认**只列调仓日**。非调仓日本来就不选股，列出来是三段
+        #   "本期不选股"的空段 —— 会把真正要看的那期推到第二页去
+        #   （实测：froec 最近三期全是非调仓日，第一页什么都没有）。
+        if (q.get('only') or 'rebal') == 'rebal':
+            rows = [r for r in rows if r['is_rebalance']]
+        out = {'total': len(rows), 'total_all': n_all,
+               'only': (q.get('only') or 'rebal'),
+               'entry': m.entry_signals(aid)}
+        if q.get('full') not in ('1', 'true'):
+            out['periods'] = rows
+            out['offset'], out['limit'] = 0, len(rows)
+            return out
+        try:
+            off = max(0, int(q.get('offset') or 0))
+        except ValueError:
+            off = 0
+        try:
+            lim = min(20, max(1, int(q.get('limit') or 3)))
+        except ValueError:
+            lim = 3
+        page = []
+        for r in rows[off:off + lim]:
+            sg = m.load_signal(aid, r['date']) or {}
+            page.append(dict(_explain_attach(aid, r, sg),
+                             buy=sg.get('buy') or [], sell=sg.get('sell') or [],
+                             hold=sg.get('hold') or [],
+                             params=sg.get('params') or {}))
+        out['periods'], out['offset'], out['limit'] = page, off, lim
+        return out
+    return _live_err(_go)
 
 
 
@@ -323,7 +564,7 @@ def api_live_backtest(_q, body):
             return {'error': '本金必须是正数'}
         cmd += ['--cash', repr(c)]
     job_id = 'lvbt-%s' % datetime.now().strftime('%H%M%S')
-    _JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+    _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
                      'sha': want, 'run_id': None, 'rc': None}
     threading.Thread(target=_runs._run_job, args=(job_id, cmd, registry.ROOT),
                      daemon=True).start()

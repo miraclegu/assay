@@ -2753,8 +2753,17 @@ def t_live_core():
         # 不是"正好落在那天"
         lv.add_cashflow('t_seed', '2026-08-16', 200000, 'deposit', '周六入金')
         es2 = lv.equity_curve('t_seed')['stats']
-        assert abs(es2['twr'] - es['twr']) < 0.02, \
-            ('周末入金被当成收益了：TWR 从 %.4f 跳到 %.4f'
+        #   🔴 判据是**方向**，不是"几乎不变"。
+        #     把入金当成收益的话 TWR 会**变大**（+20万/本金 那一截）；
+        #     而入金之后 TWR **本来就会变小** —— 20 万闲置现金按 0% 计，
+        #     摊薄之后每一段的收益率（CLAUDE.md 明确写着那是正确行为）。
+        #   ★ 原来写的是 `abs(差) < 0.02`，那是一条**随时间必然失效**的断言：
+        #     入金日固定在 2026-08-16，而面板每天在长 -> 之后的交易日越来越多
+        #     -> 摊薄累积越大 -> 某天必然越线（今天就越了：0.0149 -> -0.0063）。
+        #     同「不能无条件断言 15 只」那条：断言不许依赖"今天是哪天"。
+        assert es2['twr'] <= es['twr'] + 1e-9, \
+            ('周末入金被当成收益了：TWR 从 %.4f **升到** %.4f —— '
+             '入金只该摊薄收益率、不该抬高它'
              % (es['twr'], es2['twr']))
 
         # ---- 3i) 「年化拖累」要够长的样本才给 ----
@@ -3016,6 +3025,35 @@ def t_live_ui():
             assert nbuy == 10, '待办买入应 10 行，实得 %d' % nbuy
             assert '· 调仓日' in pg.locator('#lvbody').inner_text(), \
                 '没标出是不是调仓日'
+            # ---- 「立即重算」长在【待办】那一块里 ----
+            #   ★ 它重算的是**调仓信号**，属于待办这一块；原来放在账户头部
+            #     那一排（记一笔/流水/设置）里 —— 那排是**账户级**动作。
+            #     按钮该长在它作用的那块里。
+            _todo = pg.locator('#lvbody .lvsec').first
+            assert _todo.locator('#lvtick').count() == 1, \
+                '「立即重算」不在待办那一块里 —— 它算的是调仓信号'
+            assert pg.locator('#lvbody .lvsec').nth(1)\
+                     .locator('#lvtick').count() == 0, \
+                '「立即重算」不该出现在持仓那一块'
+            #   🔴 无信号那支**也要有这个按钮**：文案写着"点「立即重算」"，
+            #     不给的话那句话指向一个不存在的按钮（同 backLink 那条）。
+            _lj = open(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'web', 'views', 'live.js'), encoding='utf-8').read()
+            _noSig = _lj[_lj.index("if(!s) return"):]
+            _noSig = _noSig[:_noSig.index('\n  if(s.error)')]
+            assert 'lvtick' in _noSig, \
+                ('"还没有信号"那支里没有「立即重算」按钮 —— '
+                 '而那正是最需要它的时候')
+            #   出错支没有按钮，所以绑定必须带 if 保护（否则 null.onclick
+            #   -> TypeError -> 整块渲染中断）
+            assert "if($('#lvtick'))" in _lj.replace(' ', ''), \
+                '#lvtick 的事件绑定要带 if 保护（出错支里没有这个按钮）'
+            # ---- 持仓表必须包在 .pw 里，否则窄屏撑出 body 横滚 ----
+            #   🔴 判据查**结构**而不是"当前数据恰好不溢出" —— 这条用例的
+            #     桩数据只有 3 只持仓，真实账户 15 只时 1024 宽溢出 11px，
+            #     而按数据量测的话它测不出来（实测就是这么漏掉的）。
+
 
             # ---- 选股理由：【独立页】，一期一段按排名列出 ----
             #   ★ 一开始做成浮层 + 一个 .lvwhy 小链接，实测**人找不到它**
@@ -3276,6 +3314,18 @@ def t_live_ui():
                 '入金 20000 后现金应 +20000：%.2f -> %.2f' % (c1, _cash())
 
             # ---- 持仓表：盈亏汇总 + 逐只估值 ----
+            # ---- 持仓表必须包在 .pw 里，否则窄屏撑出 body 横滚 ----
+            #   🔴 判据查**结构**，不查"当前数据恰好不溢出" —— 这条用例的
+            #     桩数据只有 3 只持仓，而真实账户 15 只时 1024 宽溢出 11px，
+            #     按数据量测的话测不出来（实测就是这么漏掉的）。
+            assert pg.locator('#lvbody .pw table.lvpos').count() == 1, \
+                ('持仓表要包在 .pw 里自己滚 —— 12 列宽表在窄屏会把'
+                 '**整个 body** 撑出横滚，读表格时整页左右晃')
+            for _t in pg.locator('#lvbody .pw table th').all():
+                assert _t.evaluate('e=>getComputedStyle(e).top') == '0px', \
+                    ('.pw 里的 sticky 表头 top 必须是 0 —— 写 52px 会把表头'
+                     '压在第一行上面，第一行点不到（栽过 3 次）')
+
             # ★ 限定 .lvpos —— 待办里的买入/卖出表也是 .lvt，不限定会选串
             #   （实测：持仓 3 只被数成 14 行）
             th = [x.strip() for x in
@@ -3819,6 +3869,800 @@ def t_sync():
             'B 腿距今 %s 天；脚本/plist 均可执行'
             % (len(truth), lo, hi, nfut, la,
                '/'.join(str(i.get('days_since')) for i in b)))
+
+
+@case('实盘页停留时自己刷：盘中轮询 / 收盘不轮 / 浮层开着跳过（playwright）',
+       tag='web')
+def t_live_poll():
+    """🔴 **实盘页停留时必须自己刷。**
+
+    原来只在进入时 `loadLive` 拉一次，于是停在页面上盯盘时数字永远不动，
+    切走再回来才更新 —— 而这一页正是**盯盘时一直开着**的那一页。
+    实测（修复前）：停留 70 秒 `/api/live/account` 新增 **0** 个请求、
+    报价时间戳停在 13:56，切走再回来才变 13:57。
+
+    ★ 判据 `rt_live` 由**服务端**给（realtime.in_session + is_trading_day）——
+      前端硬编码交易时段的话，改了时段或遇到半日市会白轮/漏轮，
+      而"多轮几次"不报错、"该轮没轮"更不报错。
+    ★ 这条用例**不等 60 秒**：直接查 POLL 是否装上 + 间隔常量 + 分支条件，
+      再手动调一次 loadLive 验证它真能刷新（等一分钟的用例没人愿意跑）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        # ---- 服务端：rt_live 必须给，且与 realtime 那一处同源 ----
+        from assay import live as _lv
+        from assay.srv import live as _srv_live
+        from assay import realtime as _rt
+        aid = next((a['id'] for a in _lv.load_accounts()
+                    if not a.get('archived')), None)
+        if not aid:
+            return '跳过（没有实盘账户）'
+        want = bool(_rt.in_session() and _rt.is_trading_day())
+        got = _srv_live._rt_live()
+        assert got == want, \
+            ('rt_live 与 realtime.in_session/is_trading_day 不一致'
+             '（%r vs %r）—— 判据分两处写就会分叉' % (got, want))
+        src = open(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'assay', 'srv', 'live.py'), encoding='utf-8').read()
+        assert 'in_session()' in src and 'is_trading_day()' in src, \
+            ('rt_live 该调 realtime 的那两个函数，不要在这里另写时段判据')
+
+        js = open(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'web', 'views', 'live.js'), encoding='utf-8').read()
+        flat = js.replace(' ', '').replace('\n', '')
+        # ---- 前端：装了轮询、间隔与服务端同节拍、按 rt_live 开关 ----
+        assert 'POLL=setInterval' in flat, \
+            ('实盘页没有轮询 —— 停留时数字不会动，而这一页正是'
+             '盯盘时一直开着的那一页')
+        assert 'if(o.rt_live)livePoll(aid);elsestopPoll();' in flat, \
+            ('要按服务端给的 rt_live 决定轮不轮：盘中轮、收盘停。'
+             '收盘后还轮的话每次请求都会触发服务端的 _rt_catch_up，'
+             '白打接口而限流是这条链上唯一的风险')
+        import re as _re
+        m = _re.search(r'LVPOLL_MS\s*=\s*(\d+)', js)
+        assert m and int(m.group(1)) == 60000, \
+            ('轮询间隔该是 60 秒（与服务端 _rt_loop 同节拍），实得 %s'
+             % (m.group(1) if m else '没有这个常量'))
+        #   🔴 浮层开着要**跳过这一轮**而不是停掉 —— 停了就不再动，
+        #     和一开始的 bug 是同一种坏。
+        assert "className==='stmodal')return;" in flat, \
+            ('浮层开着时该 return（跳过这一轮），不能 stopPoll —— '
+             '关掉浮层后要自动继续')
+        assert 'stopPoll();return;' in flat, \
+            '离开这一页/换账户要自己停掉（兜底）'
+
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page()
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            hits = []
+            pg.on('request', lambda r: hits.append(1)
+                  if '/api/live/account' in r.url else None)
+            pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
+                    wait_until='networkidle')
+            pg.wait_for_selector('#lvbody .lvsec', timeout=90000)
+            pg.wait_for_timeout(800)
+            live_now = pg.evaluate('()=>LVO && LVO.rt_live')
+            #   盘中该装上 POLL，收盘该是 null —— 两种都要对
+            has = pg.evaluate('()=>POLL!==null')
+            assert has == bool(live_now), \
+                ('rt_live=%r 时 POLL 该%s，实得 %r'
+                 % (live_now, '装上' if live_now else '为 null', has))
+            # ---- 刷新状态要写在页面上（不说人分不清"没变"和"坏了"）----
+            tag = pg.locator('#lvbody .lvtag').first.inner_text()
+            if live_now:
+                assert '自动刷新' in tag, \
+                    '盘中该在数据日标签里标"每分钟自动刷新"：%s' % tag
+            else:
+                assert '不自动刷新' in tag or '已收盘' in tag, \
+                    ('收盘后该说清不刷新的原因 —— 不说的话人分不清'
+                     '"数字没变"和"页面坏了"：%s' % tag)
+            # ---- 手动跑一次轮询回调：该真的重新拉数据 ----
+            n0 = len(hits)
+            pg.evaluate('()=>loadLive(LVSEL, true)')
+            pg.wait_for_timeout(1500)
+            assert len(hits) > n0, \
+                'loadLive(aid, true) 没有重新请求 /api/live/account'
+            #   quiet 模式不该重拉业绩板（它要重放整条权益曲线）
+            eq_hits = []
+            pg.on('request', lambda r: eq_hits.append(1)
+                  if '/api/live/equity' in r.url else None)
+            pg.evaluate('()=>loadLive(LVSEL, true)')
+            pg.wait_for_timeout(1200)
+            assert not eq_hits, \
+                ('quiet 模式不该重拉 /api/live/equity —— 它要重放整条'
+                 '权益曲线，而累计收益一天内变化很小，每分钟重放纯浪费')
+            # ---- 浮层开着时跳过，但 POLL 仍在 ----
+            if live_now:
+                pg.locator('#lvrec').click()
+                pg.wait_for_timeout(700)
+                assert pg.evaluate(
+                    "()=>{const m=document.getElementById('stwrap');"
+                    "return !!m && m.className==='stmodal';}"), '浮层没打开'
+                assert pg.evaluate('()=>POLL!==null'), \
+                    ('浮层开着时该**跳过这一轮**而不是 stopPoll —— '
+                     '停了就不再动，和一开始的 bug 是同一种坏')
+                pg.keyboard.press('Escape')
+                pg.wait_for_timeout(400)
+                assert pg.evaluate('()=>POLL!==null'), \
+                    '关掉浮层后轮询该继续'
+            # ---- 离开这一页要停掉 ----
+            pg.goto('http://127.0.0.1:%d/#/home' % port,
+                    wait_until='networkidle')
+            pg.wait_for_timeout(900)
+            assert pg.evaluate('()=>POLL') is None, \
+                '离开实盘页后轮询该停掉（不停就是白打接口）'
+            assert not errs, '有运行时错误：%s' % errs[:3]
+            br.close()
+        return ('rt_live 与 realtime.in_session/is_trading_day 同源；'
+                '轮询间隔 60s（与 _rt_loop 同节拍）；rt_live=%r 时 '
+                'POLL %s；刷新状态写在数据日标签里；quiet 模式重拉 account '
+                '但不重拉 equity；浮层开着跳过这一轮而 POLL 仍在；'
+                '离开这一页自动停' % (live_now, '装上' if live_now else '为空'))
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE = old_live
+
+
+@case('实盘业绩页：资金/收益/回撤三条曲线 + 年月日收益表（playwright）',
+       tag='web')
+def t_live_perf_ui():
+    """回测详情页能看的曲线与收益表，实盘也要能看（独立页 #/live/<id>/perf）。
+
+    🔴 **资金曲线与收益曲线是两条不同的线**：总资产含入金，入金那天会跳
+      一截；净值是 TWR，入金不算收益。混用就是把入金算成赚的
+      （TWR 存在的全部理由）。所以两条都画、各自标口径。
+    🔴 净值序列由**服务端**给（lv/perf.py 的 nav）—— 前端拿 equity 自己推
+      就是第二份 TWR 实现，迟早分叉。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        # 服务端先自证：四个序列对齐，且 nav 末值 == stats.twr
+        from assay import live as _lv
+        aid = next((a['id'] for a in _lv.load_accounts()
+                    if not a.get('archived')), None)
+        if not aid:
+            return '跳过（没有实盘账户）'
+        cur = _lv.equity_curve(aid)
+        n = len(cur['dates'])
+        assert n == len(cur['equity']) == len(cur['nav']) \
+            == len(cur['day_rets']), \
+            ('dates/equity/nav/day_rets 必须一一对齐，实得 %d/%d/%d/%d'
+             % (n, len(cur['equity']), len(cur['nav']), len(cur['day_rets'])))
+        assert abs(cur['nav'][-1] - 1 - cur['stats']['twr']) < 1e-6, \
+            ('逐日累乘的净值末值必须 == stats.twr（%.8f vs %.8f）—— '
+             '对不上说明两处 TWR 算法分叉了'
+             % (cur['nav'][-1] - 1, cur['stats']['twr']))
+        #   🔴 第一天必须有收益：TWR 从**开户资金**起算，nav[0] != 1
+        assert abs(cur['nav'][0] - 1.0) > 1e-9, \
+            ('nav[0] 该含建仓当天的收益（TWR 起点是开户那一刻）—— '
+             '等于 1 说明第一天又被丢掉了')
+        #   🔴 逐日**金额**的合计必须 == stats.pnl_total。
+        #     day_pnls 是 Δ权益 **剔除现金流**后的值 —— 直接用
+        #     `eq[i]-eq[i-1]` 的话入金那天会多出一大截（那不是赚的）。
+        #     ★ 用**同一份 cur** 比，不受盘中价格变动影响。
+        assert abs(sum(cur['day_pnls']) - cur['stats']['pnl_total']) < 0.05, \
+            ('逐日金额合计 %.2f 与 stats.pnl_total %.2f 不一致 —— '
+             '两处对"赚了多少钱"的算法分叉了'
+             % (sum(cur['day_pnls']), cur['stats']['pnl_total']))
+
+        _RGJS = "()=>{const D=[],N=[];let d=new Date(Date.UTC(2023,0,2)), v=1.0;while(d <= new Date(Date.UTC(2026,8,8))){const wd=d.getUTCDay();if(wd>=1&&wd<=5){D.push(d.toISOString().slice(0,10));v*=1.0001;N.push(v);}d.setUTCDate(d.getUTCDate()+1);}const O={dates:D,nav:N,equity:N.map(x=>x*1e6),day_rets:N.map(()=>0.0001),day_pnls:N.map(()=>100),bench:{},benchmarks:[],stats:{}};const save=LPR, out={};for(const k of ['all','ytd','m1','m3','m6','y1','y3']){LPR={k:k,a:'',b:''};const S=lprSlice(O);out[k]={a:S.dates[0],b:S.dates[S.dates.length-1],n:S.dates.length,f:S.nav[0],r:S.nav[S.nav.length-1]-1};}LPR={k:'cus',a:'2025-03-01',b:'2025-06-30'};const C=lprSlice(O);out.cus={a:C.dates[0],b:C.dates[C.dates.length-1],n:C.dates.length};LPR=save;return {out:out,total:D.length};}"
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page()
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console', lambda m: errs.append('console: ' + m.text)
+                  if m.type == 'error' else None)
+            # ---- 入口：KPI 板的「累计收益」必须是**看得出能点**的链接 ----
+            pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
+                    wait_until='networkidle')
+            pg.wait_for_selector('#lvbody .lvsec', timeout=90000)
+            pg.wait_for_selector('a.lpin', timeout=90000)
+            lnk = pg.locator('a.lpin').first
+            assert '累计收益' in lnk.inner_text(), \
+                '入口该长在「累计收益」那一格上'
+            assert '›' in lnk.inner_text(), \
+                ('入口要带 › —— **看不出能点的入口 = 没有入口**'
+                 '（选股理由那次实测人找不到）')
+            lnk.click()
+            pg.wait_for_selector('#lp_tbl .lpbar', timeout=90000)
+            pg.wait_for_timeout(500)
+            assert pg.evaluate('()=>location.hash').endswith('/perf'), \
+                '点了没跳到业绩页'
+            txt = pg.inner_text('#main')
+            for k in ('资金曲线', '收益曲线', '回撤曲线', '收益明细'):
+                assert k in txt, \
+                    ('业绩页缺「%s」—— 🔴 第一版把这几块套在 `.pane` 里，'
+                     '而它在样式表里是 display:none，于是 SVG 画出来了、'
+                     'DOM 里也在，屏幕上什么都没有且**不报错**' % k)
+            # ---- 三条曲线在【一个框】里，上方切换 ----
+            #   🔴 三张图竖着排的话要上下滚动才能对比同一天；
+            #     同一个位置切换才看得出差别。
+            tabs = [t.strip() for t in
+                    pg.locator('#lp_tab a.lpc').all_inner_texts()]
+            #   ★ 顺序 = 看的顺序：打开第一眼要回答"我赚了多少 / 跑赢基准了吗"，
+            #     而不是"账上有多少钱"（那在 KPI 板里已经有了）。
+            assert tabs == ['收益曲线', '资金曲线', '回撤曲线'], \
+                '曲线切换条的顺序不对：%s' % tabs
+            assert pg.locator('#lp_chart svg').count() == 1, \
+                '该只有一个图框（三条曲线切换），实得 %d' \
+                % pg.locator('#lp_chart svg').count()
+            assert pg.locator('#lp_tab a.lpc.on').inner_text() == '收益曲线', \
+                '默认该是**收益曲线**（业绩页第一眼看的是赚了多少）'
+
+            def _axis():
+                return [(t or '').strip() for t in
+                        pg.locator('#lp_chart svg text').all_text_contents()
+                        if t and not (t or '').strip().startswith('20')]
+
+            def _pcts():
+                out = []
+                for t in _axis():
+                    if t.endswith('%'):
+                        try:
+                            out.append(float(t.rstrip('%')))
+                        except ValueError:
+                            pass
+                return out
+
+            # 资金曲线：y 轴必须是**金额**，不能是倍数那个 x 后缀
+            #   ★ 默认已经是收益曲线了，这里显式切到资金曲线再验。
+            pg.locator('#lp_tab a.lpc[data-c="eq"]').click()
+            pg.wait_for_timeout(300)
+            #   两条曲线的口径必须各自写在图下面。★ 一次只显示一条，
+            #   所以在**对应曲线激活时**分别验（原来两句同时查，
+            #   合到一个框之后必然失败）。
+            assert '含入金' in pg.inner_text('#lp_chart'), \
+                ('资金曲线要标"含入金" —— 不标的话人会拿总资产当收益'
+                 '（入金那天会跳一截）')
+            mx = _axis()
+            assert mx, '资金曲线没有刻度'
+            assert not any(t.endswith('x') for t in mx), \
+                ('资金曲线还在用倍数后缀 `x` —— 那是给归一化净值的'
+                 '（`2.5x` = 2.5 倍），拿它显示 40 万会印成 `404881x`，'
+                 '那个数没人读得出来：%s' % [t for t in mx if t.endswith('x')])
+            assert any(t.endswith(('万', '亿')) for t in mx), \
+                '资金曲线的 y 轴该是金额（40.5万）：%s' % mx[:6]
+            assert pg.locator('#lp_chart svg path[stroke]').count() > 0, \
+                '资金曲线没画出折线'
+
+            # 回撤曲线：🔴 y 轴最高点必须**正好是 0**
+            pg.locator('#lp_tab a.lpc[data-c="dd"]').click()
+            pg.wait_for_timeout(300)
+            dv = _pcts()
+            assert dv, '回撤曲线没有百分比刻度（该用 ratioAxis）'
+            #   ★ 消息里的 % 都要写成 %% —— 混用的话断言触发时
+            #     **消息本身崩掉**（not enough arguments for format string），
+            #     于是看不到失败原因，只看到一个格式化错误（变异测试踩到）。
+            assert abs(max(dv)) < 1e-9, \
+                ('回撤曲线 y 轴最高点该正好是 0%%，实得 %+.2f%% —— '
+                 '在最高点时回撤为 0，**不可能为正**；y 轴的留白会印出 '
+                 '+0.1%% 这种没有意义的数，读的人会以为"曾经比历史最高'
+                 '还高 0.1%%"（用 hiCap:0 钳住）' % max(dv))
+            assert min(dv) < 0, '回撤该有负值：%s' % dv
+            assert pg.locator('#lp_chart svg path[stroke]').count() > 0, \
+                '回撤曲线没画出折线'
+
+            # 收益曲线：百分比刻度 + 量级合理 + 同时给金额读数
+            pg.locator('#lp_tab a.lpc[data-c="nav"]').click()
+            pg.wait_for_timeout(300)
+            nv = _pcts()
+            assert nv, '收益曲线该是百分比刻度（pctAxis）'
+            assert max(abs(x) for x in nv) < 500, \
+                ('收益曲线的 y 轴量级到了 %.0f 个百分点 —— 画的不是 '
+                 'TWR 净值，很可能误用了 equity（总资产，含入金）'
+                 % max(abs(x) for x in nv))
+            #   ★ 跨度小的时候刻度要加小数位：0 位会印出 `-0%` 和两个 `0%`
+            ax_pct = [t for t in _axis() if t.endswith('%')]
+            assert '-0%' not in ax_pct, \
+                'y 轴出现了 -0（跨度小时该加小数位）：%s' % ax_pct
+            assert len(ax_pct) == len(set(ax_pct)), \
+                'y 轴有重复刻度（跨度小时该加小数位）：%s' % ax_pct
+            #   🔴 收益率与金额要**同时**给：只有百分比的话它旁边没有能和
+            #     "持仓浮盈 +3,698" 对上的数，看着像两回事。
+            assert '收益率与累计金额' in pg.inner_text('#lp_chart'), \
+                '收益曲线该说明同时给收益率与累计金额'
+            assert '入金不算收益' in pg.inner_text('#lp_chart'), \
+                ('收益曲线要标"入金不算收益" —— 这是 TWR 与总资产的分界，'
+                 '不标的话同屏两个口径打架')
+            pg.locator('#lp_chart svg').scroll_into_view_if_needed()
+            pg.wait_for_timeout(150)
+            _bx = pg.locator('#lp_chart svg').bounding_box()
+            pg.mouse.move(_bx['x'] + _bx['width'] * 0.7,
+                          _bx['y'] + _bx['height'] * 0.5)
+            pg.wait_for_timeout(250)
+            _tp = pg.locator('#tip').text_content() or ''
+            assert '净值' in _tp and '累计金额' in _tp, \
+                ('收益曲线的 tooltip 该同时给净值与累计金额，实得 %r' % _tp)
+            assert '元' in _tp, 'tooltip 里的金额该带单位：%r' % _tp
+            #   ★ 金额不画成第二条线（量纲不同共轴会把一条压平）
+            assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
+                '收益曲线该只有一条线（金额走 tooltip，不共轴）'
+
+            # ---- 基准指数叠加 ----
+            #   ★ 可选清单由**服务端**给（lv/perf.py 的 BENCHMARKS）——
+            #     本地缺哪个指数只有服务端知道；前端硬编码的话会列出
+            #     取不到数据的选项，而"点了什么都不出来"比不给更糟。
+            from assay.lv import perf as _perf
+            assert len(_perf.BENCHMARKS) >= 5, '可选基准太少'
+            codes = [b['code'] for b in _perf.BENCHMARKS]
+            assert all(_perf._SYM_RE.match(c) for c in codes), \
+                'BENCHMARKS 里有不合白名单（sh/sz+6 位）的代码：%s' % codes
+            #   🔴 **只许列本地真有日线的** —— 中证2000/微盘股本地没有
+            #     （前者只有 ETF、后者是万得专有），列了就是个死选项。
+            got = _perf.bench_curves(cur['dates'], codes)
+            miss = [c for c in codes if c not in got]
+            assert not miss, \
+                ('BENCHMARKS 里这些本地取不到数据：%s —— '
+                 '列一个点了什么都不出来的选项比不给更糟' % miss)
+            for c, v in got.items():
+                assert len(v) == len(cur['dates']), \
+                    '%s 的曲线没对齐到账户日期轴（%d vs %d）' \
+                    % (c, len(v), len(cur['dates']))
+            #   ★ 基点取"第一天的前一交易日收盘" -> 首值一般不等于 1
+            #     （等于 1 说明拿第一天自己做了基点，那会把首日涨跌
+            #      排除在基准之外，实测差过 9.5pp）
+            first = [v[0] for v in got.values() if v[0] is not None]
+            assert first and any(abs(x - 1.0) > 1e-9 for x in first), \
+                ('基准首值全是 1 —— 基点该取第一天的**前一交易日**收盘'
+                 '（与 feed.benchmark 同一条纪律）')
+            #   注入防护：白名单挡住非法 symbol
+            bad = _perf.bench_curves(cur['dates'],
+                                     ["sh000001'; DROP TABLE x --", 'xx1'])
+            assert not bad, 'symbol 白名单没挡住非法输入：%s' % list(bad)
+
+            bms = pg.locator('#lp_bm a.lpb')
+            assert bms.count() >= len(_perf.BENCHMARKS), \
+                '页面上的基准选项少了（%d < %d）' \
+                % (bms.count(), len(_perf.BENCHMARKS))
+            assert pg.locator('#lp_bm a.lpb.on').count() == 0, \
+                ('默认一个基准都不该选 —— 三条线以上就看不清了，'
+                 '而"想比哪个"因人而异')
+            #   每个选项要标出本地数据从哪年开始（选了科创50 才发现
+            #   前面是空的话，人会以为图画坏了）
+            t0 = bms.first.get_attribute('title') or ''
+            assert '本地数据自' in t0, '基准选项该在 title 里标数据起点：%s' % t0
+            hits2 = []
+            pg.on('request', lambda r: hits2.append(1)
+                  if '/api/live/equity' in r.url else None)
+            #   🔴 **单选**：同时看多个基准反而看不清，而"我的策略跑赢谁"
+            #     一次问一个就够。选新的要**换掉**旧的，不是叠加。
+            pg.locator('#lp_bm a.lpb[data-b="sh000905"]').click()
+            pg.wait_for_timeout(250)
+            assert pg.locator('#lp_chart svg path[stroke]').count() == 2, \
+                '选一个基准该是 2 条线（净值 + 基准）'
+            pg.locator('#lp_bm a.lpb[data-b="sz399303"]').click()
+            pg.wait_for_timeout(300)
+            on = [a.strip() for a in
+                  pg.locator('#lp_bm a.lpb.on').all_inner_texts()]
+            assert on == ['国证2000'], \
+                '选新基准该换掉旧的（单选），实得选中 %s' % on
+            assert pg.locator('#lp_chart svg path[stroke]').count() == 2, \
+                ('还是该 2 条线 —— 选新的要换掉旧的，实得 %d'
+                 % pg.locator('#lp_chart svg path[stroke]').count())
+            #   点已选中的 -> 取消
+            pg.locator('#lp_bm a.lpb[data-b="sz399303"]').click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_bm a.lpb.on').count() == 0 \
+                and pg.locator('#lp_chart svg path[stroke]').count() == 1, \
+                '点已选中的该取消'
+            #   ★ 切换基准**不该重新请求** —— 进页面时一次取全。
+            #     每次勾选都重放整条权益曲线（几秒）的话，随手点一下
+            #     就像卡住了。
+            #     🔴 这条必须查在 reload **之前**：reload 本身当然会
+            #       重新请求，混在一起就是拿两种原因的请求数去比。
+            assert not hits2, \
+                ('勾选基准触发了 %d 次 /api/live/equity —— 该一次取全、'
+                 '切换只改显示' % len(hits2))
+            #   ---- 记住选择（localStorage），刷新后还在 ----
+            pg.locator('#lp_bm a.lpb[data-b="sh000905"]').click()
+            pg.wait_for_timeout(300)
+            assert pg.evaluate("()=>localStorage.getItem('lvbench')") \
+                == 'sh000905', \
+                ('选中的基准要存进 localStorage —— 刷新一次就没了的话'
+                 '每次进来都要重选，而这是"每天看同一个对比"的场景')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#lp_tab a.lpc', timeout=90000)
+            pg.wait_for_timeout(900)
+            pg.locator('#lp_tab a.lpc[data-c="nav"]').click()
+            pg.wait_for_timeout(400)
+            assert [a.strip() for a in
+                    pg.locator('#lp_bm a.lpb.on').all_inner_texts()] \
+                == ['中证500'], 'reload 之后选中的基准该还在'
+            #   🔴 存的值必须**校验再用**：localStorage 里可能是上个版本留下的
+            #     代码或手改的垃圾。不校验就拿一个取不到数据的 symbol 去画，
+            #     表现是"选中了但没有线"，而它不报错。
+            for junk in ('DROP TABLE x', 'sh999999'):
+                pg.evaluate("(v)=>localStorage.setItem('lvbench',v)", junk)
+                pg.reload(wait_until='networkidle')
+                pg.wait_for_selector('#lp_tab a.lpc', timeout=90000)
+                pg.wait_for_timeout(900)
+                pg.locator('#lp_tab a.lpc[data-c="nav"]').click()
+                pg.wait_for_timeout(350)
+                assert pg.locator('#lp_bm a.lpb.on').count() == 0, \
+                    'localStorage 里的 %r 该被挡掉' % junk
+                assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
+                    '%r 不该画出第二条线（也不该崩）' % junk
+                #   🔴 判据要看 **LPB 本身**：下游的
+                #     `picks = LPB.filter(c => BD[c])` 会把取不到数据的过滤掉，
+                #     所以"没有线 / 没有选中"这两条**抓不到校验被绕过**
+                #     （变异测试实测全绿）。校验的意义是**别把垃圾读进状态**。
+                #   ★ 只对**形状不合法**的那种判 —— `sh999999` 形状是对的，
+                #     校验本来就不该挡它（它只是本地没这个指数），
+                #     那一种靠下游过滤兜住就够了。
+                if not junk.startswith(('sh', 'sz')):
+                    assert pg.evaluate('()=>LPB') == [], \
+                        ('localStorage 里的 %r 该在**读的时候**就被校验挡掉，'
+                         '而不是靠下游过滤兜住 —— 状态里留着垃圾，'
+                         '下次谁用它都可能踩到' % junk)
+            #   恢复一个正常的，继续后面的断言
+            pg.locator('#lp_bm a.lpb[data-b="sh000905"]').click()
+            pg.wait_for_timeout(350)
+            #   tooltip 不许重复：基准只进 series，不能再进 extra
+            pg.locator('#lp_chart svg').scroll_into_view_if_needed()
+            pg.wait_for_timeout(150)
+            _b2 = pg.locator('#lp_chart svg').bounding_box()
+            pg.mouse.move(_b2['x'] + _b2['width'] * 0.5,
+                          _b2['y'] + _b2['height'] * 0.5)
+            pg.wait_for_timeout(250)
+            lines = [x for x in
+                     (pg.locator('#tip').text_content() or '').split('\n') if x]
+            names = [x.split()[0] for x in lines[1:]]
+            assert len(names) == len(set(names)), \
+                ('tooltip 里有重复读数 %s —— 基准只该进 series'
+                 '（lineChart 会自动列出），再放进 extra 就出现两次' % names)
+            assert '中证500' in (pg.locator('#tip').text_content() or ''), \
+                'tooltip 该列出勾选的基准'
+            #   说明里要讲清两件事：同一起点、指数是日线（今天还没有点）
+            _ct = pg.inner_text('#lp_chart')
+            assert '同一起点' in _ct and '日线收盘' in _ct, \
+                ('要说明基准与账户同一起点、且指数是日线收盘（所以盘中的'
+                 '今天基准断在昨天，那不是缺数据）')
+            pg.locator('#lp_bclr').click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
+                '「不比」之后该只剩净值一条线'
+            assert not pg.evaluate("()=>localStorage.getItem('lvbench')"), \
+                '取消基准时也要清掉 localStorage（不然刷新又回来了）'
+
+            # ---- 收益明细是**方格热力图**，不是列表 ----
+            #   🔴 一屏几十行数字没法"一眼看出哪天崩的"；方格图的底色是
+            #     强度、位置是日期 —— 这一页存在的理由就是快速看形态。
+            assert pg.locator('#lp_tbl a.lpg.on').inner_text() == '日', \
+                '默认粒度该是「日」（打开就看到这个月每天怎么样）'
+            assert pg.locator('#lp_tbl a.lps.on').inner_text() == '两者', \
+                '默认读数该是「两者」（收益率 + 金额）'
+            assert pg.locator('#lp_tbl .calg').count() == 1, \
+                '日粒度该画自然日历方格（.calg）'
+            n_td = pg.locator('#lp_tbl .cd:not(.off):not(.pad)').count()
+            assert n_td > 0, '日历里没有交易日格子'
+            assert pg.locator('#lp_tbl .cd.off').count() > 0, \
+                '非交易日该打斜纹（.cd.off）—— 不然看不出哪天没开市'
+            assert pg.locator('#lp_tbl .lgd').count() == 1, \
+                ('要有图例 —— 🔴 弱强度格子的底色近乎透明，'
+                 '方向全靠数字前的 +/- 号，图例得说明这件事')
+            #   一格里两个读数都要有
+            c0 = pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+            both = ' '.join(c0.inner_text().split())
+            assert '%' in both, '「两者」模式该显示收益率：%s' % both
+            assert any(ch.isdigit() for ch in both.split('%')[-1]), \
+                '「两者」模式该同时显示金额：%s' % both
+            tip = c0.get_attribute('title') or ''
+            for k in ('日收益', '金额', '净值', '总资产'):
+                assert k in tip, '格子的 title 缺「%s」：%s' % (k, tip[:80])
+            # ---- 三种读数切换 ----
+            pg.locator('#lp_tbl a.lps[data-s="pnl"]').click()
+            pg.wait_for_timeout(250)
+            only_pnl = ' '.join(
+                pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+                .inner_text().split())
+            assert '%' not in only_pnl, '「金额」模式不该有 %%：%s' % only_pnl
+            pg.locator('#lp_tbl a.lps[data-s="ret"]').click()
+            pg.wait_for_timeout(250)
+            only_ret = ' '.join(
+                pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+                .inner_text().split())
+            assert '%' in only_ret and ',' not in only_ret, \
+                '「收益率」模式该只有百分比：%s' % only_ret
+            pg.locator('#lp_tbl a.lps[data-s="both"]').click()
+            pg.wait_for_timeout(200)
+            # ---- 三种粒度 + 下钻 ----
+            pg.locator('#lp_tbl a.lpg[data-g="month"]').click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_tbl .hm.m .hc').count() > 0, '月粒度没格子'
+            pg.locator('#lp_tbl a.lpg[data-g="year"]').click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_tbl .hm.y .hc').count() > 0, '年粒度没格子'
+            #   年格 -> 月，月格 -> 日（点格子下钻，与回测详情页一致）
+            pg.locator('#lp_tbl .hm.y .hc').first.click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_tbl a.lpg.on').inner_text() == '月', \
+                '点年格该下钻到月'
+            pg.locator('#lp_tbl .hm.m .hc').first.click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#lp_tbl a.lpg.on').inner_text() == '日' \
+                and pg.locator('#lp_tbl .calg').count() == 1, \
+                '点月格该下钻到该月的日历'
+            #   月/年格里的金额合计必须 == stats.pnl_total（单月/单年时）
+            #   🔴 **盘中跳过**：末点是实时补的（stats.intraday 非空），
+            #     Python 侧先取的 cur 与浏览器随后请求到的不是同一份 ——
+            #     价格每分钟都在动。不跳过就是拿两个时刻的数对比，
+            #     偶发失败且看着像真 bug（同 CLAUDE.md：含实时成分的接口
+            #     自己就不稳定，先自证再比）。
+            #     服务端侧的一致性另有直接判据：sum(day_pnls) == pnl_total，
+            #     在上面已经用同一份 cur 验过了。
+            if (cur['stats'].get('intraday') is None
+                    and len({d[:7] for d in cur['dates']}) == 1):
+                pg.locator('#lp_tbl a.lpg[data-g="month"]').click()
+                pg.wait_for_timeout(250)
+                mtxt = ' '.join(pg.locator('#lp_tbl .hm.m .hc').first
+                                .inner_text().split())
+                want = format(abs(round(cur['stats']['pnl_total'])), ',d')
+                assert want in mtxt, \
+                    ('单月时月格的金额该等于 stats.pnl_total（%s），实得 %s'
+                     % (want, mtxt))
+                pg.locator('#lp_tbl a.lpg[data-g="day"]').click()
+                pg.wait_for_timeout(250)
+            # ---- hover 要高亮"当前是哪一天" ----
+            #   🔴 光有 tooltip 不够：鼠标在图上时看不出读的是哪一天 ——
+            #     折线密的时候差一两个像素就是差一天，而 tooltip 只在鼠标
+            #     旁边，对不上图上的位置。
+            #   ★ mouse.move 用的是**视口坐标** —— 前面点了几轮粒度按钮，
+            #     页面重排后这张图可能已经滚出视口，不先滚进来的话
+            #     鼠标落不到图上（表现是"hover 没反应"，很像功能坏了）。
+            pg.locator('#lp_chart svg').scroll_into_view_if_needed()
+            pg.wait_for_timeout(200)
+            box = pg.locator('#lp_chart svg').bounding_box()
+            assert not pg.locator('#lp_chart svg g.hov').is_visible(), \
+                'hover 高亮默认该隐藏'
+            pg.mouse.move(box['x'] + box['width'] * 0.6,
+                          box['y'] + box['height'] * 0.5)
+            pg.wait_for_timeout(250)
+            assert pg.locator('#lp_chart svg g.hov').is_visible(), \
+                'hover 时该出现高亮（竖线 + 数据点 + 日期）'
+            vx = pg.locator('#lp_chart svg .hvl').get_attribute('x1')
+            cx = pg.locator('#lp_chart svg .hvd').first.get_attribute('cx')
+            assert vx == cx, \
+                ('竖线该对齐到**数据点**而不是鼠标位置（%s vs %s）—— '
+                 '对齐鼠标的话读数与竖线会差一天，而"差一天"正是最难发现的'
+                 '那种错' % (vx, cx))
+            hvt = pg.locator('#lp_chart svg .hvt').text_content() or ''
+            assert hvt in cur['dates'], \
+                '高亮的日期标签该是曲线上的某一天，实得 %r' % hvt
+            assert hvt in (pg.locator('#tip').text_content() or ''), \
+                'tooltip 与高亮标签该是同一天（两处不一致就是读错了）'
+            # ---- 时间区间 ----
+            #   ★ 默认 **今年以来**；起点晚于年初时从**实盘起点**开始
+            #     （账户 09-01 才开户，强行从 01-01 画会有 8 个月空白，
+            #      看着像数据缺了）。
+            rgs = [t.strip() for t in
+                   pg.locator('#lp_rg a.lpr').all_inner_texts()]
+            assert rgs == ['今年以来', '近一月', '近三月', '近六月',
+                           '近一年', '近三年', '全部', '自定义'], \
+                '区间选项不对：%s' % rgs
+            assert pg.locator('#lp_rg a.lpr.on').inner_text() == '今年以来', \
+                '默认区间该是「今年以来」'
+            #   KPI 板是**全程**口径，必须标出来 —— 图按区间画，
+            #   两个数摆同一屏不标就看着像对不上。
+            kk = [' '.join(x.split()) for x in
+                  pg.locator('#main .kpi .k').all_inner_texts()]
+            assert all('全程' in x for x in kk), \
+                'KPI 四格该标「· 全程」（图是按区间画的）：%s' % kk
+            assert '这一段' in pg.inner_text('#lp_chart'), \
+                '图下面该给这一段的收益（与 KPI 的全程口径区分开）'
+            #   🔴 账户只有几天时**所有预设档都落在全程**，测不出差别 ——
+            #     用构造数据直接验纯函数（同 perfBuckets / drawdownSeries）。
+            rg = pg.evaluate(_RGJS)
+            o = rg['out']
+            assert rg['total'] > 900, '构造的交易日太少：%d' % rg['total']
+            order = ['m1', 'm3', 'm6', 'y1', 'y3', 'all']
+            ns = [o[k]['n'] for k in order]
+            assert ns == sorted(ns) and len(set(ns)) == len(ns), \
+                '各区间的天数该严格递增：%s' % list(zip(order, ns))
+            assert o['ytd']['a'].endswith('-01-01'), \
+                'YTD 该从年初起：%s' % o['ytd']['a']
+            assert o['all']['a'] == '2023-01-02', '「全部」该从第一天起'
+            #   🔴 裁剪后必须**按区间起点重新归一化** —— 不归一化的话
+            #     "近一月"画出来仍是开户至今的累计，y 轴写的百分比其实是
+            #     三年的收益，**而那不报错**。
+            #     基点取区间起点的**前一天**（区间外那一点），所以首值
+            #     不是 1.0 而是"第一天的涨幅"。
+            for k in order:
+                assert abs(o[k]['f'] - 1.0001) < 1e-6, \
+                    ('%s 的首值该是"区间第一天的涨幅"（1.0001），实得 %.6f —— '
+                     '等于 1.0 说明拿区间首日自己做了基点，'
+                     '把首日涨跌排除在这段收益之外' % (k, o[k]['f']))
+            rr = [o[k]['r'] for k in order]
+            assert rr == sorted(rr), '区间收益该随区间变长而变大：%s' % rr
+            #   🔴 「近 N 月」按**自然日往前推**再落到交易日轴上 ——
+            #     直接取"最后 N×20 个交易日"的话，"近一月"会因节假日
+            #     多少而漂（春节那个月只有 15 个交易日）。
+            #     判据：起点必须正好是 last 减 N 个自然月之后的第一个交易日。
+            import datetime as _dt
+
+            def _minus_month(ds, m):
+                y, mo, dd = (int(x) for x in ds.split('-'))
+                mo -= m
+                while mo <= 0:
+                    mo += 12
+                    y -= 1
+                try:
+                    return _dt.date(y, mo, dd).isoformat()
+                except ValueError:            # 2/30 之类
+                    return _dt.date(y, mo, 28).isoformat()
+            _last = o['all']['b']
+            for k, mm in (('m1', 1), ('m3', 3), ('m6', 6),
+                          ('y1', 12), ('y3', 36)):
+                want = _minus_month(_last, mm)
+                assert o[k]['a'] >= want and o[k]['a'] <= want or True, ''
+                #   起点该落在 [want, want+5天] 内（want 本身可能是周末）
+                assert want <= o[k]['a'] <= (
+                    _dt.date.fromisoformat(want)
+                    + _dt.timedelta(days=5)).isoformat(), \
+                    ('%s 的起点该是 %s 之后的第一个交易日，实得 %s —— '
+                     '按"最后 N×20 个交易日"取的话会随节假日漂'
+                     % (k, want, o[k]['a']))
+            #   🔴 YTD 的**钳到起点**要用"今年才开户"的数据才测得到：
+            #     构造数据从 2023 年开始，2026-01-01 > 第一天，钳制不触发。
+            #     真实账户正是今年开户的（09-01），拿它验。
+            if cur['dates'][0] > cur['dates'][-1][:4] + '-01-01':
+                _ytd = pg.evaluate(
+                    "()=>{const s=LPR; LPR={k:'ytd',a:'',b:''};"
+                    "const r=lprSpan(LPD.dates); LPR=s; return r;}")
+                assert _ytd[0] == cur['dates'][0], \
+                    ('账户 %s 才开户，YTD 该从**开户日**起而不是年初 —— '
+                     '实得 %s。强行从 01-01 画会有一大段空白，'
+                     '看着像数据缺了' % (cur['dates'][0], _ytd[0]))
+            #   🔴 图必须真的画**裁剪后**的数据 —— 只验区间说明文字的话，
+            #     曲线还在画全程也发现不了（变异测试抓到过）。
+            #     判据：x 轴第一个日期刻度 == 区间起点。
+            pg.locator('#lp_rg a.lpr[data-r="all"]').click()
+            pg.wait_for_timeout(350)
+            _xall = [(t or '').strip() for t in
+                     pg.locator('#lp_chart svg text').all_text_contents()
+                     if (t or '').strip().startswith('20')]
+            assert _xall and _xall[0] == cur['dates'][0], \
+                ('「全部」时 x 轴该从账户第一天起：%s vs %s'
+                 % (_xall[:2], cur['dates'][0]))
+            pg.locator('#lp_rg a.lpr[data-r="cus"]').click()
+            pg.wait_for_timeout(300)
+            if pg.locator('#lp_ra').count() and len(cur['dates']) >= 3:
+                pg.fill('#lp_ra', cur['dates'][1])
+                pg.locator('#lp_ra').press('Enter')
+                pg.wait_for_timeout(600)
+                _xc = [(t or '').strip() for t in
+                       pg.locator('#lp_chart svg text').all_text_contents()
+                       if (t or '').strip().startswith('20')]
+                assert _xc and _xc[0] == cur['dates'][1], \
+                    ('自定义起点之后，x 轴第一个刻度该跟着变（%s vs %s）—— '
+                     '还画全程说明图没用裁剪后的数据'
+                     % (_xc[:2], cur['dates'][1]))
+            #   恢复默认区间，后面的断言按 YTD 来
+            pg.evaluate("()=>{localStorage.removeItem('lvrange');}")
+            pg.locator('#lp_rg a.lpr[data-r="ytd"]').click()
+            pg.wait_for_timeout(400)
+            assert o['cus']['a'] == '2025-03-03' \
+                and o['cus']['b'] == '2025-06-30', \
+                ('自定义 2025-03-01~06-30 该落到交易日 03-03~06-30，'
+                 '实得 %s~%s' % (o['cus']['a'], o['cus']['b']))
+
+            # ---- 浮窗在视口右边缘要**翻到光标左侧** ----
+            #   🔴 原来固定放右下（clientX+12）—— 光标移到图最右边时浮窗
+            #     整块跑到视口外面，读数看不见。而那正是最需要看读数的位置：
+            #     曲线的最新一天。
+            #   ★ 定位前必须**先填内容再量尺寸**：offsetWidth 在设置
+            #     textContent 之前是旧值，用它算翻转会翻错边。
+            _TIPJS = "()=>{const t=document.getElementById('tip');const b=t.getBoundingClientRect();return {l:b.left, r:b.right, w:b.width, vw:window.innerWidth,vis:getComputedStyle(t).display!=='none'};}"
+
+            def _tipbox():
+                return pg.evaluate(_TIPJS)
+
+            #   ★ 重新取一次 bounding_box —— 前面点过粒度/区间/基准，
+            #     页面重排之后旧的 _bx 已经过期，鼠标会落到图外
+            #     （表现是"浮窗不出现"，很像功能坏了）。
+            pg.locator('#lp_chart svg').scroll_into_view_if_needed()
+            pg.wait_for_timeout(200)
+            _bx = pg.locator('#lp_chart svg').bounding_box()
+            for frac in (0.15, 0.5, 0.97):
+                pg.mouse.move(_bx['x'] + _bx['width'] * frac,
+                              _bx['y'] + _bx['height'] * 0.5)
+                pg.wait_for_timeout(200)
+                tb = _tipbox()
+                assert tb['vis'] and tb['w'] > 0, \
+                    '光标在图上 %.0f%% 处时浮窗该可见' % (frac * 100)
+                assert tb['l'] >= -0.5 and tb['r'] <= tb['vw'] + 0.5, \
+                    ('浮窗跑到视口外了（左 %.0f 右 %.0f / 视口 %.0f）—— '
+                     '右边放不下就该翻到光标左侧'
+                     % (tb['l'], tb['r'], tb['vw']))
+            #   ★ 判据要能区分"翻转生效"和"恰好没超" —— 在最右侧时
+            #     浮窗必须落在光标**左边**。
+            _cx = _bx['x'] + _bx['width'] * 0.97
+            pg.mouse.move(_cx, _bx['y'] + _bx['height'] * 0.5)
+            pg.wait_for_timeout(200)
+            tb = _tipbox()
+            assert tb['r'] <= _cx + 1, \
+                ('最右侧时浮窗该翻到光标左边（右边界 %.0f vs 光标 %.0f）'
+                 % (tb['r'], _cx))
+
+            #   ★ 两侧都放不下时**必须钳进视口** —— 宁可压着光标也要可见。
+            #     这条要用"内容撑得比视口还宽 + 光标顶在右下角"来测：
+            #     正常宽度下翻转之后本来就在视口内，钳制没机会生效，
+            #     那样的断言是空转（变异测试实测全绿）。
+            _cl = pg.evaluate("()=>{const t=document.getElementById('tip');const old=t.textContent;t.textContent=('X'.repeat(400)+'\\n').repeat(80);_tipAt(t, window.innerWidth-3, window.innerHeight-3);const b=t.getBoundingClientRect();const o={l:b.left, r:b.right, t:b.top, bt:b.bottom, vw:window.innerWidth, vh:window.innerHeight};t.textContent=old; t.style.display='none'; return o;}")
+            assert _cl['l'] >= -0.5 and _cl['t'] >= -0.5, \
+                ('浮窗被挤出视口左上（左 %.0f 上 %.0f）—— '
+                 '两侧都放不下时该钳进视口' % (_cl['l'], _cl['t']))
+
+            #   ★ 垂直方向同理：光标靠底部时要翻到**上方**。
+            #     这条要用**正常高度**的浮窗测 —— 上面那条用的内容比视口
+            #     还高，翻转与不翻转最终都被钳到 top=4，看不出差别
+            #     （变异测试实测：去掉垂直翻转照样全绿）。
+            _vf = pg.evaluate("()=>{const t=document.getElementById('tip');const old=t.textContent;t.textContent='2026-01-01\\n净值  +1.00%';const cy=window.innerHeight-6;_tipAt(t, 200, cy);const b=t.getBoundingClientRect();const o={t:b.top, bt:b.bottom, h:b.height, cy:cy, vh:window.innerHeight};t.textContent=old; t.style.display='none'; return o;}")
+            assert _vf['bt'] <= _vf['vh'] + 0.5, \
+                ('光标靠底部时浮窗超出视口下沿（底 %.0f / 视口高 %.0f）'
+                 % (_vf['bt'], _vf['vh']))
+            assert _vf['bt'] <= _vf['cy'] + 1, \
+                ('光标靠底部时浮窗该翻到**上方**（底 %.0f vs 光标 %.0f）—— '
+                 '不翻的话它会被挤在视口边缘、盖住光标'
+                 % (_vf['bt'], _vf['cy']))
+
+            pg.mouse.move(5, 5)
+            pg.wait_for_timeout(200)
+            assert not pg.locator('#lp_chart svg g.hov').is_visible(), \
+                '移开后高亮该隐藏'
+
+            # ---- 窄屏不许把 body 撑出横滚 ----
+            for w in (1440, 1024):
+                pg.set_viewport_size({'width': w, 'height': 900})
+                pg.wait_for_timeout(250)
+                ov = pg.evaluate(
+                    '()=>document.body.scrollWidth-document.body.clientWidth')
+                assert ov == 0, '%d 宽 body 横滚 %dpx' % (w, ov)
+            assert not errs, '业绩页有运行时错误：%s' % errs[:3]
+            br.close()
+        return ('nav/day_rets/day_pnls 与 dates 对齐、nav 末值 == stats.twr、'
+                'nav[0] 含建仓当天收益；入口是「累计收益 ›」链接；'
+                '三条曲线在**一个框**里切换（资金 y 轴=金额不是倍数 x、'
+                '回撤 y 轴最高**正好 0%%**、收益 tooltip 同时给净值与累计'
+                '金额且跨度小时刻度加小数位不出现 -0%%）；各标口径'
+                '（含入金 / 入金不算收益）；'
+                '区间默认「今年以来」且钳到开户日（8 档 + 自定义、'
+                '按自然月推再落交易日、裁剪后按区间起点重新归一化、'
+                'x 轴刻度跟着变、记在 localStorage）；KPI 标「全程」'
+                '且图下单独给这一段的收益；'
+                '收益明细是**方格图**：默认日+两者、非交易日打斜纹、有图例、'
+                '三种读数切换、年→月→日点格下钻、单月金额 == pnl_total；'
+                'hover 高亮竖线对齐数据点且与 tooltip 同一天；'
+                '1440/1024 宽零横滚；%d 个交易日' % n)
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE = old_live
 
 
 @case('数据同步页面真实渲染（playwright）', tag='web')
@@ -6901,6 +7745,528 @@ def t_srv_split():
                lp.count('\n'), len(_lvused)))
 
 
+@case('信号归档必须放【子目录】，否则"最新信号"读到旧版', tag='fast')
+def t_rev_subdir():
+    """🔴 revision 归档存成 `<date>.rev1.json`（与信号**同层**）时：
+
+    有三处在扫 `signals/` 下的 `*.json` —— `sig.latest_signal` /
+    `px.latest_signal` / `explain_history`，而前两者取 `sorted(...)[-1]`。
+    `'2026-09-08.rev1.json'` 排在 `'2026-09-08.json'` **后面**（`'r' > '.'`），
+    于是"最新信号"读到的是**被归档的旧版**。
+
+    ★ 实测代价：改完规则重算，磁盘主文件已经是「卖出 0 只」，
+      而页面/接口仍然给「卖出 2 只」—— **接口不报错，只是给了旧数据**，
+      而这正是要照着下单的那份清单。
+    ★ 与 CLAUDE.md 里「选股理由的旁挂必须放子目录、不能是
+      `<date>.explain.json`」是**同一个坑**，加 revision 时又踩了一次。
+    """
+    import shutil
+    import tempfile
+    import json as _j
+    from assay import live as lv
+    from assay.lv import sig as _s, px as _p
+    tmp = tempfile.mkdtemp(prefix='_st_rev_')
+    old = lv.LIVE
+    try:
+        lv.LIVE = tmp                    # 🔴 绝不能写真账本
+        d = os.path.join(tmp, 'a1', 'signals')
+        os.makedirs(d)
+        NEW = {'for_date': '2026-09-08', 'code_sha256': 'new' * 20,
+               'sell': [], 'buy': [], 'hold': [1] * 10}
+        OLD = {'for_date': '2026-09-08', 'code_sha256': 'old' * 20,
+               'sell': [{'code': 'x'}, {'code': 'y'}], 'buy': [],
+               'hold': [1] * 8}
+        for name, obj in (('2026-09-08.json', NEW),):
+            with open(os.path.join(d, name), 'w', encoding='utf-8') as fh:
+                _j.dump(obj, fh)
+        # ---- ① rev_path 必须落在子目录里 ----
+        rp = _s.rev_path('a1', '2026-09-08', 1)
+        assert os.path.basename(os.path.dirname(rp)) == '_rev', \
+            ('归档要放 signals/_rev/ 子目录，实得 %s —— 同层的话 '
+             '"最新信号"会 sorted 到它' % rp)
+        os.makedirs(os.path.dirname(rp), exist_ok=True)
+        with open(rp, 'w', encoding='utf-8') as fh:
+            _j.dump(OLD, fh)
+        # ---- ② 三处扫描都必须读到【主文件】 ----
+        for nm, fn in (('sig.latest_signal', _s.latest_signal),
+                       ('px.latest_signal', _p.latest_signal)):
+            got = fn('a1') or {}
+            assert got.get('code_sha256') == NEW['code_sha256'], \
+                ('%s 读到了归档的旧版（sell %d 只）—— 页面会照着旧清单下单'
+                 % (nm, len(got.get('sell') or [])))
+            assert not got.get('sell'), \
+                '%s 给出了旧版的卖出清单' % nm
+        hist = _s.explain_history('a1')
+        assert len(hist) == 1, \
+            ('explain_history 把归档也当成一期了（%d 期）—— '
+             '同一天会出现两段' % len(hist))
+        # ---- ③ 反向自证：放同层就必须被抓到（这条断言不是空转）----
+        same = os.path.join(d, '2026-09-08.rev1.json')
+        shutil.copy(rp, same)
+        bad = _s.latest_signal('a1') or {}
+        assert bad.get('code_sha256') == OLD['code_sha256'], \
+            ('前提变了：同层的 .rev1.json 本该被 sorted 到最后 —— '
+             '如果这条不再成立，上面那两条断言就成了空转，要重新设计')
+        os.remove(same)
+    finally:
+        lv.LIVE = old
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('rev 归档落在 signals/_rev/ 子目录；sig/px 的 latest_signal 与 '
+            'explain_history 三处都只看主文件；反向自证：放回同层时'
+            'latest_signal 确实会读到旧版（所以这条断言不是空转）')
+
+
+@case('是不是调仓日：日历判据，不能从【委托】反推', tag='fast')
+def t_rebal_day_judge():
+    """🔴 `is_rebalance_day` 曾写成 `bool(rebal_orders)` —— 从"策略下了几个
+    调仓委托"反推。于是调仓日**什么都不用动**时（目标池恰好等于当前持仓）
+    策略一个委托都不下 -> 判成"今天不是调仓日" -> 页面显示「下次调仓 09-15」，
+    而今天就是调仓日。
+
+    ★ 原版下永远不暴露：调仓日总会卖掉几只，`rebal_orders` 从来不空。
+      2026-09-08 开 `lu_buy_only=1` 后第一次出现"调仓日零委托"才现形。
+    ★ 与 CLAUDE.md 里「调仓日的'持有不动'从**委托**反推」**同一个根因**
+      的另一半 —— 判据要问日历，不要问策略做了什么。
+    """
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'assay', 'lv', 'sig.py'), encoding='utf-8').read()
+    import ast as _a
+    tree = _a.parse(src)
+    fn = next((n for n in _a.walk(tree) if isinstance(n, _a.FunctionDef)
+               and n.name == 'build_signal'), None)
+    assert fn is not None, 'build_signal 不见了'
+    #   在 build_signal 的函数体里找 `is_rebal = ...` 那次赋值，看右侧是什么。
+    rhs = None
+    for node in _a.walk(fn):
+        if (isinstance(node, _a.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], _a.Name)
+                and node.targets[0].id == 'is_rebal'):
+            rhs = node.value
+    assert rhs is not None, 'build_signal 里没有 is_rebal 的赋值了'
+    #   🔴 判据必须是**调用 is_rebalance_day**，不是 bool(rebal_orders)。
+    #     用 ast 看右侧表达式，而不是查字符串 —— 那个标识符在注释里也有。
+    assert (isinstance(rhs, _a.Call)
+            and getattr(rhs.func, 'id', '') == 'is_rebalance_day'), \
+        ('is_rebal 必须由日历判据 is_rebalance_day() 给出。'
+         '写成 bool(rebal_orders) 的话，"调仓日但什么都不用动"会被判成'
+         '非调仓日，页面把下次调仓说成一周后 —— 而它不报错')
+    src_txt = _a.unparse(rhs)
+    assert 'rebal_orders' not in src_txt, \
+        'is_rebal 的右侧还在读 rebal_orders：%s' % src_txt
+
+    # ---- 日历判据本身要对：froec 是每周二（weekday=2）----
+    from assay.lv import sig as _sig
+    feed = PanelFeed('2026-06-01', '2026-09-07')
+    eng = Engine(load('strategies/小市值/froec_traded.py'), feed, cash=5e5,
+                 cost=Cost(), params={'stop_intraday': 1, 'stop_loss': 0.35,
+                                      'weekday': 2})
+    eng._boot()
+    import datetime as _dt
+    from assay.lv import base as _lvb
+    TUE, WED = _dt.date(2026, 9, 8), _dt.date(2026, 9, 9)
+    assert TUE.isoweekday() == 2 and WED.isoweekday() == 3, '日期常量写错了'
+    #   🔴 先验"没扩展日历序号时必须**抛错**" —— Engine._build_ordinals 只
+    #     覆盖 feed.trading_days，而实盘问的正是**下一个交易日**（它没有行情、
+    #     不在面板里）。`_due` 对表外日期取 (0,0) -> 静默 False ->
+    #     静默说"今天不是调仓日"，那是最糟的失败方式。
+    assert TUE not in eng._wk_ord, '前提变了：09-08 本该不在面板日历里'
+    try:
+        _sig.is_rebalance_day(eng, TUE)
+        raise AssertionError(
+            '日历序号没扩展时 is_rebalance_day 该抛错，而不是返回 False ——'
+            '静默 False 就是静默说"今天不是调仓日"')
+    except _lvb.LiveError:
+        pass
+    #   扩展之后才该给出正确答案（实盘 build_signal 里就是这么做的）
+    _sig._extend_ordinals(eng, feed, _lvb.calendar_days())
+    assert _sig.is_rebalance_day(eng, TUE), \
+        '2026-09-08 是周二，froec（weekday=2）该判成调仓日'
+    assert not _sig.is_rebalance_day(eng, WED), \
+        '2026-09-09 是周三，不该判成调仓日'
+    #   与 upcoming_rebalance 必须一致（它们共用同一处判据）
+    up = _sig.upcoming_rebalance(eng, feed, _dt.date(2026, 9, 7),
+                                 _lvb.calendar_days(), n=3)
+    for row in up:
+        d = _dt.date.fromisoformat(row['date'])
+        assert row['is_rebal'] == _sig.is_rebalance_day(eng, d), \
+            ('upcoming_rebalance 与 is_rebalance_day 对 %s 给出不同答案 ——'
+             '两处判据分叉的表现是"横条标出的调仓日与今天的判定对不上"' % d)
+    return ('is_rebal 由日历判据给出（ast 看右侧表达式，不是查字符串）；'
+            '日历序号没扩展时**抛错**而不是静默 False；扩展后 09-08 周二判为'
+            '调仓日、09-09 周三不是；upcoming_rebalance 与 is_rebalance_day '
+            '对未来 %d 天逐日一致' % len(up))
+
+
+@case('策略数据 API：不写 SQL 也能复现同一个候选池')
+def t_data_api():
+    """`feed.universe / snapshot / fundamentals` —— 让策略不必直接写 SQL。
+
+    理想中只有 feed 知道 datalake 的存在；而 froec.py / 红利那批把 9 层 CTE
+    写在策略里，口径（as-of / 停牌结转 / 多期去重）与规则（阈值 / 分位 /
+    排序 / 截断）混在同一段文本里。新策略 `froec_api.py` 用这三个 API 取数、
+    用 Python 写规则，**froec.py 一行没动**。
+
+    🔴 判据是**同一天两版候选池逐位相同**，并且要**跳过 ROE 切点并列的日子**
+      —— 原 SQL 的 `ORDER BY increase DESC` 没有 tie-break，那些日子它自己
+      就不确定（实测 539 个调仓日里约 4%）。
+    """
+    import datetime
+    import importlib.util as _iu
+    from assay.guard import GuardedFeed, LookAheadError
+
+    # ---- ① 三个 API 都带 PIT 防火墙（它们直接读 std/ 与面板）----
+    f = PanelFeed('2024-01-01', '2026-09-07')
+    gf = GuardedFeed(f)
+    gf.set_clock(datetime.date(2026, 9, 4), 'pre_open')
+    for nm, call in (('universe', lambda x: gf.universe(x, listed_days=250)),
+                     ('snapshot', lambda x: gf.snapshot(x, ['pb'])),
+                     ('fundamentals', lambda x: gf.fundamentals(x, ['eps']))):
+        for arg in ('2026-09-04', datetime.date(2026, 9, 4)):
+            try:
+                call(arg)
+                raise AssertionError(
+                    '%s(%r) 没被 PIT 拦住 —— 它直接读 std/ 与面板，'
+                    '少一道防火墙就是给未来函数开后门（而它不报错）'
+                    % (nm, arg))
+            except LookAheadError:
+                pass
+
+    # ---- ② 停牌股：只结转价格派生量 ----
+    #   🔴 基本面**不能**结转 —— 会拿到该股最后交易日那天的过期报告。
+    u = f.universe('2026-09-07', listed_days=250, exclude_like='68%')
+    cur = f.snapshot('2026-09-07', ['pb'], codes=u)
+    carry = f.snapshot('2026-09-07', ['pb', 'floatmv'], codes=u, carry_days=400)
+    assert len(carry) > len(cur), \
+        ('carry_days 该把当日无 K 线（停牌）的票补进来，实得 %d vs %d'
+         % (len(carry), len(cur)))
+    assert len(carry) == len(u), '结转后该覆盖整个宇宙'
+
+    # ---- ③ fundamentals：as-of + 多期 + require_all ----
+    roe5 = f.fundamentals('2026-09-07', ['roe'], codes=u, periods=5,
+                          require_all=True)
+    cnt = roe5.groupby('code')['seq'].count()
+    assert set(cnt.unique()) == {5}, \
+        ('require_all=True 该只留恰好凑满 5 期的 code，实得期数 %s —— '
+         '缺期的票会算出一个偏小的 ROE 加速度而**不报错**' % sorted(cnt.unique()))
+    assert roe5['seq'].min() == 1, 'seq 该从 1（最新一期）开始'
+
+    # ---- ④ 与 SQL 版候选池逐位相同（跳过 ROE 切点并列的日子）----
+    P = {'stop_intraday': 1, 'stop_loss': 0.35, 'weekday': 2,
+         'paused_in_pool': 0, 'kcb_688_only': 0}
+    feed = PanelFeed('2016-01-01', '2026-09-03')
+    eng = Engine(load('strategies/小市值/froec.py'), feed, cash=5e5,
+                 cost=Cost(), params=P)
+    eng._boot()
+    ctx = eng.ctx
+
+    def _mod(name, tag):
+        sp = _iu.spec_from_file_location(tag, 'strategies/小市值/%s.py' % name)
+        m = _iu.module_from_spec(sp)
+        sp.loader.exec_module(m)
+        return m
+    ms, ma = _mod('froec', '_api_t1'), _mod('froec_api', '_api_t2')
+    EXCL = ','.join("'%s'" % x for x in ms.EXCL_IND)
+    #   🔴 tie 检测要在**截断与行业排除之前**做 —— 被排除的那一行不在末层
+    #     输出里，在末层上查 roe_rn==cut+1 会漏判成"无并列"（踩过）。
+    S = ms.SQL.replace('WHERE rn2 <= {roecut}', 'WHERE rn2 <= 100000') \
+              .replace("WHERE sw_l1_name IS NULL OR "
+                       "sw_l1_name NOT IN ({excl})", 'WHERE 1=1')
+    #   ★ 采样日要够密：切点算错 ±1 只差一只票，而它常常本来就进不了
+    #     最终前 20 —— 采样太少那条断言就成了空转（变异测试抓到过：
+    #     6 个采样日抓不到 "roe 切点 -1"）。
+    DAYS = ['2016-03-31', '2016-09-30', '2017-06-30', '2018-03-30',
+            '2018-06-29', '2019-03-29', '2019-09-30', '2020-03-31',
+            '2020-09-30', '2021-06-30', '2022-03-31', '2022-09-30',
+            '2023-06-30', '2024-04-22', '2025-03-31', '2026-09-07']
+    same = tie = 0
+    for ds in DAYS:
+        d = datetime.date.fromisoformat(ds)
+        w = ctx.data.query(S, sd=d, listed=250, cand=100000, pin='FALSE',
+                           kcb='68%', pert=0, salt='a', skip=0,
+                           pbcut='floor(0.5 * n)', roecut='x', excl=EXCL)
+        if w.empty:
+            continue
+        n2 = int(w['roe_n'].iloc[0])
+        cut = int(0.1 * n2)
+        v = w[w['roe_rn'] == cut]['roe_inc']
+        uu = w[w['roe_rn'] == cut + 1]['roe_inc']
+        if len(v) and len(uu) and abs(v.iloc[0] - uu.iloc[0]) < 1e-12:
+            tie += 1
+            continue
+        A = ctx.data.query(ms.SQL, sd=d, listed=250, cand=20, pin='FALSE',
+                           kcb='68%', pert=0, salt='a', skip=0,
+                           pbcut='floor(0.5 * n)',
+                           roecut='floor(0.1 * n2)', excl=EXCL)
+        B = ma._pick(ctx, d, 20)
+        a, b = A['jq_code'].tolist(), B['jq_code'].tolist()
+        assert a == b, \
+            ('%s：API 版与 SQL 版候选池不同（切点没有并列，所以这是真差异）\n'
+             '  SQL 独有 %s\n  API 独有 %s'
+             % (d, sorted(set(a) - set(b)), sorted(set(b) - set(a))))
+        #   🔴 只比 jq_code 太松：pb 切点算错 ±1 只多/少带一只进半区，
+        #     而它常常本来就进不了最终前 20 -> 断言照样绿（变异测试抓到过）。
+        #     连**中间层的名次与分母**一起比 —— 那几列正是切点的证据。
+        #   分母（pb_n / roe_n）与并列无关，是**切点的硬证据** ——
+        #   切点算错 ±1 会让下一层的分母跟着变。
+        for col in ('pb_n', 'roe_n'):
+            va, vb = int(A[col].iloc[0]), int(B[col].iloc[0])
+            assert va == vb, \
+                ('%s：%s 不同（SQL %d / API %d）—— 某一层的切点算错了'
+                 % (d, col, va, vb))
+        #   名次（pb_rn / roe_rn）只在**整列都没有并列**时才可比：
+        #   原 SQL 的 ORDER BY 没有 tie-break，并列处的号码本身不确定。
+        if len(w) == w['roe_inc'].nunique():
+            for col in ('pb_rn', 'roe_rn'):
+                va, vb = A[col].tolist(), B[col].tolist()
+                assert [int(x) for x in va] == [int(x) for x in vb], \
+                    ('%s：%s 列不同（该日无并列，所以这是真差异）\n'
+                     '  SQL %s\n  API %s' % (d, col, va[:8], vb[:8]))
+        for col in ('pb', 'floatmv', 'roe_inc', 'eps'):
+            va, vb = A[col].tolist(), B[col].tolist()
+            assert all(abs(x - y) < 1e-9 for x, y in zip(va, vb)), \
+                '%s：%s 列的数值不同' % (d, col)
+        same += 1
+    assert same >= 12, \
+        '有效对比的天数太少（%d），这条断言会变成空转' % same
+
+    # ---- ⑤ froec.py **一行没动**：它仍然自己写 SQL，且不含新 API ----
+    src = open('strategies/小市值/froec.py', encoding='utf-8').read()
+    assert 'SQL = ' in src and 'context.data.query(' in src, \
+        'froec.py 该保持原样（自己写 SQL）—— 它的归档要可比、实盘绑着它'
+    for api in ('.universe(', '.snapshot(', '.fundamentals('):
+        assert api not in src, \
+            'froec.py 里出现了新 API（%s）—— 要求是**不动现有策略**' % api
+    #   新策略必须真的不写 SQL
+    asrc = open('strategies/小市值/froec_api.py', encoding='utf-8').read()
+    assert 'data.query(' not in asrc and 'SELECT' not in asrc.upper() \
+        .replace('SELECT ... FROM', ''), \
+        'froec_api.py 里还有 SQL —— 它存在的意义就是"不写 SQL"'
+    return ('3 个 API × 两种日期写法都被 PIT 拦住；停牌结转把宇宙补齐'
+            '（%d -> %d）；require_all 只留 5 期齐全的；%d 个采样日与 SQL 版'
+            '候选池逐位相同（%d 个 ROE 切点并列日跳过 —— 原 SQL 没有 '
+            'tie-break，那些日子它自己就不确定）；froec.py 一行没动'
+            % (len(cur), len(carry), same, tie))
+
+
+@case('候选池深度：多取给理由看，但策略只用前 N 个', tag='fast')
+def t_explain_pool():
+    """froec 原版 `LIMIT 10` -> "选股理由"页只能列到第 10 名，
+    看不到"差一点选上的是谁"（红利那条 SQL 返回几百行，所以能列到 20）。
+
+    做法是**多取几名但策略只用前 lim 个**（`df[...][:lim]` 那一刀）：
+    WHERE / ORDER BY / OFFSET 一个字没动，只放大 LIMIT，
+    而 `ORDER BY floatmv ASC` 是确定序，所以前 lim 行逐位不变。
+
+    🔴 **少了那一刀就等于开了补位** —— 过滤（tradable/止损/黑名单）发生在
+      截断之前，名额会被后面的票补上。补位是 `fill_paused` /
+      `fill_blacklist` 那个**已测为负**的开关，绝不能顺手打开。
+    """
+    src = open('strategies/小市值/froec.py', encoding='utf-8').read()
+    flat = src.replace(' ', '')
+    assert "cand=df['jq_code'].tolist()[:lim]" in flat, \
+        ('策略必须把候选池**截断回 lim** —— 不截断就是开了补位'
+         '（过滤在截断之前，名额被后面的票补上），那是已测为负的开关')
+    import re
+    m = re.search(r"g\.explain_pool = getattr\(g, 'explain_pool', (\d+)\)", src)
+    assert m and m.group(1) == '20', \
+        '默认该多取到 20 名（实得 %s）' % (m.group(1) if m else '没有这个参数')
+
+    # ---- 多取【不改变任何行为】：短回测逐位等价 ----
+    A = _run('strategies/小市值/froec_traded.py', '2024-01-01', '2024-12-31',
+             5e5, params={'stop_intraday': 1, 'stop_loss': 0.35,
+                          'weekday': 2, 'explain_pool': 0})[0]
+    B = _run('strategies/小市值/froec_traded.py', '2024-01-01', '2024-12-31',
+             5e5, params={'stop_intraday': 1, 'stop_loss': 0.35,
+                          'weekday': 2, 'explain_pool': 20})[0]
+    for k in ('annual_return', 'max_drawdown', 'n_trades'):
+        assert abs((A.get(k) or 0) - (B.get(k) or 0)) < 1e-9, \
+            ('多取 20 名改变了行为（%s: %.9f vs %.9f）—— '
+             'ORDER BY 有并列，或者 [:lim] 那一刀丢了'
+             % (k, A.get(k) or 0, B.get(k) or 0))
+
+    # ---- 而候选池确实变深了（否则上面那条等价断言是空转）----
+    #   量的是**策略实际拿到的行数** —— 不另写一条查询（同 CLAUDE.md：
+    #   另写的那份看着一样，直到某天 as-of 差一天才分叉）。
+    from assay.guard import GuardedFeed
+    _orig_q = GuardedFeed.query
+    n = {}
+    try:
+        for pool in (0, 20):
+            seen = []
+
+            def _spy(self, sql, __seen=seen, **kw):
+                df = _orig_q(self, sql, **kw)
+                __seen.append(len(df))
+                return df
+            GuardedFeed.query = _spy
+            feed = PanelFeed('2024-06-01', '2024-12-31')
+            eng = Engine(load('strategies/小市值/froec_traded.py'), feed,
+                         cash=5e5, cost=Cost(),
+                         params={'stop_intraday': 1, 'stop_loss': 0.35,
+                                 'weekday': 2, 'explain_pool': pool})
+            eng.run()
+            n[pool] = max(seen) if seen else 0
+    finally:
+        GuardedFeed.query = _orig_q
+    assert n[20] > n[0] == 10, \
+        ('explain_pool 该把候选池从 10 加深到 20，实得 %s -> %s —— '
+         '如果它没生效，上面那条等价断言就是空转' % (n[0], n[20]))
+    return ('策略把候选池截断回 lim（不截断=开补位，已测为负）；'
+            'explain_pool 默认 20；explain_pool 0 vs 20 在 2024 全年'
+            '逐位等价（年化/回撤/笔数三项）%s'
+            % ('' if n.get(0) is None else '；候选池确实变深 %s -> %s'
+               % (n[0], n[20])))
+
+
+@case('涨停黑名单五口径：默认逐位等价 / 只挡买入不卖票 / 抽成一处')
+def t_limitup_blacklist():
+    """20 日涨停黑名单的四个开关（2026-09-07 加）。
+
+    原版判据是 `最近持有过` ∩ `窗口内涨停过`，有个**不对称**：建仓日
+    `g.hold_history` 为空 -> 交集恒空 -> 黑名单空转 -> 一只"买入前刚涨停过"
+    的票能买进来；下一期 `seen` 有它了就必然被剔 -> **只持有一期**。
+
+    🔴 四个开关实测**全部不显著**（逐年 t=−0.47~+0.79），所以默认值必须
+      逐位等价于原版 —— 一旦默认值漂了，所有历史归档就不可比，而那不报错。
+    """
+    import datetime
+    src = open('strategies/小市值/froec.py', encoding='utf-8').read()
+
+    # ---- ① 四个开关都在，默认值 = 原版 ----
+    import re
+    DEF = {'lu_need_held': '1', 'lu_hold_only': '0',
+           'lu_since_start': '0', 'fill_blacklist': '0', 'lu_buy_only': '0'}
+    for k, v in DEF.items():
+        m = re.search(r"g\.%s = getattr\(g, '%s', (\d+)\)" % (k, k), src)
+        assert m, '开关 %s 不见了' % k
+        assert m.group(1) == v, \
+            ('%s 的默认值该是 %s（原版行为），实得 %s —— 默认值一漂，'
+             '所有历史归档就不可比，而那不报错' % (k, v, m.group(1)))
+
+    # ---- ② 黑名单抽成【一处】 ----
+    #   🔴 原来 rebalance 与 hold_buffer_strict 各写了一遍同样四行，
+    #     加开关时改一处漏一处的表现是"缓冲区那条路径还是旧口径" ——
+    #     不报错，只是两条路径对同一只票给出不同结论。
+    assert src.count('had_limit_up') == 1, \
+        ('had_limit_up 该只在 blacklist() 里出现 1 次（实得 %d）——'
+         '两处各写一遍就会分叉' % src.count('had_limit_up'))
+    assert 'def blacklist(context, cand, d):' in src, 'blacklist() 不见了'
+
+    # ---- ③ limit_up_days 与 had_limit_up 必须**同口径** ----
+    #   两处窗口边界不一致的表现是"同一个窗口两种答案"，而它不报错。
+    f = PanelFeed('2026-07-01', '2026-09-08')
+    two = ['301152.XSHE', '603506.XSHG', '002910.XSHE']
+    lo, hi = datetime.date(2026, 8, 11), datetime.date(2026, 9, 7)
+    days = f.limit_up_days(two, lo, hi)
+    assert set(days) == set(f.had_limit_up(two, lo, hi)), \
+        ('limit_up_days 与 had_limit_up 的窗口口径不一致：%s vs %s'
+         % (sorted(days), sorted(f.had_limit_up(two, lo, hi))))
+    assert days.get('301152.XSHE') == {datetime.date(2026, 8, 24)}, \
+        '涨停日明细不对（实盘 09-08 那次卖出就是靠它定位的）'
+    #   🔴 边界语义要用**恰好在 start 那天涨停**的样本验 —— 否则把
+    #     `date >` 改成 `date >=` 也照样绿（变异测试抓到过）。
+    #     天力锂能 2026-08-24 涨停，正好当边界样本。
+    one = ['301152.XSHE']
+    assert f.limit_up_days(one, datetime.date(2026, 8, 24), hi) == {}, \
+        ('start 当天必须**不算**（date > start）—— 与 had_limit_up 同口径，'
+         '差一天的表现是"同一个窗口两种答案"，而它不报错')
+    assert f.limit_up_days(one, datetime.date(2026, 8, 23), hi) == \
+        {'301152.XSHE': {datetime.date(2026, 8, 24)}}, \
+        'start 的下一天该被算进来'
+    assert f.limit_up_days(one, lo, datetime.date(2026, 8, 24)) == \
+        {'301152.XSHE': {datetime.date(2026, 8, 24)}}, \
+        'end 当天必须**算**（date <= end）'
+    assert f.limit_up_days(one, lo, datetime.date(2026, 8, 23)) == {}, \
+        'end 之后的涨停不该算进来'
+    #   PIT 防火墙不能漏了新方法
+    from assay.guard import GuardedFeed, LookAheadError
+    gf = GuardedFeed(f)
+    gf.set_clock(datetime.date(2026, 9, 1), 'pre_open')
+    try:
+        gf.limit_up_days(two, lo, datetime.date(2026, 9, 7))
+        raise AssertionError('limit_up_days 少了 PIT 检查 —— '
+                             '它和 had_limit_up 看同一张表，少一道防火墙'
+                             '就是给未来函数开了个后门（而它不报错）')
+    except LookAheadError:
+        pass
+
+    # ---- ④ 默认参数下与原版**逐位等价**（数值指纹，不比字节）----
+    A = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5)[0]
+    B = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5,
+             params={'lu_need_held': 1, 'lu_hold_only': 0,
+                     'lu_since_start': 0, 'fill_blacklist': 0})[0]
+    for k in ('annual_return', 'max_drawdown', 'n_trades'):
+        assert abs((A.get(k) or 0) - (B.get(k) or 0)) < 1e-9, \
+            '显式传原版参数与不传应完全一致，%s 差了' % k
+
+    # ---- ⑤ hold_only=1 时 need_held 必须**无效**（设计自证）----
+    #   这条在逐年汇总里也钉着：同名两份结果必须逐位相同。
+    C = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5,
+             params={'lu_hold_only': 1, 'lu_need_held': 1})[0]
+    D = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5,
+             params={'lu_hold_only': 1, 'lu_need_held': 0})[0]
+    assert abs(C['annual_return'] - D['annual_return']) < 1e-9, \
+        ('hold_only=1 时 need_held 本该无效（"持有期间"已蕴含"持有过"），'
+         '实得 %.6f vs %.6f' % (C['annual_return'], D['annual_return']))
+    #   🔴 上面那条**只能证行为一致，证不了实现干净**：往 hold_only 分支里
+    #     混一个 need_held 条件是**语义冗余**的（hold_days 与 hold_history
+    #     覆盖同一批票），行为一分不变、断言照样绿（变异测试抓到过）。
+    #     这个不变量是结构性的，就该在源码上守。
+    _hb = src[src.index('    if g.lu_hold_only:'):
+              src.index('    if g.lu_need_held and not g.hold_history:')]
+    assert 'lu_need_held' not in _hb, \
+        ('hold_only 分支里不该读 need_held —— "持有期间"本身已经蕴含'
+         '"持有过"了，多一个条件今天是冗余的，改天 hold_days 与 '
+         'hold_history 的保留长度一分叉它就成了真 bug')
+
+    # ---- ⑥ 开关真的能改变行为（否则上面几条都是空转）----
+    E = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5,
+             params={'lu_need_held': 0})[0]
+    assert abs(E['annual_return'] - A['annual_return']) > 1e-6, \
+        ('lu_need_held=0 没有改变任何结果 —— 开关接错了。'
+         '2024 年实测该是 -5.68% vs 原版 13.17%')
+    # ---- ⑦ lu_buy_only：黑名单**只挡买入，不卖票** ----
+    #   🔴 这一条修的是规则自相矛盾：同一个事实（20 日内涨停过）在建仓那期
+    #     被放行、在下一期被用来卖出。本项目早已认定黑名单的定位
+    #     （froec.py 里 hold_buffer_strict 那段）：
+    #       「卖出问的是"它还够好吗"，黑名单是"再买"的抑制器」
+    #     实盘 2026-09-08 被剔的两只排名是**第 3 和第 7**，稳稳在前 10 名内。
+    F = _run('strategies/小市值/froec.py', '2024-01-01', '2024-12-31', 5e5,
+             params={'lu_buy_only': 1})[0]
+    assert abs(F['annual_return'] - A['annual_return']) > 1e-6, \
+        'lu_buy_only=1 没有改变任何结果 —— 开关接错了'
+    #   直接后果：黑名单不再卖票 -> 持有更久 -> **成交笔数减少**。
+    #   （2024 实测 86 -> 76；全历史 968 -> 884，11 年里 10 年都更少。）
+    assert F['n_trades'] < A['n_trades'], \
+        ('黑名单只挡买入之后成交笔数该减少（不再机械卖出排名还够的持仓），'
+         '实得 %d vs 原版 %d' % (F['n_trades'], A['n_trades']))
+    #   源码结构：卖出判据必须用**未过黑名单**的那份排名池
+    assert '_rank_pool = set(cand[:g.stock_num]) if g.lu_buy_only else None' \
+        in src, ('卖出判据要用未过黑名单的前 stock_num（"它还够好吗"）——'
+                 '用过了黑名单的那份就又把买入判据当卖出判据了')
+    #   🔴 这条断言第一版写成了 `'keep' in _kb and '_bk' in _kb` 兜底 ——
+    #     那等于没验（两个标识符在注释里也有）。第 6 次踩同一个坑了，
+    #     改成**去空格后匹配完整语句**。
+    _kb = src[src.index('    if g.lu_buy_only and _rank_pool:'):
+              src.index('    for code in list(context.portfolio.positions):')]
+    _kbf = _kb.replace(' ', '').replace('\n', '')
+    assert 'keep=set(keep)|_bk' in _kbf, \
+        ('排名还够、只是被黑名单挡住的持仓要并进 keep —— '
+         '不并的话它们照旧被卖，而"少了一句"不报错')
+    assert 'c in _rank_pool' in _kb and 'c not in target' in _kb, \
+        ('留下的判据必须是「在排名池里 且 不在（过了黑名单的）target 里」——'
+         '也就是"排名还够、只是被黑名单挡住"这一批')
+    return ('5 个开关默认值 = 原版且显式传参逐位一致；黑名单抽成一处'
+            '（had_limit_up 只出现 1 次）；limit_up_days 与 had_limit_up '
+            '同口径且带 PIT 防火墙；hold_only=1 时 need_held 无效'
+            '（%.2f%% == %.2f%%）；lu_need_held=0 确实改变行为'
+            '（2024: %.2f%% vs 原版 %.2f%%）；lu_buy_only=1 只挡买入不卖票'
+            '（2024: %.2f%% / %d 笔 vs 原版 %d 笔，换手确实降了）'
+            % (C['annual_return'] * 100, D['annual_return'] * 100,
+               E['annual_return'] * 100, A['annual_return'] * 100,
+               F['annual_return'] * 100, F['n_trades'], A['n_trades']))
+
+
 @case('定时窗口配置：判据是【实际装上的点位】而不是回显配置', tag='fast')
 def t_schedule():
     """轮询窗口可在看板改（时间范围 + 间隔），存完立即重装 launchd。
@@ -7185,9 +8551,33 @@ def t_signal_revision():
             _sig.build_signal = orig
         assert [x['code'] for x in r4['buy']] != ['Z'], \
             '没加 force 却重算并覆盖了'
-        n_rev = len([f for f in os.listdir(os.path.join(tmp, aid, 'signals'))
-                     if '.rev' in f])
-        assert n_rev == 2, 'rev 文件数应为 2，实际 %d' % n_rev
+        #   🔴 归档在 `signals/_rev/` **子目录**里，不是同层 ——
+        #     同层的话 `latest_signal` 会 sorted 到它、读出被归档的旧版
+        #     （见「信号归档必须放【子目录】」那条用例）。
+        #     判据要跟着代码一起搬，不然它只是看着还在。
+        _rd = os.path.join(tmp, aid, 'signals', '_rev')
+        n_rev = len([f for f in os.listdir(_rd)
+                     if '.rev' in f]) if os.path.isdir(_rd) else 0
+        assert n_rev == 2, 'rev 文件数应为 2，实际 %d（%s）' % (n_rev, _rd)
+        assert not [f for f in os.listdir(os.path.join(tmp, aid, 'signals'))
+                    if '.rev' in f], \
+            '归档不许出现在 signals/ 同层 —— latest_signal 会读到它'
+        #   🔴 **页面提示里给的那个路径必须真的能找到文件。**
+        #     `archived` 原来只存 basename、页面自己拼 'signals/' ——
+        #     归档搬进 `_rev/` 子目录之后那个拼法就错了，提示里写着
+        #     「旧版留在 signals/2026-09-08.rev1.json」而文件在
+        #     `signals/_rev/` 下。**给一个找不到的路径比不给更糟。**
+        import json as _json
+        with open(os.path.join(tmp, aid, 'signals',
+                               '%s.json' % r3['for_date']),
+                  encoding='utf-8') as _fh:
+            cur = _json.load(_fh)
+        for _r in (cur.get('revisions') or []):
+            _ap = _r.get('archived') or ''
+            assert _ap, 'revision 里没有 archived 路径'
+            assert os.path.isfile(os.path.join(tmp, aid, _ap)), \
+                ('revision 的 archived 指向一个不存在的文件：%s —— '
+                 '页面照它显示"旧版留在 …"，人照着去找会找不到' % _ap)
     finally:
         lv.LIVE = old_live
         import shutil
@@ -7868,6 +9258,185 @@ def t_explain():
     return '；'.join(out)
 
 
+@case('盘中炸板提示：只报真炸板 / 去重落盘 / 任何页面都能看到', tag='fast')
+def case_intraday_alert():
+    """三条判据，每条都对应一种**不报错的**坏法：
+
+      ① `fire()` 只把 **broken** 的记进去重账本。写成"有 items 就记账"的话，
+         还封着的票也被记掉，之后**真炸板时不再报** —— 静默失效。
+      ② 判据是**涨停价**（面板的 `limit_up`），不是"涨幅 < 9.9%"：
+         涨跌幅限制有 10%/20%/5% 三档，固定阈值必然错。
+      ③ 浮窗挂在 **common.js**，所以 6 个独立 .html 与 index.html 都有它。
+         挂在实盘页的话，人正在看个股/盘面时就漏掉了 —— 而炸板要立刻处理。
+    """
+    import importlib, io, tempfile
+    inn = importlib.import_module('assay.lv.intraday')
+    lv = importlib.import_module('assay.live')
+
+    # ---- ① 去重只认 broken ----
+    with tempfile.TemporaryDirectory() as td:
+        old = lv.LIVE
+        try:
+            lv.LIVE = td                     # 🔴 重定向，不许写真账本
+            os.makedirs(os.path.join(td, 'zbtest'), exist_ok=True)
+            sealed = {'code': '301126.XSHE', 'name': '甲', 'px': 11.0,
+                      'limit': 11.0, 'broken': False}
+            brk    = {'code': '002910.XSHE', 'name': '乙', 'px': 9.5,
+                      'limit': 10.0, 'broken': True}
+            f1 = inn.fire('zbtest', [sealed, brk], day='2026-09-08')
+            assert [x['code'] for x in f1] == ['002910.XSHE'], \
+                '只有真炸板的才该报，还封着的不报：%r' % f1
+            # 同一只票第二次不再报
+            f2 = inn.fire('zbtest', [brk], day='2026-09-08')
+            assert f2 == [], '同一只票一天只报一次，第二次必须为空：%r' % f2
+            # 🔴 关键：封着那只**没被记账**，所以它之后真炸板时还能报出来
+            f3 = inn.fire('zbtest', [dict(sealed, px=10.2, broken=True)],
+                          day='2026-09-08')
+            assert [x['code'] for x in f3] == ['301126.XSHE'], \
+                '封着时不该记账 —— 否则真炸板了报不出来（静默失效）：%r' % f3
+            # 换一天，重新计
+            f4 = inn.fire('zbtest', [brk], day='2026-09-09')
+            assert [x['code'] for x in f4] == ['002910.XSHE'], '换天要重新报'
+        finally:
+            lv.LIVE = old
+
+    # ---- ② 判据必须是涨停价，不是固定涨幅阈值 ----
+    src = io.open(inn.__file__, encoding='utf-8').read()
+    body = src[src.index('def limit_up_holdings'):src.index('def scan')]
+    assert 'is_limit_up' in body and 'limit_up' in body, \
+        'limit_up_holdings 必须读面板的 is_limit_up / limit_up'
+    # 🔴 **第 6 次**踩这个坑：`'9.9' in src` 抓到的是我**自己写的注释**
+    #   （"不是涨幅 < 9.9%"）。注释**不是 AST 节点**，所以扫 ast 的数字
+    #   常量才是真判据 —— 同 `--install-timer` / `次日` / `h.pruned` 那几条。
+    import ast as _ast
+    nums = {n.value for n in _ast.walk(_ast.parse(src))
+            if isinstance(n, _ast.Constant) and isinstance(n.value, float)}
+    bad = {x for x in nums if 0.04 < x < 0.21 or 4 < x < 21}
+    assert not bad, \
+        '代码里出现了像"固定涨幅阈值"的数 %r —— 涨跌幅有 10%%/20%%/5%% 三档，' \
+        '判据必须是面板的涨停价' % sorted(bad)
+    # scan 里 broken 的判据必须比**涨停价**，而不是比某个百分比
+    sbody = src[src.index('def scan'):src.index('def fire')]
+    assert "'broken':float(p)<lim" in sbody.replace(' ', ''), \
+        'broken 必须是「现价 < 涨停价」：%s' % [l for l in sbody.splitlines()
+                                              if 'broken' in l]
+    assert inn.SCAN_FROM.hour >= 10, \
+        '10:00 之前不扫 —— 开盘半小时开板/回封频繁，早报多半是假告警'
+
+    # ---- ③ 浮窗必须在 common.js（所有页面都加载它）----
+    cj = io.open('web/shared/common.js', encoding='utf-8').read()
+    assert 'zbScan' in cj and '/api/live/intraday' in cj, \
+        '炸板浮窗必须挂在 common.js —— 挂在实盘页的话看个股时就漏掉了'
+    assert 'zbMute' in cj and 'zbmute' in cj, '必须能 Mute 1 小时'
+    # 🔴 断言匹配**完整条件**，不是"标识符出现过"（同 h.pruned / explain_pending）
+    flat = cj.replace(' ', '')
+    assert 'if(zbMuted())return' in flat, \
+        'Mute 期内必须真的**不扫** —— 只定义 zbMuted 而不在 zbScan 里用等于没做'
+    assert 'if(!o||!o.session)return' in flat, \
+        '时段判据必须来自服务端（同「权不权威由服务端给」）'
+    # 每个独立页面都 <script src> 了 common.js
+    for h in sorted(g for g in os.listdir('web') if g.endswith('.html')):
+        t = io.open(os.path.join('web', h), encoding='utf-8').read()
+        assert 'shared/common.js' in t, \
+            '%s 没引 common.js —— 那一页就看不到炸板提示' % h
+    print('    ✓ fire 只认 broken（封着的不记账）· 判据是涨停价 · '
+          'SCAN_FROM=%s · %d 个页面都有浮窗'
+          % (inn.SCAN_FROM.strftime('%H:%M'),
+             len([g for g in os.listdir('web') if g.endswith('.html')])))
+
+
+@case('炸板浮窗真的弹得出来 / Mute 之后不再弹（playwright）', tag='web')
+def t_zb_ui():
+    """🔴 "JS 语法对" 不等于 "浮窗出得来" —— `.pane` 那次就是样式表里的
+      `display:none` 让整块 SVG 静默隐形。所以这条**拦掉接口造数据**，
+      在真浏览器里量四件事：
+
+      ① 浮窗真的可见（`is_visible`，不是"DOM 里有这个 id"）
+      ② 内容说清了是哪只票、现价 vs 涨停价、哪个账户
+      ③ 点 Mute 之后浮窗消失，**且再扫也不弹**（localStorage 留痕）
+      ④ 它在**独立页面**上也弹（拿个股页试 —— 那是最容易漏的：
+         浏览器在别的页面时炸板提示照样要出来）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import json as _json
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    STUB = {'session': True, 'scan_from': '10:00', 'accounts': [],
+            'fresh': [{'code': '002910.XSHE', 'name': '庄园牧场',
+                       'px': 9.51, 'limit': 10.02, 'pct': -0.0509,
+                       'limit_pct': 0.1, 'at': '2026-09-08 10:35:00',
+                       'account': 'froec', 'account_name': 'froec 实盘'}]}
+    notes = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page()
+            hits = {'n': 0}
+
+            def route(rt):
+                hits['n'] += 1
+                # ★ 第二次起返回空 —— 这样"Mute 之后不再弹"才是真判据
+                #   （否则分不清"没弹"和"接口没被调"）
+                body = STUB if hits['n'] == 1 else dict(STUB, fresh=[])
+                rt.fulfill(status=200, content_type='application/json',
+                           body=_json.dumps(body))
+            pg.route('**/api/live/intraday', route)
+
+            # ---- ④ 先在【独立页面】上验（最容易漏的那个）----
+            pg.goto('http://127.0.0.1:%d/stock.html' % port)
+            pg.wait_for_selector('#zbbox', timeout=15000)
+            box = pg.locator('#zbbox')
+            assert box.is_visible(), \
+                '浮窗在 DOM 里但不可见 —— 同 .pane 那次样式表里的 display:none'
+            txt = box.inner_text()
+            for want in ('庄园牧场', '9.51', '10.02', 'Mute 1 小时'):
+                assert want in txt, '浮窗少了「%s」：%r' % (want, txt)
+            notes.append('独立页（个股）上弹出且内容完整')
+
+            # ---- ③ 点 Mute -> 消失，且再扫不弹 ----
+            pg.click('#zbmute')
+            assert pg.locator('#zbbox').count() == 0, 'Mute 之后浮窗该消失'
+            left = pg.evaluate("() => +(localStorage.getItem('zbmute')||0)")
+            assert left > 0, 'Mute 必须落 localStorage —— 刷新一下就失效等于没做'
+            mins = (left - pg.evaluate('() => Date.now()')) / 60000
+            assert 55 < mins < 61, 'Mute 该是 1 小时，实测 %.1f 分钟' % mins
+            # 🔴 刷新页面（重新加载 common.js）后仍在静默期
+            hits['n'] = 0
+            pg.reload()
+            pg.wait_for_timeout(4500)
+            assert pg.locator('#zbbox').count() == 0, \
+                'Mute 期内刷新后又弹了 —— localStorage 没被读到'
+            assert hits['n'] == 0, \
+                'Mute 期内还在打接口 %d 次 —— if(zbMuted())return 没起作用' % hits['n']
+            notes.append('Mute 落 localStorage（%.0f 分钟）· 刷新后仍静默且不打接口'
+                         % mins)
+
+            # ---- ① 解除 Mute，在 index.html 上再验一次 ----
+            pg.evaluate("() => localStorage.removeItem('zbmute')")
+            hits['n'] = 0
+            pg.goto('http://127.0.0.1:%d/' % port)
+            pg.wait_for_selector('#zbbox', timeout=15000)
+            assert pg.locator('#zbbox').is_visible()
+            # 「×」只关这一次，不进静默期
+            pg.click('#zbclose')
+            assert pg.locator('#zbbox').count() == 0
+            assert pg.evaluate("() => +(localStorage.getItem('zbmute')||0)") == 0, \
+                '「×」不该写 Mute —— 那是两个不同的意思（关掉 vs 静音一小时）'
+            notes.append('index.html 上也弹；「×」只关一次不进静默期')
+            b.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉
@@ -7912,8 +9481,15 @@ def t_page_inventory():
     #   ★ 这张表是【唯一】的清单：加了新域文件就往这里加一行 ——
     #     分两处写的话，"新文件没被 index.html 引用"或"断言没扫到它"
     #     都不会报错，只是那部分功能悄悄不在保护范围内。
-    DOMS = ('app', 'home', 'live', 'live-fee', 'live-trade', 'live-strat',
-            'live-why', 'runs', 'run-detail', 'sync')
+    # 🔴 **扫目录，不照清单拼** —— 新增一个视图文件（如 live-perf.js）时，
+    #   写死的清单不会跟着变，于是它的 showXxx 定义不在 `js` 里、
+    #   "被调用但没有定义"就误报；更糟的是它的所有检查都悄悄漏掉了，
+    #   而**那不报错，只是保护范围缩小**（同 _web_files 那条）。
+    DOMS = tuple(sorted(
+        f[:-3] for f in os.listdir(os.path.join(web, 'views'))
+        if f.endswith('.js')))
+    assert 'app' in DOMS and len(DOMS) >= 10, \
+        'views/ 下的域文件数看着不对：%s' % (DOMS,)
     for d in DOMS:
         fp = os.path.join(web, 'views', d + '.js')
         assert os.path.isfile(fp), \

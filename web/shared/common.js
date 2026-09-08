@@ -368,3 +368,93 @@ function cvPrep(cv) {
   return {g, W, H};
 }
 
+
+/* ============ 盘中炸板提示（全局浮窗）============
+   🔴 **任何页面都要能看到** —— 所以挂在 common.js 里（6 个独立 .html 与
+     index.html 都加载它）。挂在实盘页的话，人正在看个股/盘面时就漏掉了，
+     而炸板恰恰是要立刻处理的事。
+   🔴 判据全在服务端（`/api/live/intraday`）：
+     · "哪些持仓昨天涨停" 要读面板的 is_limit_up（前端没有面板）
+     · "现在是不是盘中" 见 realtime.in_session
+     · 涨停价用面板的 `limit_up`，不是"涨幅 < 9.9%" —— 涨跌幅限制有
+       10%/20%/5% 三档，还会因 ST 状态变化而变，前端自己推必然错
+   ★ 去重在**服务端落盘**（同一只票一天只报一次）：重启一次就把今天报过的
+     又报一遍的话，通知一多就没人看了。
+   ★ 10:00 之前不扫（服务端的 SCAN_FROM）：开盘半小时开板/回封频繁，
+     早报多半是假告警。 */
+const ZB_MS = 5 * 60 * 1000;          // 每 5 分钟扫一次
+const ZB_MUTE_MS = 60 * 60 * 1000;    // Mute 一小时
+
+function zbMuted(){
+  try {
+    const t = +(localStorage.getItem('zbmute') || 0);
+    return t > Date.now() ? t : 0;
+  } catch (e) { return 0; }
+}
+
+function zbMute(){
+  try { localStorage.setItem('zbmute', String(Date.now() + ZB_MUTE_MS)); }
+  catch (e) { /* 隐私模式写不了 —— 不该因此打挂页面 */ }
+  const b = document.getElementById('zbbox');
+  if(b) b.remove();
+}
+
+function zbBox(items){
+  /* 🔴 已经在显示时**不要重建** —— 重建会把人正在读的那条抹掉重排；
+     新的追加进去就好。 */
+  let box = document.getElementById('zbbox');
+  if(!box){
+    box = document.createElement('div');
+    box.id = 'zbbox';
+    document.body.appendChild(box);
+  }
+  const seen = new Set([...box.querySelectorAll('[data-c]')]
+    .map(x => x.dataset.c));
+  const fresh = items.filter(x => !seen.has(x.code));
+  if(!box.querySelector('.zbhd')){
+    box.innerHTML = `<div class="zbhd">🔴 炸板离场提示
+        <span class="zbx" id="zbclose" title="关掉（下次再触发还会弹）">×</span>
+      </div><div id="zblist"></div>
+      <div class="zbft">
+        <a href="#" id="zbmute">Mute 1 小时</a>
+        <a href="#" id="zbmore">去实盘页</a>
+      </div>`;
+    box.querySelector('#zbclose').onclick = () => box.remove();
+    box.querySelector('#zbmute').onclick = ev => { ev.preventDefault(); zbMute(); };
+    box.querySelector('#zbmore').onclick = ev => {
+      ev.preventDefault();
+      location.href = '/#/live/' + encodeURIComponent(items[0].account || '');
+    };
+  }
+  const list = box.querySelector('#zblist');
+  fresh.forEach(x => {
+    const d = document.createElement('div');
+    d.className = 'zbrow';
+    d.dataset.c = x.code;
+    d.innerHTML = `<b>${esc(x.name || x.code)}</b>
+      <span class="zbc">${esc(x.code)}</span>
+      <div class="zbd">现价 <b>${num(x.px, 2)}</b> / 涨停 ${num(x.limit, 2)}
+        （${x.pct == null ? '' : ((x.pct * 100).toFixed(2) + '%')}）
+        · ${esc(x.account_name || x.account || '')}
+        ${x.at ? '· ' + esc(String(x.at).slice(11, 16)) : ''}</div>`;
+    list.appendChild(d);
+  });
+}
+
+async function zbScan(){
+  if(zbMuted()) return;
+  let o;
+  try { o = await j('/api/live/intraday'); }
+  catch (e) { return; }              /* 静默失败：提示挂了不该影响页面 */
+  if(!o || !o.session) return;       /* 判据来自服务端，前端不自己判时段 */
+  if((o.fresh || []).length) zbBox(o.fresh);
+}
+
+/* ★ 页面加载后先扫一次，再进入 5 分钟节奏 —— 刚打开页面时也可能已经开板了。
+   ★ 用 setInterval 而不是 setTimeout 链：它跟 stopPoll 那套（视图切换会
+     清掉的 POLL）**互不干扰** —— 这个提示要在任何页面上都活着。 */
+if(typeof window !== 'undefined' && !window.__zbOn){
+  window.__zbOn = true;
+  setTimeout(zbScan, 3000);
+  setInterval(zbScan, ZB_MS);
+}

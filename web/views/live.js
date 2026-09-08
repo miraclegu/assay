@@ -102,6 +102,16 @@ async function showLive(aid){
 }
 
 
+/* 🔴 持仓表包在 .pw 里：12 列宽表在窄屏会把【整个 body】撑出横滚，
+     读表格时整页左右晃（CLAUDE.md「窄屏不许把整个 body 撑出横滚」）。
+     实测 1024 宽、15 只持仓的账户溢出 11px；selftest 没抓到是因为它的
+     桩数据只有 3 只持仓 —— 所以断言改成查【结构】（表必须在 .pw 里），
+     不依赖数据恰好够宽。
+     ★ sticky 表头不用再操心：.pw table th{top:0} 已经是通用规则。
+   🔴 这段说明**不能放在模板字符串里的 HTML 注释中** —— 里面的反引号会
+     提前结束模板字符串，整个文件 SyntaxError、整页白屏（实测踩过，
+     node --check 当场抓到）。同「注释里别写连着的星号加斜杠」那条。 */
+
 /* ============ 主视图 ============
    信息架构：**天天要看的留在页面上，偶尔用的进浮层。**
      页面   今日待办 + 当前持仓（含盈亏汇总）
@@ -109,7 +119,35 @@ async function showLive(aid){
      独立页 成交流水 #/live/<id>/fills —— 会越来越长，服务端分页
    ★ 策略只有【一个】入口（排头那个标签）。原来排头一个、下面又一块
      "策略版本"，是同一件事两处入口 —— 版本历史已并进浮层。 */
-async function loadLive(aid){
+/* ============ 实时轮询 ============
+   🔴 **实盘页停留时必须自己刷** —— 原来只在进入时 `loadLive` 拉一次，
+     于是停在页面上盯盘时数字永远不动，切走再回来才更新（实测：停留 70 秒
+     `/api/live/account` 新增 0 个请求、报价时间戳停在 13:56，切走再回来
+     才变 13:57）。而这一页正是**盯盘时一直开着**的那一页。
+   ★ 判据 `rt_live` 由**服务端**给（realtime.in_session + is_trading_day）——
+     前端硬编码交易时段的话，改了时段或遇到半日市就会白轮/漏轮，
+     而"多轮几次"不报错、"该轮没轮"更不报错（同"权不权威由服务端给"那条）。
+   ★ 收盘后**不轮**：那时没有新数据，每次请求还会触发服务端的
+     `_rt_catch_up`（20 秒节流）—— 白打接口，而限流是这条链上唯一的风险。
+   🔴 浮层开着时**跳过这一轮**：重建 DOM 会把正在录入的成交表单抹掉。
+     ★ 跳过而不是停掉 —— 关掉浮层后应该自动继续，
+       "停了就不再动"和一开始的 bug 是同一种坏。 */
+const LVPOLL_MS = 60000;              // 与服务端 _rt_loop 同一个节拍
+
+function livePoll(aid){
+  stopPoll();
+  POLL = setInterval(() => {
+    // 离开这一页/换了账户就自己停掉（enterView 也会 stopPoll，这里是兜底）
+    if(!(location.hash || '').startsWith('#/live') || LVSEL !== aid){
+      stopPoll(); return;
+    }
+    const mk = $('#stwrap');
+    if(mk && mk.className === 'stmodal') return;   // 浮层开着：跳过这一轮
+    loadLive(aid, true);
+  }, LVPOLL_MS);
+}
+
+async function loadLive(aid, quiet){
   const b=$('#lvbody'); b.innerHTML='<div class="none">读取中…</div>';
   let o; try{ o=await j('/api/live/account?id='+encodeURIComponent(aid)); }
   catch(e){ b.innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
@@ -130,7 +168,9 @@ async function loadLive(aid){
         @${esc(a.code_sha256.slice(0,8))} ›</a>`
       :'<a class="lvtag" href="#" id="lvstrat">未绑定策略 ›</a>'}
     <span style="flex:1"></span>
-    <button class="btn" id="lvtick" ${ro?'disabled':''}>立即重算</button>
+    <!-- ★「立即重算」不在这一排：这排是**账户级**动作（记一笔/流水/设置），
+         而重算算的是**调仓信号** —— 它属于「今日待办」那一块，
+         按钮就该长在它作用的那块里。挪过去了（见 sigHtml）。 -->
     <button class="btn" id="lvrec" ${ro?'disabled':''}>✎ 记一笔</button>
     <a class="btn" href="#/live/${a.id}/fills">流水${o.n_fills==null?'':' '+o.n_fills}</a>
     <!-- 🔴 做成按钮而不是小灰链接：一开始放在待办标题行里、样式与旁边的
@@ -146,7 +186,7 @@ async function loadLive(aid){
       ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}
         ${Object.keys((LVWHYH||{}).entry||{}).length
           ?'<span class="lvwhy">名称后的 <b>?</b> 进它建仓那一期的选股理由</span>':''}`:''}</h3>
-    ${it.length?`<table class="lvt lvpos">
+    ${it.length?`<div class="pw"><table class="lvt lvpos">
       <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
           <th class="rt">成本</th>
           <th class="rt">现价</th>
@@ -174,7 +214,8 @@ async function loadLive(aid){
         <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
         <td class="rt">${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
         <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
-      </table>
+      </table></div>
+      <!-- 持仓表包在 .pw 里，见本文件顶部注释 -->
       ${P.fee_estimated_n?'<div class="lvwhy" style="margin-top:6px">'
         +'⚠ 有 <b>'+P.fee_estimated_n+'</b> 笔买入的费用是<b>估算</b>的，'
         +'成本跟着也是估算 —— 对完账单可在流水页「冲正 + 重录」填实际值。'
@@ -182,13 +223,20 @@ async function loadLive(aid){
       :`<div class="none">空仓${o.n_fills?'':' —— 还没录过成交，点「✎ 记一笔」'}</div>`}
   </div>`;
   bindHelp();
-  liveEquityTag(aid);
+  /* ★ 轮询时不重拉业绩板：它要重放整条权益曲线，而累计收益/年化
+     这些量一天内变化很小 —— 每分钟重放一次纯属浪费。 */
+  if(!quiet) liveEquityTag(aid);
   if($('#todofold')) $('#todofold').onclick=ev=>{ ev.preventDefault();
     LVTODO = !((LVTODO==null) ? !!o.alert : LVTODO); loadLive(aid); };
   $('#lvstrat').onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256||''); };
   $('#lvset').onclick=()=>openSettings(aid, a, ro);
   $('#lvrec').onclick=()=>openRecord(aid, sig, ro);
-  $('#lvtick').onclick=async()=>{
+  /* 盘中才轮询；收盘后停掉并在页面上说清（不说的话人会以为坏了）。 */
+  if(o.rt_live) livePoll(aid); else stopPoll();
+
+  /* ★ 用 if 保护：出信号失败那支返回的是 lvwarn，里面没有这个按钮，
+     不保护就是 `null.onclick` -> TypeError -> **整块渲染中断**。 */
+  if($('#lvtick')) $('#lvtick').onclick=async()=>{
     const m=$('#lvmsg'); m.className='lvmsg'; m.textContent='算中…（重放 30 天 warmup）';
     try{ await post('/api/live/tick',{id:aid}); loadLive(aid); }
     catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
@@ -256,7 +304,13 @@ async function liveEquityTag(aid){
          而上面的总资产/持仓浮盈本来就是实时的，不标就成了同屏两个口径。 */
     const iv=st.intraday, ivs=iv?'盘中 '+esc(String(iv.at||'').slice(5)):'';
     el.innerHTML=
-      cell('累计收益'+perfHelp(st),
+      /* ★ 「累计收益」是**业绩明细页的入口** —— 曲线（资金/收益/回撤）与
+           年月日收益表都在 #/live/<id>/perf。
+         🔴 画成带 › 的链接而不是纯文字：**看不出能点的入口 = 没有入口**
+           （选股理由那次实测人找不到，见 live.js 头部那条）。 */
+      cell(`<a href="#/live/${encodeURIComponent(aid)}/perf" class="lpin"
+              title="资金曲线 / 收益曲线 / 回撤 / 年月日收益表"
+              >累计收益 ›</a>`+perfHelp(st),
         `<span style="color:${col(st.twr)}">${pct(st.twr)}</span>`,
         /* ★ 百分比旁边必须有【金额】—— 只给 % 的话，它和上面的
              "持仓浮盈 +3,698.55" 就没有能对上的数，看着像两回事。
@@ -327,9 +381,22 @@ function dataDayTag(o){
     px=' · 收盘价';
     t='；现价用的是 '+(P.asof_close||dd)+' 收盘（没有盘中实时价）';
   }
+  /* ★ **刷新状态也写在这个标签里** —— 盘中每分钟自动刷、收盘后不刷。
+     🔴 不说的话人分不清"数字没变"和"页面坏了"：这一页正是盯盘时一直
+       开着的那一页，而收盘后现价本来就不会动（同"非交易时段要把原因
+       给页面"那条）。 */
+  const live=o.rt_live;
+  const rf = live===true ? ' · 每分钟自动刷新'
+    : live===false ? ' · 已收盘，不自动刷新' : '';
+  const rt = live===true
+      ? '；盘中每 60 秒自动刷新一次（与服务端抓取同一个节拍）'
+    : live===false
+      ? '；现在不是交易时段 —— 不自动刷新（收盘后没有新的盘中数据，'
+        + '硬刷只会白打接口）。要看最新的按「立即重算」或刷新页面'
+      : '';
   return `<span class="lvtag${behind?' warn':''}"
-    title="日线行情最新到 ${dd}${t}${behind?'。⚠ 当前信号是用 '+asof+' 的数据算的 —— 点「立即重算」':''}"
-    >数据日 ${dd}${px}${behind?' · 信号用的是 '+asof:''}</span>`;
+    title="日线行情最新到 ${dd}${t}${rt}${behind?'。⚠ 当前信号是用 '+asof+' 的数据算的 —— 点「立即重算」':''}"
+    >数据日 ${dd}${px}${behind?' · 信号用的是 '+asof:''}<span class="lvwhy">${rf}</span></span>`;
 }
 
 /* ---- 两块口径说明（点 ⓘ 才展开）--------------------------------------
@@ -401,7 +468,15 @@ function posHelp(P){
 
 
 function sigHtml(s, alert, alertWhy){
-  if(!s) return '<div class="lvsec" style="margin-bottom:14px"><h3>今日待办</h3><div class="none">还没有信号 —— 点「立即重算」</div></div>';
+  /* 🔴 无信号那支**也要有按钮**：文案写着"点「立即重算」"，而按钮已从
+     账户头部挪进这一块 —— 不给的话那句话指向一个不存在的按钮
+     （同 backLink 那条：给一个点了没反应的入口比不给更糟）。
+     而且恰恰是"还没有信号"时最需要它。 */
+  if(!s) return `<div class="lvsec" style="margin-bottom:14px"><h3>今日待办
+      <span style="flex:1"></span>
+      <button class="btn" id="lvtick" ${LV.readonly?'disabled':''}
+        >立即重算</button></h3>
+    <div class="none">还没有信号 —— 点「立即重算」</div></div>`;
   if(s.error) return `<div class="lvwarn"><b>出信号失败</b><br>${esc(s.error).replace(/\n/g,'<br>')}</div>`;
   const w=(s.warnings||[]).map(x=>`<div class="lvwarn">${esc(x)}</div>`).join('');
   /* 🔴 早上重算出来的清单与昨晚【不一致】时必须显红说清差异 ——
@@ -422,7 +497,7 @@ function sigHtml(s, alert, alertWhy){
         return `<div style="margin-top:4px">第 ${r.rev} 版（${esc((r.built_at||'').slice(5,16))}
           → 被 ${esc((r.replaced_at||'').slice(5,16))} 覆盖）：${
           seg.length?esc(seg.join('；')):'（清单未变，只是指纹变了）'}
-          <span class="lvwhy">　旧版留在 signals/${esc(r.archived||'')}</span></div>`;
+          <span class="lvwhy">　旧版留在 ${esc(r.archived||'')}</span></div>`;
       }).join('')}<div style="margin-top:4px">如果已按之前那份准备了委托，
       <b>请照现在这份核对</b>。</div></div>`:'';
   /* 数据动过但清单没变 —— 低调说一句就够，不用警告样式 */
@@ -472,6 +547,9 @@ function sigHtml(s, alert, alertWhy){
         <span class="lvtag">数据 ${esc(s.data_asof)} 收盘</span>
         <span class="lvwhy">版本 ${esc(s.code_sha)}</span>
         <span style="flex:1"></span>
+        <button class="btn" id="lvtick" ${LV.readonly?'disabled':''}
+            title="按当前绑定版本与参数重算这一期的清单（要重放 30 天 warmup，几秒）"
+            >立即重算</button>
         <a href="#" id="todofold" class="lvwhy">${open?'收起 ▾':'展开 ▸'}</a></h3>
     ${open?'':`<div class="lvwhy" style="padding:2px 0">${esc(sum)}${
        rb?' · 下次调仓 '+esc(rb)+(du!=null?'（还有 '+du+' 个交易日）':''):''}</div>`}

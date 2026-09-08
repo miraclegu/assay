@@ -83,6 +83,16 @@ function route(){
     + (sm[1]?('?code='+encodeURIComponent(decodeURIComponent(sm[1]))):'')); return; }
   const fm=/^#\/live\/([\w-]+)\/fills(?:\/(\d+))?$/.exec(location.hash||'');
   if(fm){ showFills(fm[1], parseInt(fm[2]||'0',10)); return; }
+  /* 选股理由是**独立页**（同成交流水：会越来越长 -> 服务端分页）。
+     `?off=` 翻页、`?d=` 定位到某一期（持仓行的 ? 就链到这里）。 */
+  const wm=/^#\/live\/([\w-]+)\/why(?:\?(.*))?$/.exec(location.hash||'');
+  if(wm){ const q=new URLSearchParams(wm[2]||'');
+          showWhy(wm[1], parseInt(q.get('off')||'0',10), q.get('d')||'',
+                  q.get('all')==='1'); return; }
+  /* 业绩明细也是**独立页**：主视图只留「今日待办 + 当前持仓」，
+     曲线与年月日收益表是复盘时才看的（入口在 KPI 板的「累计收益」）。 */
+  const pm=/^#\/live\/([\w-]+)\/perf$/.exec(location.hash||'');
+  if(pm){ showPerf(pm[1]); return; }
   const lm=/^#\/live(?:\/([\w-]+))?$/.exec(location.hash||'');
   if(lm){ showLive(lm[1]||null); return; }
   const dm=/^#\/docs(?:\/([\w-]+))?$/.exec(location.hash||'');

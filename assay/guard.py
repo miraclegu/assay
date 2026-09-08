@@ -32,6 +32,7 @@ backtrader / zipline / rqalpha 用「bar 迭代式」喂数据，策略只能拿
     INTRADAY   全部（与「盘中成交价用收盘价代理」的约定一致，见 engine.py）
     CLOSE      全部
 """
+import datetime
 import re
 
 from .broker import CLOSE, INTRADAY, OPEN, PRE_OPEN
@@ -99,6 +100,17 @@ class GuardedFeed:
     def _check_date(self, d, who):
         if self._date is None:
             return
+        # ★ 允许 'YYYY-MM-DD' 字符串：策略里 `context.previous_date` 是 date，
+        #   但新的取数 API 也接受字符串。不归一化的话这里会抛
+        #   `'>=' not supported between str and date` ——
+        #   那个报错**指不到真正的原因**（同 day_price 那条纪律）。
+        if isinstance(d, str):
+            try:
+                d = datetime.date.fromisoformat(d[:10])
+            except ValueError:
+                raise LookAheadError(
+                    '%s 的日期参数解析不出来：%r（要 YYYY-MM-DD 或 date）'
+                    % (who, d))
         if d is not None and d >= self._date:
             raise LookAheadError(
                 '%s 请求 %s，而当前回测时点是 %s —— 历史接口只能取【严格早于今天】'
@@ -139,6 +151,29 @@ class GuardedFeed:
     def had_limit_up(self, codes, start, end):
         self._check_date(end, 'had_limit_up(end=%s)' % end)
         return self._f.had_limit_up(codes, start, end)
+
+    def limit_up_days(self, codes, start, end):
+        """明细版。🔴 PIT 检查不能少 —— 它和 had_limit_up 看同一张表，
+        少一道防火墙就是给未来函数开了个后门（而它不报错）。"""
+        self._check_date(end, 'limit_up_days(end=%s)' % end)
+        return self._f.limit_up_days(codes, start, end)
+
+    # ---------- 策略数据 API（见 feed.py 的同名方法）----------
+    # 🔴 PIT 检查一个都不能少 —— 这三个方法直接读 std/ 与面板，
+    #   少一道防火墙就是给未来函数开了个后门，而它**不报错**，
+    #   只是回测结果好得可疑（同 lookahead 那条用例记的教训）。
+
+    def universe(self, date, **kw):
+        self._check_date(date, 'universe(%s)' % date)
+        return self._f.universe(date, **kw)
+
+    def snapshot(self, date, cols, **kw):
+        self._check_date(date, 'snapshot(%s)' % date)
+        return self._f.snapshot(date, cols, **kw)
+
+    def fundamentals(self, date, fields, **kw):
+        self._check_date(date, 'fundamentals(%s)' % date)
+        return self._f.fundamentals(date, fields, **kw)
 
     def bars(self, date, codes):
         """历史 bar。今天的 bar 走 context.current()，不从这里拿。"""

@@ -17,6 +17,8 @@
 策略拿到的是同一张 panel，想怎么筛就怎么筛。
 """
 import os
+
+import pandas as _pd
 from collections import namedtuple
 
 import duckdb
@@ -269,9 +271,162 @@ class PanelFeed:
             "SELECT DISTINCT code FROM bars WHERE date > DATE '%s' AND date <= DATE '%s' "
             "AND code IN ('%s') AND limit_up" % (start, end, q)).fetchall()}
 
+    def limit_up_days(self, codes, start, end):
+        """`had_limit_up` 的**明细版**：{code: {收盘涨停的日期}}。
+
+        ★ 存在的理由：黑名单要能区分"涨停发生在持有期间"还是"买入之前" ——
+          只有集合的话分不出来。区间口径与 `had_limit_up` **完全一致**
+          (`date > start AND date <= end`)，两处不一致的表现是
+          "同一个窗口两种答案"，而它不报错。
+        """
+        if not codes:
+            return {}
+        q = "','".join(codes)
+        out = {}
+        for c, dt in self.con.execute(
+            "SELECT code, date FROM bars WHERE date > DATE '%s' AND date <= DATE '%s' "
+            "AND code IN ('%s') AND limit_up" % (start, end, q)).fetchall():
+            out.setdefault(c, set()).add(dt)
+        return out
+
+    # ==================== 策略数据 API ====================
+    # 🔴 **策略不该直接写 SQL —— 只有 feed 知道 datalake 的存在。**
+    #   下面三个方法把「取什么数据」表达成参数，把「怎么筛、怎么排、取几个」
+    #   留给策略用 Python 做。职责边界：
+    #     feed   —— 从哪张表取、as-of 怎么算、停牌怎么结转、多期怎么去重
+    #     策略   —— 阈值、分位、排序、截断（也就是"规则"本身）
+    #   ★ 现有策略（froec.py / 红利）仍然直接写 SQL，**一行都没动** ——
+    #     它们的归档要保持可比。新策略用这套 API，见
+    #     strategies/小市值/froec_api.py（与 froec.py 逐位等价，selftest 钉着）。
+
+    def universe(self, date, listed_days=0, exclude_like=None,
+                 perturb=0, salt='', sec_type='stock'):
+        """PIT 在册股票代码（list）。
+
+        🔴 **不是面板当日行。** 面板是 K 线驱动的：停牌股当日无 K 线 -> 无行
+          -> 根本不进漏斗。而聚宽 `get_all_securities()` 含停牌股，它们会参与
+          分位切点的计算、还能先占掉名额再被过滤掉。实测 2015-12-31：
+          面板 2542 行 vs 权威在市 2811 只，缺的 267 只就是停牌股。
+
+        listed_days  上市满多少【自然日】（聚宽口径）
+        exclude_like 排除代码前缀，SQL LIKE 模式，如 '68%' 排科创板
+        perturb/salt 扰动抽样：hash(code||salt) %% 10000 >= perturb 才留下。
+                     换 salt = 换一条独立路径，用来量噪声。
+        """
+        t = std_tables(self.root)
+        w = ["sec_type = '%s'" % sec_type,
+             "list_date <= DATE '%s'" % date,
+             "(delist_date IS NULL OR delist_date > DATE '%s')" % date]
+        if listed_days:
+            w.append("date_diff('day', list_date::DATE, DATE '%s') >= %d"
+                     % (date, int(listed_days)))
+        if exclude_like:
+            w.append("code NOT LIKE '%s'" % exclude_like)
+        if perturb:
+            w.append("hash(code || '%s') %% 10000 >= %d" % (salt, int(perturb)))
+        return [r[0] for r in self.con.execute(
+            'SELECT code FROM %s WHERE %s' % (t['t_universe'], ' AND '.join(w))
+        ).fetchall()]
+
+    def snapshot(self, date, cols, codes=None, carry_days=0):
+        """面板当日行 -> DataFrame（第一列 jq_code）。
+
+        carry_days > 0 时，对**当日没有行**（停牌）的 codes 做 ASOF 结转：
+        取该票 <= date 的最近一行，回看窗口 carry_days 天。
+
+        🔴 **只用它结转价格派生量**（pb / floatmv / 分类 / 风险警示）——
+          基本面**不能**结转：聚宽的 get_fundamentals 无论是否停牌都给当前
+          最新报告，结转会拿到该股【最后交易日】那天的过期报告。
+          实测 002379.XSHE@2015-12-31：结转得 2015-06-30 的 eps=-0.0286 被
+          eps>0 误剔，而当日最新是 2015-09-30 的 eps=+0.08。
+          基本面走 `fundamentals()`。
+        """
+        cl = ', '.join(cols)
+        cur = ("SELECT jq_code, %s FROM %s WHERE date = DATE '%s'"
+               % (cl, self.panel, date))
+        if not carry_days or codes is None:
+            df = self.con.execute(cur).df()
+            if codes is not None:
+                df = df[df['jq_code'].isin(set(codes))].reset_index(drop=True)
+            return df
+        self.con.register('_snap_codes', _pd.DataFrame({'code': list(codes)}))
+        try:
+            return self.con.execute("""
+                WITH today AS (%s),
+                miss AS (
+                  SELECT u.code AS jq_code, %s
+                  FROM (SELECT code, DATE '%s' AS d FROM _snap_codes
+                        WHERE code NOT IN (SELECT jq_code FROM today)) u
+                  ASOF LEFT JOIN (
+                      SELECT jq_code, date, %s FROM %s
+                      WHERE date > DATE '%s' - INTERVAL %d DAY
+                  ) p ON p.jq_code = u.code AND p.date <= u.d
+                )
+                SELECT * FROM today WHERE jq_code IN (SELECT code FROM _snap_codes)
+                UNION ALL SELECT * FROM miss
+            """ % (cur, ', '.join('p.%s' % c for c in cols), date,
+                   cl, self.panel, date, int(carry_days))).df()
+        finally:
+            self.con.unregister('_snap_codes')
+
+    def fundamentals(self, date, fields, codes=None, periods=1,
+                     table='t_indicator', require_all=False):
+        """按 **pub_date as-of** 的财务指标 -> 长表 DataFrame(code, seq, …)。
+
+        seq = 1 是最新一期，2 是上一期……最多 periods 期。
+
+        🔴 as-of 用 `pub_date <= date` —— 用 report_date 就是未来函数
+          （报告期在前、公告在后）。同一 report_date 有多条时按 pub_date
+          倒序留最后公告的那条（修正稿）。
+        require_all=True 时只保留**恰好凑满 periods 期**的 code ——
+          ROE 加速度那类"要 5 期才算得出来"的指标必须这样，否则
+          缺期的票会算出一个偏小的值而**不报错**。
+        """
+        t = std_tables(self.root)
+        tbl = t.get(table, table)
+        fl = ', '.join(fields)
+        notnull = ' AND '.join('%s IS NOT NULL' % f for f in fields)
+        sql = """
+            SELECT code, seq, %s FROM (
+              SELECT code, %s, row_number() OVER (PARTITION BY code
+                       ORDER BY report_date DESC, pub_date DESC) seq
+              FROM %s WHERE pub_date <= DATE '%s' AND %s
+            ) WHERE seq <= %d
+        """ % (fl, fl, tbl, date, notnull, int(periods))
+        df = self.con.execute(sql).df()
+        if codes is not None:
+            df = df[df['code'].isin(set(codes))]
+        if require_all and periods > 1:
+            keep = df.groupby('code')['seq'].count()
+            df = df[df['code'].isin(set(keep[keep == periods].index))]
+        return df.reset_index(drop=True)
+
     def nth_prev_day(self, d, n):
-        """往前数 n 个交易日（不足则返回最早一天）。"""
-        i = self._idx.get(d, 0)
+        """往前数 n 个交易日（不足则返回最早一天）。
+
+        🔴 `d` **不在交易日表里**时要按位置插值，不能落到 0。
+        原来写的是 `self._idx.get(d, 0)` —— 回测里 d 永远是真实交易日，
+        取不到的情况根本不会发生；但**实盘预览**问的是【下一个交易日】，
+        它还没有行情、不在表里，于是 `.get(d, 0)` 返回 0，
+        `nth_prev_day(下个交易日, 20)` 给出的是**面板的第一天**（实测 2016-01-04）。
+
+        后果是静默的：froec 的 20 日涨停黑名单
+        `had_limit_up(cand, nth_prev_day(today, 20), d)` 会变成
+        「2016 年以来涨停过吗」—— 几乎所有票都命中（实测 10/10），
+        于是「最近 20 日持有过 且 涨停过」这条规则退化成「最近持有过」，
+        持仓被整片剔出目标池。**实测代价**：拿真实的 10 只持仓在调仓日出信号，
+        修好前说「卖出 10 只」（清空），修好后是「卖出 2 只」——
+        **不报错，只是让你把整个组合平掉**。
+        （这个 bug 是加"选股理由"时被捕获到的窗口 `start=2016-01-04` 暴露的：
+         页面上要显示"哪段窗口内涨停过"，那个 2016 一眼就不对。）
+
+        bisect 对**在表里**的日期与 `_idx` 完全等价（selftest 里逐日钉住），
+        所以回测行为一行不变。
+        """
+        i = self._idx.get(d)
+        if i is None:
+            import bisect
+            i = bisect.bisect_left(self._days, d)
         return self._days[max(0, i - n)]
 
     def codes_at(self, date, where='1=1', order=None, limit=None):

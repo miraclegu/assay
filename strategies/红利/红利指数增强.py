@@ -147,6 +147,10 @@ DIV_FISCAL_YEAR = """
 """
 
 SQL_A = """
+-- 袖A｜红利低波：高股息池 -> 按 beta 升序取低波
+-- ★ 首行注释是这条查询的【名字】，实盘的"选股理由"页拿它当组名
+--   （lv/explain.py 的 _sql_head）。注释改不了任何行为，
+--   而没有名字时页面只能显示"第 1 组"，两袖分不清谁是谁。
 WITH div AS ({div}
 ), base AS (
   SELECT p.jq_code, d.amt / p.totalmv AS dy,
@@ -159,6 +163,7 @@ WITH div AS ({div}
   WHERE rk <= greatest(1, floor({dtop} * n)) AND dy > {dmin}
 ), ranked AS (
   SELECT h.jq_code,
+         h.dy, b.beta_{bw} AS beta,            -- ← 只为带出去解释，不参与筛选
          row_number() OVER (ORDER BY b.beta_{bw} ASC) AS rk,
          count(*) OVER ()                            AS bn
   FROM hi h
@@ -168,13 +173,18 @@ WITH div AS ({div}
 )
 -- B-3：原版先砍掉 beta 高的一半（p2=0.50）再取前 N。num_a=5 时池子>=10 就
 -- 不 binding（死参数）；num_a=10 时需池子>=20，否则欠配。v4 起删除该截断。
-SELECT jq_code FROM ranked
+-- 🔴 末层多返回 dy/beta/rk/bn 是**投影**改动：WHERE 与 ORDER BY 一个字没动，
+--    行与行序完全相同（`['jq_code'].tolist()` 还是同一个列表）。
+--    这几列给实盘的"为什么选它"用（lv/explain.py）；指标必须出自
+--    **策略自己这条查询**，另写一条取指标的 SQL 就是第二份口径。
+SELECT jq_code, dy, beta, rk, bn FROM ranked
 WHERE rk <= greatest(1, floor({bpct} * bn))
 ORDER BY rk
 """
 
 # Sleeve B：基本面四条 -> 高股息
 SQL_B = """
+-- 袖B｜红利价值：基本面四条（PE / ROE / 营收增速 / 净利增速）-> 高股息
 WITH div AS ({div}
 ), ind AS (
   SELECT code, inc_return, inc_total_revenue_year_on_year AS inc_rev,
@@ -209,7 +219,8 @@ WITH div AS ({div}
   --      【池子在坏年份变小是过滤器在工作，不是失灵。】
   --   ★ 我最初把「池子规模随市场漂移」当成毛病去修，方向就错了。
   --      供给端指标（池子大小、选择率）改善 ≠ 策略改善 —— 这两件事要分开看。
-  SELECT jq_code, totalmv FROM (
+  -- inc_* 三列只是【多带一列出去】给实盘的选股理由用，筛选条件一个字没动
+  SELECT jq_code, totalmv, inc_return, inc_rev, inc_np FROM (
     SELECT *,
            percent_rank() OVER (ORDER BY inc_return) pr_roe,
            percent_rank() OVER (ORDER BY inc_rev)    pr_rev,
@@ -223,11 +234,13 @@ WITH div AS ({div}
           END
 ), base AS (
   SELECT f.jq_code, d.amt / f.totalmv AS dy,
+         f.totalmv, f.inc_return, f.inc_rev, f.inc_np,   -- ← 只为带出去解释
          row_number() OVER (ORDER BY d.amt / f.totalmv DESC) AS rk,
          count(*) OVER () AS n
   FROM fund f JOIN div d ON d.code = f.jq_code
 )
-SELECT jq_code FROM base
+-- 🔴 同 SQL_A：投影改动，WHERE / ORDER BY 不动，行与行序完全相同。
+SELECT jq_code, dy, totalmv, inc_return, inc_rev, inc_np, rk, n FROM base
 WHERE rk <= greatest(1, floor({dtop} * n)) AND dy > {dmin}
 ORDER BY dy DESC
 """
@@ -251,6 +264,21 @@ def initialize(context):
     #       --param div_top_pct=0.10 --param div_method=rolling365
     g.num_a = getattr(g, 'num_a', 10)  # 原版 5；实测 10 更优（见上）
     g.num_b = getattr(g, 'num_b', 5)   # 原版 3；实测 5 更优（3~8 差异 <0.7pp）
+    # ---- 只跑其中一条腿（g.sleeve）----
+    # 'both'（默认）= 原行为，两袖并集；'a' = 只跑红利低波；'b' = 只跑红利价值。
+    # ★ 存在的理由是**基准**：要衡量"改了某个阈值有什么效果"，得先有一条
+    #   干净的单腿曲线 —— 组合曲线里两袖的效应是混在一起的，
+    #   改袖 B 的阈值却看组合年化，测到的一大半是袖 A 的噪声。
+    # 🔴 这是**开关不是分叉**：`strategies/红利/红利低波袖A.py` 与 `红利价值袖B.py`
+    #   是加载本文件、只设这一个参数的薄壳（同 froec_traded.py 的写法）。
+    #   复制成两份独立实现的话，以后修本文件的 bug 那两份不会跟随，
+    #   而"基准和生产跑的不是同一套代码"是最坏的一种基准。
+    # ★ 'both' 必须与加这个开关之前**逐位相同** —— 权益曲线数值指纹
+    #   f6739a9aa005f454ddb7441c2f83b540（2016-01-01~2025-12-31，100 万，
+    #   默认成本，div_method=fiscal_year）。selftest 里钉了一条等价性断言。
+    g.sleeve = getattr(g, 'sleeve', 'both')
+    if g.sleeve not in ('both', 'a', 'b'):
+        raise ValueError('sleeve 只能是 both / a / b，收到 %r' % (g.sleeve,))
     g.backup_a = getattr(g, 'backup_a', 5)
     g.backup_b = getattr(g, 'backup_b', 5)
     # ---- 持有缓冲区（单变量隔离「卖出条件放宽」这一件事）----
@@ -460,6 +488,13 @@ def pick(context):
               bmode=g.b_mode, broe=g.b_roe_pct, brev=g.b_rev_pct, bnp=g.b_np_pct)
     a = context.data.query(sql_a, bw=g.beta_win, bpct=g.beta_pct, **kw)['jq_code'].tolist()
     b = context.data.query(sql_b, **kw)['jq_code'].tolist()
+    # 🔴 关掉的那条腿要连**候选池**一起清空（`a` / `b` 而不只是 `la` / `lb`），
+    #    否则 backup_list 还会从它那里取票 —— 炸板再入场时就会买进
+    #    "已经关掉的那条腿"选出来的股票，而这不报错，只是单腿基准被污染。
+    if g.sleeve == 'a':
+        b = []
+    elif g.sleeve == 'b':
+        a = []
     la, lb = a[:g.num_a], b[:g.num_b]
     # 确定性去重保序，A 优先（原版 A-5：替代 list(set()) 的不确定顺序）
     tgt = []

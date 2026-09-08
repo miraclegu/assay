@@ -146,6 +146,11 @@ class Engine:
             finally:
                 del self.g._rec
             _declared.discard('_rec')
+            # ★ 留一份「策略声明过的参数名」。实盘的选股理由要列"用了哪些参数"，
+            #   而 `g.__dict__` 里混着 pos_state / target_list 这些**运行期状态**
+            #   —— 把它们当成参数列出来会让人以为可以调。这里存的是
+            #   initialize 期间真被写过的名字，与上面那段参数校验同一个判据。
+            self._declared = set(_declared)
             # ★ **拼错的参数名必须立即抛错** —— 静默无效会让整个扫描的结论变成
             #   「这个参数没影响」，那是最危险的一类假结论。
             for _k, _v in self.params.items():

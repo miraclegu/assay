@@ -103,49 +103,10 @@ function paneOverview(){
 }
 
 /* ============ SVG 折线图 ============ */
-function lineChart(el,series,opt){
-  opt=opt||{}; const W=1160,H=opt.h||330,L=54,R=16,T=opt.t||22,B=26;
-  const n=series[0].v.length; if(!n){el.innerHTML='<div class="note">无数据</div>';return;}
-  const log=!!opt.log;
-  const tf=v=>log?Math.log10(Math.max(v,1e-6)):v;
-  let lo=Infinity,hi=-Infinity;
-  series.forEach(s=>s.v.forEach(v=>{if(v==null)return;const t=tf(v);
-    if(t<lo)lo=t; if(t>hi)hi=t;}));
-  if(!(hi>lo)){hi=lo+1;}
-  const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
-  const X=i=>L+(W-L-R)*(n<2?0:i/(n-1)), Y=v=>T+(H-T-B)*(1-(tf(v)-lo)/(hi-lo));
-  const path=s=>{let d='',on=false;
-    s.v.forEach((v,i)=>{if(v==null){on=false;return;}
-      d+=(on?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' ';on=true;});return d;};
-  // y 轴刻度
-  let ticks=[];
-  for(let k=0;k<=4;k++){const t=lo+(hi-lo)*k/4; ticks.push(log?Math.pow(10,t):t);}
-  const yl=v=>opt.pctAxis?((v-1)*100).toFixed(0)+'%':(v>=10?v.toFixed(0)+'x':v.toFixed(2)+'x');
-  // x 轴：取 6 个日期
-  const xs=[]; for(let k=0;k<6;k++){const i=Math.round((n-1)*k/5); xs.push([i,opt.dates[i]]);}
-  el.innerHTML=`
-   ${opt.title?`<div class="ttl">${opt.title}</div>`:''}
-   ${opt.ctl||''}
-   <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-     ${ticks.map(v=>`<line class="gl" x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/>
-        <text class="ax" x="${L-7}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end">${yl(v)}</text>`).join('')}
-     ${xs.map(([i,d])=>`<text class="ax" x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle">${d}</text>`).join('')}
-     ${series.map(s=>`<path d="${path(s)}" fill="none" stroke="${s.c}"
-        stroke-width="${s.w||1.6}" stroke-linejoin="round"/>`).join('')}
-     <rect id="hz" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent"/>
-   </svg>
-   <div class="note" style="padding-left:8px">${series.map(s=>
-      `<span style="color:${s.c}">━</span> ${s.n}`).join('　')}</div>`;
-  // hover
-  const svg=el.querySelector('svg'), tip=$('#tip');
-  svg.onmousemove=e=>{const r=svg.getBoundingClientRect();
-    const i=Math.round((n-1)*Math.min(1,Math.max(0,((e.clientX-r.left)/r.width*W-L)/(W-L-R))));
-    tip.style.display='block'; tip.style.left=(e.clientX+12)+'px';
-    tip.style.top=(e.clientY+10)+'px';
-    tip.textContent=opt.dates[i]+'\n'+series.map(s=>s.n+'  '+
-      (s.v[i]==null?'—':(opt.pctAxis?((s.v[i]-1)*100).toFixed(1)+'%':s.v[i].toFixed(3)+'x'))).join('\n');};
-  svg.onmouseleave=()=>{$('#tip').style.display='none';};
-}
+/* lineChart 搬到 shared/chart.js —— 实盘业绩页也要用它。
+   ★ 仍是裸的顶层函数（本项目不引模块系统），shared/ 在
+     views/ 之前加载，所以这里的调用一个字都不用改。 */
+
 let EQLOG=true;
 let EQR={a:null,b:null};      // 权益曲线的显示区间（null = 全程）
 
@@ -260,14 +221,8 @@ function _mstat(){
    强度走 sqrt 让中段更早出色。字保持中性亮色，实测对比度：
      最弱格 12.6:1、中段 7.5~8.6:1、最强格 6.2:1(红) / 5.2:1(绿)
    —— 全部 >= WCAG AA 4.5，多数 >= AAA 7。 */
-const _hcol=(v,k)=>{
-  if(v==null) return 'transparent';
-  const t=Math.min(1,Math.abs(v)*(k||3));
-  const a=(0.15+Math.sqrt(t)*0.73).toFixed(3);
-  return v>0?`rgba(168,44,44,${a})`:`rgba(24,116,82,${a})`;
-};
-/* 强度弱的格子底色近乎透明，方向全靠这个 +/- 号 —— 不能省 */
-const _sn=(v,d)=>v==null?'—':(v>0?'+':'')+(v*100).toFixed(d);
+/* _hcol / _sn / _legend 搬到 shared/chart.js —— 实盘业绩页的方格图
+   要用同一套配色与图例（抄一份出来的话两页深浅不一致）。 */
 const _yhash=y=>'#/run/'+encodeURIComponent(CUR)+'/y/'+y;
 
 function paneMonthly(){ YPAGE?paneYear():paneYears(); }
@@ -371,12 +326,6 @@ function drawCal(S){
   drawDay(S);
 }
 
-function _legend(){
-  const mk=v=>`<i style="background:${_hcol(v)}"></i>`;
-  return `<div class="lgd">跌 ${[-.25,-.12,-.05,-.01].map(mk).join('')}
-    <i style="background:transparent"></i>${[.01,.05,.12,.25].map(mk).join('')} 涨
-    <span style="margin-left:10px">底色只表示方向与强度，正负看数字前的 +/- 号</span></div>`;
-}
 
 /* ---- 第四层：某一天的持仓 / 买卖（读 /api/day，只用现有归档）---- */
 async function drawDay(S){

@@ -383,7 +383,7 @@ table.dt td:first-child{color:var(--fg)}
 .lvsec.wide{grid-column:span 2}
 .lvsec{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--panel2)}
 .lvsec.lvalert{border-color:var(--warn)}
-.lvsec h3{display:flex;align-items:baseline;gap:6px;position:relative;
+.lvsec h3{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;position:relative;
   margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
   color:var(--dim);font-weight:600}
 table.lvt{width:100%;border-collapse:collapse;font-size:12px}
@@ -400,6 +400,8 @@ table.lvt tr:last-child td{border-bottom:0}
 .lvsell td:first-child{color:var(--up)}
 .lvbuy td:first-child{color:var(--down)}
 .lvwhy{font-size:10px;color:var(--dim)}
+.lvwhy.whypend{font-size:11px;color:var(--fg);background:rgba(90,140,220,.10);
+  border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .lvform{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
 .lvform input,.lvform select,.lvform textarea{background:var(--bg);color:var(--fg);
   border:1px solid var(--line);border-radius:4px;padding:4px 7px;font:12px/1.4 inherit}
@@ -469,8 +471,18 @@ table.lvfr tr.frbody td{background:var(--bg)}
 .lvd.rb{color:var(--accent);border-color:var(--accent);font-weight:600}
 /* 浮层里的 textarea 要撑开 */
 .stbox .lvform textarea{width:100%;min-height:64px}
-/* 流水页可能很长，表头吸顶 */
+/* 流水页可能很长，表头吸顶（整页滚动，所以偏移是顶栏的 52px） */
 #main .lvsec table.lvt th{position:sticky;top:52px;background:var(--panel2);z-index:2}
+/* 🔴 **但 `.pw` 里的表头 top 必须是 0** —— 这已经是第三次踩同一个坑
+   （`.tw`、`#pk table.pkt`，现在是选股理由页）。CSS 规范：一个轴不是
+   visible 时另一个轴的 visible 会算成 auto，于是 `.pw{overflow-x:auto}`
+   在**两个轴**上都是滚动容器，sticky 相对它定位 —— 52px 会把表头压到
+   **第二行**上面（实测：选股理由页的表头夹在第 1 行和第 3 行之间，
+   第 2 行被盖住；而页面看着"只是有点怪"，不报任何错）。
+   ★ 写成 `.pw table th` 这种**通用**规则，不再逐个作用域打补丁 ——
+   作用域化的样式最容易漏，而漏了不报错。 */
+.pw table th{top:0}
+#main .lvsec .pw table.lvt th{top:0}
 .stcode{margin:0;max-height:46vh;overflow:auto;background:var(--bg);
   border:1px solid var(--line);border-radius:6px;padding:12px;
   font:11px/1.6 "SF Mono",Menlo,monospace;white-space:pre}
@@ -556,3 +568,99 @@ table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}
 .wtab .n{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
 .wtab .au{color:var(--accent);font-size:10px}
 .wtab.add{color:var(--dim);padding:5px 10px}
+
+/* ============ 实盘 · 选股理由与候选池（views/live-why.js）============
+   ★ 状态用**颜色 + 文字**双编码：只靠颜色的话，"没轮到"和"被剔除"在
+     色弱或截图转灰后就分不开了，而这两件事的含义完全不同。 */
+.lvq{display:inline-block;width:13px;height:13px;line-height:13px;text-align:center;
+  border:1px solid var(--line);border-radius:50%;font-size:9px;color:var(--dim);
+  cursor:help;vertical-align:1px}
+.lvq:hover{color:var(--fg);border-color:var(--accent)}
+.lvbadge{display:inline-block;font-size:10px;padding:0 5px;border-radius:3px;
+  border:1px solid var(--line);color:var(--dim);white-space:nowrap;margin-right:5px}
+/* 状态徽章后面还跟着策略集合的 chip（备选/目标池），要留空隙 —— 
+   贴在一起会读成一个词（实测「选中·买入目标池」）。 */
+.lvpoolt .lvkv{margin-left:3px}
+.lvbadge.st-buy{color:var(--down);border-color:var(--down)}
+.lvbadge.st-sell{color:var(--up);border-color:var(--up)}
+.lvbadge.st-hold{color:var(--accent);border-color:var(--accent)}
+/* 被剔除的整行压暗 —— 候选池是拿来扫的，没入选的不该和入选的一样醒目 */
+tr.st-drop td,tr.st-none td{opacity:.62}
+/* 🔴 候选池是宽表（指标列随策略而变），必须自己在 .pw 里横滚。
+   不然窄屏下横滚的是 body，读表时整页左右晃（selftest 逐页量着这条）。 */
+table.lvpoolt{min-width:640px}
+.lvstep{border-left:2px solid var(--line);padding:2px 0 2px 8px;margin:6px 0}
+.lvstep .lvpar{justify-content:flex-start;margin-top:2px}
+#whywrap h4{font-size:12px;color:var(--dim);margin:12px 0 4px;font-weight:600}
+/* 选股理由页：一期一段。★ 段头与表之间要有分隔，否则几期连在一起分不出
+   "这一行属于哪一期" —— 而这一页存在的意义就是按期看。 */
+.whysec{margin-bottom:16px}
+.whyhd{margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+.whyhd h3{margin:0;font-size:13px}
+.whysec.whyhit{outline:1px solid var(--accent);outline-offset:6px;border-radius:6px}
+.lvtag.bad{color:var(--up);border-color:var(--up)}
+/* 复算自证通过时用中性色，不能和"出问题了"的告警长得一样 */
+.lvwarn.lvok{border-color:var(--line);color:var(--dim)}
+/* 一条查询 = 一块。★ 块与块之间要有分隔，否则「低波」和「价值」两袖的表
+   连在一起，看不出"这一行属于哪一条规则" —— 而那正是这一页要说清的事。 */
+.whygrp{margin:10px 0 14px;padding-left:8px;border-left:2px solid var(--line)}
+.whyghd{margin-bottom:4px;gap:8px}
+.whyghd b{font-size:12px}
+.whyargs{justify-content:flex-start;margin-bottom:6px}
+.whygrp .stcode{max-height:40vh;margin:6px 0}
+/* 名次跳号的分隔行：压暗、居中，一眼看出"这里省了一段"而不是数据缺了 */
+tr.whygap td{color:var(--dim);font-size:10px;text-align:center;
+  background:var(--bg);padding:2px 8px}
+
+/* KPI 板里可点的那一格标题（业绩明细入口）——
+   要看得出能点：颜色 + hover 下划线。 */
+.kpi a.lpin{color:var(--accent);text-decoration:none}
+.kpi a.lpin:hover{text-decoration:underline}
+
+/* 实盘业绩页的图块。★ 不复用 .pane —— 那个是回测页签容器，
+   样式表里 display:none，用了就静默不显示（且不报错）。 */
+.lpbox{padding-top:14px}
+.lpbox svg{width:100%;height:auto}
+
+/* 曲线 hover 高亮：竖线 + 数据点 + 日期。
+   ★ 竖线对齐到**数据点**而不是鼠标 —— 对齐鼠标的话读数与竖线
+     会差一天，而"差一天"正是最难发现的那种错。 */
+svg .hvl{stroke:var(--dim);stroke-width:1;stroke-dasharray:3 3;opacity:.75}
+svg .hvd{stroke:#0f1216;stroke-width:1.2}
+svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
+
+/* 业绩页的粒度/读数切换条。★ 当前项要看得出是"选中"而不是"能点"。 */
+.lpbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin:8px 0 10px;font-size:12px}
+.lpbar a{padding:2px 9px;border:1px solid var(--line);border-radius:5px;
+  color:var(--dim)}
+.lpbar a:hover{color:var(--fg)}
+.lpbar a.lpb.on,.lpbar a.lpc.on,.lpbar a.on{background:var(--accent);border-color:var(--accent);
+  color:#0f1216;font-weight:600}
+/* 方格里的第二行读数（金额）—— 比主读数小一号、压暗，
+   不然一格里两个同样大的数字会互相抢。 */
+.cd .cd2,.hc .cd2{display:block;font-size:10px;color:var(--dim);
+  font-variant-numeric:tabular-nums}
+
+/* 盘中炸板提示：右下角浮窗。★ 固定定位 + 高 z-index —— 它要盖在任何页面
+   的任何内容上面（含浮层），因为炸板是要立刻处理的事。
+   ★ 不做成整屏遮罩：那会打断正在录成交/看 K 线的操作。 */
+#zbbox{position:fixed;right:16px;bottom:16px;z-index:9999;width:320px;
+  max-width:calc(100vw - 32px);background:var(--panel,#151a20);
+  border:1px solid var(--down,#f05b5b);border-radius:10px;
+  box-shadow:0 8px 28px rgba(0,0,0,.45);font-size:13px;overflow:hidden}
+#zbbox .zbhd{padding:9px 12px;background:rgba(240,91,91,.14);
+  border-bottom:1px solid var(--line);font-weight:600;
+  display:flex;align-items:center;gap:6px}
+#zbbox .zbx{margin-left:auto;cursor:pointer;color:var(--dim);
+  font-size:16px;line-height:1;padding:0 2px}
+#zbbox .zbx:hover{color:var(--fg)}
+#zbbox .zbrow{padding:9px 12px;border-bottom:1px solid var(--line)}
+#zbbox .zbrow:last-child{border-bottom:0}
+#zbbox .zbc{color:var(--dim);font-size:11px;margin-left:6px;
+  font-variant-numeric:tabular-nums}
+#zbbox .zbd{color:var(--dim);font-size:11.5px;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+#zbbox .zbft{padding:8px 12px;display:flex;gap:14px;
+  border-top:1px solid var(--line);background:rgba(0,0,0,.12)}
+#zbbox .zbft a{font-size:12px}

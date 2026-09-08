@@ -23,6 +23,10 @@ EXCL_IND = ('钢铁I', '煤炭I', '石油石化I', '采掘I', '银行I', '非银
 #   聚宽源码是 list(df.code)[:int(0.5*len(df.code))]，
 #   ntile 会把余数分给前桶(等价 ceil)，多取一只就会推移下游边界。
 SQL = """
+-- FROEC 候选池：在册宇宙 -> eps>0 / 非ST -> PB 低半区 -> ROE 加速度前 10%
+--              -> 排除周期与金融行业 -> 按流通市值升序取前 N
+-- ★ 首行注释是这条查询的【名字】，实盘的"选股理由"页拿它当组名
+--   （lv/explain.py 的 _sql_head）。注释改不了任何行为。
 WITH univ AS (
   -- ★★ 候选宇宙必须是【权威在册股票】，不能用面板当日行。
   --   面板是 K 线驱动的：停牌股当日无 K 线 -> 无行 -> 根本不进漏斗。
@@ -82,7 +86,10 @@ WITH univ AS (
          - max(CASE WHEN rn=4 THEN roe END) - max(CASE WHEN rn=5 THEN roe END) AS increase
   FROM ind WHERE rn <= 5 GROUP BY 1 HAVING count(*) = 5
 ), base AS (
-  SELECT r.* FROM (
+  -- ★ `e.eps` 只是【多带一列出去】给实盘的"选股理由"用（见 lv/explain.py）：
+  --   WHERE 一个字没动，行与行序完全不变。指标必须从**策略自己这条查询**里出，
+  --   另写一条"取指标的 SQL"就是第二份口径，迟早与它分叉而没人发现。
+  SELECT r.*, e.eps FROM (
     SELECT * FROM today WHERE jq_code IN (SELECT code FROM univ)
     UNION ALL SELECT * FROM miss WHERE {pin}
   ) r JOIN eps1 e ON e.code = r.jq_code
@@ -95,12 +102,23 @@ WITH univ AS (
 ), roe_top AS (
   SELECT * FROM (
     SELECT b.jq_code, b.floatmv, b.sw_l1_name,
+           -- ↓ 这四列只是【带出去解释用】：pb 与它在 PB 半区里的名次、
+           --   ROE 加速度、EPS。参与筛选的仍然只有下面那个 rn2。
+           b.pb, b.rn AS pb_rn, b.n AS pb_n, b.eps, r.increase AS roe_inc,
            row_number() OVER (ORDER BY r.increase DESC) rn2,
            count(*) OVER () AS n2
     FROM pb_half b JOIN roec r ON r.code = b.jq_code
   ) WHERE rn2 <= {roecut}
 )
-SELECT jq_code FROM roe_top
+-- 🔴 末层多返回几列 = **投影**改动：WHERE / ORDER BY / LIMIT / OFFSET 一个字没动，
+--    所以行与行序完全相同，`df['jq_code'].tolist()` 拿到的还是同一个列表。
+--    这几列给实盘的"为什么选它"用（lv/explain.py），回测一行行为都不变：
+--      · selftest 每次都跑：同一天把宽投影与"只返回 jq_code"对跑，代码列表逐位相同
+--      · 加这几列时另跑过一次全历史（2016-01~2026-08）：逐日权益指纹 +
+--        成交流水指纹（进出场日/代码/股数/价/原因）**逐位相同**
+SELECT jq_code, floatmv, pb, eps, roe_inc, sw_l1_name,
+       pb_rn, pb_n, rn2 AS roe_rn, n2 AS roe_n
+FROM roe_top
 WHERE sw_l1_name IS NULL OR sw_l1_name NOT IN ({excl})
 ORDER BY floatmv ASC LIMIT {cand} OFFSET {skip}
 """
@@ -312,6 +330,76 @@ def initialize(context):
     g.rebal_phase = getattr(g, 'rebal_phase', 0)
     g.hold_history = []
     g.high_limit = set()
+    # ---- 20 日涨停黑名单的四个口径（单变量隔离，默认值全是原版行为）----
+    # 原版是 `最近 limit_days 天持有过` ∩ `窗口内涨停过` -> 剔除。
+    # 🔴 这个组合有个**不对称**：建仓日 g.hold_history 为空 -> seen 是空集 ->
+    #   交集恒空 -> 黑名单整段空转，于是一只"买入前刚涨停过"的票能买进来；
+    #   而下一期 seen 里有它了、涨停日还在 20 日窗口内 -> 必然被剔 ->
+    #   **只持有一期**。实测全历史 923 笔交易里 112 笔是这样（中位持有 7 天
+    #   = 一个调仓周期，均收益 −0.82%，是四组里唯一负收益的那组）。
+    # ★★ 2026-09-07 实测结论：**四个方案都没有统计显著的改善**，默认不动。
+    #   逐年独立回测（2016~2026，每年重置 50 万）与原版的配对差：
+    #       方案1 涨停即剔      +0.44pp  中位 +1.35  胜 6/11  sd  8.25  t=+0.18
+    #       方案2 持有期间      +3.18pp  中位 +4.47  胜 6/11  sd 13.30  t=+0.79
+    #       原版+补位          -0.81pp  中位 +1.11  胜 6/11  sd 11.30  t=-0.24
+    #       方案1+补位         -1.55pp  中位 -3.49  胜 5/11  sd 10.89  t=-0.47
+    #       方案2+补位         +1.03pp  中位 +3.88  胜 7/11  sd  9.93  t=+0.34
+    #   🔴 **全程回测会给出相反的排序**（方案1 +2.58pp 看着最好）——
+    #     逐年里它掉到 +0.44pp，因为 2024 单年 -18.9pp。sd 8~13pp 而效应
+    #     只有 0~3pp，11 年样本撑不起任何结论。（同 CLAUDE.md：全程切片
+    #     测的是路径混沌不是规则。）
+    #   ★ 事件研究（N 大得多）也不支持改：被剔除卖出的 92 次里，
+    #     被卖那只后 20 日 +1.86%，而**当天买的替代票 +4.65%** ——
+    #     配对差 -2.78pp（t=-1.15，不显著），方向反而是"卖对了"。
+    #   🔴 中间踩过一次基准错误：先算"被卖的票卖出后 20 日 +2.77%，t=+2.10
+    #     显著" —— 那检验的是"≠0"，而这十年小市值整体年化 37%，
+    #     任何一篮子 20 日后涨 2% 都正常（其余卖出也是 +2.06%）。
+    #     基准换成"同期同策略的替代票"之后 t 就掉到 -1.15 了。
+    # ★ 四个开关各自只动一件事，可以组合，默认全 0/1 = 原版：
+    g.lu_need_held = getattr(g, 'lu_need_held', 1)
+    #   1 = 原版：要求"最近持有过"（所以建仓日空转）
+    #   0 = 窗口内涨停过就剔，不问持有过没有 —— "在黑名单里第一期就不该买"
+    g.lu_hold_only = getattr(g, 'lu_hold_only', 0)
+    #   1 = 涨停必须发生在**持有那几天**（买入前的涨停不算）。
+    #       用 limit_up_days 拿涨停日明细，与 g.hold_days 逐日比对。
+    g.lu_since_start = getattr(g, 'lu_since_start', 0)
+    #   1 = 窗口起点不早于**策略起点**（回测的 --start / 实盘 warmup 起点）。
+    #       "策略开始之前发生的涨停"不该影响第一期之后的决策。
+    g.lu_buy_only = getattr(g, 'lu_buy_only', 0)
+    #   1 = 黑名单**只抑制买入**，不导致卖出：已持有的票只问"它还在前
+    #       stock_num 名里吗"，在就继续持有。
+    #   ★★ 这一条不是又一个待测的主意，它修的是**规则自相矛盾**：
+    #     同一个事实（这只票 20 日内涨停过）在建仓那期被放行、在下一期
+    #     被用来卖出 —— 两种相反的处理。而本项目早已认定黑名单的定位
+    #     （见上面 hold_buffer_strict 那段的注释）：
+    #         「卖出问的是"它还够好吗"，黑名单是"再买"的抑制器」
+    #         「0 那一版顺带把黑名单的**卖出副作用**也关掉了」
+    #     也就是说卖出副作用一直被当成副作用，只是那条修复路径挂在
+    #     `hold_buffer > 0` 后面，而 hold_buffer 默认 0 且已被否证。
+    #   ★ 实盘 2026-09-08 的例子最能说明：被剔掉的两只排名是**第 3 和第 7**，
+    #     稳稳在前 10 名内 —— 按"它还够好吗"根本不该卖。
+    #   ★★ 回测结论：全程 39.14% vs 37.00%（夏普 1.274 vs 1.235，换手
+    #     10.32 -> 9.05）；逐年 11 年均差 +5.29pp（t=+0.98）——
+    #     🔴 但那几乎全来自 **2026 单点**（+56.30pp，只 8 个月还年化外推），
+    #     去掉它只剩 +0.19pp、中位 -1.01pp、胜 4/10。**收益证不出好坏。**
+    #     采用它的理由是①修矛盾②与本项目认定的定位一致③排除了显著变差
+    #     且换手 11 年里 10 年更低（少付的费用是确定的）。
+    g.fill_blacklist = getattr(g, 'fill_blacklist', 0)
+    #   1 = 黑名单剔除后**补足** stock_num（复用 fill_pool 那个更宽的池子：
+    #       过滤发生在截断之前，所以自然补满）。0 = 原版不补位。
+    # ---- 「选股理由」的候选池深度 ----
+    # 🔴 froec 原版 `LIMIT 10`，于是"选股理由"页只能列到第 10 名 ——
+    #   看不到"差一点选上的是谁"（红利那条 SQL 返回几百行，所以能列到 20）。
+    # ★ 做法是**多取几名但策略只用前 lim 个**（下面 `[:lim]` 那一刀）：
+    #   WHERE / ORDER BY / OFFSET 一个字没动，只是 LIMIT 放大 ——
+    #   而 `ORDER BY floatmv ASC` 是确定序，所以前 lim 行逐位不变。
+    # 🔴 **绝不能直接把 LIMIT 调大而不截断** —— 那等于开了补位
+    #   （过滤发生在截断之前，名额会被后面的票补上），
+    #   而补位是 `fill_paused` / `fill_blacklist` 那个已测为负的开关。
+    #   0 = 不多取（完全回到原版那一次查询）。
+    g.explain_pool = getattr(g, 'explain_pool', 20)
+    g.hold_days = []        # [(日期, 那天收盘时的持仓)] —— lu_hold_only 用
+    g.start_date = None     # 策略起点，第一次 prepare 时钉住
 
     set_benchmark('000905.XSHG')      # 与聚宽原版一致：中证 500
 
@@ -335,6 +423,16 @@ def prepare(context):
     g.hold_history.append(set(context.portfolio.positions))
     if len(g.hold_history) > g.limit_days:
         g.hold_history = g.hold_history[-g.limit_days:]
+    if g.start_date is None:
+        g.start_date = context.current_date
+    # ★ 逐日持仓要配**上一个交易日**：prepare 在 09:05 跑，此刻的 positions
+    #   就是"昨收之后"的持仓；而涨停日说的是那天**收盘**涨停。
+    #   配 current_date 的话整体错一天，那种错不报错、只是命中率不对。
+    if context.previous_date is not None:
+        g.hold_days.append((context.previous_date,
+                            set(context.portfolio.positions)))
+        if len(g.hold_days) > g.limit_days + 2:
+            g.hold_days = g.hold_days[-(g.limit_days + 2):]
     g.high_limit = set()
     held = list(context.portfolio.positions)
     if held and context.previous_date:
@@ -342,21 +440,61 @@ def prepare(context):
         g.high_limit = {c for c, b in bars.items() if b.limit_up}
 
 
+def blacklist(context, cand, d):
+    """20 日涨停黑名单 -> **要剔除的**代码集合。
+
+    🔴 抽成一处：原来 `rebalance` 与 `hold_buffer_strict` 各写了一遍同样的
+      四行，加开关时改一处漏一处的表现是"缓冲区那条路径还是旧口径"——
+      而它不报错，只是两条路径对同一只票给出不同结论。
+    """
+    if not cand:
+        return set()
+    lo = context.data.nth_prev_day(context.current_date, g.limit_days)
+    if g.lu_since_start and g.start_date is not None and lo < g.start_date:
+        lo = g.start_date
+    if g.lu_hold_only:
+        # 涨停必须落在持有那几天。★ 这一支**与 hold_history 无关** ——
+        #   "持有期间"本身就已经蕴含"持有过"了。
+        lud = context.data.limit_up_days(cand, lo, d)
+        if not lud:
+            return set()
+        held_on = {}
+        for dt, s in g.hold_days:
+            for c in s:
+                held_on.setdefault(c, set()).add(dt)
+        return {c for c, days in lud.items()
+                if days & held_on.get(c, frozenset())}
+    if g.lu_need_held and not g.hold_history:
+        # 原版：没有持仓历史（建仓日）时交集恒空 —— 连查询都不必发
+        return set()
+    recent = context.data.had_limit_up(cand, lo, d)
+    if not g.lu_need_held:
+        return set(recent)
+    return set().union(*g.hold_history) & recent
+
+
 def rebalance(context):
     d = context.previous_date
     if d is None or g.pf_halt:
         return
     # 补位模式要更宽的池子：过滤发生在截断【之前】，池子不够就补不满。
-    lim = g.fill_pool if g.fill_paused else g.candidate_num
+    # ★ fill_blacklist 与 fill_paused 走同一条路：把池子放宽到 fill_pool，
+    #   于是过滤（含黑名单）发生在**截断之前**，target 自然补满 stock_num。
+    lim = (g.fill_pool if (g.fill_paused or g.fill_blacklist)
+           else g.candidate_num)
+    # ★ 查得比用得多几名，多出来的只给"选股理由"看（见 g.explain_pool）
+    _ask = max(lim, g.explain_pool) if g.explain_pool else lim
     df = context.data.query(
-        SQL, sd=d, listed=g.listed_days, cand=lim,
+        SQL, sd=d, listed=g.listed_days, cand=_ask,
         pin='TRUE' if g.paused_in_pool else 'FALSE',
         kcb='688%' if g.kcb_688_only else '68%',
         pert=g.pert, salt=g.pert_salt, skip=g.skip_n,
         pbcut=(str(int(g.pb_fixed)) if g.pb_fixed else 'floor(0.5 * n)'),
         roecut=(str(int(g.roe_fixed)) if g.roe_fixed else 'floor(0.1 * n2)'),
         excl=','.join("'%s'" % x for x in EXCL_IND))
-    cand = df['jq_code'].tolist()
+    # 🔴 **策略只用前 lim 个** —— 多取的那几名只是给"选股理由"看的。
+    #   少了这一刀就等于开了补位（过滤在截断之前），行为会变。
+    cand = df['jq_code'].tolist()[:lim]
     if not cand:
         return
     # 顺序与聚宽 FROEC 原版一致：
@@ -365,11 +503,14 @@ def rebalance(context):
     # 而 v0b 是【候选 15 -> 过滤 -> 黑名单 -> 最后截到 10】(candidate_num=15)。
     # 两条线的原版写法不同，不能互相照抄。
     cand = stop_filter(context, context.tradable(cand, 'buy'))
-    if g.hold_history:
-        recent = context.data.had_limit_up(
-            cand, context.data.nth_prev_day(context.current_date, g.limit_days), d)
-        seen = set().union(*g.hold_history)
-        cand = [c for c in cand if c not in (seen & recent)]
+    _drop = blacklist(context, cand, d)
+    # ★ 两个判据分开取，因为它们问的是两件事（见 g.lu_buy_only 那段注释）：
+    #     卖出问"它还在前 stock_num 名里吗"   -> 不过黑名单
+    #     买入问"它是否被黑名单挡住"           -> 过黑名单
+    #   lu_buy_only=0（原版）时 _rank_pool 不参与任何判断，行为一行不变。
+    _rank_pool = set(cand[:g.stock_num]) if g.lu_buy_only else None
+    if _drop:
+        cand = [c for c in cand if c not in _drop]
     target = cand[:g.stock_num]
 
     # ---- 缓冲区：已持有的票排名还够就不卖 ----
@@ -388,18 +529,22 @@ def rebalance(context):
             excl=','.join("'%s'" % x for x in EXCL_IND))['jq_code'].tolist()
         if g.hold_buffer_strict:
             wide = stop_filter(context, wide)
-            if g.hold_history:
-                recent = context.data.had_limit_up(
-                    wide, context.data.nth_prev_day(
-                        context.current_date, g.limit_days), d)
-                seen = set().union(*g.hold_history)
-                wide = [c for c in wide if c not in (seen & recent)]
+            _wdrop = blacklist(context, wide, d)
+            if _wdrop:
+                wide = [c for c in wide if c not in _wdrop]
         buf = set(wide[:g.stock_num + g.hold_buffer])
         keep = {c for c in context.portfolio.positions
                 if c in buf and c not in target}
         if keep:
             log.info('[BUF] 缓冲区留下 %d 只：%s', len(keep), sorted(keep))
 
+    if g.lu_buy_only and _rank_pool:
+        # 排名还够、只是被黑名单挡住的持仓 -> 继续持有（黑名单不卖票）
+        _bk = {c for c in context.portfolio.positions
+               if c in _rank_pool and c not in target}
+        if _bk:
+            keep = set(keep) | _bk
+            log.info('[LU] 黑名单只挡买入，留下 %d 只：%s', len(_bk), sorted(_bk))
     for code in list(context.portfolio.positions):
         if (code not in target and code not in g.high_limit
                 and code not in keep):

@@ -9,9 +9,14 @@ import re
 from ..feed import PanelFeed
 
 from . import base as _base
+from . import px as _px
 from . import fee as _fee
 from . import pos as _pos
 from . import sig as _sig
+
+# 基准 symbol 白名单：sh/sz + 6 位数字。**只认这个形状** ——
+# 它会拼进 SQL 字符串，放开就是注入口（同 query.py 那三层防线）。
+_SYM_RE = __import__('re').compile(r'^(sh|sz)\d{6}$')
 
 
 def _last_px(feed, codes, day):
@@ -383,7 +388,109 @@ def equity_curve(aid, datalake=None):
     stats['fee_drag_annual'] = (
         round(stats['fee_pct'] * (244.0 / n), 6)
         if stats['fee_pct'] is not None and yrs > 0.08 else None)
-    return {'dates': dates, 'equity': eq, 'stats': stats, 'note': None}
+    # ★ 逐日 TWR 净值 + 逐日收益率 —— 业绩页要画"收益曲线"与年月日收益表。
+    #   🔴 **不能拿 `equity` 当收益曲线**：它是总资产（含入金），
+    #     入金那天会凭空跳一截，看着像赚了一笔（TWR 存在的全部理由）。
+    #     所以净值单独给一条，与 `twr` 同口径、逐日累乘。
+    #   ★ 在服务端算：现金流在这里、切区间的规则也在这里。
+    #     前端拿 equity 自己推的话就是第二份 TWR 实现，迟早分叉。
+    nav, _c = [], 1.0
+    for r in twr:
+        _c *= (1.0 + r)
+        nav.append(round(_c, 8))
+    # ★ 逐日**金额**收益：Δ权益 − 当日净现金流。
+    #   🔴 不能直接用 `eq[i] - eq[i-1]` —— 入金那天会多出一大截，
+    #     那不是赚的（与 twr 剔除现金流是同一条纪律，只是这里保留金额）。
+    #   ★ 第一天的基准是**起点资金**（开户那一刻），不是它自己的收盘 ——
+    #     否则建仓日的盈亏又被丢掉（CLAUDE.md 记过的同一个坑）。
+    #   🔴 循环 **dates/eq**（最终序列），不是 `days` ——
+    #     盘中补点那一支会给 dates/eq/twr 各加一个点，
+    #     循环 days 会少一个，于是页面上最后一天没有金额（对齐断言抓到过）。
+    pnls, _pe, _pd = [], init, None
+    for i, ds in enumerate(dates):
+        d = _base._d(ds)
+        f = sum(v for fd, v in flow_by_day.items()
+                if fd <= d and (_pd is None or fd > _pd))
+        pnls.append(round(eq[i] - _pe - f, 2))
+        _pe, _pd = eq[i], d
+    return {'dates': dates, 'equity': eq, 'nav': nav,
+            'day_rets': [round(r, 8) for r in twr],
+            'day_pnls': pnls,
+            'stats': stats, 'note': None}
 
 
 # ============================ 交易日历 ============================
+
+# ============================ 基准指数 ============================
+# ★ 可选的基准。**只列本地真有日线的** —— 列一个取不到数据的选项，
+#   人点了什么都不出来，那比不给这个选项更糟（同 backLink 那条）。
+# 🔴 中证2000（932000）与万得微盘股本地**没有**：
+#     · 中证2000 —— tdx 只有跟踪它的 ETF，没有指数本身
+#     · 微盘股   —— 万得专有指数，tdx 不提供
+#   替代是**国证2000**（sz399303，2010 起），同为"小市值 2000 只"口径。
+#   ★ 不拿 ETF 的价格当指数用：ETF 有折溢价、有管理费损耗、成立日晚，
+#     拿它当基准会把跟踪误差算成策略的超额，而那不报错。
+BENCHMARKS = [
+    {'code': 'sh000001', 'name': '上证指数', 'from': '2003'},
+    {'code': 'sz399006', 'name': '创业板指', 'from': '2010-06'},
+    {'code': 'sh000688', 'name': '科创50', 'from': '2019-12'},
+    {'code': 'sh000905', 'name': '中证500', 'from': '2007'},
+    {'code': 'sh000852', 'name': '中证1000', 'from': '2005'},
+    # ---- 下面几个是"更小市值"那一端的替代 ----
+    # 🔴 中证2000（932000）本地**没有**：tdx 只有跟踪它的 8 只 ETF。
+    #   国证2000 是同一层级（小市值 2000 只）的口径。
+    {'code': 'sz399303', 'name': '国证2000', 'from': '2010',
+     'note': '中证2000 本地没有（只有 ETF）—— 这是同层级口径'},
+    # 🔴 万得微盘股（8841431.WI）是**万得专有**，tdx 不提供，
+    #   本地一个"微盘"口径都没有。下面三个是最接近的小盘指数，
+    #   但**都比微盘股大一档** —— 拿它们当微盘的替身会低估策略的
+    #   风格暴露，所以名字里不写"微盘"，只写它本来的名字。
+    {'code': 'sz399101', 'name': '中小综指', 'from': '2005-06',
+     'note': '深市中小板全体，偏小盘；比微盘股大一档'},
+    {'code': 'sz399316', 'name': '巨潮小盘', 'from': '2005-02',
+     'note': '本地最接近"小盘"的宽基；比微盘股大一档'},
+    {'code': 'sz399634', 'name': '中小等权', 'from': '2006-12',
+     'note': '等权，风格上更接近等权小市值组合'},
+]
+
+
+def bench_curves(dates, codes, datalake=None):
+    """把基准指数对齐到给定的交易日轴 -> {code: [归一化净值]}。
+
+    🔴 **基点取第一天的【前一交易日】收盘**，不是第一天收盘 ——
+      与 `feed.benchmark` 同一条纪律：用首日收盘做基点等于把首日的
+      涨跌排除在基准之外（实测差 9.5pp）。这里的"第一天"是账户曲线的
+      第一天，所以基准与账户从**同一起点**出发，叠加起来才可比。
+    ★ 指数在 raw/tdx/kline/index_*.parquet，不在面板里 —— 面板是
+      「(date, code) 股票宽表」，塞指数进去会让 as-of 语义变浑。
+    ★ 某天指数停牌/缺失时**留 None**（前端断开画），不做前值填充：
+      填出来的平线看着像"那几天没动"，而实际是没有数据。
+    """
+    if not dates or not codes:
+        return {}
+    import duckdb
+    root = _px._lake(datalake)
+    T = "read_parquet('%s/raw/tdx/kline/index_*.parquet')" % root
+    con = duckdb.connect(':memory:')
+    out = {}
+    try:
+        for sym in codes:
+            if not _SYM_RE.match(sym or ''):
+                continue                     # 只认 sh/sz + 6 位，防注入
+            base = con.execute(
+                "SELECT close FROM %s WHERE symbol = '%s' AND date < DATE '%s' "
+                "ORDER BY date DESC LIMIT 1" % (T, sym, dates[0])).fetchone()
+            rows = dict(con.execute(
+                "SELECT date, close FROM %s WHERE symbol = '%s' "
+                "AND date BETWEEN DATE '%s' AND DATE '%s'"
+                % (T, sym, dates[0], dates[-1])).fetchall())
+            if not rows:
+                continue
+            b = base[0] if base else rows.get(_base._d(dates[0]))
+            if not b:
+                continue
+            out[sym] = [(round(rows[_base._d(d)] / b, 8)
+                         if _base._d(d) in rows else None) for d in dates]
+    finally:
+        con.close()
+    return out

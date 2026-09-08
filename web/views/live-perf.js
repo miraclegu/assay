@@ -1,0 +1,447 @@
+/* 实盘业绩【独立页】 #/live/<id>/perf
+   —— 回测详情页能看的曲线与收益表，实盘也要能看。
+
+   信息架构：主视图仍然只有「今日待办 + 当前持仓」两块（selftest 钉着），
+   业绩明细是**复盘时才看**的，所以放独立页、从 KPI 板的「累计收益 ›」点进来。
+
+   🔴 **资金曲线与收益曲线是两条不同的线，不能混**：
+     · 资金曲线 = 总资产（含入金）—— 回答"我账上有多少钱"
+     · 收益曲线 = TWR 净值      —— 回答"我的钱涨了多少"
+     入金那天总资产会跳一截，拿它当收益就是把入金算成赚的
+     （这正是 TWR 存在的理由）。所以各自把口径写在图下面。
+   ★ 净值与逐日金额由**服务端**给（lv/perf.py 的 nav / day_rets / day_pnls）：
+     现金流与切区间的规则都在那边，前端拿 equity 自己推就是第二份 TWR 实现。
+
+   ★ 画图与分桶用 shared/chart.js（lineChart / perfBuckets / calGrid /
+     drawdownSeries / _hcol / _legend）—— 与回测详情页**同一份**实现。
+
+   🔴 别把图块套在 `.pane` 里：那是回测详情页的页签容器，样式表里写着
+     display:none（要靠 .on 打开）。套了之后 SVG 确实画出来了、DOM 里也在，
+     **屏幕上什么都没有且不报错**（第一版就这么挂的）。 */
+
+let LPD = null;          // 当前账户的业绩数据（全程）
+let LPS = null;          // 按区间裁剪 + 重新归一化后的数据
+/* 当前曲线。★ 默认 **收益曲线** —— 打开业绩页第一眼要回答的是
+   "我赚了多少 / 跑赢基准了吗"，而不是"账上有多少钱"（那在 KPI 板里
+   已经有了）。资金与回撤是往后翻的。 */
+let LPC = 'nav';         // nav=收益 | eq=资金 | dd=回撤
+/* 选中的基准（收益曲线上叠加）。
+   ★ **单选**：同时看多个基准没有意义 —— 三条线以上就看不清，而"我的策略
+     跑赢谁"一次问一个就够。选新的自动换掉旧的，点已选中的取消。
+   ★ **记住选择**（localStorage）：刷新一次就没了的话，每次进来都要重选，
+     而这是"每天看同一个对比"的场景（同侧栏收起 `lvfold` 那条）。
+   🔴 存的值要**校验**再用：localStorage 里可能是上个版本留下的代码、
+     或者手改过的垃圾。不校验就会拿一个取不到数据的 symbol 去画，
+     表现是"选中了但没有线"，而它不报错。 */
+let LPB = (() => {
+  try {
+    const v = localStorage.getItem('lvbench') || '';
+    return /^(sh|sz)\d{6}$/.test(v) ? [v] : [];
+  } catch (e) { return []; }
+})();
+
+function lpbSet(code){
+  LPB = code ? [code] : [];
+  try {
+    if(code) localStorage.setItem('lvbench', code);
+    else localStorage.removeItem('lvbench');
+  } catch (e) { /* 隐私模式下写不了 —— 不该因此打挂整页 */ }
+}
+/* 请求时一次取全部（见 showPerf 里的注释）。真正可选哪些由**服务端**给
+   （`o.benchmarks`）—— 本地缺哪个指数只有服务端知道，前端硬编码清单的话
+   会列出取不到数据的选项，而"点了什么都不出来"比不给这个选项更糟。 */
+const LPB_ALL = ['sh000001','sz399006','sh000688','sh000905','sh000852',
+                 'sz399303','sz399101','sz399316','sz399634'].join(',');
+const LPB_COL = ['#7ec8a0','#c88ad0','#d0a05b','#6fa8d8','#d07a7a',
+                 '#9db85b','#5bb0b8','#b89d6f','#8f9bd8'];
+
+function showPerf(aid){
+  const b = $('#main');
+  $('#cat').innerHTML = ''; $('#vp').innerHTML = '';
+  b.innerHTML = '<div class="none">读取中…（要重放整条权益曲线）</div>';
+  /* ★ 一次把**全部**基准取回来，之后切换只改显示 —— 零额外请求。
+     每次勾选都重新请求的话，服务端要重放整条权益曲线（几秒），
+     而勾选是随手点的动作，那个延迟会让人以为卡住了。 */
+  j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL).then(o => {
+    LPD = o; renderPerf(aid);
+  }).catch(e => { b.innerHTML = '<div class="none">' + esc(e) + '</div>'; });
+}
+
+function renderPerf(aid){
+  const o = LPD, st = (o && o.stats) || {};
+  const b = $('#main');
+  if(!o || !o.dates || !o.dates.length){
+    b.innerHTML = backLink() + '<div class="none">还没有权益曲线 ——'
+      + '录入第一笔成交之后就有了</div>';
+    return;
+  }
+  const n = o.dates.length;
+  const sgn = x => x == null ? '' : (x >= 0 ? '+' : '');
+  const col = x => x == null ? '' : (x >= 0 ? 'var(--up)' : 'var(--down)');
+  const pc = x => x == null ? '—' : sgn(x) + (x * 100).toFixed(2) + '%';
+
+  b.innerHTML = backLink()
+    + `<div class="ttl">业绩 · ${esc(aid)}
+        <span class="lvwhy">${esc(o.dates[0])} ~ ${esc(o.dates[n-1])}
+        · ${n} 个交易日</span></div>`
+    /* ★ 用 shared/common.js 的 cell() —— 与实盘 KPI 板同一个件。
+         card() 是回测详情页专用的（run-detail.js），不跨过去用。 */
+    /* 🔴 这四格是**全程**（开户至今）的口径，而下面的图按所选区间画 ——
+         不标"全程"的话两个数摆在同一屏上看着像对不上（区间收益写在
+         图下面的 rgNote 里）。 */
+    + `<div class="kpi" style="margin-bottom:10px">
+        ${cell('累计收益 (TWR)<span class="lvwhy"> · 全程</span>',
+               `<span style="color:${col(st.twr)}">${pc(st.twr)}</span>`,
+               st.pnl_total == null ? 'TWR'
+                 : (sgn(st.pnl_total) + num(st.pnl_total, 2) + ' 元 · TWR'))}
+        ${cell('加权年化<span class="lvwhy"> · 全程</span>',
+               `<span style="color:${col(st.twr_annual)}">${
+                 st.twr_annual == null ? '—' : pc(st.twr_annual)}</span>`,
+               st.twr_annual == null ? '不足 20 个交易日不外推' : 'TWR 年化')}
+        ${cell('最大回撤<span class="lvwhy"> · 全程</span>', st.max_drawdown == null ? '—'
+                 : (st.max_drawdown * 100).toFixed(2) + '%',
+               st.max_drawdown_at ? '最深 ' + esc(st.max_drawdown_at) : '')}
+        ${cell('当前回撤<span class="lvwhy"> · 全程</span>', st.drawdown_now == null ? '—'
+                 : (st.drawdown_now * 100).toFixed(2) + '%', '距历史最高')}
+       </div>`
+    /* 🔴 三条曲线放**一个框**、上方切换 —— 三张图竖着排的话要上下滚动
+         才能对比同一天；同一个位置切换才看得出差别。 */
+    + '<div id="lp_rgwrap"></div>'
+    + '<div class="lpbar" id="lp_tab"></div>'
+    + '<div id="lp_chart" class="lpbox"></div>'
+    + '<div id="lp_tbl" class="lpbox"></div>';
+  /* 🔴 曲线与收益明细都用**裁剪后**的数据（LPS），KPI 板用**全程**
+     （上面那四格标着 TWR/最大回撤，是开户至今的口径）——
+     两者混着看会以为对不上，所以区间条下面单独给这一段的收益。 */
+  if(o.nav && o.day_pnls){
+    LPS = lprSlice(o);
+    $('#lp_rgwrap').innerHTML = lprBar(o, aid);
+    lprBind($('#lp_rgwrap'), aid);
+  } else {
+    LPS = null;
+  }
+  renderChart(aid);
+  renderPerfTable(aid);
+}
+
+/* ============ 时间区间 ============
+   ★ 默认 **今年以来**（YTD）—— 打开看的是"今年怎么样"，而不是"开户至今"
+     （后者在 KPI 板里已经有了）。
+   🔴 起点晚于今年年初时就从**实盘起点**开始：账户 09-01 才开户，
+     强行从 01-01 画会有 8 个月的空白，看着像数据缺了。
+   ★ 区间选择也**记住**（localStorage），与基准同一条理由：
+     这是"每天看同一段"的场景。 */
+const LPR_OPTS = [
+  ['ytd', '今年以来'], ['m1', '近一月'], ['m3', '近三月'],
+  ['m6', '近六月'], ['y1', '近一年'], ['y3', '近三年'],
+  ['all', '全部'], ['cus', '自定义'],
+];
+let LPR = (() => {
+  try {
+    const v = JSON.parse(localStorage.getItem('lvrange') || 'null');
+    if(v && LPR_OPTS.some(o => o[0] === v.k)) return v;
+  } catch (e) { /* 存的是垃圾就用默认 */ }
+  return {k: 'ytd', a: '', b: ''};
+})();
+
+function lprSet(v){
+  LPR = v;
+  try { localStorage.setItem('lvrange', JSON.stringify(v)); }
+  catch (e) { /* 隐私模式下写不了 —— 不该因此打挂整页 */ }
+}
+
+/* 区间 -> [起, 止] 两个日期字符串（含端点）。
+   🔴 **按自然日往前推，然后落到交易日轴上** —— 直接用"最后 N 个交易日"
+     的话，"近一月"会因为节假日多少而漂（春节那个月只有 15 个交易日）。
+   ★ 起点**不早于账户第一天**：账户 09-01 开户，"近一年"就是 09-01 至今，
+     而不是画 10 个月的空白。 */
+function lprSpan(dates){
+  const last = dates[dates.length - 1], first = dates[0];
+  if(LPR.k === 'all') return [first, last];
+  if(LPR.k === 'cus'){
+    const a = LPR.a && LPR.a >= first ? LPR.a : first;
+    const b = LPR.b && LPR.b <= last ? LPR.b : last;
+    return a <= b ? [a, b] : [first, last];
+  }
+  if(LPR.k === 'ytd') {
+    const y0 = last.slice(0, 4) + '-01-01';
+    return [y0 > first ? y0 : first, last];
+  }
+  const M = {m1: 1, m3: 3, m6: 6, y1: 12, y3: 36}[LPR.k] || 0;
+  const d = new Date(last + 'T00:00:00Z');
+  d.setUTCMonth(d.getUTCMonth() - M);
+  const a = d.toISOString().slice(0, 10);
+  return [a > first ? a : first, last];
+}
+
+/* 把所有序列裁到区间，并把净值/基准**按区间起点重新归一化**。
+   🔴 不重新归一化的话，"近一月"那段画出来仍然是从开户至今的累计 ——
+     y 轴写着 +1.7% 而它其实是三个月的收益，而那不报错。 */
+function lprSlice(o){
+  const [a, b] = lprSpan(o.dates);
+  const i0 = o.dates.findIndex(d => d >= a);
+  let i1 = o.dates.length - 1;
+  while(i1 > i0 && o.dates[i1] > b) i1--;
+  const cut = arr => (arr || []).slice(i0, i1 + 1);
+  const dates = cut(o.dates);
+  const nav = cut(o.nav);
+  /* 基点 = 区间起点的**前一天**净值（区间外那一点）—— 与 TWR 的
+     "起点是前一交易日"同一条纪律：用区间首日自己做基点会把首日
+     的涨跌排除在这段收益之外。区间从第一天开始时用 1.0（开户起点）。 */
+  const nb = i0 > 0 ? o.nav[i0 - 1] : 1.0;
+  const bench = {};
+  for(const k in (o.bench || {})){
+    const v = cut(o.bench[k]);
+    const bb = i0 > 0 ? o.bench[k][i0 - 1] : (v.find(x => x != null) || 1);
+    bench[k] = bb ? v.map(x => (x == null ? null : x / bb)) : v;
+  }
+  return {dates: dates, equity: cut(o.equity),
+          nav: nb ? nav.map(x => x / nb) : nav,
+          day_rets: cut(o.day_rets), day_pnls: cut(o.day_pnls),
+          bench: bench, benchmarks: o.benchmarks, stats: o.stats,
+          i0: i0, i1: i1, span: [dates[0], dates[dates.length - 1]],
+          full: o.dates.length};
+}
+
+function lprBar(o, aid){
+  const [a, b] = LPR.k === 'cus' ? lprSpan(o.dates) : ['', ''];
+  return '<div class="lpbar" id="lp_rg"><span class="lvwhy">区间</span>'
+    + LPR_OPTS.map(([k, t]) => `<a href="#" class="lpr${LPR.k === k ? ' on' : ''}"
+        data-r="${k}">${t}</a>`).join('')
+    + (LPR.k === 'cus'
+       ? `<input id="lp_ra" class="syf" size="10" value="${esc(a)}"
+            placeholder="开始"> <input id="lp_rb" class="syf" size="10"
+            value="${esc(b)}" placeholder="结束">`
+       : '')
+    + '</div>';
+}
+
+function lprBind(el, aid){
+  el.querySelectorAll('a.lpr').forEach(x => x.onclick = ev => {
+    ev.preventDefault();
+    lprSet({k: x.dataset.r, a: LPR.a, b: LPR.b});
+    renderPerf(aid);
+  });
+  const ra = el.querySelector('#lp_ra'), rb = el.querySelector('#lp_rb');
+  [ra, rb].forEach(inp => { if(!inp) return;
+    inp.onchange = () => {
+      lprSet({k: 'cus', a: (ra.value || '').trim(), b: (rb.value || '').trim()});
+      renderPerf(aid);
+    };
+  });
+}
+
+/* 这一段的收益 —— **必须单独给**：KPI 板那四格是开户至今的口径，
+   而图画的是所选区间，两个数摆在同一屏上看着像对不上。 */
+function rgNote(o){
+  if(!o || !o.dates || o.dates.length < 2) return '';
+  const r = o.nav ? o.nav[o.nav.length - 1] - 1 : null;
+  const p = (o.day_pnls || []).reduce((a, b) => a + (b || 0), 0);
+  const sg = x => (x >= 0 ? '+' : '');
+  return `<div class="note">区间 <b>${esc(o.dates[0])} ~ ${
+    esc(o.dates[o.dates.length - 1])}</b>（${o.dates.length} 个交易日${
+    o.full && o.full !== o.dates.length ? ' / 全程 ' + o.full : ''}）　`
+    + (r == null ? '' : `这一段：<b style="color:${
+        r >= 0 ? 'var(--up)' : 'var(--down)'}">${sg(r)}${(r * 100).toFixed(2)}%</b>`)
+    + `　<b style="color:${p >= 0 ? 'var(--up)' : 'var(--down)'}">${
+        sg(p)}${num(Math.round(p), 0)}</b> 元</div>`;
+}
+
+function renderChart(aid){
+  const o = LPS || LPD, st = (LPD && LPD.stats) || {};
+  const bar = $('#lp_tab'), el = $('#lp_chart');
+  const pc = x => x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%';
+  /* 🔴 旧服务端没有 nav/day_pnls（改了 assay/*.py 但没重启 serve.py）——
+     直接用会 `undefined[0]` 整页崩。说清原因比崩掉好。 */
+  if(!o.nav || !o.day_pnls){
+    bar.innerHTML = '';
+    el.innerHTML = '<div class="lvwarn"><b>服务端还没有 nav / day_pnls 字段</b>'
+      + '<br>改了 <code>assay/*.py</code> 之后要重启：'
+      + '<code>python3 serve.py --restart</code>'
+      + '（Python 模块只在进程启动时加载一次）</div>';
+    return;
+  }
+  const dd = drawdownSeries(o.equity, st.start_equity || o.equity[0]);
+  /* 累计金额 = 逐日金额的前缀和。★ 不能用 equity − 起点：那含入金。 */
+  const cum = []; let acc = 0;
+  o.day_pnls.forEach(v => { acc += (v || 0); cum.push(Math.round(acc)); });
+  const money = v => (v >= 0 ? '+' : '') + num(v, 0) + ' 元';
+
+  /* 顺序 = 看的顺序：收益（默认）-> 资金 -> 回撤 */
+  const TABS = [['nav', '收益曲线'], ['eq', '资金曲线'], ['dd', '回撤曲线']];
+  bar.innerHTML = '<span class="lvwhy">曲线</span>'
+    + TABS.map(([k, t]) => `<a href="#" class="lpc${LPC === k ? ' on' : ''}"
+        data-c="${k}">${t}</a>`).join('');
+  /* 🔴 innerHTML 之后才存在的元素要重新绑事件 —— 只在渲染开头绑的话
+     点了没反应且不报错（对比页表格里的「移除」栽过）。 */
+  bar.querySelectorAll('a.lpc').forEach(a => a.onclick = ev => {
+    ev.preventDefault(); LPC = a.dataset.c; renderChart(aid); });
+
+  if(LPC === 'eq'){
+    lineChart(el, [{n: '总资产', v: o.equity, c: '#5b9cf0'}],
+      {dates: o.dates, h: 300, moneyAxis: true,
+       ctl: rgNote(o) + '<div class="note">总资产 = 现金 + 持仓市值（按当日收盘）。'
+          + '<b>含入金</b> —— 入金那天会跳一截，那不是收益。'
+          + '净入金 ' + num(st.net_deposit || 0, 2) + ' 元。</div>'});
+  } else if(LPC === 'nav'){
+    /* 🔴 收益率与收益金额**同时给**：只有百分比的话它旁边没有能和
+       "持仓浮盈 +3,698" 对上的数，看着像两回事（同 KPI 板那条）。
+       ★ 金额不画成第二条线 —— 量纲不同共一根 y 轴必然把一条压平，
+         而"压平"看着像那条线没动。读数走 tooltip 的 extra。 */
+    /* ---- 基准叠加：与账户**同一起点**，所以直接可比 ----
+       ★ 基点由服务端取"第一天的前一交易日收盘"（与 feed.benchmark 同一条
+         纪律）—— 用第一天收盘做基点等于把首日涨跌排除在基准之外，
+         实测差过 9.5pp。 */
+    const BM = o.benchmarks || [], BD = o.bench || {};
+    const picks = LPB.filter(c => BD[c]);
+    const extra = [{n: '累计金额', v: cum, fmt: money}];
+    const series = [{n: '净值 (TWR)', v: o.nav, c: '#e0b050', w: 2}];
+    picks.forEach((c, i) => {
+      const b = BM.find(x => x.code === c) || {code: c, name: c};
+      /* ★ 基准只进 `series` —— lineChart 的 tooltip 会自动列出所有
+         series，再放进 `extra` 就是**同一行读数出现两次**（实测踩到）。
+         `extra` 只放不共轴的那个量（累计金额）。 */
+      series.push({n: b.name, v: BD[c], c: LPB_COL[LPB_ALL.split(',').indexOf(c)
+                   % LPB_COL.length], w: 1.2});
+    });
+    /* 基准选择器。★ 每个选项标出**本地数据从哪年开始** —— 科创50 只有
+       2019-12 之后，选了它却发现前面是空的话，人会以为图画坏了。
+       ★ `note` 是服务端给的说明（比如"中证2000 本地没有"）—— 写在 title 里。 */
+    const bsel = '<div class="lpbar" id="lp_bm"><span class="lvwhy">基准</span>'
+      + BM.map(b => `<a href="#" class="lpb${LPB.indexOf(b.code) >= 0 ? ' on' : ''}"
+          data-b="${b.code}" title="${esc(b.code)}${
+            b.from ? '　本地数据自 ' + esc(b.from) : ''}${
+            b.note ? '\n' + esc(b.note) : ''}">${esc(b.name)}</a>`).join('')
+      + (LPB.length ? '<a href="#" class="lpb" id="lp_bclr">不比</a>' : '')
+      + '</div>';
+    lineChart(el, series,
+      {dates: o.dates, h: 300, pctAxis: true, extra: extra,
+       ctl: bsel + rgNote(o) + '<div class="note">时间加权净值：每个有外部现金流的日子'
+          + '切开再连乘 —— <b>入金不算收益</b>，这也是能和回测年化直接比的'
+          + '口径。　鼠标移到曲线上同时给<b>收益率与累计金额</b>（当前 '
+          + pc(st.twr) + ' / '
+          + (cum.length ? money(cum[cum.length - 1]) : '—') + '）。'
+          + (picks.length
+             ? '<br>基准与账户<b>同一起点</b>（基点取第一天的前一交易日收盘）；'
+               + '指数是<b>日线收盘</b>，所以盘中的今天基准还没有点，曲线断在'
+               + '昨天 —— 那不是缺数据。'
+             : '')
+          + '</div>'});
+    /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
+       —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
+    el.querySelectorAll('a.lpb').forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      /* 单选：点新的换掉旧的，点已选中的取消。★ 不做"多选 + 清空按钮" ——
+         同时看多个基准反而看不清（见 LPB 的注释）。 */
+      lpbSet(a.id === 'lp_bclr' ? '' : (LPB[0] === a.dataset.b ? '' : a.dataset.b));
+      renderChart(aid);
+    });
+  } else {
+    /* 🔴 `hiCap: 0` —— 回撤的最高点**永远是 0**（在最高点时回撤为 0，
+       不可能为正）。不钳的话 y 轴留白会显示成 +0.1%，而那个数没有意义，
+       读的人会以为"曾经比历史最高还高 0.1%"。 */
+    lineChart(el, [{n: '回撤', v: dd, c: '#f05b5b'}],
+      {dates: o.dates, h: 300, ratioAxis: true, hiCap: 0,
+       ctl: rgNote(o) + '<div class="note">距历史最高还差多少。峰值从<b>起点资金</b>'
+          + '起算 —— 只看曲线上的点会把第一天的下跌算成"没有回撤"。　最深 '
+          + (st.max_drawdown == null ? '—'
+             : (st.max_drawdown * 100).toFixed(2) + '%')
+          + (st.max_drawdown_at ? '（' + esc(st.max_drawdown_at) + '）' : '')
+          + '</div>'});
+  }
+}
+
+/* 收益明细 = **方格热力图**（与回测详情页同一套 calGrid / _hcol / _legend）。
+   🔴 不用列表：一屏几十行数字没法"一眼看出哪天崩的"，而方格图的底色
+     就是强度、位置就是日期 —— 这一页存在的理由就是快速看形态。
+   三种粒度（日 / 月 / 年）× 三种读数（收益率 / 金额 / 两者）。
+   ★ 默认「日 + 两者」并停在**最近有数据的那个月** —— 打开就该看到"这个月
+     每天怎么样"，而不是先让人选。 */
+let LPV = {gran: 'day', show: 'both', ym: null};
+
+function renderPerfTable(aid){
+  const o = LPS || LPD, el = $('#lp_tbl');
+  if(!o.nav || !o.day_pnls){ el.innerHTML = ''; return; }
+  /* 🔴 用净值不用总资产；base=1.0 —— nav[0] 已含建仓当天的收益
+     （TWR 从开户资金起算），不传起点会把第一天整段丢掉。
+     金额传 day_pnls：逐日相加，不能用"桶末 − 桶初"（那含入金）。 */
+  const B = perfBuckets(o.dates, o.nav, 1.0, o.day_pnls);
+  if(!LPV.ym) LPV.ym = o.dates[o.dates.length - 1].slice(0, 7);
+  const sn = (v, d) => v == null ? '—' : _sn(v, d == null ? 2 : d) + '%';
+  const money = v => v == null ? '—'
+    : (v >= 0 ? '+' : '') + num(Math.round(v), 0);
+  const cellTxt = r => LPV.show === 'ret' ? sn(r.ret)
+    : LPV.show === 'pnl' ? money(r.pnl)
+    : `${sn(r.ret)}<span class="cd2">${money(r.pnl)}</span>`;
+
+  const gbtn = (k, t) => `<a href="#" class="lpg${LPV.gran === k ? ' on' : ''}"
+      data-g="${k}">${t}</a>`;
+  const sbtn = (k, t) => `<a href="#" class="lps${LPV.show === k ? ' on' : ''}"
+      data-s="${k}">${t}</a>`;
+  let h = `<div class="ttl">收益明细
+      <span class="lvwhy">按 <b>TWR 净值</b>算（与收益曲线同口径）；
+        金额是逐日 Δ权益 <b>剔除现金流</b>后相加</span></div>
+    <div class="lpbar">
+      <span class="lvwhy">粒度</span>${gbtn('day','日')}${gbtn('month','月')}${gbtn('year','年')}
+      <span class="lvwhy" style="margin-left:14px">读数</span>
+      ${sbtn('ret','收益率')}${sbtn('pnl','金额')}${sbtn('both','两者')}
+    </div>`;
+
+  if(LPV.gran === 'day'){
+    const yms = [...new Set(o.dates.map(d => d.slice(0, 7)))].sort();
+    const at = yms.indexOf(LPV.ym);
+    const items = {};
+    o.dates.forEach((d, i) => {
+      if(!d.startsWith(LPV.ym)) return;
+      items[d] = {ret: B.days[d], pnl: o.day_pnls[i],
+                  tip: `日收益 ${sn(B.days[d])}　金额 ${money(o.day_pnls[i])}\n`
+                     + `净值 ${o.nav[i].toFixed(4)}　总资产 ${num(o.equity[i], 2)}`};
+    });
+    const M = B.months[LPV.ym] || {};
+    h += `<div class="crumb">
+        ${at > 0 ? `<a href="#" class="lpym" data-ym="${yms[at-1]}">◀ ${yms[at-1]}</a>` : ''}
+        <b style="margin:0 10px">${LPV.ym}</b>
+        ${at >= 0 && at < yms.length - 1
+          ? `<a href="#" class="lpym" data-ym="${yms[at+1]}">${yms[at+1]} ▶</a>` : ''}
+        <span style="margin-left:14px" class="lvwhy">本月
+          收益 ${sn(M.ret)}　金额 ${money(M.pnl)}　最大回撤
+          ${M.mdd == null ? '—' : (M.mdd * 100).toFixed(2) + '%'}</span>
+      </div>`
+      + calGrid(LPV.ym, items, cellTxt, {scale: 12}) + _legend();
+  } else if(LPV.gran === 'month'){
+    const ks = Object.keys(B.months).sort();
+    h += `<div class="hm m">${ks.map(k => {
+      const r = B.months[k];
+      return `<div class="hc" data-ym="${k}" style="background:${_hcol(r.ret, 4)}"
+        title="${k}　收益 ${sn(r.ret)}　金额 ${money(r.pnl)}
+最大回撤 ${(r.mdd*100).toFixed(2)}%　交易日 ${r.n}
+点击看这个月的每日">
+        <div class="k">${k}</div><div class="v">${cellTxt(r)}</div>
+        <div class="n">回撤 ${(r.mdd*100).toFixed(1)}% · ${r.n} 日</div></div>`;
+    }).join('')}</div>` + _legend();
+  } else {
+    const ks = Object.keys(B.years).sort();
+    h += `<div class="hm y">${ks.map(k => {
+      const r = B.years[k];
+      return `<div class="hc" data-y="${k}" style="background:${_hcol(r.ret, 2)}"
+        title="${k} 年　收益 ${sn(r.ret)}　金额 ${money(r.pnl)}
+最大回撤 ${(r.mdd*100).toFixed(2)}%　交易日 ${r.n}
+点击看这一年的月度">
+        <div class="k">${k}</div><div class="v">${cellTxt(r)}</div>
+        <div class="n">回撤 ${(r.mdd*100).toFixed(1)}% · ${r.n} 日</div></div>`;
+    }).join('')}</div>` + _legend();
+  }
+  el.innerHTML = h;
+
+  const re = () => renderPerfTable(aid);
+  el.querySelectorAll('a.lpg').forEach(a => a.onclick = ev => {
+    ev.preventDefault(); LPV.gran = a.dataset.g; re(); });
+  el.querySelectorAll('a.lps').forEach(a => a.onclick = ev => {
+    ev.preventDefault(); LPV.show = a.dataset.s; re(); });
+  el.querySelectorAll('a.lpym').forEach(a => a.onclick = ev => {
+    ev.preventDefault(); LPV.ym = a.dataset.ym; re(); });
+  el.querySelectorAll('.hc[data-ym]').forEach(c => c.onclick = () => {
+    LPV.ym = c.dataset.ym; LPV.gran = 'day'; re(); });
+  el.querySelectorAll('.hc[data-y]').forEach(c => c.onclick = () => {
+    LPV.gran = 'month'; re(); });
+}

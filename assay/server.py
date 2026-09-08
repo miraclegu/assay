@@ -60,9 +60,12 @@ ROUTES = {
     '/api/live/accounts': live.api_live_accounts,
     '/api/live/account': live.api_live_account,
     '/api/live/signal': live.api_live_signal,
+    '/api/live/explain': live.api_live_explain,
+    '/api/live/explains': live.api_live_explains,
     '/api/live/code': live.api_live_code,
     '/api/live/strategy': live.api_live_strategy,
     '/api/live/equity': live.api_live_equity,
+    '/api/live/intraday': live.api_live_intraday,
     '/api/live/fills': live.api_live_fills,
     '/api/sync': sync.api_sync,
     '/api/sync/auto': sync.api_sync_auto,
@@ -259,7 +262,10 @@ class _Facade(types.ModuleType):
       —— 否则 `ROUTES` 这种本模块自己的定义也会被转走。
     """
 
-    _FWD = ('ALLOW_BACKTEST', 'ALLOW_LIVE', '_live_thread')
+    #   `_BOOT_TS`：selftest 把它调早来模拟"进程比代码旧"的横幅。
+    #   不转发的话赋值只落在 server 自己的 __dict__ 上，各域读的还是原值
+    #   —— 又是一次"设置了却不生效"。
+    _FWD = ('ALLOW_BACKTEST', 'ALLOW_LIVE', '_live_thread', '_BOOT_TS')
 
     def __getattr__(self, name):
         for _m in _FACADE:
