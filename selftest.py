@@ -10044,6 +10044,116 @@ def t_log_and_dd():
     return '；'.join(notes)
 
 
+@case('策略线是【基准的一种】：可选 / 单选 / 不撞色（playwright）', tag='web')
+def t_strat_bench():
+    """用户："策略的线颜色和上证线颜色一样了，而且策略线始终在上面，无法取消。
+    策略线也是基准的一种，也应该可选展示。"
+
+      ① **不撞色**：策略色不许出现在 `LPB_COL` 里 —— 两条一模一样时
+         "哪条是策略"只能靠猜。静态断言（改配色数组也能抓到）
+      ② **默认不画**：三条线以上就看不清了，而"想比哪个"因人而异
+         （同「默认一个都不勾」那条）
+      ③ **与指数共用一个单选槽**：选了上证，策略要自动消失 —— 两处状态
+         的话会出现"既选了上证又开着策略"这种要额外记的组合
+      ④ **点同一个能取消**（原来是常显、关不掉）
+      ⑤ 图下那段解释**跟着选中状态走**：没画线还留着一段话，读的人会去找
+         那条不存在的线
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import re as _re
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    # ---- ① 静态：撞色 ----
+    src = _io.open('web/views/live-perf.js', encoding='utf-8').read()
+    m = _re.search(r'const LPB_COL = \[(.*?)\];', src, _re.S)
+    assert m, '找不到 LPB_COL'
+    cols = [c.lower() for c in _re.findall(r"'(#\w+)'", m.group(1))]
+    ms = _re.search(r"策略 \(完全照做\)', v: sv, c: '(#\w+)'", src)
+    assert ms, '找不到策略线的配色'
+    sc = ms.group(1).lower()
+    assert sc not in cols, \
+        ('策略线的颜色 %s 与指数配色撞了（LPB_COL 里第 %d 个）—— '
+         '两条一模一样时"哪条是策略"只能靠猜' % (sc, cols.index(sc) + 1))
+    # 那个没人读的旧开关必须删干净（留着下次有人以为它管事）
+    assert 'LPSTRAT' not in src and 'lpstrat' not in src, \
+        '还留着没人读的 LPSTRAT / lpstrat'
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            # 🔴 先清掉记忆：localStorage 里可能存着上一次选的基准，
+            #   那样"默认不画"这条会因为环境而时绿时红。
+            pg.goto('http://127.0.0.1:%d/' % port)
+            pg.evaluate("() => localStorage.removeItem('lvbench')")
+            pg.goto('http://127.0.0.1:%d/#/live/froec/perf' % port)
+            pg.wait_for_selector('#lp_bm a.lpbs', timeout=25000)
+            pg.wait_for_timeout(2500)
+            SNAP = """() => {
+              const el = document.getElementById('lp_chart');
+              const ps = [...el.querySelectorAll('svg path[d]')];
+              const notes = [...el.querySelectorAll('.note')]
+                            .map(e => e.textContent).join(' ');
+              return {n: ps.length,
+                      cols: ps.map(x => (x.getAttribute('stroke')||'').toLowerCase()),
+                      picked: [...document.querySelectorAll('#lp_bm a.on')]
+                              .map(a => a.textContent.trim()),
+                      hasNote: notes.includes('完全照做的净值')};
+            }"""
+            # ② 默认不画
+            a0 = pg.evaluate(SNAP)
+            assert a0['n'] == 1, \
+                '默认画了 %d 条线（应当只有"实际"那条）：%r' % (a0['n'], a0['cols'])
+            assert not a0['picked'], '默认就选中了 %r' % a0['picked']
+            assert not a0['hasNote'], '没画策略线却留着那段解释'
+            # 选「策略」
+            pg.click('#lp_bm a.lpbs')
+            pg.wait_for_timeout(1300)
+            a1 = pg.evaluate(SNAP)
+            assert a1['n'] == 2, '选了策略却只有 %d 条线' % a1['n']
+            assert sc in a1['cols'], \
+                '策略线的颜色 %s 没出现在图上：%r' % (sc, a1['cols'])
+            assert a1['picked'] == ['策略'], '选中态不对：%r' % a1['picked']
+            assert a1['hasNote'], '选了策略却没有那段解释'
+            # ③ 改选上证 -> 策略自动消失
+            pg.evaluate("""() => [...document.querySelectorAll('#lp_bm a.lpb')]
+                .find(a => a.textContent.trim() === '上证指数').click()""")
+            pg.wait_for_timeout(1300)
+            a2 = pg.evaluate(SNAP)
+            assert a2['n'] == 2, '改选上证后有 %d 条线' % a2['n']
+            assert sc not in a2['cols'], \
+                ('选了上证，策略线还在（%r）—— 它们必须共用**一个**单选槽，'
+                 '否则会出现"既选上证又开着策略"这种要额外记的组合' % a2['cols'])
+            assert a2['picked'] == ['上证指数'], '选中态不对：%r' % a2['picked']
+            assert not a2['hasNote'], '策略线没画了，那段解释该跟着走'
+            # ④ 点同一个能取消
+            pg.click('#lp_bm a.lpbs')
+            pg.wait_for_timeout(1100)
+            pg.click('#lp_bm a.lpbs')
+            pg.wait_for_timeout(1100)
+            a3 = pg.evaluate(SNAP)
+            assert a3['n'] == 1 and not a3['picked'], \
+                '再点一次没取消掉（%d 条线，选中 %r）' % (a3['n'], a3['picked'])
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return ('策略色 %s 不在 %d 个指数色里 · 默认不画 · 与指数单选互斥 · '
+            '可取消 · 解释跟着选中走' % (sc, len(cols)))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

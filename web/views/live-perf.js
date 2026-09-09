@@ -28,8 +28,6 @@ let LPC = 'nav';         // nav=收益 | eq=资金 | dd=回撤
 /* 策略曲线（完全照做）与每期执行差异 —— 见 lv/bench.py。
    🔴 实盘与绑定策略**必然有差异**，两条曲线摆一起才看得出执行的代价。 */
 let LPBCH = null, LPXD = null, LPBCH_NOTE = '';
-let LPSTRAT = (() => { try { return localStorage.getItem('lpstrat') !== '0'; }
-                       catch(e){ return true; } })();
 /* 选中的基准（收益曲线上叠加）。
    ★ **单选**：同时看多个基准没有意义 —— 三条线以上就看不清，而"我的策略
      跑赢谁"一次问一个就够。选新的自动换掉旧的，点已选中的取消。
@@ -38,10 +36,18 @@ let LPSTRAT = (() => { try { return localStorage.getItem('lpstrat') !== '0'; }
    🔴 存的值要**校验**再用：localStorage 里可能是上个版本留下的代码、
      或者手改过的垃圾。不校验就会拿一个取不到数据的 symbol 去画，
      表现是"选中了但没有线"，而它不报错。 */
+/* 🔴 **策略线也是「基准」的一种**，与指数共用**同一个单选槽**。
+   头一版把它做成常显 + 一个独立开关，实测两个毛病：颜色与上证撞了
+   （都是 LPB_COL[0]），而且**关不掉** —— 而"想比哪个"因人而异，
+   三条线以上就看不清了（同「默认一个都不勾」那条）。
+   ★ 值 `strat` 与指数 code 走同一个 localStorage key：这样"当前在比什么"
+     只有一处状态，不会出现"既选了上证又开着策略"这种要额外记的组合。 */
+const LPB_STRAT = 'strat';
+
 let LPB = (() => {
   try {
     const v = localStorage.getItem('lvbench') || '';
-    return /^(sh|sz)\d{6}$/.test(v) ? [v] : [];
+    return (v === LPB_STRAT || /^(sh|sz)\d{6}$/.test(v)) ? [v] : [];
   } catch (e) { return []; }
 })();
 
@@ -136,7 +142,8 @@ function renderPerf(aid){
      两者混着看会以为对不上，所以区间条下面单独给这一段的收益。 */
   if(o.nav && o.day_pnls){
     LPS = lprSlice(o);
-    $('#lp_rgwrap').innerHTML = lprBar(o, aid);
+    const rw = $('#lp_rgwrap');
+    if(rw) rw.innerHTML = lprBar(o, aid);      /* 同上：人可能已经走开 */
     lprBind($('#lp_rgwrap'), aid);
   } else {
     LPS = null;
@@ -273,6 +280,13 @@ function rgNote(o){
 function renderChart(aid){
   const o = LPS || LPD, st = (LPD && LPD.stats) || {};
   const bar = $('#lp_tab'), el = $('#lp_chart');
+  /* 🔴 **人已经走开了。** 这几个渲染都是异步回调（权益要重放整条曲线、
+     策略曲线要跑一次回测），回来时页面可能已经切走 —— 那时容器是 null，
+     `null.innerHTML = ...` 直接抛。selftest 里就是这么抓到的：先访问首页
+     再进 perf 页，上一页的回调回来就崩（而它只在控制台里报，页面看着正常）。
+     ★ 判据用容器存在与否，不是 `location.hash` —— 同一个 hash 下也可能
+       重渲染过（换区间/换基准），而容器在不在是当下的事实。 */
+  if(!bar || !el || !o) return;
   const pc = x => x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%';
   /* 🔴 旧服务端没有 nav/day_pnls（改了 assay/*.py 但没重启 serve.py）——
      直接用会 `undefined[0]` 整页崩。说清原因比崩掉好。 */
@@ -325,16 +339,23 @@ function renderChart(aid){
        ★ 对齐用**日期**而不是下标：两边交易日可能不等长（策略曲线从
          开户日起算，而权益曲线盘中会多补今天那一点）—— 按下标并的话
          错一位就整条线平移，而它不报错。 */
-    if(LPSTRAT && LPBCH && !LPBCH.error && LPBCH.dates){
+    const stratOn = LPB.indexOf(LPB_STRAT) >= 0;
+    if(!stratOn) LPBCH_NOTE = '';
+    if(stratOn && LPBCH && !LPBCH.error && LPBCH.dates){
       const m = {};
       LPBCH.dates.forEach((d, i) => { m[d] = LPBCH.nav[i]; });
       const sv = o.dates.map(d => m[d] == null ? null : m[d]);
       if(sv.some(v => v != null))
-        series.push({n: '策略 (完全照做)', v: sv, c: '#7ec8a0', w: 1.6});
+        /* 🔴 颜色**不能用 LPB_COL[0]**（`#7ec8a0`）—— 那是上证的色，
+           两条线一模一样时"哪条是策略"只能靠猜。这里用一个不在 LPB_COL
+           里的紫色，且比指数线粗一档（它不是外部基准，是"我本来该有的"）。 */
+        series.push({n: '策略 (完全照做)', v: sv, c: '#b07de0', w: 1.7});
       /* ★ 两条线的**基点都是本金** —— 策略那条若拿首日收盘做基点，
          就等于把它首日的涨跌排除在外，差异里会混进「起点差」。
        ★ 末尾那一天策略常常**没有值**：面板到昨天，而实际那条盘中会用
          实时价多补一点 —— 不说明的话看着像策略线断了。 */
+      /* ★ 这段说明只在**选中策略**时给：它解释的是那条线，没画线还留着
+         一段话，读的人会去找那条不存在的线。 */
       LPBCH_NOTE = (() => {
         const last = o.dates[o.dates.length - 1];
         const miss = m[last] == null;
@@ -361,7 +382,17 @@ function renderChart(aid){
     /* 基准选择器。★ 每个选项标出**本地数据从哪年开始** —— 科创50 只有
        2019-12 之后，选了它却发现前面是空的话，人会以为图画坏了。
        ★ `note` 是服务端给的说明（比如"中证2000 本地没有"）—— 写在 title 里。 */
+    /* ★ 「策略」排在最前并用分隔线隔开：它不是外部指数，而是
+         "完全照做会怎样" —— 与账户同本金同费率，所以是最有意义的那个对照。
+       ★ 拿不到策略曲线时（没绑定版本 / 快照缺文件）**不列这个选项** ——
+         列出来点了什么都不出来比不给更糟（同 backLink 那条）。 */
+    const canStrat = !!(LPBCH && !LPBCH.error && (LPBCH.dates || []).length);
     const bsel = '<div class="lpbar" id="lp_bm"><span class="lvwhy">基准</span>'
+      + (canStrat ? `<a href="#" class="lpb lpbs${
+            LPB.indexOf(LPB_STRAT) >= 0 ? ' on' : ''}" data-b="${LPB_STRAT}"
+          title="按绑定版本 ${esc((LPBCH.sha || '').slice(0, 8))} 与当时参数、\
+同本金同费率完全照做的净值。&#10;两条的差 = 执行的代价（漏单/价格/手工加减）"
+          >策略</a><span class="lvwhy">|</span>` : '')
       + BM.map(b => `<a href="#" class="lpb${LPB.indexOf(b.code) >= 0 ? ' on' : ''}"
           data-b="${b.code}" title="${esc(b.code)}${
             b.from ? '　本地数据自 ' + esc(b.from) : ''}${
@@ -417,6 +448,7 @@ let LPV = {gran: 'day', show: 'both', ym: null};
 
 function renderPerfTable(aid){
   const o = LPS || LPD, el = $('#lp_tbl');
+  if(!el || !o) return;              /* 人已经走开了（见 renderChart 那条） */
   if(!o.nav || !o.day_pnls){ el.innerHTML = ''; return; }
   /* 🔴 用净值不用总资产；base=1.0 —— nav[0] 已含建仓当天的收益
      （TWR 从开户资金起算），不传起点会把第一天整段丢掉。
@@ -523,7 +555,7 @@ const XD_LABEL = {
 
 function renderExec(aid){
   const el = $('#lp_exec');
-  if(!el) return;
+  if(!el) return;                    /* 人已经走开了（见 renderChart 那条） */
   const xd = LPXD || {};
   const items = xd.items || [];
   if(xd.error){
