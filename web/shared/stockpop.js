@@ -168,27 +168,41 @@ function spMine(){
     el.innerHTML = '<div class="spdim spnote">这只票没有实盘成交记录。</div>';
     return;
   }
-  let net = 0, cost = 0, got = 0;
-  ts.forEach(t => {
-    const sh = +t.shares || 0, px = +t.price || 0;
-    if(t.side === 'buy'){ net += sh; cost += sh * px; }
-    else { net -= sh; got += sh * px; }
-  });
-  el.innerHTML = `<div class="spmt">我的成交
-      <span class="spdim">${ts.length} 笔 · 现持 ${num(net, 0)} 股</span></div>
-    <div class="pw"><table class="lvt spt"><thead><tr>
+  let net = 0;
+  ts.forEach(t => { net += (t.side === 'buy' ? 1 : -1) * (+t.shares || 0); });
+  /* 🔴 **默认折叠。** 买卖点的主视角是图上的 B/S 点（位置就是价位，
+     hover 出价/量/费用/账户）—— 一份同样内容的表格摊在下面，等于把
+     刚腾出来的空间又占回去，而且人得在两处之间来回对。
+     但它**不能删**：费用与账户是图上放不下的，而"这只票我到底买了几笔"
+     是要能查的（同「能进 tooltip 的就别占列」+「偶尔用的进浮层」）。 */
+  const openNow = SP.mineOpen ? ' on' : '';
+  el.innerHTML = `<div class="spmt spfold${openNow}" id="spmt">
+      <span class="sparr">▸</span> 我的成交
+      <span class="spdim">${ts.length} 笔 · 现持 ${num(net, 0)} 股 ·
+        图上是 <span class="up">B</span>/<span class="dn">S</span> 点</span>
+    </div>
+    <div class="pw spmw${openNow}" id="spmw"><table class="lvt spt"><thead><tr>
       <th class="tx">成交日</th><th class="tx">方向</th><th>股数</th>
       <th>价格</th><th>金额</th><th>费用</th><th class="tx">账户</th>
     </tr></thead><tbody>${ts.map(t => {
       const buy = t.side === 'buy';
       return `<tr><td class="tx">${esc(t.date || '')}</td>
-        <td class="tx"><span class="${buy ? 'up' : 'dn'}">${buy ? '买入' : '卖出'}</span></td>
+        <td class="tx"><span class="${buy ? 'up' : 'dn'}">${
+          buy ? '买入' : '卖出'}</span></td>
         <td>${num(t.shares, 0)}</td><td>${num(t.price, 2)}</td>
         <td>${num((+t.shares || 0) * (+t.price || 0), 2)}</td>
         <td>${t.fee == null ? '—' : num(t.fee, 2)}</td>
         <td class="tx spdim" title="${esc(t.note || '')}">${
           esc(t.account_name || t.account || '')}${t.note ? ' ✎' : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
+  /* 🔴 `.spmw` 的 display 在**样式表**里，所以开关只能加/去 class ——
+     写 `style.display=''` 只是删掉内联样式、样式表规则照旧生效，
+     表现是"点了没反应"且不报错（CLAUDE.md 里 .hlpbox 那条）。 */
+  document.getElementById('spmt').onclick = () => {
+    SP.mineOpen = !SP.mineOpen;
+    document.getElementById('spmt').classList.toggle('on', SP.mineOpen);
+    document.getElementById('spmw').classList.toggle('on', SP.mineOpen);
+  };
 }
 
 function spDraw(hover){
@@ -196,7 +210,9 @@ function spDraw(hover){
   if(!cv) return;
   const box = cv.parentElement.getBoundingClientRect();
   cv.style.width = box.width + 'px';
-  cv.style.height = Math.max(200, Math.round(box.width * 0.42)) + 'px';
+  /* ★ 高度给到宽的一半、下限 340：B/S 圆点画在成交价【上下方】，
+     图矮了圆点就贴着边缘、甚至压出主图区。 */
+  cv.style.height = Math.max(340, Math.round(box.width * 0.5)) + 'px';
   if(!SP.bars.length){
     const g = cv.getContext('2d');
     g.clearRect(0, 0, cv.width, cv.height);
@@ -233,9 +249,20 @@ function spBindHover(cv){
     const i = Math.round((x - geo.PADL) / geo.step);
     const b = SP.bars[i];
     if(!b){ tip.style.display = 'none'; return; }
-    tip.innerHTML = `<b>${esc(b.date)}</b><br>开 ${num(b.open, 2)}
-      高 ${num(b.high, 2)}<br>低 ${num(b.low, 2)} 收 <b>${num(b.close, 2)}</b>
-      <br>量 ${num((b.volume || 0) / 1e4, 1)} 万手`;
+    /* 🔴 涨跌幅必须给 —— 看 K 线第一个想知道的就是"那天涨跌多少"，
+       只给 OHLC 的话得自己拿收盘除昨收。`change_pct` 面板里现成有，
+       **已是**百分数（别再乘 100）；`turnover` 同样是百分数。 */
+    const up = (b.change_pct || 0) >= 0;
+    tip.innerHTML = `<b>${esc(b.date)}</b>
+      <span class="${up ? 'up' : 'dn'}">${
+        b.change_pct == null ? '' : pctv(b.change_pct)}</span>
+      <br>开 ${num(b.open, 2)} 高 ${num(b.high, 2)}
+      <br>低 ${num(b.low, 2)} 收 <b class="${up ? 'up' : 'dn'}">${
+        num(b.close, 2)}</b>
+      <br>昨收 ${num(b.preclose, 2)}
+      <br>量 ${num((b.volume || 0) / 1e4, 1)} 万股${
+        b.turnover == null ? '' : ' · 换手 ' + pctn(b.turnover, 2)}
+      <br>额 ${num((b.amount || 0) / 1e8, 2)} 亿`;
     _tipAt(tip, e.clientX, e.clientY);
     if(i !== SP.hover){ SP.hover = i; spDraw(i); }
   };

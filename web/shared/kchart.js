@@ -143,26 +143,41 @@ function drawKChart(cv, opts) {
   const trHits = [];
   if (trs.length) {
     const at = {};
-    bars.forEach((b, i) => { at[b.date] = i; });
+    bars.forEach((bb, i) => { at[bb.date] = i; });
     const bySlot = {};
+    g.save();
+    g.font = 'bold 10px ui-sans-serif,system-ui,sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
     trs.forEach(t => {
       const i = at[t.date];
       if (i == null || t.price == null) return;
       const k = i + '|' + t.side;
       bySlot[k] = (bySlot[k] || 0) + 1;
-      const dup = bySlot[k] - 1;               // 同日同向的第 n 笔，错开一点
+      const dup = bySlot[k] - 1;               /* 同日同向的第 n 笔，往外错开 */
       const buy = t.side === 'buy';
-      const x = X(i), y = Y(+t.price);
-      const off = 7 + dup * 8;
-      const ty = buy ? y + off : y - off;      // 买在下方、卖在上方（不挡住 K 线）
-      g.fillStyle = buy ? UP : DN;
-      g.beginPath();
-      if (buy) { g.moveTo(x, y + 2); g.lineTo(x - 4.6, ty + 3); g.lineTo(x + 4.6, ty + 3); }
-      else { g.moveTo(x, y - 2); g.lineTo(x - 4.6, ty - 3); g.lineTo(x + 4.6, ty - 3); }
-      g.closePath(); g.fill();
-      g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = .8; g.stroke();
-      trHits.push({x: x, y: ty, r: 8, t: t});
+      const x = X(i), py = Y(+t.price);
+      const R = 7.5;
+      const cy = buy ? py + R + 5 + dup * (R * 2 + 2)
+                     : py - R - 5 - dup * (R * 2 + 2);
+      /* ① 从圆心到**成交价那一点**的细引线 + 一个小点：圆本身有半径，
+         光靠圆的位置说不出"到底是哪个价" —— 引线的端点才是确切价位。 */
+      g.strokeStyle = buy ? UP : DN;
+      g.lineWidth = 1;
+      g.globalAlpha = .75;
+      g.beginPath(); g.moveTo(x, py); g.lineTo(x, cy + (buy ? -R : R)); g.stroke();
+      g.globalAlpha = 1;
+      g.beginPath(); g.arc(x, py, 1.6, 0, 6.2832); g.fill();
+      /* ② B / S 圆点。★ 描一圈背景色的边：K 线密的时候圆压在影线上，
+         没有这圈边就糊成一团（同均线配色要互相拉开那条）。 */
+      g.beginPath(); g.arc(x, cy, R, 0, 6.2832);
+      g.fillStyle = buy ? UP : DN; g.fill();
+      g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = 1.4; g.stroke();
+      g.fillStyle = '#fff';
+      g.fillText(buy ? 'B' : 'S', x, cy + .5);
+      trHits.push({x: x, y: cy, r: R + 3, t: t});
     });
+    g.restore();
   }
 
   /* 副图 */

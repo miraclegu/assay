@@ -9606,7 +9606,55 @@ def t_stockpop():
                 assert want in txt, 'hover 读数少了「%s」：%r' % (want, txt)
             assert ('%.2f' % f['price']) in txt.replace(',', ''), \
                 'hover 读数里没有成交价 %.2f：%r' % (f['price'], txt)
-            notes.append('买卖点 %d 个 · hover 出价/量/账户' % d['nh'])
+            # ---- B/S 点是【同花顺那种圆点】，不是三角；列表默认折叠 ----
+            bs = pg.evaluate("() => { const c = document.getElementById('spcv');"
+                             "  return {w: c.offsetWidth, h: c.offsetHeight}; }")
+            # 🔴 高度判**比例**不判绝对值：改成 width*0.32 时算出 368，
+            #   仍然 >= 340 —— 断言照过（变异实测）。
+            assert bs['w'] > 1000 and bs['h'] >= 340 \
+                   and bs['h'] >= bs['w'] * 0.45, \
+                ('画布只有 %dx%d —— B/S 圆点要能看出"哪根柱子"，'
+                 '窄了 120 根柱子挤在一起圆点会互相压住' % (bs['w'], bs['h']))
+            kc = _io.open('web/shared/kchart.js', encoding='utf-8').read()
+            seg = kc[kc.index('const trs = opts.trades'):kc.index('/* 副图 */')]
+            assert "fillText(buy ? 'B' : 'S'" in seg, \
+                '买卖点必须是带 B/S 字母的圆点（同花顺那种），不是三角'
+            # 🔴 只查 `g.arc(` 太宽 —— 引线端点那个小圆也是 arc，
+            #   把 B/S 那个圆改成三角路径**照样全绿**（变异实测）。
+            assert 'g.arc(x, cy, R,' in seg.replace('  ', ' '), \
+                'B/S 标记本身必须是圆（arc(x, cy, R)），不是三角形路径'
+            # 🔴 `.spmw` 的 display 在**样式表**里，所以开关只能加/去 class ——
+            #   写 style.display='' 只是删内联样式、规则照旧生效，表现是
+            #   "点了没反应"且不报错（.hlpbox 那条）。所以这里量**可见性**。
+            assert not pg.locator('#spmw').is_visible(), \
+                '成交明细该默认折起 —— 图上的 B/S 点才是主视角'
+            assert '笔' in pg.locator('#spmt').inner_text(), \
+                '折起时要留一行摘要（几笔、现持多少）—— 收起后什么都看不到' \
+                '的折叠不如不做'
+            pg.click('#spmt'); pg.wait_for_timeout(300)
+            assert pg.locator('#spmw').is_visible(), '点了展不开'
+            row = pg.locator('#spmw tbody tr').first.inner_text()
+            for w in ('买入', '16.63' if '16.63' in row else str(f['price'])):
+                assert w in row, '明细行少了「%s」：%r' % (w, row)
+            pg.click('#spmt'); pg.wait_for_timeout(300)
+            assert not pg.locator('#spmw').is_visible(), '再点收不起来'
+            # ---- K 线读数必须有【涨跌幅】----
+            st = pg.evaluate("() => SP.geo.step")
+            bb2 = cv.bounding_box()
+            pg.mouse.move(bb2['x'] + (f['x'] - st * 30) / sc,
+                          bb2['y'] + bb2['height'] * 0.4)
+            pg.wait_for_timeout(500)
+            kt = pg.locator('#sptip').inner_text()
+            # 🔴 `'%' in kt` 太宽 —— 去掉涨跌幅后「换手 1.22%」里还有个 %，
+            #   断言照过（变异实测）。判据是 pctv 输出的**带符号**百分数。
+            import re as _re2
+            assert _re2.search(r'[+-]\d+\.\d+%', kt) and ('昨收' in kt), \
+                ('K 线读数少了涨跌幅或昨收 —— 看 K 线第一个想知道的就是'
+                 '"那天涨跌多少"，只给 OHLC 得自己拿收盘除昨收：%r' % kt)
+            for w in ('开', '高', '低', '收', '量'):
+                assert w in kt, 'K 线读数少了「%s」：%r' % (w, kt)
+            notes.append('B/S 圆点 %d 个 · 明细默认折起 · K 线读数带涨跌幅'
+                         % d['nh'])
             b.close()
     finally:
         httpd.shutdown()
