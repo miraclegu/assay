@@ -20,6 +20,10 @@
      不拖垮整页 —— 看 K 线的时候不该因为"解禁表读不了"整页白屏。 */
 let CODE = qs('code') || localStorage.getItem('skcode') || '';
 let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq', SUB = qs('sub') || 'macd';
+/* 对数坐标：线性轴上「涨 1 块」在 10 元和 100 元处占同样高度，于是长
+   区间里低价那一段的波动被压平 —— 翻倍的行情看着像条平线。默认关
+   （对着券商软件看的是线性），存进 URL 所以能加书签。 */
+let KLOG = qs('log') === '1';
 /* BOLL 叠主图：**默认关**。原来只要选了副图就无条件叠上去，于是主图有
    7 条线；而 BOLL 中轨就是 MA20（同一条线画两遍），上下轨的橙色又与
    MA5 撞色 —— 表现正是"5 日线看着有两条、两条都不对"。 */
@@ -133,6 +137,8 @@ function chartBox(k, ind) {
       <span class="lvwhy">|</span>
       ${SUBS.map(([s, t]) => `<a href="#" class="lvtag sb${SUB === s ? ' on' : ''}" data-s="${s}">${t}</a>`).join('')}
       <span class="lvwhy">|</span>
+      <a href="#" class="lvtag${KLOG ? ' on' : ''}" id="klogt"
+        title="对数坐标：等百分比涨幅 = 等高度。&#10;看几年的走势用它才可比 —— 线性轴会把低价那一段的波动压平">对数</a>
       <a href="#" class="lvtag${BOLL ? ' on' : ''}" id="bollt"
         title="布林带（20±2σ）叠主图。默认关：主图已有 4 条均线，&#10;而 BOLL 中轨就是 MA20（同一条线），所以这里只画上下轨">BOLL</a>
       <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
@@ -329,6 +335,15 @@ function wire() {
     ev.preventDefault(); FQ = e.dataset.f; nav({fq: FQ}); load(); });
   $$('#body .sb').forEach(e => e.onclick = ev => {
     ev.preventDefault(); SUB = e.dataset.s; nav({sub: SUB}); load(); });
+  /* ★ 只**重画**，不重新取数 —— 换的是坐标映射，数据一个字没变
+     （同 BOLL 那个按钮）。 */
+  if ($('#klogt')) $('#klogt').onclick = ev => {
+    ev.preventDefault();
+    KLOG = !KLOG;
+    nav({log: KLOG ? '1' : ''});
+    ev.currentTarget.classList.toggle('on', KLOG);
+    geo = redraw();
+  };
   if ($('#bollt')) $('#bollt').onclick = ev => {
     ev.preventDefault();
     BOLL = !BOLL;
@@ -398,7 +413,7 @@ function redraw() {
        带上就是同一条线画两遍（kchart 那边也不画中轨，两处都堵住）。 */
   const bars = (BOLL && IND) ? BARS.map((b, i) => IND[i]
     ? Object.assign({}, b, {ub: IND[i].ub, lb: IND[i].lb}) : b) : BARS;
-  return drawKChart(cv, {bars: bars, events: SHOWEV ? EVS : [],
+  return drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
     sub: SUB ? IND : null, subKind: SUB, hover: HOVER});
 }
 </script>

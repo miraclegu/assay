@@ -796,3 +796,43 @@ def api_live_trades_of(q):
         return {'code': m.normalize_code(code), 'trades': m.trades_of(code)}
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
+
+def api_live_bench(q):
+    """GET /api/live/bench?id=[&force=1] —— 绑定策略的理论曲线。
+
+    实盘的实际操作与绑定策略**必然有差异**（漏单、价格不同、手工加减），
+    所以业绩页要两条曲线：实际（TWR）与策略（完全照做）。
+    ★ 跑一次回测要 0.5~几秒，所以三层缓存（进程内 -> 旁挂 -> 真跑），
+      缓存键含 `data_fingerprint`（数据修正过必须重算）。
+    """
+    aid = q.get('id') or ''
+    if not aid:
+        return {'error': '缺 id'}
+    from ..lv import bench as _b
+    try:
+        return _b.compute(aid, force=(q.get('force') == '1'))
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
+
+def api_live_exec_diff(q):
+    """GET /api/live/exec_diff?id=[&date=] —— 每期「策略说什么 vs 实际做了什么」。
+
+    🔴 **调仓提示本来就以实际持仓为准**（`lv/sig.py` 的 `_seed` 用
+      `fifo_lots(真实成交流水)` 播种），所以这里比的是**执行**：
+      提示的 10 只买了几只、股数与价格差多少。
+    🔴 股数**按本金归一化后再比** —— 实测 froec 09-01 那份信号是按 100 万
+      算的（账户后来改成 40 万），不归一化会把 10 只里 9 只判成"买少了"，
+      而那根本不是执行差异。
+    """
+    aid = q.get('id') or ''
+    if not aid:
+        return {'error': '缺 id'}
+    from ..lv import bench as _b
+    d = q.get('date')
+    try:
+        if d:
+            return _b.diff_one(aid, d)
+        return {'items': _b.diff_history(aid, limit=int(q.get('limit') or 60))}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}

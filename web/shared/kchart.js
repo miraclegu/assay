@@ -53,17 +53,40 @@ function drawKChart(cv, opts) {
     vmax = Math.max(vmax, b.volume || 0);
   });
   if (!isFinite(lo) || !isFinite(hi)) return null;
-  const pad = (hi - lo) * 0.06 || 1;
-  lo -= pad; hi += pad;
+  /* 🔴 **对数坐标**（opts.log）。为什么 K 线需要它：线性轴上"涨 1 块"
+     在 10 元和 100 元处占同样的高度，于是看长区间时**低价那一段的波动被
+     压平**，翻倍的行情看着像一条平线。对数轴上等百分比 = 等高度，
+     几年的走势才可比。
+     ★ 只换坐标映射，**数据一个字不动** —— 蜡烛、MA、BOLL、买卖点、
+       十字光标读数全都走这同一个 `Y`，所以改这一处就够（不用逐处改）。
+     🔴 `log10` 的定义域要求 v > 0：价格理论上恒正，但**面板里可能有 0
+       或 null**（停牌补的行、脏数据），`Math.log10(0)` 是 -Infinity，
+       会让整张图的坐标变成 NaN —— 一片空白且不报错。所以下界兜到一个
+       正数，并且 lo 也不再按线性减 pad（那会减成负数）。 */
+  const LOG = !!opts.log && lo > 0;
+  const lg = v => Math.log10(v > 0 ? v : 1e-9);
+  let plo, phi;
+  if (LOG) {
+    plo = lg(lo); phi = lg(hi);
+    const p2 = (phi - plo) * 0.06 || 0.01;
+    plo -= p2; phi += p2;
+  } else {
+    const pad = (hi - lo) * 0.06 || 1;
+    plo = lo - pad; phi = hi + pad;
+  }
   const n = bars.length, step = w / n, bw = Math.max(1, step * 0.7);
   const X = i => PADL + step * (i + 0.5);
-  const Y = v => PADT + mainH - (v - lo) / (hi - lo) * mainH;
+  const Y = v => PADT + mainH
+    - ((LOG ? lg(v) : v) - plo) / (phi - plo) * mainH;
   const VY = v => volTop + volH - (vmax ? v / vmax * volH : 0);
 
   g.font = '10px ui-monospace,Menlo,monospace';
   g.textAlign = 'right';
   for (let i = 0; i <= 4; i++) {
-    const v = lo + (hi - lo) * i / 4, y = Y(v);
+    /* ★ 刻度在**当前坐标系里**均分，再映回价格 —— 对数轴上线性均分的话
+       上半张图会挤成一团（同一段像素高度对应的价差不一样）。 */
+    const t = plo + (phi - plo) * i / 4;
+    const v = LOG ? Math.pow(10, t) : t, y = Y(v);
     g.strokeStyle = LINE; g.globalAlpha = .5;
     g.beginPath(); g.moveTo(PADL, y); g.lineTo(W - PADR, y); g.stroke();
     g.globalAlpha = 1;

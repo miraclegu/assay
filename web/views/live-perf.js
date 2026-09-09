@@ -25,6 +25,11 @@ let LPS = null;          // 按区间裁剪 + 重新归一化后的数据
    "我赚了多少 / 跑赢基准了吗"，而不是"账上有多少钱"（那在 KPI 板里
    已经有了）。资金与回撤是往后翻的。 */
 let LPC = 'nav';         // nav=收益 | eq=资金 | dd=回撤
+/* 策略曲线（完全照做）与每期执行差异 —— 见 lv/bench.py。
+   🔴 实盘与绑定策略**必然有差异**，两条曲线摆一起才看得出执行的代价。 */
+let LPBCH = null, LPXD = null, LPBCH_NOTE = '';
+let LPSTRAT = (() => { try { return localStorage.getItem('lpstrat') !== '0'; }
+                       catch(e){ return true; } })();
 /* 选中的基准（收益曲线上叠加）。
    ★ **单选**：同时看多个基准没有意义 —— 三条线以上就看不清，而"我的策略
      跑赢谁"一次问一个就够。选新的自动换掉旧的，点已选中的取消。
@@ -62,6 +67,20 @@ function showPerf(aid){
   /* ★ 一次把**全部**基准取回来，之后切换只改显示 —— 零额外请求。
      每次勾选都重新请求的话，服务端要重放整条权益曲线（几秒），
      而勾选是随手点的动作，那个延迟会让人以为卡住了。 */
+  /* ★ 三份并行：权益 + 策略曲线 + 执行差异。策略曲线要跑一次回测
+     （服务端三层缓存），拉不到就只画实际那条 —— 不让它拖住整页。 */
+  Promise.all([
+    j('/api/live/bench?id=' + encodeURIComponent(aid)).catch(e => ({error: String(e)})),
+    j('/api/live/exec_diff?id=' + encodeURIComponent(aid)).catch(() => ({items: []})),
+  ]).then(([bch, xd]) => {
+    LPBCH = bch; LPXD = xd;
+    /* 🔴 **竞态**：这三份是并行拉的，谁先回来不定。头一版写
+       `if(LPD) render...` —— 而这一支常常比权益那支先回来，那时 LPD
+       还是 null，于是什么都不渲染；之后权益回来只调了 renderChart，
+       **执行差异块永远是空的**（数据在 LPXD 里躺着，且不报错）。
+       所以两支都要调，各自判自己依赖的数据齐没齐。 */
+    if(LPD){ renderChart(aid); renderExec(aid); }
+  });
   j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL).then(o => {
     LPD = o; renderPerf(aid);
   }).catch(e => { b.innerHTML = '<div class="none">' + esc(e) + '</div>'; });
@@ -109,7 +128,9 @@ function renderPerf(aid){
     + '<div id="lp_rgwrap"></div>'
     + '<div class="lpbar" id="lp_tab"></div>'
     + '<div id="lp_chart" class="lpbox"></div>'
-    + '<div id="lp_tbl" class="lpbox"></div>';
+    + '<div id="lp_tbl" class="lpbox"></div>'
+    /* ★ 执行差异放在收益表之后：它是复盘时才看的，而「我涨了多少」是第一眼要看的。 */
+    + '<div id="lp_exec" class="lpbox"></div>';
   /* 🔴 曲线与收益明细都用**裁剪后**的数据（LPS），KPI 板用**全程**
      （上面那四格标着 TWR/最大回撤，是开户至今的口径）——
      两者混着看会以为对不上，所以区间条下面单独给这一段的收益。 */
@@ -121,6 +142,8 @@ function renderPerf(aid){
     LPS = null;
   }
   renderChart(aid);
+  /* ★ 执行差异也在这里调一次：它的数据可能**先**到（见上面那条竞态）。 */
+  renderExec(aid);
   renderPerfTable(aid);
 }
 
@@ -295,7 +318,38 @@ function renderChart(aid){
     const BM = o.benchmarks || [], BD = o.bench || {};
     const picks = LPB.filter(c => BD[c]);
     const extra = [{n: '累计金额', v: cum, fmt: money}];
-    const series = [{n: '净值 (TWR)', v: o.nav, c: '#e0b050', w: 2}];
+    const series = [{n: '实际 (TWR)', v: o.nav, c: '#e0b050', w: 2}];
+    /* ---- 「策略」曲线：完全按绑定版本做会怎样 ----
+       🔴 它与实际的差 = **执行的代价**（漏单、价格、手工调整），
+         而不是策略好坏。两条同起点、同本金、同费率，所以差异只剩执行。
+       ★ 对齐用**日期**而不是下标：两边交易日可能不等长（策略曲线从
+         开户日起算，而权益曲线盘中会多补今天那一点）—— 按下标并的话
+         错一位就整条线平移，而它不报错。 */
+    if(LPSTRAT && LPBCH && !LPBCH.error && LPBCH.dates){
+      const m = {};
+      LPBCH.dates.forEach((d, i) => { m[d] = LPBCH.nav[i]; });
+      const sv = o.dates.map(d => m[d] == null ? null : m[d]);
+      if(sv.some(v => v != null))
+        series.push({n: '策略 (完全照做)', v: sv, c: '#7ec8a0', w: 1.6});
+      /* ★ 两条线的**基点都是本金** —— 策略那条若拿首日收盘做基点，
+         就等于把它首日的涨跌排除在外，差异里会混进「起点差」。
+       ★ 末尾那一天策略常常**没有值**：面板到昨天，而实际那条盘中会用
+         实时价多补一点 —— 不说明的话看着像策略线断了。 */
+      LPBCH_NOTE = (() => {
+        const last = o.dates[o.dates.length - 1];
+        const miss = m[last] == null;
+        const d0 = (o.nav[0] != null && sv[0] != null)
+          ? (o.nav[0] - sv[0]) * 100 : null;
+        return `<b style="color:#7ec8a0">策略</b>：按绑定版本 ${
+          esc((LPBCH.sha || "").slice(0, 8))} 与当时参数、同本金同费率
+          <b>完全照做</b>的净值。两条差异 = <b>执行的代价</b>
+          （漏单 / 价格 / 手工加减），不是策略好坏。
+          ${d0 == null ? "" : `首日就差 <b>${(d0 >= 0 ? "+" : "") +
+            d0.toFixed(2)}pp</b>（调仓日与实际建仓日不同步时会这样）。`}
+          ${miss ? "最后一天策略没有值 —— 面板到昨天，而实际那条盘中" +
+            "用实时价多补了一点。" : ""}`;
+      })();
+    }
     picks.forEach((c, i) => {
       const b = BM.find(x => x.code === c) || {code: c, name: c};
       /* ★ 基准只进 `series` —— lineChart 的 tooltip 会自动列出所有
@@ -326,6 +380,7 @@ function renderChart(aid){
                + '指数是<b>日线收盘</b>，所以盘中的今天基准还没有点，曲线断在'
                + '昨天 —— 那不是缺数据。'
              : '')
+          + (LPBCH_NOTE ? '<br>' + LPBCH_NOTE : '')
           + '</div>'});
     /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
@@ -340,8 +395,9 @@ function renderChart(aid){
     /* 🔴 `hiCap: 0` —— 回撤的最高点**永远是 0**（在最高点时回撤为 0，
        不可能为正）。不钳的话 y 轴留白会显示成 +0.1%，而那个数没有意义，
        读的人会以为"曾经比历史最高还高 0.1%"。 */
-    lineChart(el, [{n: '回撤', v: dd, c: '#f05b5b'}],
-      {dates: o.dates, h: 300, ratioAxis: true, hiCap: 0,
+    lineChart(el, [{n: '回撤', v: ddGap(dd), c: '#f05b5b', w: 1.3,
+                    fill: '#f05b5b'}],
+      {dates: o.dates, h: 300, ratioAxis: true, hiCap: 0, zero: 0,
        ctl: rgNote(o) + '<div class="note">距历史最高还差多少。峰值从<b>起点资金</b>'
           + '起算 —— 只看曲线上的点会把第一天的下跌算成"没有回撤"。　最深 '
           + (st.max_drawdown == null ? '—'
@@ -444,4 +500,100 @@ function renderPerfTable(aid){
     LPV.ym = c.dataset.ym; LPV.gran = 'day'; re(); });
   el.querySelectorAll('.hc[data-y]').forEach(c => c.onclick = () => {
     LPV.gran = 'month'; re(); });
+}
+
+/* ============ 每期「策略说什么 vs 实际做了什么」============
+   🔴 **调仓提示本来就以实际持仓为准**（`lv/sig.py` 的 `_seed` 把
+     `fifo_lots(真实成交流水)` 播种进引擎，让策略跑自己的代码路径）——
+     所以这一块比的不是"提示对不对"，而是**执行**：提示的 10 只买了几只、
+     股数与价格差多少。
+   🔴 股数**按本金归一化后再比**（服务端做）：实测 froec 09-01 那份信号是
+     按 100 万算的（账户后来改成 40 万），不归一化会把 10 只里 9 只判成
+     "买少了"，而那根本不是执行差异 —— 页面上必须把这个比例说出来，
+     否则"要 9300 股、实买 3700"看着就是没照做。 */
+const XD_LABEL = {
+  ok: ['照做', ''],
+  missed: ['没买', 'warn'],
+  short: ['买少了', 'warn'],
+  over: ['买多了', 'warn'],
+  extra: ['提示外买入', 'warn'],
+  sell_miss: ['没卖', 'warn'],
+  sell_extra: ['提示外卖出', 'warn'],
+};
+
+function renderExec(aid){
+  const el = $('#lp_exec');
+  if(!el) return;
+  const xd = LPXD || {};
+  const items = xd.items || [];
+  if(xd.error){
+    el.innerHTML = `<div class="warn">执行差异取不到：${esc(xd.error)}</div>`;
+    return;
+  }
+  if(!items.length){
+    el.innerHTML = '<div class="lvwhy">还没有可比对的调仓期'
+      + '（要有信号、且那天有成交或有提示）。</div>';
+    return;
+  }
+  /* ★ 汇总先给：一眼看出"照做了几期、差在哪" —— 逐期表格是往下翻的。 */
+  const tot = {};
+  items.forEach(it => Object.entries(it.counts || {}).forEach(
+    ([k, v]) => { tot[k] = (tot[k] || 0) + v; }));
+  const nClean = items.filter(it => it.clean).length;
+  const pxs = items.map(it => it.px_diff_avg).filter(v => v != null);
+  const pxAvg = pxs.length ? pxs.reduce((a, b) => a + b, 0) / pxs.length : null;
+
+  el.innerHTML = `<div class="lpttl">执行差异
+      <span class="lvwhy">${items.length} 期 · 完全照做 ${nClean} 期${
+        pxAvg == null ? '' : ' · 平均价差 ' + pctv(pxAvg * 100)}</span>
+    </div>
+    <div class="lvwhy" style="margin-bottom:8px">
+      调仓提示用的是<b>实际持仓</b>（成交流水重建），所以这里比的是<b>执行</b>：
+      提示的票买了几只、股数与价格差多少。
+      ${Object.entries(tot).filter(([k]) => k !== 'ok').length
+        ? '合计 ' + Object.entries(tot).filter(([k]) => k !== 'ok').map(
+            ([k, v]) => `<b>${(XD_LABEL[k] || [k])[0]} ${v}</b>`).join(' · ')
+        : '<b>每一期都照做了。</b>'}
+    </div>
+    ${items.map(it => xdSection(it)).join('')}`;
+}
+
+function xdSection(it){
+  const bad = (it.rows || []).filter(r => r.kind !== 'ok');
+  return `<div class="lvsec xds">
+    <h3>${esc(it.date)}
+      ${it.is_rebalance_day ? '<span class="lvwhy">调仓日</span>' : ''}
+      <span class="lvwhy">提示买 ${it.n_want_buy} 卖 ${it.n_want_sell}</span>
+      ${it.clean ? '<span class="lvwhy" style="color:var(--down)">✓ 照做</span>'
+        : `<span class="warn">${bad.length} 处不同</span>`}
+      ${it.px_diff_avg == null ? ''
+        : `<span class="lvwhy">价差均 ${pctv(it.px_diff_avg * 100)}</span>`}
+    </h3>
+    ${it.scale_why ? `<div class="lvwhy" style="margin:0 0 6px">
+        ⓘ ${esc(it.scale_why)}</div>` : ''}
+    <div class="pw"><table class="lvt xdt"><thead><tr>
+      <th>代码</th><th class="tx">名称</th><th class="tx">差异</th>
+      <th>提示股数</th><th>实际股数</th>
+      <th>参考价</th><th>成交价</th><th>价差</th><th>笔数</th>
+    </tr></thead><tbody>${(it.rows || []).map(r => {
+      const [lbl, cls] = XD_LABEL[r.kind] || [r.kind, ''];
+      const wantSh = r.want_shares_scaled != null
+        ? `${num(r.want_shares_scaled, 0)}<span class="lvwhy"> (原 ${
+            num(r.want_shares, 0)})</span>`
+        : (r.want_shares == null ? '—' : num(r.want_shares, 0));
+      return `<tr class="${r.kind === 'ok' ? '' : 'xdbad'}">
+        <td>${spLink(r.code, r.code)}</td>
+        <td class="tx">${spLink(r.code, r.name || '')}</td>
+        <td class="tx ${cls}">${lbl}</td>
+        <td>${wantSh}</td>
+        <td>${r.got_buy != null ? num(r.got_buy, 0)
+              : (r.got_sell != null ? '-' + num(r.got_sell, 0) : '—')}</td>
+        <td>${r.ref_price == null ? '—' : num(r.ref_price, 2)}</td>
+        <td>${r.got_px == null ? '—' : num(r.got_px, 3)}</td>
+        <td style="color:${r.px_diff == null ? '' : upc(r.px_diff)}">${
+          r.px_diff == null ? '—' : pctv(r.px_diff * 100)}</td>
+        <td class="lvwhy">${r.n_fills || '—'}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>
+  </div>`;
 }

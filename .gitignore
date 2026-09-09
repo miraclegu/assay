@@ -26,3 +26,4 @@ live/**/__pycache__/
 # 它按【当前绑定版本】算，重绑一次就整份重生成 —— 入库只会制造无意义的 diff。
 # 删了也不丢东西：下次打开选股理由页会自动重算（见 srv/live.py `_explain_kick`）。
 live/*/signals/_explain/
+live/*/_bench/

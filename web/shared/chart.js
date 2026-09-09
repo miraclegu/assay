@@ -17,6 +17,8 @@ function _money(v, dp){
 }
 
 
+let _gidN = 0;
+
 function lineChart(el,series,opt){
   opt=opt||{}; const W=1160,H=opt.h||330,L=54,R=16,T=opt.t||22,B=26;
   const n=series[0].v.length; if(!n){el.innerHTML='<div class="note">无数据</div>';return;}
@@ -38,6 +40,27 @@ function lineChart(el,series,opt){
   const path=s=>{let d='',on=false;
     s.v.forEach((v,i)=>{if(v==null){on=false;return;}
       d+=(on?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' ';on=true;});return d;};
+  /* 面积填充：每一段（null 之间）单独闭合到基线。
+     🔴 **逐段闭合，不是整条闭合** —— 整条的话中间那些 null（水面上的日子）
+       会被一条直线跨过去，填出一片"其实没有回撤"的红色。
+     ★ 水下图的面积本身就是信息：它同时说出"跌了多深"和"在水下待了多久"，
+       而单看曲线只能看出深度。 */
+  const area=(s,baseV)=>{
+    const yb=Y(baseV).toFixed(1); let d='',seg=[];
+    const flush=()=>{
+      if(seg.length<1){seg=[];return;}
+      d+='M'+seg[0][0]+' '+yb+' ';
+      seg.forEach(([x,y])=>{d+='L'+x+' '+y+' ';});
+      d+='L'+seg[seg.length-1][0]+' '+yb+' Z ';
+      seg=[];
+    };
+    s.v.forEach((v,i)=>{
+      if(v==null){flush();return;}
+      seg.push([X(i).toFixed(1),Y(v).toFixed(1)]);
+    });
+    flush();
+    return d;
+  };
   // y 轴刻度
   let ticks=[];
   for(let k=0;k<=4;k++){const t=lo+(hi-lo)*k/4; ticks.push(log?Math.pow(10,t):t);}
@@ -57,6 +80,7 @@ function lineChart(el,series,opt){
     :opt.ratioAxis?(v*100).toFixed(1)+'%'
     :(v>=10?v.toFixed(0)+'x':v.toFixed(2)+'x');
   // x 轴：取 6 个日期
+  const _gid = "g" + (++_gidN);
   const xs=[]; for(let k=0;k<6;k++){const i=Math.round((n-1)*k/5); xs.push([i,opt.dates[i]]);}
   el.innerHTML=`
    ${opt.title?`<div class="ttl">${opt.title}</div>`:''}
@@ -65,6 +89,27 @@ function lineChart(el,series,opt){
      ${ticks.map(v=>`<line class="gl" x1="${L}" x2="${W-R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/>
         <text class="ax" x="${L-7}" y="${(Y(v)+3).toFixed(1)}" text-anchor="end">${yl(v)}</text>`).join('')}
      ${xs.map(([i,d])=>`<text class="ax" x="${X(i).toFixed(1)}" y="${H-8}" text-anchor="middle">${d}</text>`).join('')}
+     <!-- 水下填充用**渐变**：靠水面几乎透明、越深越浓 —— 均匀一层的话
+          浅回撤区域（大部分时间）糊成一片脏色，而"深度"这个信息也丢了。
+          🔴 每个图的渐变 id 必须**唯一**（见 _gid）：同一页面上有多张图
+            （回测详情页 c1/c2、实盘业绩页三条曲线），id 撞了的话后一个
+            定义会赢，表现是"某张图的填充色莫名变了"，而它不报错。 -->
+     ${series.filter(s=>s.fill).length?`<defs>${
+        series.filter(s=>s.fill).map((s,k)=>
+          `<linearGradient id="${_gid}_${k}" x1="0" y1="0" x2="0" y2="1">
+             <stop offset="0" stop-color="${s.fill}" stop-opacity="0.05"/>
+             <stop offset="1" stop-color="${s.fill}" stop-opacity="0.55"/>
+           </linearGradient>`).join('')}</defs>`:''}
+     ${series.filter(s=>s.fill).map((s,k)=>
+        `<path d="${area(s,opt.zero==null?lo:opt.zero)}"
+           fill="url(#${_gid}_${k})" stroke="none"/>`).join('')}
+     <!-- 水面线（0 基准）。★ 与网格线**不同色**：网格是刻度，这一条是
+          "有没有回撤"的分界 —— 曲线贴着它走的那几段就是创新高。
+          🔴 颜色刻意淡（不抢曲线）但要能认出来，所以换个色系（偏蓝=水面）
+            而不是把灰网格加深：加深的话它看着还是"某一条刻度线"。 -->
+     ${opt.zero==null?'':`<line x1="${L}" x2="${W-R}"
+        y1="${Y(opt.zero).toFixed(1)}" y2="${Y(opt.zero).toFixed(1)}"
+        stroke="rgba(91,156,240,.55)" stroke-width="1"/>`}
      ${series.map(s=>`<path d="${path(s)}" fill="none" stroke="${s.c}"
         stroke-width="${s.w||1.6}" stroke-linejoin="round"/>`).join('')}
      <!-- hover 高亮：一条竖线 + 每条线上一个圆点 + 顶部日期。
@@ -161,6 +206,16 @@ function perfBuckets(dates, equity, base, pnls){
    🔴 `base` = **起点资金**。峰值从它起算，不是从曲线第一个点起算 ——
      第一天就跌的话，只看曲线上的点会把那次下跌算成"没有回撤"
      （CLAUDE.md 里 perf.py 的 max_drawdown 修过同一个坑）。 */
+/* 水下图里"在水面上"的那几段**不画** —— 回撤 = 0 表示刚创新高，那不是
+   "深度 0 的水下"，而是**根本不在水下**。画成贴顶的实线会让人以为
+   那段也有回撤（只是很小），而"没有回撤"和"回撤 0.0%"读起来是两回事。
+   🔴 一处定义：回测详情页与实盘业绩页都得这么画，两处各写一份
+     `v === 0 ? null : v` 的话，改一处漏一处不报错、只是两页长得不一样。
+   ★ 断开就是语义本身：线断的地方 = 在水面上。 */
+function ddGap(dd){
+  return dd.map(v => (v == null || v === 0) ? null : v);
+}
+
 function drawdownSeries(equity, base){
   const out=[]; let pk=(base==null?-Infinity:base);
   for(const v of equity){

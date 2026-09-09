@@ -9917,6 +9917,133 @@ def t_updown_color():
                                         tuple(r['flatRGB'])))
 
 
+@case('K 线对数坐标 / 回撤图顶到 0 且水面上不画（playwright）', tag='web')
+def t_log_and_dd():
+    """用户："K线图需要支持对数"、"回撤水下图最高刻度应该是 0.0%，没有发生
+    回撤的那一段线是不是应该没有颜色？"
+
+      ① 对数坐标要**真的是对数**：判据是**几何等距性** —— 造等比数列
+         10/20/40/80，线性轴上间距是 1:2:4，对数轴上必须相等。
+         只查"传了 log 参数"抓不到映射写错（那才是会出错的地方）
+      ② 回撤图最高刻度是 `0%`：`lineChart` 默认在顶端留 6% 白，会印出
+         `+0.4%` —— 那个数**没有意义**（不可能比历史最高还高），
+         读的人会当成"曾经超出过"。要传 hiCap
+      ③ 回撤 = 0 的那几段**不画**：那是"在水面上"，不是"水下 0.0%"。
+         判据是 path 的 `M` 段数 > 1（断开了）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import glob
+    import json as _json
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    rid = None
+    for m in sorted(glob.glob('runs/*/*/*/meta.json'), reverse=True)[:80]:
+        if os.path.isfile(os.path.join(os.path.dirname(m), 'equity.parquet')):
+            rid = _json.load(open(m, encoding='utf-8')).get('run_id')
+            break
+    if not rid:
+        return '跳过（没有带权益曲线的归档）'
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            # ---- ① 对数坐标的几何等距性 ----
+            pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port)
+            pg.wait_for_timeout(4000)
+            assert pg.locator('#klogt').count() == 1, '个股页没有「对数」按钮'
+            r = pg.evaluate("""() => {
+              const cv = document.createElement('canvas');
+              cv.width = 400; cv.height = 400;
+              cv.style.width = '400px'; cv.style.height = '400px';
+              document.body.appendChild(cv);
+              const bars = [10, 20, 40, 80].map((v, i) => ({
+                date: '2026-01-0' + (i + 1), open: v, high: v, low: v,
+                close: v, volume: 100}));
+              const probe = lg => {
+                const geo = drawKChart(cv, {bars: bars, log: lg});
+                const g = cv.getContext('2d');
+                const ys = [];
+                for(let i = 0; i < 4; i++){
+                  const x = Math.round(geo.X(i));
+                  const d = g.getImageData(x, 0, 1, 400).data;
+                  for(let y = 0; y < 400; y++)
+                    if(d[y * 4 + 3] > 150){ ys.push(y); break; }
+                }
+                return ys;
+              };
+              const gaps = a => [a[1] - a[0], a[2] - a[1], a[3] - a[2]];
+              const lin = probe(false), log = probe(true);
+              return {lin: gaps(lin), log: gaps(log), nlin: lin, nlog: log};
+            }""")
+            assert len(r['nlog']) == 4 and len(r['nlin']) == 4, \
+                '探针只取到 %r / %r 个点 —— 构造不对' % (r['nlin'], r['nlog'])
+            lg, ln = r['log'], r['lin']
+            assert max(ln) - min(ln) > 10, \
+                '线性轴上等比数列的间距居然是均匀的 %r —— 构造不对，这条测不到' % ln
+            assert max(lg) - min(lg) <= 2, \
+                ('对数轴上等比数列 10/20/40/80 的间距是 %r，应当相等 —— '
+                 '坐标映射写错了（只查"传了 log 参数"是抓不到这个的）' % lg)
+            # 按钮点了要真的重画（不重新取数）
+            pg.click('#klogt')
+            pg.wait_for_timeout(800)
+            assert 'log=1' in pg.url, '「对数」没写进 URL（书签会丢掉这个状态）'
+            assert 'on' in (pg.locator('#klogt').get_attribute('class') or ''), \
+                '「对数」按钮点了没高亮'
+            notes.append('对数轴等距（线性 %r -> 对数 %r）' % (ln, lg))
+
+            # ---- ②③ 回撤图 ----
+            pg.goto('http://127.0.0.1:%d/#/run/%s' % (port, rid))
+            pg.wait_for_timeout(4500)
+            pg.evaluate("() => tab(1)")          # 权益页签
+            pg.wait_for_timeout(1800)
+            d = pg.evaluate("""() => {
+              const c2 = document.getElementById('c2');
+              if(!c2) return null;
+              const ys = [...c2.querySelectorAll('text.ax')]
+                .filter(t => +t.getAttribute('x') < 60)
+                .map(t => ({y: +t.getAttribute('y'), s: t.textContent}))
+                .sort((a, b) => a.y - b.y);
+              const path = c2.querySelector('path[d]');
+              const dd = path ? path.getAttribute('d') : '';
+              return {ticks: ys.map(o => o.s),
+                      nM: (dd.match(/M/g) || []).length,
+                      vis: !!(c2.querySelector('svg') || {}).getBoundingClientRect
+                           && c2.querySelector('svg').getBoundingClientRect().height > 0};
+            }""")
+            assert d and d['vis'], \
+                '回撤图不可见 —— `#c2` 在 `.pane` 里（样式表 display:none），' \
+                '要先 tab(1)'
+            assert d['ticks'], '回撤图没有 y 轴刻度'
+            top = d['ticks'][0].strip().lstrip('+')
+            assert top.startswith('0'), \
+                ('回撤图最高刻度是 %r，应当是 0 —— lineChart 默认在顶端留 6%% 白，'
+                 '会印出 +0.4%%，而"比历史最高还高"是没有意义的数（要传 hiCap）'
+                 % d['ticks'][0])
+            assert d['nM'] > 1, \
+                ('回撤曲线只有 1 个 M 段（一整条连着）—— 回撤 = 0 的那几段'
+                 '是"在水面上"，不该画成贴顶的实线')
+            notes.append('回撤顶到 %s · 水面上断成 %d 段' % (top, d['nM']))
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

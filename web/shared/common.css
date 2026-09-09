@@ -718,3 +718,9 @@ a.spl.accent{color:var(--accent)}
 #spwrap .spfold.on .sparr{transform:rotate(90deg)}
 #spwrap .spmw{display:none}
 #spwrap .spmw.on{display:block}
+/* 执行差异：不同的那几行标出来 —— 一屏十几行时要能一眼扫到 */
+#lp_exec .xds{margin-top:10px}
+#lp_exec table.xdt{font-size:12px}
+#lp_exec tr.xdbad{background:rgba(224,163,60,.07)}
+#lp_exec .warn{color:var(--warn)}
+#lp_exec .lpttl{font-weight:600;margin-bottom:4px}

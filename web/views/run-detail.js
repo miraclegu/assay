@@ -171,8 +171,19 @@ function paneEquity(){
     ctl:`<div class="ctl"><span class="${EQLOG?'on':''}" id="lg">对数</span><span class="${EQLOG?'':'on'}" id="ln">线性</span></div>`});
   $('#lg').onclick=()=>{EQLOG=true;paneEquity();};
   $('#ln').onclick=()=>{EQLOG=false;paneEquity();};
-  lineChart($('#c2'),[{n:'回撤',v:dd.map(v=>v+1),c:'#e05b5b',w:1.4}],
-    {dates,title:'回撤（水下图）',h:190,pctAxis:true});
+  /* 🔴 `hiCap:1` —— 值是 `回撤+1`（配 pctAxis），所以回撤 0 对应 **1**。
+     不钳的话 lineChart 会在顶端多留 6%，最高刻度印成 `+0.4%` ——
+     那个数**没有意义**（不可能比历史最高还高），读的人会当成"曾经超出过"。
+     ★ 实盘业绩页早就传了 `hiCap: 0`，**这一处漏了** —— 同一个坑修过一次、
+       另一处没跟上，而它不报错，只是刻度多一截。
+     ★ `ddGap` 把回撤 0 的那几段断开：那是"在水面上"，不是"水下 0.0%"。 */
+  /* 水下图：面积 + 水面线。★ 只有一条断断续续的曲线时看不出"在水下待了
+     多久"，而那与"跌了多深"同样重要（面积 = 痛苦的总量）。
+     ★ `zero:1` 是水面（值是回撤+1，配 pctAxis）；填充色很淡，
+       曲线自己保持清晰。 */
+  lineChart($('#c2'),[{n:'回撤',v:ddGap(dd).map(v=>v==null?null:v+1),
+                       c:'#e05b5b',w:1.3,fill:'#e05b5b'}],
+    {dates,title:'回撤（水下图）',h:190,pctAxis:true,hiCap:1,zero:1});
   $('#p1').querySelectorAll('.rg[data-a]').forEach(b=>b.onclick=()=>{
     EQR={a:b.dataset.a||null,b:b.dataset.b||null}; paneEquity();});
   $('#rgo').onclick=()=>{EQR={a:$('#ra').value||null,b:$('#rb').value||null}; paneEquity();};

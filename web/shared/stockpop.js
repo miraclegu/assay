@@ -21,6 +21,10 @@
 const SP_FQ = 'bfq';
 const SP_NS = [60, 120, 250];
 let SP = null;            /* {code, n, bars, trades, prof, geo} */
+/* 对数坐标记在 localStorage：跟 4 个页面共用这个浮层，每次点开都要
+   重新切一次的话就等于没有这个开关。 */
+let SPLOG = (() => { try { return localStorage.getItem('splog') === '1'; }
+                     catch(e){ return false; } })();
 
 const spHref = c => '/stock.html?code=' + encodeURIComponent(c);
 
@@ -81,13 +85,26 @@ function spNsBar(){
   const el = document.getElementById('spns');
   if(!el) return;
   el.innerHTML = SP_NS.map(n =>
-    `<a href="#" data-n="${n}" class="${n === SP.n ? 'on' : ''}">${n}日</a>`).join('');
+    `<a href="#" data-n="${n}" class="${n === SP.n ? 'on' : ''}">${n}日</a>`).join('')
+    + `<a href="#" data-lg="1" class="${SPLOG ? 'on' : ''}"
+        title="对数坐标：等百分比涨幅 = 等高度 —— 线性轴会把低价那一段的波动压平">对数</a>`;
   /* ★ `<a href="#">` 当按钮**必须 preventDefault** —— 不拦的话会把
      location.hash 改成 '#'，在 index.html 上直接触发路由跳回目录页，
      表现是"点了没反应又好像回到了首页"，且没有任何报错。 */
   [...el.querySelectorAll('a')].forEach(a => {
-    a.onclick = ev => { ev.preventDefault(); SP.n = +a.dataset.n;
-                        spNsBar(); spLoad(); };
+    a.onclick = ev => {
+      ev.preventDefault();
+      if(a.dataset.lg){
+        /* ★ 只**重画** —— 换的是坐标映射，数据没变，不用再打接口。 */
+        SPLOG = !SPLOG;
+        try { localStorage.setItem('splog', SPLOG ? '1' : '0'); }
+        catch(e){ /* 隐私模式写不了 —— 不该因此打挂开关 */ }
+        spNsBar(); spDraw();
+        return;
+      }
+      SP.n = +a.dataset.n;
+      spNsBar(); spLoad();
+    };
   });
 }
 
@@ -218,7 +235,8 @@ function spDraw(hover){
     g.clearRect(0, 0, cv.width, cv.height);
     return;
   }
-  SP.geo = drawKChart(cv, {bars: SP.bars, trades: SP.trades, hover: hover});
+  SP.geo = drawKChart(cv, {bars: SP.bars, trades: SP.trades,
+                           log: SPLOG, hover: hover});
   spBindHover(cv);
 }
 
