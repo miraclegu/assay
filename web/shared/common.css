@@ -701,10 +701,12 @@ svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
 #spwrap .spmt{margin:14px 0 6px;font-weight:600;font-size:13px}
 #spwrap table.spt{font-size:12px}
 #spwrap .spbox>.spbody>*{min-width:0}
-/* ★ 链接看得出能点，但不抢眼 —— 表格里成片的蓝色会盖住要扫的数字。
-   虚下划线表示"点了有别的动作"（不是普通跳转）。 */
-a.spl{color:inherit;text-decoration:none;border-bottom:1px dotted var(--dim)}
-a.spl:hover{color:var(--accent,#6aa7ff);border-bottom-color:currentColor}
+/* ★ **不加下划线**（2026-09-09 用户要求）：表格里每个代码和名称都带
+   一条虚线，一屏几十行就成了一片噪声，而要扫的是数字。
+   ★ 但 hover 变色**不能一起去掉** —— 那是"这一格能点"唯一的现场
+   提示，去了就真的看不出来了。 */
+a.spl{color:inherit;text-decoration:none}
+a.spl:hover{color:var(--accent,#6aa7ff)}
 /* ★ 同行业表里**当前这只票**要标出来（原来是内联 style，改走 class）——
    不标的话"它排第几"这个信息就得自己数。 */
 a.spl.accent{color:var(--accent)}
