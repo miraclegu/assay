@@ -252,12 +252,13 @@ function spBindHover(cv){
     /* 🔴 涨跌幅必须给 —— 看 K 线第一个想知道的就是"那天涨跌多少"，
        只给 OHLC 的话得自己拿收盘除昨收。`change_pct` 面板里现成有，
        **已是**百分数（别再乘 100）；`turnover` 同样是百分数。 */
-    const up = (b.change_pct || 0) >= 0;
+    /* 🔴 三态：0 不上色（同 upc）。`>= 0` 会把平盘画成红的。 */
+    const cc = upc(b.change_pct);
     tip.innerHTML = `<b>${esc(b.date)}</b>
-      <span class="${up ? 'up' : 'dn'}">${
+      <span style="color:${cc}">${
         b.change_pct == null ? '' : pctv(b.change_pct)}</span>
       <br>开 ${num(b.open, 2)} 高 ${num(b.high, 2)}
-      <br>低 ${num(b.low, 2)} 收 <b class="${up ? 'up' : 'dn'}">${
+      <br>低 ${num(b.low, 2)} 收 <b style="color:${cc}">${
         num(b.close, 2)}</b>
       <br>昨收 ${num(b.preclose, 2)}
       <br>量 ${num((b.volume || 0) / 1e4, 1)} 万股${

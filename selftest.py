@@ -9803,6 +9803,120 @@ def t_live_nojump():
             % n_rt)
 
 
+@case('涨跌配色：0 走中性色 / K 线阳线也实心 / 一处定义（playwright）', tag='web')
+def t_updown_color():
+    """用户："涨跌幅为0的，不要用红色。K线中的红色柱子，也使用实心柱子。"
+
+      ① `upc` 是**唯一**定义，判据 `> 0` / `< 0` 两头夹 —— `>= 0` 会把
+         "平盘"并进"涨"，等于凭空报了个涨
+      ② 各视图里不许再有 `x >= 0 ? 涨色 : 跌色` 的副本：原来 `col` 在
+         live.js 里写了 4 遍、live-perf.js 2 遍，改一处漏五处**不报错**，
+         只是"这块 0 是灰的、那块还是红的"
+      ③ K 线柱体：**阳线与阴线的填充密度必须一样**（都是实心）。判据是
+         数柱体内部的像素，不是查 `strokeRect` 有没有出现 ——
+         后者连注释里的那个词都会算命中（我自己的自检就这么误报过一次）
+      ④ 平盘（收=开）的柱子用中性色
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import re as _re
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    # ---- ② 静态：不许有第二份涨跌配色 ----
+    BAD = _re.compile(r'>=\s*0\s*\?\s*[\'"]?var\(--up\)')
+    for f in _web_files('web', '.js') + _web_files('web', '.html'):
+        t = _io.open(os.path.join('web', f), encoding='utf-8').read()
+        for ln, line in enumerate(t.splitlines(), 1):
+            assert not BAD.search(line), \
+                ('%s:%d 自己写了一份涨跌配色（`>= 0 ? 涨色`）—— 它会把 0 '
+                 '画成红的。用 common.js 的 `upc`（一处定义）：%s'
+                 % (f, ln, line.strip()[:80]))
+    cj = _io.open('web/shared/common.js', encoding='utf-8').read()
+    m = _re.search(r'const upc\s*=([^;]+);', cj)
+    assert m, 'common.js 里没有 upc'
+    assert '> 0' in m.group(1) and '< 0' in m.group(1), \
+        'upc 必须用 `> 0` / `< 0` 两头夹（`>= 0` 会把 0 并进涨）：%s' % m.group(1)
+    assert '--dim' in m.group(1), 'upc 的 0 必须走中性色 --dim'
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1400, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port)
+            pg.wait_for_timeout(4000)
+            r = pg.evaluate("""() => {
+              const cv = document.createElement('canvas');
+              cv.width = 200; cv.height = 200;
+              cv.style.width = '200px'; cv.style.height = '200px';
+              document.body.appendChild(cv);
+              /* 数柱体内部的像素密度 —— 空心柱中间是背景色，密度会低一截。
+                 🔴 判据必须是**像素**，不是源码里有没有 strokeRect：
+                 那个词出现在注释里也算命中（自检误报过一次）。 */
+              const dens = (o, c) => {
+                drawKChart(cv, {bars: [{date: '2026-01-01', open: o,
+                  high: Math.max(o, c) + 1, low: Math.min(o, c) - 1,
+                  close: c, volume: 100}]});
+                const d = cv.getContext('2d').getImageData(120, 90, 8, 20).data;
+                let n = 0;
+                for(let i = 3; i < d.length; i += 4) if(d[i] > 60) n++;
+                return n;
+              };
+              /* 平盘柱子的颜色：取柱体上那一个像素 */
+              drawKChart(cv, {bars: [{date: '2026-01-01', open: 11, high: 12,
+                low: 10, close: 11, volume: 100}]});
+              const g = cv.getContext('2d');
+              const px = g.getImageData(124, 0, 1, 200).data;
+              let flatRGB = null;
+              for(let y = 0; y < 200; y++){
+                const i = y * 4;
+                if(px[i + 3] > 200){ flatRGB = [px[i], px[i+1], px[i+2]]; break; }
+              }
+              return {up: dens(10, 12), dn: dens(12, 10),
+                      zero: upc(0), pos: upc(0.01), neg: upc(-0.01),
+                      flatRGB: flatRGB};
+            }""")
+            # ③ 阳线阴线同样实心
+            assert r['up'] > 40 and r['dn'] > 40, \
+                '柱体密度太低（阳 %d / 阴 %d）—— 构造不对，这条测不到' \
+                % (r['up'], r['dn'])
+            assert abs(r['up'] - r['dn']) <= 2, \
+                ('阳线密度 %d vs 阴线 %d —— 阳线还是空心的（窄柱时描边中间'
+                 '是背景色，看着比阴线淡一档）' % (r['up'], r['dn']))
+            # ① 0 走中性
+            assert 'dim' in r['zero'], '`upc(0)` 给的是 %r —— 0 不该是涨色' % r['zero']
+            assert 'up' in r['pos'] and 'down' in r['neg'], \
+                'upc 的正负两侧不对：%r / %r' % (r['pos'], r['neg'])
+            # ④ 平盘柱子既不是涨色也不是跌色
+            assert r['flatRGB'], '取不到平盘柱子的颜色 —— 构造不对'
+            up_rgb = pg.evaluate(
+                "() => { const s = getComputedStyle(document.documentElement);"
+                "  const h = s.getPropertyValue('--up').trim();"
+                "  const d = document.createElement('div'); d.style.color = h;"
+                "  document.body.appendChild(d);"
+                "  const c = getComputedStyle(d).color;"
+                "  return c.match(/\\d+/g).slice(0, 3).map(Number); }")
+            assert r['flatRGB'] != up_rgb, \
+                '平盘（收=开）的柱子画成了涨色 %r —— 那是凭空报了个涨' % up_rgb
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return ('upc 三态（0 -> %s）· 柱体密度 阳 %d == 阴 %d（都实心）· '
+            '平盘柱子 rgb%s 不是涨色' % (r['zero'], r['up'], r['dn'],
+                                        tuple(r['flatRGB'])))
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

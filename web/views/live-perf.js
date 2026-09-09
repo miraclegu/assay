@@ -77,7 +77,7 @@ function renderPerf(aid){
   }
   const n = o.dates.length;
   const sgn = x => x == null ? '' : (x >= 0 ? '+' : '');
-  const col = x => x == null ? '' : (x >= 0 ? 'var(--up)' : 'var(--down)');
+  const col = upc;
   const pc = x => x == null ? '—' : sgn(x) + (x * 100).toFixed(2) + '%';
 
   b.innerHTML = backLink()
@@ -242,8 +242,8 @@ function rgNote(o){
     esc(o.dates[o.dates.length - 1])}</b>（${o.dates.length} 个交易日${
     o.full && o.full !== o.dates.length ? ' / 全程 ' + o.full : ''}）　`
     + (r == null ? '' : `这一段：<b style="color:${
-        r >= 0 ? 'var(--up)' : 'var(--down)'}">${sg(r)}${(r * 100).toFixed(2)}%</b>`)
-    + `　<b style="color:${p >= 0 ? 'var(--up)' : 'var(--down)'}">${
+        upc(r)}">${sg(r)}${(r * 100).toFixed(2)}%</b>`)
+    + `　<b style="color:${upc(p)}">${
         sg(p)}${num(Math.round(p), 0)}</b> 元</div>`;
 }
 

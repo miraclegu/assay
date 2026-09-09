@@ -86,15 +86,20 @@ function drawKChart(cv, opts) {
   }
   bars.forEach((b, i) => {
     if (b.close == null) return;
-    const up = b.close >= (b.open == null ? b.close : b.open);
-    const c = up ? UP : DN;
+    /* 🔴 **阳线也实心**（2026-09-09 用户要求）：原来阳线画 strokeRect（空心，
+       A 股软件的老习惯），但柱子窄的时候（120 根挤在一屏）1px 的描边中间
+       是背景色，看着比阴线**淡一档**，一眼扫过去像"涨的那些不重要"。
+       ★ 影线仍然 stroke —— 它本来就是一条线。
+       🔴 **平盘（收=开）用中性色**，不并进涨色：`>= 0` 会把"没涨"画成红的，
+       等于凭空报了个涨（同 common.js 的 `upc` 那条）。 */
+    const o0 = b.open == null ? b.close : b.open;
+    const c = b.close > o0 ? UP : b.close < o0 ? DN : cssv('--dim', '#8b97a6');
     g.strokeStyle = c; g.fillStyle = c; g.lineWidth = 1;
     const x = X(i);
     g.beginPath(); g.moveTo(x, Y(b.high)); g.lineTo(x, Y(b.low)); g.stroke();
-    const y1 = Y(Math.max(b.open, b.close)), y2 = Y(Math.min(b.open, b.close));
+    const y1 = Y(Math.max(o0, b.close)), y2 = Y(Math.min(o0, b.close));
     const hh = Math.max(1, y2 - y1);
-    if (up) g.strokeRect(x - bw / 2, y1, bw, hh);   /* 阳线空心，A 股习惯 */
-    else g.fillRect(x - bw / 2, y1, bw, hh);
+    g.fillRect(x - bw / 2, y1, bw, hh);
     g.fillStyle = c; g.globalAlpha = .55;
     g.fillRect(x - bw / 2, VY(b.volume || 0), bw, volTop + volH - VY(b.volume || 0));
     g.globalAlpha = 1;

@@ -26,6 +26,9 @@ const pctv = (v, d) => v == null ? '—'
 /* 换手/振幅/限幅不带符号 —— 它们不会为负，带个 + 读着像涨跌 */
 const pctn = (v, d) => v == null ? '—' : (+v).toFixed(d == null ? 2 : d) + '%';
 const sign = v => v == null ? '' : (v > 0 ? 'pos' : (v < 0 ? 'neg' : ''));
+/* 涨跌配色的**唯一**定义。🔴 `0` 走中性色（`--dim`）而不是涨色：
+   "平盘"和"微涨"是两件事，把 0 画成红的等于凭空报了个涨。
+   ★ 判据用 `> 0` / `< 0` 两头夹，不是 `>= 0` —— 后者会把 0 并进涨。 */
 const upc  = v => v == null ? '' : (v > 0 ? 'var(--up)' : v < 0 ? 'var(--down)' : 'var(--dim)');
 const yiv  = v => v == null ? '—'
   : Math.abs(v) >= 1e8 ? (v / 1e8).toFixed(2) + '亿'

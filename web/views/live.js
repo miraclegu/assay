@@ -160,7 +160,7 @@ const LV_RT_FIELDS = ['price', 'chg_day', 'pnl_day', 'value',
 
 function lvRtd(f, x, P){
   const sgn = v => v == null ? '' : (v >= 0 ? '+' : '');
-  const col = v => v == null ? '' : (v >= 0 ? 'var(--up)' : 'var(--down)');
+  const col = upc;
   const A = `data-rt="${esc(x.code)}|${f}"`;
   const asof = (P.asof || '').slice(0, 10);
   switch(f){
@@ -258,7 +258,7 @@ async function loadLive(aid, quiet){
   const a=o.account, sig=o.signal, ro=LV.readonly, P=o.pos||{};
   const it=P.items||[];
   const sgn=x=>x==null?'':(x>=0?'+':'');
-  const col=x=>x==null?'':(x>=0?'var(--up)':'var(--down)');
+  const col = upc;
   b.innerHTML=`
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
@@ -344,7 +344,7 @@ async function loadLive(aid, quiet){
 
 function kpiHtml(o){
   const P=o.pos||{}, sgn=x=>x==null?'':(x>=0?'+':'');
-  const col=x=>x==null?'':(x>=0?'var(--up)':'var(--down)');
+  const col = upc;
   const wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
   return `<div class="kpi">
     ${cell('总资产', num(P.equity,2), '现金 + 持仓市值', 'big')}
@@ -378,7 +378,7 @@ function kpiHtml(o){
 async function liveEquityTag(aid){
   const el=$('#kperf2'); if(!el) return;
   const pct=x=>(x==null?'—':(x>=0?'+':'')+(x*100).toFixed(2)+'%');
-  const col=x=>x==null?'':(x>=0?'var(--up)':'var(--down)');
+  const col = upc;
   try{
     const e=await j('/api/live/equity?id='+encodeURIComponent(aid));
     const st=e.stats;
