@@ -9661,6 +9661,148 @@ def t_stockpop():
     return '；'.join(notes)
 
 
+@case('实盘页刷新不许【跳动】：只换数字，DOM 与滚动位置不动（playwright）', tag='web')
+def t_live_nojump():
+    """用户的原话："刷新的时候感觉整个页面跳动了一下。是不是应该只刷新数字，
+    页面不应该跟着动。"
+
+    钉四件事，每件都对应一种**看得见但不报错**的坏法：
+      ① `quiet` 轮询**不清空**成「读取中…」—— 内容先消失、高度塌陷，
+         几百毫秒后再撑开，那就是"跳一下"的来源
+      ② DOM **结构不重建**：判据是往某一行打个 `data-mark`，刷完必须还在
+         （只比高度的话，重建出一模一样的 DOM 也算"没跳"，但 hover、
+         选中的文字、正在读的那一行都断了）
+      ③ **容器高度与滚动位置逐像素不变**
+      ④ **业绩板要原样保住**：`#kperf2` 由 `liveEquityTag` 异步补进来（轮询
+         刻意不重拉它），而 `kpiHtml` 给的只是占位「累计收益 …」——
+         整块换会把它抹回加载态，高度掉一截。实测 #lvkpi 177 -> 161
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    # ---- ① 静态：quiet 分支不许清空 ----
+    src = _io.open('web/views/live.js', encoding='utf-8').read()
+    fn = src[src.index('async function loadLive'):]
+    fn = fn[:fn.index('\n}\n')]
+    flat = fn.replace(' ', '')
+    assert "if(!quiet)b.innerHTML='<divclass=\"none\">读取中…</div>'" in flat, \
+        ('quiet 轮询必须跳过「读取中…」占位 —— 清空会让高度塌陷，'
+         '几百毫秒后再撑开就是"整页跳一下"')
+    assert 'if(quiet&&livePatch(o))' in flat, \
+        'quiet 时必须先试原地 patch，patch 得动才不重建 DOM'
+    # 一处定义：渲染路径里不许有手写的 data-rt（否则与 lvRtd 两份会分叉）
+    body = src[src.index('async function loadLive'):]
+    assert 'data-rt=' not in body, \
+        '渲染路径里有手写的 data-rt —— 那就是第二份定义，迟早与 lvRtd 分叉'
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1500, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live' % port)
+            pg.wait_for_selector('#lvbody table.lvpos', timeout=20000)
+            pg.wait_for_timeout(4500)          # 等业绩板异步填进来
+            n_rt = pg.locator('#lvbody td[data-rt]').count()
+            assert n_rt >= 7, '持仓表里只有 %d 个实时格子' % n_rt
+            # ② 打记号 + ③ 记高度与滚动位置
+            pg.evaluate("""() => {
+              const tr = document.querySelector('#lvbody table.lvpos tr:nth-child(3)');
+              if(tr) tr.dataset.mark = 'keepme';
+              window.scrollTo(0, 300);
+            }""")
+            pg.wait_for_timeout(300)
+            S = """() => ({
+              mark: !!document.querySelector('#lvbody table.lvpos tr[data-mark]'),
+              sc: window.scrollY,
+              h: document.querySelector('#lvbody').offsetHeight,
+              k: document.querySelector('#lvkpi').offsetHeight,
+              eq: (document.querySelector('#kperf2') || {}).textContent || '',
+              px: (document.querySelector('#lvbody td[data-rt$="|price"]')
+                   || {}).textContent || '',
+            })"""
+            b4 = pg.evaluate(S)
+            assert b4['mark'], '记号没打上 —— 持仓表结构变了，这条用例失去意义'
+            # 手动触发一次 quiet 刷新（不等 60 秒 —— 等一分钟的用例没人愿意跑）
+            pg.evaluate("async () => { await loadLive(LVSEL, true); }")
+            pg.wait_for_timeout(1500)
+            af = pg.evaluate(S)
+            assert af['mark'], \
+                'DOM 被重建了（记号丢了）—— 只比高度的话重建出一样的 DOM ' \
+                '也算"没跳"，但 hover 与选中的文字都断了'
+            assert b4['h'] == af['h'], \
+                '容器高度 %s -> %s，页面会跳' % (b4['h'], af['h'])
+            assert b4['k'] == af['k'], \
+                'KPI 板高度 %s -> %s（业绩板被抹回加载态了？）' % (b4['k'], af['k'])
+            assert b4['sc'] == af['sc'], \
+                '滚动位置 %s -> %s' % (b4['sc'], af['sc'])
+            # ④ 业绩板内容原样
+            assert b4['eq'] and af['eq'] == b4['eq'], \
+                ('业绩板被换掉了：%r -> %r —— `#kperf2` 是异步补的，'
+                 'quiet 轮询不重拉它，整块换 KPI 会把它抹回占位'
+                 % (b4['eq'][:30], af['eq'][:30]))
+            assert af['px'], '现价格子空了 —— patch 把内容弄丢了'
+            # ---- ⑤ 数字真的换了：**构造**一个变化（盘后价格不动，
+            #      "更新了"和"没更新"看不出来 —— 变异实测这条会空转）----
+            changed = pg.evaluate("""() => {
+              const it = (LVO.pos || {}).items || [];
+              if(!it.length) return null;
+              const o = JSON.parse(JSON.stringify(LVO));
+              const x = o.pos.items[0];
+              x.price = (x.price || 10) + 1.11;      /* 明显不同的价 */
+              x.pnl = (x.pnl || 0) + 12345.67;
+              livePatch(o);
+              const td = document.querySelector(
+                `#lvbody td[data-rt="${x.code}|price"]`);
+              const tp = document.querySelector(
+                `#lvbody td[data-rt="${x.code}|pnl"]`);
+              return {want: x.price.toFixed(2), got: (td || {}).textContent || '',
+                      wantPnl: x.pnl.toFixed(2),
+                      gotPnl: (tp || {}).textContent || ''};
+            }""")
+            assert changed, '没有持仓 —— 这条测不到'
+            assert changed['want'] in changed['got'].replace(',', ''), \
+                ('patch 没把现价换掉：要 %s，格子里是 %r —— 盘后价格本来'
+                 '不动，所以这条必须**构造**一个变化才测得到'
+                 % (changed['want'], changed['got']))
+            assert changed['wantPnl'] in changed['gotPnl'].replace(',', ''), \
+                'patch 没把浮盈换掉：要 %s，是 %r' % (changed['wantPnl'],
+                                                    changed['gotPnl'])
+            # ---- ⑥ 换了一只票但只数不变时，必须【回退到整块重建】----
+            #   🔴 判据要含**持仓代码序列**而不只是只数：逐格 patch 会按
+            #     code 找格子，找不到就悄悄不更新 —— 新票那一行显示的还是
+            #     旧票的数字，而它不报错。
+            swapped = pg.evaluate("""() => {
+              const o = JSON.parse(JSON.stringify(LVO));
+              const it = o.pos.items;
+              if(!it.length) return null;
+              it[0] = Object.assign({}, it[0], {code: '000001.XSHE',
+                                                name: '平安银行'});
+              return livePatch(o);      /* 应当返回 false = 结构变了 */
+            }""")
+            assert swapped is False, \
+                ('换了一只票（只数不变）时 livePatch 返回了 %r —— 它必须'
+                 '返回 false 让调用方整块重建，否则新票那一行显示的还是'
+                 '旧票的数字，而它不报错' % swapped)
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return ('%d 个实时格子原地换 · DOM 记号保住 · 高度/滚动/业绩板逐项不变'
+            % n_rt)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

@@ -67,8 +67,10 @@ async function post(u, body) {
 }
 
 /* ---- KPI 一格 ---- */
-function cell(k, v, sub, cls) {
-  return `<div class="${cls || ''}"><div class="k">${k}</div>
+function cell(k, v, sub, cls, attr) {
+  /* ★ `attr` 是给**原地更新**用的（实盘页每分钟刷一次，重建整块 DOM 会让
+     页面跳一下）：调用方传 `data-rtk="equity"`，轮询时按它找到 .v 改数字。 */
+  return `<div class="${cls || ''}"${attr ? ' ' + attr : ''}><div class="k">${k}</div>
     <div class="v">${v}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
 }
 

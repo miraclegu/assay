@@ -147,10 +147,110 @@ function livePoll(aid){
   }, LVPOLL_MS);
 }
 
+/* ---- 实盘页的【原地刷新】---------------------------------------------
+   🔴 轮询不许重建整块 DOM。原来 `loadLive` 一进来就把 #lvbody 清成
+     「读取中…」，然后才发请求 —— 内容先消失、**高度塌陷**，几百毫秒后
+     再撑开，看起来就是"整页跳一下"。而这一页正是盯盘时一直开着的那页。
+   做法：quiet 轮询只换**会变的那几处**（持仓的实时列 + KPI 板 + 报价时间），
+     DOM 结构一行不动 —— 滚动位置、hover、选中的文字全保住。
+   🔴 格子内容**一处定义**（`lvRtd`）：渲染与刷新各写一份的话，
+     "刷新之后的数字格式跟首次渲染不一样"不报错，只是慢慢分叉。 */
+const LV_RT_FIELDS = ['price', 'chg_day', 'pnl_day', 'value',
+                      'pnl', 'pnl_pct', 'weight'];
+
+function lvRtd(f, x, P){
+  const sgn = v => v == null ? '' : (v >= 0 ? '+' : '');
+  const col = v => v == null ? '' : (v >= 0 ? 'var(--up)' : 'var(--down)');
+  const A = `data-rt="${esc(x.code)}|${f}"`;
+  const asof = (P.asof || '').slice(0, 10);
+  switch(f){
+    case 'price': return `<td class="rt" ${A}>${
+      x.price == null ? '—' : num(x.price, 2)}${x.stale ?
+        `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${
+          esc(x.px_date)} 挂账">停</span>` : ''}${x.rt_src ?
+        `<span class="lvwhy" style="color:var(--accent)" title="盘中实时价（${
+          esc(x.rt_at || '')}，来源 ${esc(x.rt_src)}）">实</span>` : ''}</td>`;
+    case 'chg_day': return `<td class="rt" ${A} style="color:${col(x.chg_day)}"
+      title="相对昨收 ${x.preclose == null ? '—' : num(x.preclose, 2)}">${
+      x.chg_day == null ? '—'
+        : sgn(x.chg_day) + (x.chg_day * 100).toFixed(2) + '%'}</td>`;
+    case 'pnl_day': return `<td class="rt" ${A} style="color:${col(x.pnl_day)}"
+      title="${x.entry === asof ? '今天建的仓 —— 基准是成交价，不是昨收'
+        : '基准是昨收 ' + num(x.preclose, 2)}">${
+      x.pnl_day == null ? '—' : sgn(x.pnl_day) + num(x.pnl_day, 2)}</td>`;
+    case 'value': return `<td class="rt" ${A}>${
+      x.value == null ? '—' : num(x.value, 2)}</td>`;
+    case 'pnl': return `<td class="rt" ${A} style="color:${col(x.pnl)}">${
+      x.pnl == null ? '—' : sgn(x.pnl) + num(x.pnl, 2)}</td>`;
+    case 'pnl_pct': return `<td class="rt" ${A} style="color:${col(x.pnl_pct)}">${
+      x.pnl_pct == null ? '—'
+        : sgn(x.pnl_pct) + (x.pnl_pct * 100).toFixed(2) + '%'}</td>`;
+    case 'weight': return `<td class="rt" ${A}>${
+      x.weight == null ? '—' : (x.weight * 100).toFixed(1) + '%'}</td>`;
+  }
+  return '';
+}
+
+/* 结构签名：变了就只能整块重建（新增/卖光了持仓、待办换了、版本重绑）。
+   🔴 判据要含**持仓代码序列**而不只是只数：换了一只票但只数不变时，
+     逐格 patch 会把新票的数字填进旧票那一行 —— 而它不报错。 */
+function lvSig(o){
+  const P = o.pos || {}, s = o.signal || {};
+  return JSON.stringify([(P.items || []).map(x => x.code),
+    s.for_date, s.code_sha256, (s.buy || []).length, (s.sell || []).length,
+    o.n_fills, (o.account || {}).name, !!o.rt_live]);
+}
+
+/* 只换会变的那几处。返回 false = 结构变了，调用方要走整块重建。 */
+function livePatch(o){
+  const box = $('#lvbody');
+  if(!box || !LVO || lvSig(o) !== lvSig(LVO)) return false;
+  const P = o.pos || {};
+  (P.items || []).forEach(x => {
+    LV_RT_FIELDS.forEach(f => {
+      const td = box.querySelector(`td[data-rt="${x.code}|${f}"]`);
+      if(td) td.outerHTML = lvRtd(f, x, P);
+    });
+  });
+  const k = $('#lvkpi');
+  if(k){
+    /* 🔴 **业绩板要原样搬过去。** `#kperf2` 由 `liveEquityTag` 异步补进来
+       （它要重放整条权益曲线，所以 quiet 轮询刻意不重拉它），而 `kpiHtml`
+       给的只是占位「累计收益 …」—— 直接整块换会把已经填好的业绩板
+       **抹回加载态**，容器高度掉一截，看起来还是"跳了一下"。
+       实测：DOM 没被重建、数字都对，而 #lvkpi 高度 177 -> 161。
+       ★ 头一版保的是 `#kperf` —— 那是个**空的遗留容器**（display:none），
+         保它等于什么都没保，而"高度还是变了"看不出是保错了对象。 */
+    const kp = k.querySelector('#kperf2');
+    const keep = kp ? kp.innerHTML : null;
+    k.innerHTML = kpiHtml(o);
+    const kp2 = k.querySelector('#kperf2');
+    if(keep && kp2) kp2.innerHTML = keep;
+  }
+  const d = $('#lvday');
+  if(d) d.innerHTML = dataDayTag(o);     /* 报价时间在这里 */
+  LVO = o;
+  return true;
+}
+
 async function loadLive(aid, quiet){
-  const b=$('#lvbody'); b.innerHTML='<div class="none">读取中…</div>';
+  const b=$('#lvbody');
+  /* 🔴 quiet（每分钟的轮询）**不清空**：清成「读取中…」会让高度塌陷，
+     几百毫秒后再撑开 —— 那就是"整页跳一下"的来源。首次进入才给占位，
+     那时本来就是空的、没有东西可跳。 */
+  if(!quiet) b.innerHTML='<div class="none">读取中…</div>';
   let o; try{ o=await j('/api/live/account?id='+encodeURIComponent(aid)); }
-  catch(e){ b.innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
+  catch(e){
+    /* ★ 轮询失败**不要**把已经渲好的内容换成错误信息：网络抖一下就把
+       持仓表清掉、下一轮又回来，比不刷新更糟。安静地跳过这一轮。 */
+    if(!quiet) b.innerHTML='<div class="none">'+esc(e)+'</div>';
+    return;
+  }
+  /* 结构没变就只换数字，DOM 一行不动（滚动位置/hover/选中都保住）。 */
+  if(quiet && livePatch(o)){
+    if(o.rt_live) livePoll(aid); else stopPoll();
+    return;
+  }
   /* 期数清单（浮层的期数切换 + 持仓行上的"出处"都用它）。★ 只是清单，
      某一期的完整理由按需再拉 —— 复算一期要重放 30 天 warmup。 */
   await lvWhyLoad(aid);
@@ -162,7 +262,7 @@ async function loadLive(aid, quiet){
   b.innerHTML=`
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
-    ${dataDayTag(o)}
+    <span id="lvday">${dataDayTag(o)}</span>
     ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
         title="源码 / 参数 / 版本历史 / 用这个版本跑过的回测">${esc(a.strategy_path.split('/').pop())}
         @${esc(a.code_sha256.slice(0,8))} ›</a>`
@@ -180,7 +280,7 @@ async function loadLive(aid, quiet){
     <button class="btn" id="lvset">⚙</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
-  ${kpiHtml(o)}
+  <div id="lvkpi">${kpiHtml(o)}</div>
   ${sigHtml(sig, o.alert, o.alert_why)}
   <div class="lvsec"><h3>当前持仓
       ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}
@@ -199,20 +299,7 @@ async function loadLive(aid, quiet){
         <td class="tx">${skLink(x.code, x.name||'')}${lvHoldMark(aid, x.code)}</td>
         <td class="rt">${num(x.shares)}</td>
         <td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee,2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost,4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven==null?'—':num(x.breakeven,3)}（含估算卖出费 ${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}）">${num(x.cost_net,3)}</td>
-        <td class="rt">${x.price==null?'—':num(x.price,2)}${x.stale?
-            `<span class="lvwhy" title="当日无行情（停牌），按最后已知价 ${esc(x.px_date)} 挂账">停</span>`:''}${
-          x.rt_src?`<span class="lvwhy" style="color:var(--accent)"
-            title="盘中实时价（${esc(x.rt_at||'')}，来源 ${esc(x.rt_src)}）">实</span>`:''}</td>
-        <td class="rt" style="color:${col(x.chg_day)}"
-            title="相对昨收 ${x.preclose==null?'—':num(x.preclose,2)}">${
-          x.chg_day==null?'—':sgn(x.chg_day)+(x.chg_day*100).toFixed(2)+'%'}</td>
-        <td class="rt" style="color:${col(x.pnl_day)}"
-            title="${x.entry===(P.asof||'').slice(0,10)?'今天建的仓 —— 基准是成交价，不是昨收':'基准是昨收 '+num(x.preclose,2)}">${
-          x.pnl_day==null?'—':sgn(x.pnl_day)+num(x.pnl_day,2)}</td>
-        <td class="rt">${x.value==null?'—':num(x.value,2)}</td>
-        <td class="rt" style="color:${col(x.pnl)}">${x.pnl==null?'—':sgn(x.pnl)+num(x.pnl,2)}</td>
-        <td class="rt" style="color:${col(x.pnl_pct)}">${x.pnl_pct==null?'—':sgn(x.pnl_pct)+(x.pnl_pct*100).toFixed(2)+'%'}</td>
-        <td class="rt">${x.weight==null?'—':(x.weight*100).toFixed(1)+'%'}</td>
+        ${LV_RT_FIELDS.map(f=>lvRtd(f, x, P)).join('')}
         <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
       </table></div>
       <!-- 持仓表包在 .pw 里，见本文件顶部注释 -->
