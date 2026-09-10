@@ -26,6 +26,7 @@ import duckdb
 # 撮合与风控需要的字段。策略要别的列走 query()/panel()，不必挤在这里。
 Bar = namedtuple('Bar', 'open_hfq close_hfq open_raw factor '
                         'open_limit_up open_limit_down limit_up limit_down sealed '
+                        'touch_up '
                         'amount limit_ok '
                         'high_hfq low_hfq')
 
@@ -39,6 +40,12 @@ _BAR_COLS = """
     is_limit_up                      AS limit_up,
     is_limit_down                    AS limit_down,
     (low >= limit_up - 0.005)        AS sealed,
+    -- 「盘中**摸到过**涨停」。与 `limit_up`（= 面板 is_limit_up = **收盘**封在
+    -- 板上）是两件事：实测 2026-09 以来「盘中摸到、收盘没封住」有 183 个，
+    -- 它们的 is_limit_up 全是 false。
+    -- ★ 纯**投影**改动：只多返回一列，WHERE / ORDER BY 一个字没动，
+    --   原策略不读它 —— 行为一行不变（同「末层 SELECT 多返回几列」那条）。
+    (high >= limit_up - 0.005)       AS touch_up,
     -- ★ 成交量约束用 amount(元) 而非 volume：实测 volume 的单位是【股 × 100】，
     --   除以 100 才是股数（交叉验证：volume/100 算换手率得 0.4731，
     --   面板 turnover 列 0.473107，精确吻合）。用 amount 元对元，绕开单位陷阱。

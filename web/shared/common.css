@@ -724,3 +724,8 @@ a.spl.accent{color:var(--accent)}
 #lp_exec tr.xdbad{background:rgba(224,163,60,.07)}
 #lp_exec .warn{color:var(--warn)}
 #lp_exec .lpttl{font-weight:600;margin-bottom:4px}
+/* 表头上的口径标记 ⓘ：列名本身放不下的口径说明挂在 title 里。
+   ★ 必须有个可见标记 —— 光挂 title 的话没人会去悬停（同「看不出能点的
+     入口 = 没有入口」）。 */
+#main th.hasH{cursor:help}
+#main th .thq{font-size:10px;color:var(--dim);margin-left:2px;vertical-align:top}

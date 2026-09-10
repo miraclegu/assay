@@ -198,8 +198,16 @@ class GuardedFeed:
             d = {'open_hfq': b.open_hfq, 'open_raw': b.open_raw, 'factor': b.factor,
                  'open_limit_up': b.open_limit_up, 'open_limit_down': b.open_limit_down}
             if full:
+                # ★ `touch_up`（盘中摸到过涨停）与 `sealed`/`high_hfq` 同一批：
+                #   都是**收盘**派生量，所以只在 INTRADAY/CLOSE 给。
+                #   🔴 它是**全天**最高价派生的 —— 在 INTRADAY（14:00）取它，
+                #     严格说用到了 14:00 之后的信息。这与 `limit_up`
+                #     （= 收盘封住）是**同一个近似**：引擎无分时线，
+                #     盘中相位一律用收盘价代理（froec.py 的既有约定）。
+                #     用它的策略必须在自己的 docstring 里把这一条写明。
                 d.update(close_hfq=b.close_hfq, limit_up=b.limit_up,
                          limit_down=b.limit_down, sealed=b.sealed,
+                         touch_up=b.touch_up,
                          high_hfq=b.high_hfq, low_hfq=b.low_hfq)
             out[c] = d
         return out

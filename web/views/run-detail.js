@@ -363,7 +363,7 @@ async function drawDay(S){
     <div id="d_sell"></div><div id="d_buy"></div><div id="d_hold"></div>`;
   tbl($('#d_sell'),o.sells,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'exit_price',t:'卖出价',f:px},
@@ -375,7 +375,7 @@ async function drawDay(S){
   ],'当日卖出 '+o.sells.length+' 笔'+(o.sells.length?'':'（无）'));
   tbl($('#d_buy'),o.buys,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'gross_amount',t:'成交金额',f:v=>money(v)},
     {k:'exit_date',t:'后来平仓于'},
@@ -389,7 +389,7 @@ async function drawDay(S){
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
     {k:'weight',t:'权重',f:v=>pct(v,1)},
     {k:'value',t:'市值',f:v=>money(v)},
-    {k:'shares',t:'股数',f:v=>money(v)},
+    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'last_price',t:'现价',f:px},
@@ -429,7 +429,10 @@ function tbl(el,rows,cols,note,opt){
       return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sd;});
     el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
      `<div class="tw"><table><thead><tr>${cols.map(c=>
-        `<th data-k="${c.k}" class="${c.l?'l':''}">${c.t}${sk===c.k?(sd>0?' ▲':' ▼'):''}</th>`).join('')}
+        `<th data-k="${c.k}" class="${c.l?'l':''}${c.h?' hasH':''}"${
+          c.h?` title="${c.h.replace(/"/g,'&quot;')}"`:''}>${c.t}${
+          c.h?'<span class="thq">ⓘ</span>':''}${
+          sk===c.k?(sd>0?' ▲':' ▼'):''}</th>`).join('')}
       </tr></thead><tbody>${body(rs)}</tbody></table></div>`;
     el.querySelectorAll('th').forEach(t=>t.onclick=()=>{
       const k=t.dataset.k; sd=(sk===k)?-sd:-1; sk=k; draw();});

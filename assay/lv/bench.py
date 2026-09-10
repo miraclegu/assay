@@ -116,29 +116,55 @@ def compute(aid, force=False, datalake=None):
         #   没被抬到 5）。引擎默认的 5 元会让 froec 那种小额多笔凭空多付费用
         #   —— 而"策略曲线比实际差"就成了费率假设的产物，不是执行差异。
         # ★ `Cost` 的印花税参数叫 **close_tax**（`stamp_tax` 只是命令行的名字）。
-        cost = Cost(slippage=0.0015, commission=comm,
+        cost = Cost(slippage=BENCH_SLIP, commission=comm,
                     min_commission=float(
                         _fee.fee_model_at(aid, end).get('min_commission') or 0),
                     close_tax='auto',
                     locked=['slippage', 'commission', 'min_commission',
                             'close_tax'])
-        feed = PanelFeed(start, end, root=datalake)
-        eng = Engine(_load(entry), feed, cash=cash, cost=cost, params=params)
+        # 🔴🔴 **feed 给长区间，但开户日之前【一个委托都不下】。**
+        #   两件事必须同时满足，而它们互相拉扯：
+        #     ① 周内序号要对 —— `run_weekly(weekday=N)` 判「本周第 N 个交易日」，
+        #        序号按 **feed 的交易日表**算。区间从开户日起会切掉那一周的
+        #        前半段：2026-09-01 在完整面板里是 (2,-4)，截断后成 (1,-4)
+        #        -> weekday=2 判不中 -> **第一天不建仓**、净值恰好 1.0000
+        #        （用户一眼看出的「刚好 0%，一点波动都没有」）。
+        #     ② 起点资金要和实盘**一样** —— 不然买的股数、遇到的「资金不足
+        #        一手」约束都不同，两条线不可比（用户第二次指出的那条）。
+        #   ★ 挂点是 **`Engine._due`**，不是替换策略模块上的函数：
+        #     `run_daily(prepare, ...)` 是在 froec.py 的 `initialize` **内部**
+        #     注册的，传进引擎的是那个模块自己的函数对象 —— 在
+        #     `froec_traded` 模块上换属性对已注册的引用毫无影响（实测：
+        #     warmup 期照样交易、首日权益 52.6 万）。
+        #   ★ 也不能改 `_tasks`：它在 `run()` -> `_boot()` 里才被填充，
+        #     那时已经开始跑了。`_due` 是每个任务每天都要过的那道门。
+        class _GatedEngine(Engine):
+            """warmup 期只推进日历，不触发任何任务 —— 资金停在 init_cash、
+            持仓为空，与实盘开户那一刻的状态完全一致。
+            ★ 副作用是 warmup 期不累积 `g.hold_history` / `g.pos_state`，
+              **这是对的**：实盘 09-01 也是空仓开始，那时它们本来就是空。"""
+
+            def _due(self, i, d, freq, wd, md, ev, off):
+                if str(d) < start:
+                    return False
+                return Engine._due(self, i, d, freq, wd, md, ev, off)
+
+        feed = PanelFeed(
+            (datetime.date.fromisoformat(start)
+             - datetime.timedelta(days=40)).isoformat(), end, root=datalake)
+        eng = _GatedEngine(_load(entry), feed, cash=cash, cost=cost,
+                           params=params)
         curve = eng.run(verbose=False)
-        # 🔴 `Engine.run()` 返回的是 **[(date, total_value)] 的列表**，
-        #   不是 DataFrame —— 我头一版按 DataFrame 写（`curve['date']`），
-        #   那会抛 TypeError。凭印象假设接口形状，这一轮第五次了。
-        dates = [str(d) for d, _v in curve]
-        tv = [v for _d, v in curve]
-        # 🔴 基点取**本金**，不是首日收盘权益。
-        #   实盘那条是 TWR，起点是「开户那一刻的资金」（CLAUDE.md 里修过
-        #   一次：从 None 起会把第一个交易日的盈亏整段丢掉）。策略这条若
-        #   拿首日**收盘**做基点，就等于把策略首日的涨跌也排除在外 ——
-        #   两条线基点不同口径，差异里混进了「起点差」而不是执行差。
-        #   ★ froec 恰好 tv[0] == cash（周频策略，09-01 周一空仓），
-        #     所以这个错**在当前数据上看不出来** —— 但换一个首日就建仓的
-        #     账户立刻就是错的。
+        # 从开户日截断。★ 基点用 `cash`：warmup 期没有任何交易，所以开户日
+        #   前一天的权益就是 init_cash —— 与实盘 TWR 的起点（开户那一刻的
+        #   资金）同口径，两条线这才能直接比。
+        full = [(str(d), float(v)) for d, v in curve]
+        idx = next((i for i, (d, _v) in enumerate(full) if d >= start), None)
+        if idx is None:
+            return {'error': '回测区间里没有 >= 开户日的交易日'}
         base0 = cash
+        dates = [d for d, _v in full[idx:]]
+        tv = [v for _d, v in full[idx:]]
         out = {
             'dates': dates,
             'nav': [None if v is None else float(v) / base0 for v in tv],
@@ -171,6 +197,33 @@ def compute(aid, force=False, datalake=None):
 #   成交。所以拿 `trade_date == for_date` 的成交与那份信号比。
 #   🔴 **不按"信号建好的那一刻之后的第一笔"来归属** —— 一天可能有多份
 #     revision，而补录三个月前的成交也会被算进最近那期。判据用日期。
+
+# 🔴 **回测的滑点假设** —— 与 `compute()` 里 `Cost(slippage=...)` 必须是同一个数。
+#   写死两处迟早分叉，而分叉的表现是"执行差异凭空多出/少掉一截"。
+BENCH_SLIP = 0.0015
+
+
+def _strat_px(code, day, side, datalake=None):
+    """策略在回测里的成交价 = 当日**开盘价** × (1 ± 滑点/2)。
+
+    ★ 为什么用开盘价：froec/红利都是 `rebal_time='09:30'` 下单，引擎按当日
+      开盘价撮合，而 A 股开盘价就是集合竞价成交价 —— 实盘挂竞价成交的也是它。
+    🔴 **这才是"执行差异"该比的基准。** 头一版拿信号里的 `ref_price`
+      （= T-1 **收盘**价）去比，量出来的是**隔夜跳空** —— 那既不是执行质量、
+      也不是用户能控制的事（用户原话：「我为什么要关心隔夜跳空？这是我需要
+      关心、能解决的事情吗？」）。ref_price 只是信号 T-1 晚估股数用的中间量，
+      不该出现在这张表里。
+    """
+    from . import px as _px
+    try:
+        op = _px.day_price(code, day, 'open', datalake=datalake)
+    except Exception:                                       # noqa: BLE001
+        return None                 # 当天行情还没同步 -> 这一行不给策略价
+    if not op:
+        return None
+    k = 1 + BENCH_SLIP / 2 if side == 'buy' else 1 - BENCH_SLIP / 2
+    return op * k
+
 
 def _fill_map(aid, day):
     """那一天的实际成交，按代码聚合（同日多笔合并：股数相加、价格按金额加权）。
@@ -205,6 +258,42 @@ def _fill_map(aid, day):
     return out
 
 
+def _cand_rank(aid, day):
+    """那一期候选池里每只票的名次 -> {code: (rank, 池子总数, 组名, status)}。
+
+    ★ 给「提示外买入」用：策略没让买它，但**它在候选池里排第几**才是有信息
+      量的那一半 —— 排第 11 名（池子 20、策略取前 10）说明只差一名，
+      而压根不在池里说明策略完全没考虑它。
+    🔴 读**旁挂的选股理由**（`signals/_explain/<date>.json`），不重新算 ——
+      重算一遍就是第二份口径，而"当时的候选池"是既成事实（同选股理由那条：
+      理由是**捕获**来的，不是照策略再算一遍）。
+    ★ 拿不到就返回空 dict，不报错：老信号（这个功能之前的那些期）没有旁挂，
+      那时候只能显示"—"，不该让整块打不开。
+    """
+    p = os.path.join(_base.acct_dir(aid), 'signals', '_explain',
+                     '%s.json' % day)
+    if not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, encoding='utf-8') as f:
+            d = json.load(f)
+    except Exception:                                       # noqa: BLE001
+        return {}
+    out = {}
+    for gi, g in enumerate((d.get('explain') or {}).get('groups') or [], 1):
+        rows = g.get('rows') or []
+        n = len(rows)
+        gname = g.get('sql_head') or ('第 %d 组' % gi)
+        for r in rows:
+            c = _base.normalize_code(r.get('code') or '')
+            if not c or c in out:
+                continue        # 一只票在多组里时留**第一组**的名次（同选股理由页）
+            out[c] = {'rank': r.get('rank'), 'of': n, 'group': gname,
+                      'status': r.get('status'),
+                      'dropped_by': r.get('dropped_by')}
+    return out
+
+
 def diff_one(aid, day, sig=None):
     """一期的执行差异。返回 {date, rows, summary}。
 
@@ -227,6 +316,7 @@ def diff_one(aid, day, sig=None):
     if not sig:
         return {'date': day, 'error': '这一天没有信号'}
     got = _fill_map(aid, day)
+    ranks = _cand_rank(aid, day)
     want_b = {_base.normalize_code(x['code']): x for x in (sig.get('buy') or [])}
     want_s = {_base.normalize_code(x['code']): x for x in (sig.get('sell') or [])}
     rows = []
@@ -263,12 +353,24 @@ def diff_one(aid, day, sig=None):
         r = {'code': c, 'name': nm,
              'want_side': 'buy' if wb else ('sell' if ws else None),
              'want_shares': (wb or ws or {}).get('shares'),
-             'ref_price': (wb or ws or {}).get('ref_price'),
+             'strat_px': _strat_px(
+                 c, day, 'buy' if wb else 'sell', datalake=None),
              'got_buy': bs or None, 'got_sell': ss or None,
              'got_px': (g or {}).get('buy_px') if bs else (g or {}).get('sell_px'),
-             'n_fills': (g or {}).get('n') or 0}
+             'n_fills': (g or {}).get('n') or 0,
+             # ★ 候选名次：`extra`（提示外买入）最需要它 —— 「第 11/20 名」
+             #   说明只差一名，「不在候选池」说明策略完全没考虑过它。
+             'cand': ranks.get(c)}
+        # 🔴 `want_shares` 直接给**按实际本金折算后**的股数 —— 那才是
+        #   「当时该买多少」。原始值（按信号里那个 cash 算的）与这个账户
+        #   无关，摆出来只是噪声（用户指出：「后面加个『原』多少的意义是
+        #   什么」）。缩放比例本身在 `scale_why` 里说清，不用逐行重复。
+        # ★ 折算后按 100 股取整 —— A 股一手 100 股，给个 3,522 这种数
+        #   照着下不了单（引擎内部也是 `int(value / (价 * 100))` 取整手）。
         want = float(r['want_shares'] or 0) * (scale if wb else 1.0)
-        r['want_shares_scaled'] = round(want) if scale != 1.0 else None
+        want = float(int(want / 100) * 100) if want else 0.0
+        if wb or ws:
+            r['want_shares'] = round(want) or None
         if wb:
             if not bs:
                 r['kind'] = 'missed'
@@ -282,14 +384,37 @@ def diff_one(aid, day, sig=None):
             r['kind'] = 'sell_miss' if not ss else 'ok'
         else:
             r['kind'] = 'sell_extra' if ss else 'extra'
-        if r['ref_price'] and r['got_px']:
-            r['px_diff'] = r['got_px'] / float(r['ref_price']) - 1.0
+        # 🔴 判据是**策略的成交价**，不是信号里的 ref_price（T-1 收盘）——
+        #   后者量的是隔夜跳空，与执行无关。
+        # 🔴 只有**策略确实点过名**的票才有"执行差异"可言。
+        #   `extra`（提示外买入）在策略侧没有基准 —— 硬拿开盘价当基准会
+        #   算出一个方向相反的数（实测 300375 给出 +0.0751%），而它读起来
+        #   像"这一笔买贵了"，其实策略根本没打算买它。
+        if r['strat_px'] and r['got_px'] and (wb or ws):
+            r['px_diff'] = r['got_px'] / float(r['strat_px']) - 1.0
+        elif not (wb or ws):
+            r['strat_px'] = None          # 策略没让买/卖，没有基准价
         rows.append(r)
 
     n = {}
     for r in rows:
         n[r['kind']] = n.get(r['kind'], 0) + 1
     pxs = [r['px_diff'] for r in rows if r.get('px_diff') is not None]
+    # 🔴 **补名字**：批量粘贴的成交（`source=bulk`）`name` 一律是空 ——
+    #   其余行的名字来自**信号**，而「提示外买入」压根不在信号里，所以
+    #   那一行就成了光秃秃的代码（用户指出的第一条）。服务端有 `names_of`，
+    #   前端没有面板、补不了。
+    miss = [r['code'] for r in rows if not (r.get('name') or '').strip()]
+    if miss:
+        # ★ `names_of` 在 **lv/px.py**，不在 base —— 头一版写 `_base.names_of`
+        #   而 base 上没有这个名字，那个 `except Exception: pass` 把
+        #   AttributeError 吞了，于是名字**照样是空的、还不报错**
+        #   （项目纪律里「禁止吞异常」那条，我自己犯了一次）。
+        from . import px as _px
+        got = _px.names_of(miss) or {}
+        for r in rows:
+            if not (r.get('name') or '').strip():
+                r['name'] = got.get(r['code']) or ''
     return {
         'date': day, 'rows': rows, 'counts': n,
         'scale': scale, 'scale_why': scale_why,

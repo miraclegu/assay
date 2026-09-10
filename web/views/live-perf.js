@@ -553,6 +553,29 @@ const XD_LABEL = {
   sell_extra: ['提示外卖出', 'warn'],
 };
 
+/* 候选名次。★ 「提示外买入」最需要它：第 11/20 名说明只差一名（策略取前 10），
+   而"不在候选池"说明策略完全没考虑过它 —— 两种情况的含义完全不同。
+   🔴 名次来自**旁挂的选股理由**（当时捕获的候选池），不是现算的。
+     老信号（这个功能之前那几期）没有旁挂，显示「—」而不是猜一个。 */
+const XD_ST = {buy: '选中·买入', hold: '选中·持有', sell: '卖出',
+               not_taken: '没轮到', dropped: '被剔除'};
+
+function xdCand(r){
+  const c = r.cand;
+  if(!c || c.rank == null){
+    /* ★ 分两种「没有」：策略点过名但拿不到理由（老信号）vs 真的不在候选池。
+       前者是数据缺失、后者是事实 —— 混成一个「—」就分不出来了。 */
+    return r.want_side
+      ? '<span class="lvwhy">—</span>'
+      : '<span class="lvwhy" title="策略那一期的候选池里没有它">不在候选池</span>';
+  }
+  const st = XD_ST[c.status] || c.status || '';
+  const hot = (c.status === 'not_taken' && r.kind === 'extra');
+  return `<span class="${hot ? 'warn' : ''}" title="${esc(c.group || '')}${
+    c.dropped_by ? '　剔除原因：' + esc(c.dropped_by) : ''}">第 ${c.rank}/${
+    c.of} 名${st ? ' · ' + st : ''}</span>`;
+}
+
 function renderExec(aid){
   const el = $('#lp_exec');
   if(!el) return;                    /* 人已经走开了（见 renderChart 那条） */
@@ -581,7 +604,7 @@ function renderExec(aid){
     </div>
     <div class="lvwhy" style="margin-bottom:8px">
       调仓提示用的是<b>实际持仓</b>（成交流水重建），所以这里比的是<b>执行</b>：
-      提示的票买了几只、股数与价格差多少。
+      提示的票买了几只、股数与价格差多少。<b>价差</b>是<b>我的成交价 vs 策略回测的成交价</b>（都按当日开盘，策略那边含 0.075% 的滑点假设）—— 负数表示我买得比回测假设便宜。★ 不比昨收：那量的是<b>隔夜跳空</b>，既不是执行质量、也不是能控制的事。
       ${Object.entries(tot).filter(([k]) => k !== 'ok').length
         ? '合计 ' + Object.entries(tot).filter(([k]) => k !== 'ok').map(
             ([k, v]) => `<b>${(XD_LABEL[k] || [k])[0]} ${v}</b>`).join(' · ')
@@ -606,13 +629,13 @@ function xdSection(it){
     <div class="pw"><table class="lvt xdt"><thead><tr>
       <th>代码</th><th class="tx">名称</th><th class="tx">差异</th>
       <th>提示股数</th><th>实际股数</th>
-      <th>参考价</th><th>成交价</th><th>价差</th><th>笔数</th>
+      <th>策略成交价</th><th>我的成交价</th><th>价差</th>
+      <th class="tx">候选名次</th><th>笔数</th>
     </tr></thead><tbody>${(it.rows || []).map(r => {
       const [lbl, cls] = XD_LABEL[r.kind] || [r.kind, ''];
-      const wantSh = r.want_shares_scaled != null
-        ? `${num(r.want_shares_scaled, 0)}<span class="lvwhy"> (原 ${
-            num(r.want_shares, 0)})</span>`
-        : (r.want_shares == null ? '—' : num(r.want_shares, 0));
+      /* ★ 只给**实际该买多少**（服务端已按本金折算并取整手）——
+         原始那个数是按信号里的 cash 算的，与这个账户无关。 */
+      const wantSh = r.want_shares == null ? '—' : num(r.want_shares, 0);
       return `<tr class="${r.kind === 'ok' ? '' : 'xdbad'}">
         <td>${spLink(r.code, r.code)}</td>
         <td class="tx">${spLink(r.code, r.name || '')}</td>
@@ -620,10 +643,11 @@ function xdSection(it){
         <td>${wantSh}</td>
         <td>${r.got_buy != null ? num(r.got_buy, 0)
               : (r.got_sell != null ? '-' + num(r.got_sell, 0) : '—')}</td>
-        <td>${r.ref_price == null ? '—' : num(r.ref_price, 2)}</td>
+        <td>${r.strat_px == null ? '—' : num(r.strat_px, 3)}</td>
         <td>${r.got_px == null ? '—' : num(r.got_px, 3)}</td>
         <td style="color:${r.px_diff == null ? '' : upc(r.px_diff)}">${
           r.px_diff == null ? '—' : pctv(r.px_diff * 100)}</td>
+        <td class="tx">${xdCand(r)}</td>
         <td class="lvwhy">${r.n_fills || '—'}</td>
       </tr>`;
     }).join('')}</tbody></table></div>
