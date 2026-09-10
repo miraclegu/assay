@@ -25,6 +25,24 @@
 （多收集一个集合）与 `check_limit_up`（多判一类）。`froec.py` 与
 `froec_traded.py` 一行没动 —— 它们的归档要可比，而且实盘账户绑着快照。
 （同 froec_api.py / froec_roe_yoy.py 的做法。）
+
+--------------------------------------------------------------------
+🔴🔴 **回测结论（2026-09-10 重跑，参数口径已修正）：不采纳。**
+
+★ **第一批数字作废**（同 froec_lu_sameday）：`_TRADED` 曾是凭印象拼的，
+  与 froec_traded 的真实参数不同。现在加载 froec_traded 本身。
+
+逐年独立（每年重置 50 万；2026 到 09-08），vs 现状 froec_traded：
+
+    均 +0.43pp   中位 +0.60   更好 6/11   sd 6.12   t=+0.23   不显著
+    链乘年化 42.42%（现状 41.84%）  平均回撤 19.3%（19.6%）  夏普 1.50（1.47）
+
+★ 三项都朝好的方向但幅度极小，t=+0.23 —— 证不出任何东西。
+★ 而「当天卖」那个变体（froec_lu_sameday）测得更透：它暴露了这一类规则的
+  共同缺陷 —— **卖出判据与黑名单判据互斥，卖了会立刻买回**；而补齐抑制器
+  之后效果反而更差。本版有同一个问题（`touch_up` 卖出、`is_limit_up` 抑制），
+  只是幅度更小所以不明显。
+★ 结论：**维持现状。** 详见 froec_lu_sameday.py 的结论块。
 """
 
 import importlib.util
@@ -44,14 +62,9 @@ def _private(name):
     return m
 
 
-_base = _private('froec.py')
+_traded = _private('froec_traded.py')
+_base = _traded._base          # froec_traded 自己加载的 froec 私有实例
 
-# ---- froec_traded 的那一层：真实交易口径（照抄它的做法）----
-_TRADED = {
-    'stop_intraday': 1,
-    'stop_loss': 0.35,
-    'weekday': 2,
-}
 
 
 def _prepare(context):
@@ -95,10 +108,7 @@ _base.check_limit_up = _check_limit_up
 
 
 def initialize(context):
-    g = _base.g
-    for k, v in _TRADED.items():
-        setattr(g, k, v)
-    _base.initialize(context)
+    _traded.initialize(context)   # 🔴 参数口径由 froec_traded 定，不自己拼
 
 
 # 其余全部转发给私有实例（引擎按名字取这些）
