@@ -23,6 +23,9 @@ LIVE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                     'live')
 FILE = 'watchlist.jsonl'
 ACTS = ('add', 'remove', 'group', 'note')
+# 'order' 不在 ACTS 里 —— 它是**分组级**的，没有 code，
+# 走 set_group_order() 那个独立入口（act() 一律要求 code）。
+ORDER_ACT = 'order'
 DEFAULT_GROUP = '默认'
 
 
@@ -99,11 +102,76 @@ def current(group=None):
     return out
 
 
+def group_order():
+    """页签顺序（重放出来的，不单独存一份）。
+
+    ★ 与整个模块同一套纪律：改顺序是**追加一条** `{'act':'order',
+      'groups':[...]}`，当前顺序由重放得出。存两份就会分叉。
+    🔴 语义是**整体覆盖**（同买点清单的 `set`）——「把顺序挪一下」天然是
+      对整个序列的一次赋值，逐个记"谁挪到第几"要重建中间状态才读得出来。
+    ★ 顺序记录**不带 code**，所以 `current()` 开头那句
+      `if not r.get('code'): continue` 天然把它跳过 —— 不用改重放逻辑。
+    """
+    out = []
+    for r in _read():
+        if r.get('act') == 'order' and isinstance(r.get('groups'), list):
+            out = [str(x) for x in r['groups']]
+    return out
+
+
+def _group_key(name):
+    """没被人排过的分组用这个默认序：**实盘自动组在前**，其余按名称。
+
+    ★ 自动组在前的理由：它们跟着持仓变，语义与手工分的组不同。
+      这也是页面原来那份 `sortGroups` 的规则 —— 现在只留服务端这一份
+      （两份排序实现迟早分叉，而"两个页面对同一份分组给出不同顺序"不报错）。
+    """
+    return (0 if is_auto_group(name) else 1, name)
+
+
+def set_group_order(names):
+    """追加一条顺序记录。返回**生效后**的顺序（不是传进来的那份）。
+
+    ★ 返回生效后的：传进来的可能少几个分组（页面只知道它当时看到的那些），
+      而真正的显示顺序还要把没列到的追加在后面 —— 不回传的话页面得自己
+      再算一遍，那就是第二份实现。
+    """
+    if not isinstance(names, (list, tuple)):
+        raise WatchError('groups 要是一个数组，收到 %r' % type(names).__name__)
+    gs = [str(x)[:24] for x in names if str(x).strip()]
+    if len(gs) > 200:
+        raise WatchError('分组太多了（%d）' % len(gs))
+    # 🔴 **重名直接拒**：顺序里出现两次同一个分组，"它到底排第几"没有答案。
+    #   静默去重会让人以为排好了，而看到的顺序不是他排的那个。
+    dup = [x for i, x in enumerate(gs) if x in gs[:i]]
+    if dup:
+        raise WatchError('顺序里有重复的分组：%s' % '、'.join(sorted(set(dup))))
+    _append({'uid': uuid.uuid4().hex[:12],
+             'ts': datetime.datetime.now().replace(microsecond=0).isoformat(),
+             'act': 'order', 'groups': gs})
+    return [g['name'] for g in groups()]
+
+
 def groups():
+    """分组清单，**已经按显示顺序排好**。
+
+    ★ 顺序由服务端给，页面直接渲染 —— 页面再排一遍就是第二份实现。
+    🔴 存下来的顺序会**过期**（分组改名、清空、新账户出现），所以不能
+      "顺序里没有它就不显示"：
+        · 顺序里有、现在没有的分组 -> 跳过（它空了），但**记录留着** ——
+          重新加票进来时还在原来那个位置
+        · 现在有、顺序里没有的（新的）-> 追加在**后面**，按默认序
+      两头都不丢，才不会出现"我排过序之后新加的分组不见了"。
+    """
     gs = {}
+    autos = {}
     for x in current():
-        gs[x['group']] = gs.get(x['group'], 0) + 1
-    return [{'name': k, 'n': v} for k, v in sorted(gs.items())]
+        g = x['group']
+        gs[g] = gs.get(g, 0) + 1
+        autos[g] = is_auto_group(g)
+    order = [g for g in group_order() if g in gs]
+    rest = sorted((g for g in gs if g not in order), key=_group_key)
+    return [{'name': g, 'n': gs[g], 'auto': autos[g]} for g in order + rest]
 
 
 def act(action, code, group=None, note=''):

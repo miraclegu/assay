@@ -478,6 +478,43 @@ function lvSortTh(k, label){
     on ? (LVSORT.desc ? ' ▼' : ' ▲') : ''}</th>`;
 }
 
+/* 点表头：**就地重排，不重新取数、不重建 DOM。**
+   🔴 原来调 `loadLive(aid)` —— 它一进来就把 `#lvbody` 清成「读取中…」，
+     几百毫秒后内容才回来：**高度先塌陷再撑开**，那就是"点一下整页跳一下"。
+     而排序**根本不需要服务端** —— 数据已经在 `LVO.pos.items` 里，
+     要变的只有行的先后与表头那个箭头。
+   ★ 与 CLAUDE.md 里「刷新只换数字，不许重建 DOM」是**同一个坑的另一半**：
+     那次修的是每分钟的轮询，这次是点表头。判据也同一条 ——
+     DOM 不重建（滚动位置、hover、选中的文字全保住）。
+   ★ `appendChild` 是**移动**不是复制，所以那些 `data-rt` 格子连同
+     `livePatch` 的定位依据一起原样保留。
+   返回 false = 认不出现在的表结构（比如刚换了账户），交给调用方整块重建。 */
+function lvSortApply(aid){
+  const tb = document.querySelector('#lvbody table.lvpos');
+  if(!tb || !LVO) return false;
+  const items = ((LVO.pos || {}).items) || [];
+  const rows = Array.from(tb.querySelectorAll('tr'))
+                    .filter(r => !r.querySelector('th'));
+  if(!rows.length || rows.length !== items.length) return false;
+  const byCode = new Map();
+  rows.forEach(r => {
+    const c = r.querySelector('td[data-rt]');
+    if(c) byCode.set(String(c.dataset.rt).split('|')[0], r);
+  });
+  const want = lvSortRows(items).map(x => x.code);
+  if(want.length !== rows.length || want.some(c => !byCode.has(c))) return false;
+  const host = rows[0].parentNode;
+  want.forEach(c => host.appendChild(byCode.get(c)));
+  /* 表头箭头复用 `lvSortTh` 这一处定义（渲染与重排各写一份就会分叉）。
+     🔴 `outerHTML` 把节点连同 onclick 一起换掉了 —— 必须重绑，
+        不然第二次点就没反应，而那不报错。 */
+  tb.querySelectorAll('th.lvsth').forEach(th => {
+    th.outerHTML = lvSortTh(th.dataset.sk, LVSORT_COLS[th.dataset.sk]);
+  });
+  lvSortBind(aid);
+  return true;
+}
+
 /* innerHTML 之后才存在的元素要重新绑事件 —— 只在渲染开头绑的话点了没反应
    且不报错（对比页「移除」栽过）。所以每次渲染完都调它。 */
 function lvSortBind(aid){
@@ -486,7 +523,8 @@ function lvSortBind(aid){
       const k = th.dataset.sk;
       if(LVSORT.k === k) LVSORT.desc = !LVSORT.desc;
       else { LVSORT.k = k; LVSORT.desc = true; }   /* 换列 -> 默认降序 */
-      loadLive(aid);        /* 重渲染（不是 quiet：表头与行序都要变） */
+      /* 就地重排；认不出表结构才退回整块重建（那时本来就要重建） */
+      if(!lvSortApply(aid)) loadLive(aid);
     };
   });
 }

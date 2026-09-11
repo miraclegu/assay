@@ -570,6 +570,15 @@ table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}
 .wtab .n{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
 .wtab .au{color:var(--accent);font-size:10px}
 .wtab.add{color:var(--dim);padding:5px 10px}
+/* 页签可拖动改顺序。★ `cursor:grab` 是"这东西能拖"唯一的现场提示 ——
+   没有它就只能靠 title，而没人会去悬停每个页签（同「看不出能点的入口
+   = 没有入口」）。 */
+.wtab[draggable="true"]{cursor:grab}
+.wtab.wdrag{opacity:.4;cursor:grabbing}
+/* 插入位用**边线**指示，不用位移 —— 让页签互相推开会把整条横条抖一遍，
+   而"抖动"正是要避免的那种体验。 */
+.wtab.wdl{box-shadow:inset 3px 0 0 0 var(--accent)}
+.wtab.wdr{box-shadow:inset -3px 0 0 0 var(--accent)}
 
 /* ============ 实盘 · 选股理由与候选池（views/live-why.js）============
    ★ 状态用**颜色 + 文字**双编码：只靠颜色的话，"没轮到"和"被剔除"在

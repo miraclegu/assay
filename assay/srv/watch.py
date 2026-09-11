@@ -139,6 +139,24 @@ def api_watchlist_sync(_q, body):
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
 
+def api_watchlist_order(_q, body):
+    """POST /api/watchlist/order —— 改页签顺序。body: {groups: [...]}
+
+    ★ 归 --live 管（写 live/ 下的账本），只读模式下不许改。
+    ★ 回传**生效后**的 groups（含只数）—— 页面拖完直接用它重渲染，
+      不自己推算顺序（那就是第二份实现）。
+    """
+    if not base.ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 去掉 --readonly 重启即可'}
+    w = _watch()
+    try:
+        w.set_group_order((body or {}).get('groups') or [])
+        return {'ok': True, 'groups': w.groups()}
+    except w.WatchError as e:
+        return {'error': str(e)}
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e)}
+
 
 
 def api_watchlist_act(_q, body):

@@ -6797,6 +6797,69 @@ def t_watchlist():
         assert miss.get('missing'), '查不到的那行没标出来'
         assert [x for x in v['rows'] if x['code'] == '600519.XSHG'][0]['name'], \
             '正常的票应该有名称与行情'
+        # ---- 页签顺序：append-only、重放、过期不丢 ----
+        # 🔴 顺序是**服务端**给的（页面不再自己排）。与整个模块同一套纪律：
+        #   改顺序追加一条 `{act:'order'}`，当前顺序由重放得出。
+        assert wl.group_order() == [], '还没排过，顺序记录该是空的'
+        # 🔴 先造一个**自动组**（名字带 `实盘·` 前缀）—— 不造的话下面
+        #   「自动组该排在前面」那条是**空转的**（这一段跑在 sync_live 之前，
+        #   那时一个自动组都没有，判据退化成纯名称排序）。变异测试抓到过：
+        #   把 `_group_key` 改成不区分自动组，断言照样全绿。
+        wl.act('add', '600036', group=wl.auto_group('测试账户'))
+        # 🔴 还要一个**名字排在自动组前面**的手工组。自动组前缀是「实盘·」，
+        #   而 `实`(U+5B9E) 的码位本来就在 `核`/`银`/`默` 前面 —— 只有中文
+        #   手工组的话，"去掉自动组优先"算出来的顺序**和正确的一样**，
+        #   断言照样绿（变异测试抓到过）。`A` 是 ASCII，必排在它前面。
+        wl.act('add', '600000', group='A银行观察')
+        _d0 = [g['name'] for g in wl.groups()]
+        assert any(wl.is_auto_group(g) for g in _d0) and \
+            any(not wl.is_auto_group(g) for g in _d0), \
+            '要同时有自动组与手工组才测得出默认序：%s' % _d0
+        # 默认序：实盘自动组在前，其余按名称（= 页面原来那份规则）
+        _autos = [g['name'] for g in wl.groups() if g['auto']]
+        assert _d0[:len(_autos)] == _autos, \
+            '没排过时自动组该在前面：%s' % _d0
+        assert _d0 == sorted(_d0, key=lambda n: (0 if wl.is_auto_group(n) else 1, n)), \
+            '没排过时的默认序不对：%s' % _d0
+        # 倒过来排 -> 立刻生效，且**存进了账本**（不是只在内存里）
+        _rev = list(reversed(_d0))
+        _got = wl.set_group_order(_rev)
+        assert _got == _rev, '排完的顺序不对：要 %s 实得 %s' % (_rev, _got)
+        assert [g['name'] for g in wl.groups()] == _rev, 'groups() 没照排好的顺序给'
+        _recs = [r for r in wl.log() if r.get('act') == 'order']
+        assert len(_recs) == 1 and _recs[0]['groups'] == _rev, \
+            '顺序没作为一条记录追加进账本：%s' % _recs
+        # 🔴 顺序记录**不带 code**，`current()` 必须照旧 —— 重放循环开头
+        #   那句 `if not r.get('code'): continue` 就是靠它跳过的。
+        #   漏了的话顺序记录会被当成一条股票记录，表现是**自选池多一行空票**。
+        assert all(x.get('code') for x in wl.current()), \
+            '顺序记录被当成股票记录读进自选池了'
+        _n_before = len(wl.current())
+        wl.set_group_order(_d0)                      # 再排回去（又是一条）
+        assert len(wl.current()) == _n_before, '排序改变了自选池的内容'
+        assert len([r for r in wl.log() if r.get('act') == 'order']) == 2, \
+            'append-only：第二次排序该是新追加一条，不是改写上一条'
+        assert [g['name'] for g in wl.groups()] == _d0, '最后一条顺序该生效'
+        # 🔴 **过期的顺序不能把分组弄丢。** 顺序里有的分组可能已经空了，
+        #   而新分组（新账户、新建组）还没被排过 —— 两头都不许丢，
+        #   否则"我排过序之后新加的分组不见了"。
+        wl.set_group_order(['不存在的组'] + _d0[:1])
+        _after = [g['name'] for g in wl.groups()]
+        assert set(_after) == set(_d0), \
+            '过期顺序把分组弄丢了或凭空多出来：%s vs %s' % (_after, _d0)
+        assert _after[0] == _d0[0], '排过的那个该在最前面：%s' % _after
+        _new = [g for g in _after if g not in _d0[:1]]
+        assert _new == sorted(_new, key=lambda n: (0 if wl.is_auto_group(n) else 1, n)), \
+            '没排过的那批该按默认序追加在后面：%s' % _after
+        # 🔴 重名直接拒 —— "它到底排第几"没有答案；静默去重会让人以为排好了
+        for _bad in (['A', 'A'], 'abc', None, [_d0[0], _d0[0]]):
+            try:
+                wl.set_group_order(_bad)
+                raise AssertionError('非法顺序 %r 应被拒' % (_bad,))
+            except wl.WatchError:
+                pass
+        wl.set_group_order(_d0)                      # 收尾：回到默认序
+        _ord_n = len([r for r in wl.log() if r.get('act') == 'order'])
         # ---- 实盘持仓自动进自选，按账户分组 ----
         #   ★ 幂等：再同步一次不该追加任何记录（持仓没变）。
         #   🔴 只加不自动移 —— 卖光了标"已清仓"但留着，自动移出会把手写的
@@ -6922,6 +6985,12 @@ def t_watchlist():
         sv.ALLOW_LIVE = False
         assert (sv.api_watchlist_act({}, {'act': 'add', 'code': '601857'})
                 or {}).get('error'), '只读模式下应拒绝改自选'
+        # 改顺序也写账本 —— 同一条拦住（漏了就是只读模式能改账本）
+        _n_ord = len([r for r in wl.log() if r.get('act') == 'order'])
+        assert (sv.api_watchlist_order({}, {'groups': ['x']})
+                or {}).get('error'), '只读模式下应拒绝改页签顺序'
+        assert len([r for r in wl.log() if r.get('act') == 'order']) == _n_ord, \
+            '只读模式下顺序记录还是被写进去了'
         n_before = len(wl.log())
         sv.ALLOW_LIVE = True
         assert sv.api_watchlist_act({}, {'act': 'add', 'code': '601988'}).get('ok')
@@ -6929,13 +6998,16 @@ def t_watchlist():
         return ('append-only：4 次改动 + 移出后日志 5 条且 add 记录仍在；'
                 '重复加幂等不追加；重放出的分组/备注正确；分组过滤；'
                 '退市代码不静默丢掉而是标 missing；3 类非法输入被拒；'
-                '只读模式接口层拒写；持仓自动按账户分组同步且幂等、'
+                '只读模式接口层拒写（含改顺序）；'
+                '页签顺序：默认自动组在前、拖过的从账本重放、'
+                'append-only（%d 条 order 记录）、过期顺序不丢分组、重名拒；'
+                '持仓自动按账户分组同步且幂等、'
                 '不覆盖手工分组、已清仓只标记不移出；'
                 '抓取范围 = 持仓∪自选∪买点且去重（%d < %d+%d）；'
                 '自选带实时价且涨跌幅按实时价重算、不自己打接口；'
                 '新加的票立刻补抓一次（snap+bar 各 1 请求）、'
                 '同一只有 180s 冷却、非交易时段与只读模式一律不发请求'
-                % (len(codes), len(held), len(watch)))
+                % (_ord_n, len(codes), len(held), len(watch)))
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
         rtm.snapshot, rtm.fetch = _o_snap, _o_fetch
@@ -7320,6 +7392,65 @@ def t_new_pages_ui():
                 '默认没落在第一个分组上：%s' % pg.locator('.wtab.on').inner_text()
             assert pg.locator('.lvsec').first.locator(
                 'table.pkt tr').count() >= 2, '默认页签下一行都没有'
+            # ---- 页签能【拖动改顺序】，且拖完立刻存进账本 ----
+            # 🔴 顺序存在服务端（`watchlist.jsonl` 的 order 记录），不存
+            #   localStorage —— 换台机器就回到默认的话，"我怎么归类这些票"
+            #   这件事就没留住。判据必须是**重新打开页面还在**。
+            _tg = lambda: pg.locator('.wtab[data-g]').evaluate_all(
+                'es => es.map(e => e.dataset.g)')
+            _o0 = _tg()
+            assert len(_o0) >= 2, '分组不够两个，测不了顺序：%s' % _o0
+            assert pg.locator('.wtab[data-g]').first.get_attribute(
+                'draggable') == 'true', '页签没开 draggable —— 按住拖不动'
+            # ＋ 不是分组，不该参与排序
+            assert pg.locator('#wnewg').get_attribute('draggable') != 'true', \
+                '「＋」也能拖 —— 它不是分组，永远该在最后'
+
+            def _drag(i_from, i_to_left_of):
+                a = pg.locator('.wtab[data-g]').nth(i_from)
+                z = pg.locator('.wtab[data-g]').nth(i_to_left_of)
+                ab, zb = a.bounding_box(), z.bounding_box()
+                pg.mouse.move(ab['x'] + ab['width'] / 2,
+                              ab['y'] + ab['height'] / 2)
+                pg.mouse.down()
+                # 落点取目标页签的**左侧 20%** -> 插到它前面
+                for _s in (0.5, 0.2):
+                    pg.mouse.move(zb['x'] + zb['width'] * _s,
+                                  zb['y'] + zb['height'] / 2, steps=8)
+                pg.mouse.up()
+                pg.wait_for_timeout(1500)
+
+            _drag(len(_o0) - 1, 0)                 # 最后一个拖到最前面
+            _o1 = _tg()
+            assert _o1[0] == _o0[-1], \
+                '拖了没生效：%s -> %s' % (_o0, _o1)
+            assert sorted(_o1) == sorted(_o0), '拖动把分组弄丢了：%s' % _o1
+            # 🔴 判据是**重新打开页面**后还在 —— 只看当前 DOM 的话，
+            #   "本地移动了但没存上"看不出来（POST 挂掉也是这个表现）。
+            pg.goto(base + '/watchlist.html', wait_until='networkidle')
+            pg.wait_for_selector('.wtab.on', timeout=40000)
+            pg.wait_for_timeout(1500)
+            assert _tg() == _o1, \
+                '顺序没存住（重开页面回弹了）：存的 %s，重开后 %s' % (_o1, _tg())
+            # 服务端也要认这份顺序（页面与账本不许分叉）
+            _sg = pg.evaluate(
+                "async () => (await (await fetch('/api/watchlist')).json())"
+                ".groups.map(g => g.name)")
+            assert _sg == _o1, '接口给的顺序与页面不一致：%s vs %s' % (_sg, _o1)
+            # 还原顺序，别把这个用例的副作用留给后面的断言
+            # ★ 不用"再拖一次"还原 —— 拖到右邻的左边是**原位**（空操作），
+            #   第一版就这么写的，结果后面"切页签行数要变"那条踩空
+            #   （首个页签变成了只有 2 行的手工组）。直接指定目标顺序。
+            _ordered = '%s -> %s' % ('/'.join(_o0), '/'.join(_o1))
+            pg.evaluate(
+                "async gs => (await fetch('/api/watchlist/order',"
+                " {method:'POST', headers:{'Content-Type':'application/json'},"
+                "  body: JSON.stringify({groups: gs})})).json()", _o0)
+            pg.goto(base + '/watchlist.html', wait_until='networkidle')
+            pg.wait_for_selector('.wtab.on', timeout=40000)
+            pg.wait_for_timeout(1200)
+            tabs = [x.replace('\n', ' ') for x in
+                    pg.locator('.wtab').all_inner_texts()]
             # 实时价：与持仓页共用同一个库，页面侧不额外调接口
             #   ★ 在【实盘持仓那个页签】上验 —— 手工加的票没进抓取轮转，
             #     在它那一页看不到实时标记是正常的。
@@ -7417,10 +7548,12 @@ def t_new_pages_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('四页真渲染：盘面（KPI 齐 + 分布图 %d 像素 + 翻日 %s→%s + '
                     '%d 个榜单）、板块（%d 类 / 申万 %d 行 / 概念 %d 行 / 点出成分）、'
-                    '自选（加入后渲染 + 页签按账户分【无「全部」】且切换生效）、'
+                    '自选（加入后渲染 + 页签按账户分【无「全部」】且切换生效'
+                    ' + 页签可拖动改顺序、重开页面仍在、接口与页面一致'
+                    '（%s））、'
                     '对比（曲线 %d 像素 + 读数 + '
                     '加减只数）；四页都能点到个股页；顶栏 6 个入口齐'
-                    % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, nz2))
+                    % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, _ordered, nz2))
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
         shutil.rmtree(tmp, ignore_errors=True)
@@ -10527,7 +10660,7 @@ def t_strat_bench():
             '可取消 · 解释跟着选中走' % (sc, len(cols)))
 
 
-@case('持仓表排序：六列可点 / 升降切换 / 刷新不重排（playwright）', tag='web')
+@case('持仓表排序：六列可点 / 升降切换 / 点了不跳动（playwright）', tag='web')
 def t_pos_sort():
     """用户："需要支持点击当日、当日盈亏、市值、浮盈、幅度、仓位从大到小、
     从小到大排序。"
@@ -10541,6 +10674,11 @@ def t_pos_sort():
          存在局部里的话刚点的排序立刻被冲掉
       ⑤ 排序后 `data-rt` 格子仍在 -> `livePatch` 照常只换数字
          （它按 `code|field` 找格子，与行序无关）
+      ⑥ **点表头本身不许跳动**：就地移动 `<tr>` 节点，不重建 DOM、
+         不打接口。用户反馈「点击一下排序这个页面会发生重新刷新，整个页面
+         会跳动一下」—— 原来调 `loadLive`，它先把 `#lvbody` 清成「读取中…」
+         再撑开。判据是 DOM 记号 + 尺寸 + 滚动位置 + 接口次数四条，
+         而且视口要**真的能滚**（1000 高的视口下这页滚不动，那条是空转）
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -10638,12 +10776,75 @@ def t_pos_sort():
             assert n_rt >= 7, \
                 ('排序后只剩 %d 个 data-rt 格子 —— livePatch 靠它们原地刷新，'
                  '丢了就会退回整块重建（页面跳动）' % n_rt)
+            # ---- ⑥ 点表头【本身】不许跳动：不重建 DOM、不打接口 ----
+            # 🔴 用户："点击一下排序这个页面会发生重新刷新，整个页面会跳动
+            #   一下，体验比较差。" 根因：原来 `lvSortBind` 调 `loadLive(aid)`
+            #   —— 它一进来就把 `#lvbody` 清成「读取中…」，几百毫秒后内容
+            #   才回来，**高度先塌陷再撑开**。而排序根本不需要服务端。
+            # ★ 四条判据各有各的构造条件，混在一起测全是空转：
+            _mk = """() => { const r = document.querySelector(
+                '#lvbody table.lvpos tr:nth-child(2)');
+                r.dataset.mark = 'keep'; r.id = 'sprobe'; return true; }"""
+            pg.evaluate(_mk)
+            _api = []
+            pg.on('request', lambda r: (_api.append(r.url)
+                                        if '/api/live/account' in r.url else None))
+            # ① 视口要**真的能滚**，否则"滚动位置保住了"是空转的
+            #    （实测 1000 高的视口下这页滚不动，scrollY 一直是 0）
+            pg.set_viewport_size({'width': 1600, 'height': 520})
+            pg.wait_for_timeout(300)
+            pg.evaluate("() => window.scrollTo(0, 260)")
+            pg.wait_for_timeout(200)
+            _sy0 = pg.evaluate("() => window.scrollY")
+            assert _sy0 > 100, '视口没滚起来（%s），这条测不了' % _sy0
+            _H = ("""() => ({b: document.querySelector('#lvbody')
+                       .getBoundingClientRect().height,
+                   k: document.querySelector('#lvkpi')
+                       .getBoundingClientRect().height,
+                   rt: document.querySelectorAll('#lvbody td[data-rt]').length})""")
+            _h0 = pg.evaluate(_H)
+            _n_api = len(_api)
+            _o_before = pg.evaluate(ORDER)
+            pg.locator('#lvbody th.lvsth', has_text='市值').first.click()
+            pg.wait_for_timeout(900)
+            # ② 行序确实变了 —— 不变的话下面三条全是空转
+            assert pg.evaluate(ORDER) != _o_before, \
+                '点了「市值」行序没变，后面几条断言都测不到东西'
+            # ③ DOM 没被重建：记号还在。**只比高度是不够的** ——
+            #    重建出一模一样的 DOM 也"没跳"，而 hover 与选中的文字已经断了
+            assert pg.evaluate(
+                "() => { const e = document.querySelector('#sprobe');"
+                "  return !!e && e.dataset.mark === 'keep'; }"), \
+                '点表头把 DOM 重建了 —— 滚动位置/hover/选中的文字都会断'
+            _h1 = pg.evaluate(_H)
+            assert _h1 == _h0, \
+                '点表头之后尺寸变了（%s -> %s）—— 那就是"跳一下"' % (_h0, _h1)
+            assert pg.evaluate("() => window.scrollY") == _sy0, \
+                '点表头把滚动位置冲掉了（%s -> %s）' \
+                % (_sy0, pg.evaluate("() => window.scrollY"))
+            # ④ 表头箭头也要**就地**跟上。
+            #    🔴 原来只在全量重渲染之后验箭头 —— 而全量重渲染本来就会
+            #      照 `lvSortTh` 重生表头，所以那条断言对"就地重排忘了换
+            #      箭头"是**空转的**（变异测试当场抓到）。
+            _on = pg.evaluate(
+                "() => { const t = document.querySelector("
+                "  '#lvbody th.lvsth.on'); return t ? t.textContent.trim() : null; }")
+            assert _on and '市值' in _on and '▼' in _on, \
+                '就地重排之后表头没跟上（高亮/方向）：%r' % _on
+            # ⑤ 一次接口都不该打：数据已经在 LVO 里，排序是纯本地的重排
+            assert len(_api) == _n_api, \
+                '点表头又去打了 %d 次 /api/live/account —— 排序不需要服务端' \
+                % (len(_api) - _n_api)
+            pg.set_viewport_size({'width': 1600, 'height': 1000})
+            pg.wait_for_timeout(300)
             assert not errs, 'JS 错误：%s' % errs[:2]
             b.close()
     finally:
         httpd.shutdown()
     return ('%d 列升降序都对 · null 排最后 · quiet 与全量刷新都不重排 · '
-            '%d 个 data-rt 格子保留' % (n_checked, n_rt))
+            '%d 个 data-rt 格子保留 · 点表头就地重排'
+            '（DOM 不重建 / 尺寸与滚动位置不变 / 0 次接口）'
+            % (n_checked, n_rt))
 
 
 @case('看板页面清单：每个路由都有实现', tag='fast')

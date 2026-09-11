@@ -129,6 +129,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/alerts/refresh_div': watch.api_alerts_refresh_div,
                  '/api/watchlist': watch.api_watchlist_act,
                  '/api/watchlist/sync': watch.api_watchlist_sync,
+                 '/api/watchlist/order': watch.api_watchlist_order,
                  '/api/rt/poll': rt.api_rt_poll,
                  '/api/live/backtest': live.api_live_backtest,
                  '/api/sync/run': sync.api_sync_run}

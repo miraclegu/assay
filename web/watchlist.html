@@ -71,6 +71,9 @@ function render() {
         }
       } catch (e) { alert(String(e)); }
     }, placeholder: '加自选：代码或名称'});
+    /* innerHTML 填充之后才存在的元素要重新绑事件 —— 只在页面加载时绑
+       的话，重渲染出来的那些永远没有 handler：点了/拖了没反应且不报错。 */
+    wtabDrag();
     $$('.wtab[data-g]').forEach(e => e.onclick = ev => {
       ev.preventDefault(); GROUP = e.dataset.g;
       const u = new URL(location.href);
@@ -121,19 +124,84 @@ function render() {
   }
 }
 
+/* ---- 页签拖动改顺序 ------------------------------------------------
+   🔴 **顺序由服务端给、也存在服务端**（`watchlist.jsonl` 追加一条
+     `{act:'order',groups:[...]}`，当前顺序由重放得出）。页面既不自己
+     排、也不存 localStorage：
+       · 页面自己排 -> 第二份实现，"两处对同一份分组给出不同顺序"不报错
+       · 存 localStorage -> 换台机器/换浏览器就回到默认，而分组顺序是
+         "我怎么归类这些票"，属于决策记录，该跟账本一起走
+   ★ 拖完**立刻存**，不留"排了但没生效"的窗口（同定时窗口那条）。
+   ★ 点击仍然切换分组 —— HTML5 拖拽结束不会再触发 click，两者不冲突。
+   ★ `＋`（新建分组）不参与：它不是分组，永远在最后。 */
+function wtabDrag() {
+  let src = null;
+  const clr = () => $$('.wtab').forEach(e =>
+    e.classList.remove('wdl', 'wdr', 'wdrag'));
+  $$('.wtab[data-g]').forEach(el => {
+    el.draggable = true;
+    el.ondragstart = ev => {
+      src = el; el.classList.add('wdrag');
+      ev.dataTransfer.effectAllowed = 'move';
+      /* setData 不是可选的 —— 不设的话 Firefox 根本不开始拖，
+         而表现是"按住拖不动"且没有任何报错。 */
+      ev.dataTransfer.setData('text/plain', el.dataset.g);
+    };
+    el.ondragend = () => { src = null; clr(); };
+    el.ondragover = ev => {
+      if (!src || src === el) return;
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      const after = ev.clientX > r.left + r.width / 2;
+      el.classList.toggle('wdr', after);
+      el.classList.toggle('wdl', !after);
+    };
+    el.ondragleave = () => el.classList.remove('wdl', 'wdr');
+    el.ondrop = async ev => {
+      ev.preventDefault();
+      if (!src || src === el) { clr(); return; }
+      const r = el.getBoundingClientRect();
+      const after = ev.clientX > r.left + r.width / 2;
+      el.parentNode.insertBefore(src, after ? el.nextSibling : el);
+      clr();
+      await wtabSave();
+    };
+  });
+}
+
+/* 把当前 DOM 里的页签顺序存回账本，并**照服务端说的**对账。 */
+async function wtabSave() {
+  const want = $$('.wtab[data-g]').map(e => e.dataset.g);
+  let r;
+  try { r = await post('/api/watchlist/order', {groups: want}); }
+  catch (e) { r = {error: String(e)}; }
+  if (r.error) {
+    /* 🔴 失败要**退回服务端那份顺序**，不能把本地那个"看着排好了"的
+       留在屏幕上 —— 那样页面显示的和账本对不上，而它不报错。 */
+    $('#wmsg').className = 'lvmsg bad';
+    $('#wmsg').textContent = '顺序没存上：' + r.error;
+    render();
+    return;
+  }
+  W.groups = r.groups || W.groups;
+  const got = (r.groups || []).map(g => g.name);
+  /* 🔴 服务端的顺序与我刚拖出来的不一样时**照它的重渲染**。
+     它是权威（账本在它那边），而"我看到的顺序不是存下来的那个"
+     是最难查的那种不一致。 */
+  if (got.join('|') !== want.join('|')) render();
+}
+
 /* ---- 页签 ----------------------------------------------------------
    ★ 从 chip 改成【页签】：分组是"我要分别盯的几拨票"，而 chip 看着像
      筛选标签。参考 table-data-viewer 的 `groups[] -> items[]` 模型。
    ★ 实盘账户组带「持」标记并排在前面 —— 它们是自动同步来的，
      和手工分的组语义不同（自动组里的票会跟着持仓变）。 */
-/* 实盘自动组排前面（它们跟着持仓变），其余按名称 */
-function sortGroups(w) {
-  return (w.groups || []).slice().sort((a, b) => {
-    const aa = a.name.startsWith('实盘·'), bb = b.name.startsWith('实盘·');
-    if (aa !== bb) return aa ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-}
+/* 🔴 **顺序不在这里排** —— `watchlist.groups()` 已经排好了（人拖过的
+   顺序从账本重放，没排过的按"自动组在前、再按名称"）。页面再排一遍就是
+   第二份实现，而"页面显示的顺序和账本对不上"不报错。
+   ★ `auto` 也由服务端给（`is_auto_group`），页面不再自己 `startsWith`
+     猜前缀 —— 前缀改一次就要改两处。 */
+function sortGroups(w) { return (w.groups || []).slice(); }
 function rowsOf(w) {
   return (w.rows || []).filter(x => x.group === GROUP);
 }
@@ -161,9 +229,10 @@ function head(w) {
     </div>
     <div class="wtabs">
       ${gs.map(g => `<a href="#" class="wtab${GROUP === g.name ? ' on' : ''}"
-        data-g="${esc(g.name)}" title="${g.name.startsWith('实盘·')
-          ? '实盘账户自动同步的组 —— 里面的票跟着持仓变' : '手工分组'}"
-        >${g.name.startsWith('实盘·') ? '<b class="au">持</b> ' : ''}${
+        data-g="${esc(g.name)}" title="${g.auto
+          ? '实盘账户自动同步的组 —— 里面的票跟着持仓变'
+          : '手工分组'}　·　按住可拖动改顺序（拖完立刻存进账本）"
+        >${g.auto ? '<b class="au">持</b> ' : ''}${
           esc(g.name.replace('实盘·', ''))} <span class="n">${g.n}</span></a>`).join('')}
       <a href="#" class="wtab add" id="wnewg" title="新建一个分组页签">＋</a>
     </div>`;
