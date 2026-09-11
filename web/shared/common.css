@@ -372,6 +372,8 @@ table.dt td:first-child{color:var(--fg)}
 .lvcard{background:var(--panel);border:1px solid var(--line);border-radius:8px;
   padding:14px 16px;margin:0 0 14px}
 .lvhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+/* 标签行：一排 .lvtag。与 .lvhead 分开 —— 后者语义是「页头」，每页只有一个（selftest 的定位器依赖这点）。 */
+.lvtags{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .lvhead h2{margin:0;font-size:15px}
 .lvtag{font-family:"SF Mono",Menlo,monospace;font-size:11px;color:var(--dim);
   background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 6px}

@@ -28,6 +28,12 @@ function lineChart(el,series,opt){
   series.forEach(s=>s.v.forEach(v=>{if(v==null)return;const t=tf(v);
     if(t<lo)lo=t; if(t>hi)hi=t;}));
   if(!(hi>lo)){hi=lo+1;}
+  /* 🔴 **参考线必须落在量程里，否则它静默不画。** `opt.zero` 是水面线
+     （回撤图的 0%）。账户一直在水下时数据的最大值是负的（实测 -0.30%），
+     量程就整段在 0 以下 —— 水面线画在画布外面，而**那不报错**：
+     图看着正常，只是没有参照物，"离水面多远"读不出来。
+     ★ 所以先把参考线纳入极值，再做留白与钳制。 */
+  if(opt.zero!=null){const z=tf(opt.zero); if(z<lo)lo=z; if(z>hi)hi=z;}
   const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
   /* 🔴 钳住有**物理上界/下界**的序列。回撤的最高点永远是 0（在最高点时
      回撤为 0，不可能为正），而上面那 6% 的留白会把上界抬成 +0.1% ——

@@ -3552,8 +3552,13 @@ def t_live_ui():
             pg.wait_for_timeout(400)
 
             # 按成交日取档：9 月按万0.9、10 月按万0.6
+            # ★ `force_price=True`：这条用例测的是**按成交日取哪一档费率**，
+            #   价格只是夹具（沿用那张真实账单的 6.010×11000=66,110）。
+            #   面板往前推进之后 09-10 当天的区间成了 6.10~6.24，
+            #   价格校验会拒掉它 —— 那时挂的是夹具不是产品。
             for d, want in (('2026-09-10', 5.95), ('2026-10-08', 3.97)):
-                rr = lv.add_fill(aid0, d, '603889.XSHG', 'buy', 11000, 6.010)
+                rr = lv.add_fill(aid0, d, '603889.XSHG', 'buy', 11000, 6.010,
+                                 force_price=True)
                 assert abs(rr['fee'] - want) < 0.011, \
                     '%s 应按当时那一档算 %.2f，实得 %.2f' % (d, want, rr['fee'])
             pg.reload()
@@ -3642,24 +3647,34 @@ def t_live_ui():
             pg.wait_for_timeout(1200)
             assert '改过的名字' in pg.locator('.lvhead h2').first.inner_text(), '改名没生效'
 
-            # ---- 代码/名称能点开个股页（新标签页，实盘页不丢状态）----
+            # ---- 代码/名称点开【速览浮层】，浮层里再去个股页（新标签）----
             #   ★ 代码与名称【都】可点 —— 只有代码可点的话，习惯认名字的人
             #     会以为不能点。
-            #   ★ 用 target=_blank：实盘页往往一直开着（待办、正在录一半的
-            #     成交），跳走再回来这些状态就没了。
-            _sk = pg.locator('#lvbody table.lvpos a[href*="/stock.html"]')
+            #   🔴 **点了不跳走**：实盘页往往一直开着（待办、正在录一半的
+            #     成交），跳走再回来这些状态就没了。所以点名称弹浮层；
+            #     要看完整个股页时走浮层里的「完整页 ↗」，那个才 target=_blank。
+            #   ★ 这一段原来断言"链接必须 target=_blank"——那是浮层之前的
+            #     交互。四件要保的事没变（都可点 / 不跳走 / 仍能到个股页且
+            #     开新标签 / 新标签里没有假的返回按钮），只是路径多了一跳。
+            _sk = pg.locator('#lvbody table.lvpos a[data-sp]')
             assert _sk.count() >= 2, \
-                '持仓表里的代码/名称没链到个股页：%d' % _sk.count()
-            _a = _sk.first
-            assert _a.get_attribute('target') == '_blank', \
-                '应在新标签页打开，否则实盘页的状态会丢'
-            assert 'noopener' in (_a.get_attribute('rel') or ''), '缺 rel=noopener'
+                '持仓表里的代码/名称没挂速览：%d' % _sk.count()
             _n_pos = pg.locator('#lvbody table.lvpos tr').count() - 1
             assert _sk.count() >= _n_pos * 2, \
                 '每只持仓的代码与名称都该可点：%d 只 vs %d 个链接' \
                 % (_n_pos, _sk.count())
+            _sk.first.click()
+            pg.wait_for_selector('#spwrap', state='visible', timeout=20000)
+            assert '#/live' in pg.url, \
+                '点名称把实盘页跳走了（该弹浮层）：%s' % pg.url
+            _full = pg.locator('#spfull')
+            assert '/stock.html' in (_full.get_attribute('href') or ''), \
+                '浮层里没有去个股页的出口'
+            assert _full.get_attribute('target') == '_blank', \
+                '「完整页」应在新标签页打开，否则实盘页的状态会丢'
+            assert 'noopener' in (_full.get_attribute('rel') or ''), '缺 rel=noopener'
             with pg.context.expect_page() as _np:
-                _a.click()
+                _full.click()
             _sp = _np.value
             _sp.wait_for_selector('#kcv', timeout=40000)
             _sp.wait_for_timeout(1200)
@@ -3675,6 +3690,8 @@ def t_live_ui():
             _sp.wait_for_timeout(2500)
             assert _sp.locator('#goback').count() == 1, '站内跳转后应有返回按钮'
             _sp.close()
+            pg.keyboard.press('Escape')
+            pg.wait_for_timeout(250)
             assert '#/live' in pg.url, '原实盘页被跳走了：%s' % pg.url
             assert pg.locator('#lvbody table.lvpos').count() == 1, \
                 '原实盘页的持仓表没了 —— 新标签页打开不该影响它'
@@ -3790,9 +3807,11 @@ def t_sync():
        标红，然后你就不看红字了 —— 告警失效比没有告警更糟。
     3) **同步脚本语法可执行**：它由 launchd 跑，坏了没人看得见。
     """
+    import ast
     import datetime
     import json
     import subprocess
+    import tempfile
 
     import duckdb
 
@@ -3849,6 +3868,122 @@ def t_sync():
         % [i for i in b if i.get('lag_days') is not None]
     assert all('days_since' in i or i.get('error') for i in b), \
         'B 腿必须报「距今几天」'
+
+    # ---- 2b) 「上次从聚宽抽取」是独立一维，不能靠数据内容反推 ----
+    # 🔴 B 腿**事件驱动**：没公告的日子 pub_date 不前进。于是「距今 18 天」
+    #   这一个数分不出两种情况：①昨天刚导、只是没新公告 ②两周没导。
+    #   用户原话：「实际上财务数据我昨天已经导入了最新的，但是上面的最新时间
+    #   不会更新，显得我好像没有更新一下。」
+    # ★ 抽取时刻**只有抽取端知道**（聚宽研究环境的 now）—— 本地文件 mtime
+    #   是下载/解压时刻，反推不出来。所以链条是：extract 写进包 →
+    #   merge 落到 _manifest/jq_extract.json → sync_status 读出来。
+    #   下面逐段测**真行为**（打 ROOT 补丁到临时目录），不测源码字符串。
+    import importlib.util as _ilu
+
+    def _load(path, name):
+        sp = _ilu.spec_from_file_location(name, path)
+        m = _ilu.module_from_spec(sp)
+        sp.loader.exec_module(m)
+        return m
+
+    # (1) sync_status._extract_info：有 / 无 两支都要对
+    ssm = _load(ss, '_ss_probe')
+    with tempfile.TemporaryDirectory() as td:
+        ssm.ROOT = td
+        assert ssm._extract_info(datetime.date(2026, 9, 11)) is None, \
+            '没有 _manifest/jq_extract.json 时必须返回 None（老包），不许猜'
+        os.makedirs(os.path.join(td, '_manifest'))
+        json.dump({'extracted_at': '2026-09-10 20:26:48',
+                   'extract_date': '2026-09-10', 'since': '2026-08-20',
+                   'data_max_date': '2026-09-09'},
+                  open(os.path.join(td, '_manifest', 'jq_extract.json'),
+                       'w', encoding='utf-8'))
+        ex = ssm._extract_info(datetime.date(2026, 9, 11))
+        assert ex and ex['days_since_extract'] == 1, \
+            '抽取距今算错：%r' % (ex,)
+        # 🔴 关键：这一维必须与「数据内容多久没变」**脱钩** ——
+        #   data_max_date 比 extract_date 早一天是常态（昨天抽的是前天的数据）
+        assert ex['data_max_date'] == '2026-09-09' and \
+            ex['extract_date'] == '2026-09-10', \
+            '抽取时点与数据切点是两个字段，不能混：%r' % (ex,)
+        # 坏 JSON 不许把整个状态接口带崩
+        open(os.path.join(td, '_manifest', 'jq_extract.json'), 'w').write('{ 坏')
+        assert ssm._extract_info(datetime.date(2026, 9, 11)) is None, \
+            '坏 JSON 应降级为 None，不该抛异常'
+
+    # (2) merge 侧：把包里的 _manifest.json 落到盘上，并补 merged_at
+    mg = os.path.join(dl, 'build', 'merge_jq_increment.py')
+    assert os.path.isfile(mg), '缺 %s' % mg
+    mgm = _load(mg, '_mg_probe')
+    with tempfile.TemporaryDirectory() as td:
+        dst = os.path.join(td, 'jq_extract.json')
+        mgm.MF_DST = dst
+        src = os.path.join(td, 'pkg')
+        os.makedirs(src)
+        # 老包（没有 _manifest.json）：静默跳过，**不许建空文件**
+        mgm._manifest(src, False, 'old.tar')
+        assert not os.path.exists(dst), \
+            '老包不该写出 jq_extract.json —— 那会让页面显示一个空记录'
+        json.dump({'extracted_at': '2026-09-10 20:26:48',
+                   'extract_date': '2026-09-10', 'data_max_date': '2026-09-09'},
+                  open(os.path.join(src, '_manifest.json'), 'w',
+                       encoding='utf-8'))
+        mgm._manifest(src, True, 'new.tar')          # dry-run 不落盘
+        assert not os.path.exists(dst), '--dry-run 不该写盘'
+        mgm._manifest(src, False, 'new.tar')
+        got = json.load(open(dst, encoding='utf-8'))
+        assert got['extracted_at'] == '2026-09-10 20:26:48', \
+            '抽取时刻丢了：%r' % (got,)
+        assert got.get('merged_at') and got.get('tar') == 'new.tar', \
+            'merge 侧要补 merged_at 与包名（"什么时候导进来的"）：%r' % (got,)
+
+    # (3) extract 侧（在聚宽研究环境跑，本地不 import）：
+    #     用 ast 确认 pack() 真的调 _manifest()、_save() 真的往 _stats 记。
+    #     ★ 用 ast 而不是字符串 —— 注释不是 AST 节点，所以抓不到"我自己写的
+    #       说明文字"（本会话已 8 次栽在这上面）。
+    exs = os.path.join(dl, 'raw', 'jq', '_ingest', 'extract_jq_increment.py')
+    assert os.path.isfile(exs), '缺 %s' % exs
+    tree = ast.parse(open(exs, encoding='utf-8').read())
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    for need in ('_manifest', '_save', 'pack'):
+        assert need in fns, 'extract 脚本缺 %s()' % need
+    calls = {c.func.id for c in ast.walk(fns['pack'])
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+    assert '_manifest' in calls, \
+        'pack() 必须调 _manifest() —— 否则包里没有抽取时刻，' \
+        '而那时本地永远显示"未知"且不报错'
+    stores = {t.value.id for t in ast.walk(fns['_save'])
+              if isinstance(t, ast.Subscript)
+              and isinstance(t.ctx, ast.Store) and isinstance(t.value, ast.Name)}
+    assert '_stats' in stores, '_save() 必须往 _stats 记每张表的 max_date'
+    # 🔴 光判「_stats 被写过」太松：`_save` 里有**两处** —— 一处是初始化
+    #   `_stats[name] = {'rows': 0}`，一处才是记结果。变异掉后者时前者还在，
+    #   于是断言照样绿（变异测试当场抓到）。所以还要判**真的记了 max_date**。
+    # 🔴 「_save 里出现过 'max_date' 这个字面量」抓不到"记的那一处被改掉"
+    #   —— print 那行也有一个 `'max_date' in d`（变异测试当场抓到，
+    #   又是一次"判据比断言宽"）。所以**把这个函数抠出来真跑一遍**：
+    #   整个模块 `from jqdata import *` 本地装不了，但单个函数可以 exec
+    #   —— 它只用到 pd / os / OUT / _stats / _saved。
+    import pandas as _pd
+    _seg = ast.get_source_segment(open(exs, encoding='utf-8').read(),
+                                  fns['_save'])
+    with tempfile.TemporaryDirectory() as td:
+        _ns = {'pd': _pd, 'os': os, 'print': lambda *a, **k: None,
+               '_stats': {}, '_saved': [], 'OUT': td}
+        exec(_seg, _ns)                                  # noqa: S102
+        _ns['_save']('t', _pd.DataFrame(
+            {'code': ['a', 'b', 'c'],
+             'pub_date': ['2026-08-01', '2026-09-09', '2026-07-15']}))
+        _g = _ns['_stats'].get('t') or {}
+        assert _g.get('max_date') == '2026-09-09', \
+            '_save() 要记这张表【实际抽到】的最大日期 —— 实得 %r。' \
+            '不记的话包里只有行数，"数据切到哪天"就答不出来' % (_g,)
+        assert _g.get('date_col') == 'pub_date' and _g.get('rows') == 3, \
+            '日期列名与行数也要记：%r' % (_g,)
+        # 空表也要有记录（否则页面上"这张表没抽到"与"没记"分不出来）
+        _ns['_save']('empty', _pd.DataFrame())
+        assert _ns['_stats'].get('empty', {}).get('rows') == 0, \
+            '空表也要记一条 rows=0'
 
     # ---- 3) 脚本可执行 ----
     sh = os.path.join(dl, 'sync_daily.sh')
@@ -4204,8 +4339,11 @@ def t_live_perf_ui():
                           _bx['y'] + _bx['height'] * 0.5)
             pg.wait_for_timeout(250)
             _tp = pg.locator('#tip').text_content() or ''
-            assert '净值' in _tp and '累计金额' in _tp, \
-                ('收益曲线的 tooltip 该同时给净值与累计金额，实得 %r' % _tp)
+            # ★ 判**两个读数都在**，不钉那条线叫什么 —— 加策略线那轮把
+            #   序列名从「净值」改成了「实际 (TWR)」（要与基准并排时必须
+            #   说清哪条是自己），断言若钉着旧标签，它测的就是名字不是内容。
+            assert ('TWR' in _tp or '净值' in _tp) and '累计金额' in _tp, \
+                ('收益曲线的 tooltip 该同时给净值(TWR)与累计金额，实得 %r' % _tp)
             assert '元' in _tp, 'tooltip 里的金额该带单位：%r' % _tp
             #   ★ 金额不画成第二条线（量纲不同共轴会把一条压平）
             assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
@@ -4252,8 +4390,19 @@ def t_live_perf_ui():
                  '而"想比哪个"因人而异')
             #   每个选项要标出本地数据从哪年开始（选了科创50 才发现
             #   前面是空的话，人会以为图画坏了）
-            t0 = bms.first.get_attribute('title') or ''
-            assert '本地数据自' in t0, '基准选项该在 title 里标数据起点：%s' % t0
+            # ★ 逐个判，而不是只判 first —— 策略线也是基准选项之一（排在
+            #   最前），而它没有"本地数据起点"可言（它是按绑定版本重跑出来
+            #   的）。只判 first 会撞到它；而只判"某一个有"又太松。
+            _bt = {(bms.nth(i).get_attribute('data-b') or ''):
+                   (bms.nth(i).get_attribute('title') or '')
+                   for i in range(bms.count())}
+            _idx = {k: v for k, v in _bt.items() if k and k != 'strat'}
+            assert _idx, '一个指数基准都没有？%s' % list(_bt)
+            _nom = [k for k, v in _idx.items() if '本地数据自' not in v]
+            assert not _nom, \
+                '这些指数基准没在 title 里标数据起点：%s —— 选了科创50 才' \
+                '发现前面是空的话，人会以为图画坏了' % _nom
+            assert _bt.get('strat'), '策略线也要有 title 说清它是怎么算出来的'
             hits2 = []
             pg.on('request', lambda r: hits2.append(1)
                   if '/api/live/equity' in r.url else None)
@@ -4775,6 +4924,83 @@ def t_sync_ui():
             assert '落后' not in b_txt, \
                 'B 腿的表格里不该出现「落后」—— 财务是事件驱动，'\
                 '按交易日算是必然误报。实得: %s' % b_txt[:120]
+            # ---- 「上次抽取」必须在页面上，且与数据内容切点**分开说** ----
+            # 🔴 用户原话：「实际上财务数据我昨天已经导入了最新的，但是上面的
+            #   最新时间不会更新，显得我好像没有更新一下。」根因：页面只显示
+            #   数据内容的 pub_date，而 B 腿事件驱动 —— 没公告就不前进。
+            _ex = _json.loads(_get('/api/sync')).get('status', {}).get('extract')
+            _bsec = [s for s in pg.locator('.lvsec').all()
+                     if '财务' in (s.locator('h3').first.inner_text() or '')]
+            assert _bsec, '找不到「财务数据」那一块'
+            _btxt = ' '.join(_bsec[0].inner_text().split())
+            assert '上次抽取' in _btxt, \
+                '财务数据那块必须写「上次抽取」—— 只显示数据内容的 pub_date 时，' \
+                '刚导完也看着像 18 天没更新'
+            if _ex is None:
+                assert '未知' in _btxt, '没有 manifest 时要明说「未知（旧格式包）」，不许猜'
+                jq_ex = '上次抽取 未知（当前包是旧格式）'
+            else:
+                _when = _ex.get('extracted_at') or _ex.get('extract_date')
+                assert _when and _when in _btxt, \
+                    '抽取时点没显示出来：%r 不在「%s」里' % (_when, _btxt[:200])
+                # ★ 两个日期必须【同时】在页面上 —— 只有一个的话，
+                #   「昨天抽的、数据切到前天」这句话就说不完整。
+                # 🔴 判据必须**限定在那一行里**：日期字符串在下面那张 B 腿
+                #   表格里也出现（财务指标 pub_date 恰好同一天），拿整块文本
+                #   去匹配就是"判据比断言宽" —— 变异掉这一格照样绿。
+                if _ex.get('data_max_date'):
+                    _tags = ' '.join(_bsec[0].locator('.lvtags')
+                                     .first.inner_text().split())
+                    assert '数据切到 pub_date %s' % _ex['data_max_date'] in _tags, \
+                        '数据切点没显示在标签行里：%s' % _tags[:200]
+                _d = _ex.get('days_since_extract')
+                if _d is not None:
+                    _age = {0: '今天', 1: '昨天'}.get(_d, '%d 天前' % _d)
+                    assert _age in _btxt, \
+                        '要把"多久以前"直接说出来（%s）：%s' % (_age, _btxt[:200])
+                # 🔴 告警判据必须是**抽取时点**而不是数据内容 ——
+                #   刚导完还标红就是假告警，而假告警看多了就不看告警了。
+                _mw = ' '.join(pg.locator('#main .lvwarn').all_inner_texts())
+                if _d is not None and _d <= 14:
+                    assert '财务数据' not in _mw or '没从聚宽抽取' not in _mw, \
+                        '%d 天前刚抽过，不该报财务数据过期：%s' % (_d, _mw[:200])
+                jq_ex = '上次抽取 %s（%s）· 数据切到 %s' % (
+                    _when, _age if _d is not None else '?',
+                    _ex.get('data_max_date') or '?')
+            # ---- 告警判据：造两种数据直接验，不靠真实状态碰巧覆盖 ----
+            # 🔴 真实状态是「抽取 1 天前 / 内容 18 天」—— 两种判据都不报警，
+            #   所以只看真实页面的断言是**空转的**（变异测试当场抓到）。
+            #   这里拦掉 /api/sync 造出两种相反的情形：
+            #     ① 刚抽过、内容很旧  -> **不许**报警（原来的 bug 就是这一格）
+            #     ② 很久没抽、内容很新 -> 必须报警
+            _base = _json.loads(_get('/api/sync'))
+
+            def _probe(days_extract, days_content):
+                o = _json.loads(_json.dumps(_base))
+                o.setdefault('status', {})['leg_b_days_since'] = days_content
+                o['status']['extract'] = {
+                    'extracted_at': '2026-01-01 00:00:00',
+                    'extract_date': '2026-01-01', 'data_max_date': '2026-01-01',
+                    'days_since_extract': days_extract}
+                pg.route('**/api/sync', lambda r: r.fulfill(
+                    status=200, content_type='application/json',
+                    body=_json.dumps(o)))
+                try:
+                    pg.reload(wait_until='networkidle')
+                    pg.wait_for_timeout(700)
+                    return ' '.join(pg.locator('#main .lvwarn').all_inner_texts())
+                finally:
+                    pg.unroute('**/api/sync')
+
+            _w1 = _probe(1, 60)
+            assert '没从聚宽抽取' not in _w1 and '没更新' not in _w1, \
+                '昨天刚抽过就不该报财务过期（内容旧是因为没公告）—— 实得：%s' % _w1[:200]
+            _w2 = _probe(40, 0)
+            assert '没从聚宽抽取' in _w2, \
+                '40 天没抽必须报警，哪怕内容里恰好有新 pub_date —— 实得：%s' % _w2[:200]
+            # 回到真实数据，后面的断言还要用
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_timeout(800)
             # 日历来源要显示，且是可信来源（不然实盘会拿不到下一个交易日）
             from assay import live as lv
             head = pg.locator('.lvhead').inner_text()
@@ -4857,12 +5083,12 @@ def t_sync_ui():
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('两条腿语义分离（行情报交易日落后 / 财务报距今天数）；'
                     '界面无"A 腿/B 腿"内部术语；日历来源可信；'
-                    '只读拦住手动同步与上传；%s；'
+                    '只读拦住手动同步与上传；%s；%s；'
                     '聚宽代码可取且 SINCE 按本地最落后表(%s)预填成 %s；'
                     '定时窗口 6 个输入框可改、显示【已装】点位与是否一致'
                     '（信号重算终点 %s，补的终点）、有「保存并重装」；'
                     '%d 份日志可点开'
-                    % (auto_note, sg.get('oldest'), sg.get('since'),
+                    % (auto_note, jq_ex, sg.get('oldest'), sg.get('since'),
                        _sv[4], n_log))
     finally:
         httpd.shutdown()
@@ -5788,7 +6014,14 @@ def t_stock_ext():
     assert abs(last['macd'] - (last['dif'] - last['dea']) * 2) < 0.01, \
         'MACD 不是 (DIF−DEA)×2：%s' % last
     # J = 3K − 2D
-    assert abs(last['jj'] - (3 * last['k'] - 2 * last['d'])) < 0.02, 'J 算错'
+    # ★ 容差 0.03 不是随手放宽：k/d/jj **返回时都已四舍五入到 2 位**，
+    #   而这里拿【已舍入的】k、d 去重算 3K−2D，误差上界就是
+    #   3×0.005 + 2×0.005 = 0.025。原来写 0.02 **小于这个上界**，
+    #   于是能不能通过取决于当天的小数 —— 2026-09-11 实测 601857
+    #   k=50.28 d=52.29 jj=46.24 而 3k−2d=46.26，差正好 0.02 而挂掉。
+    #   **失败的是断言不是产品**（同 `#d_hold .note` 那条）。
+    assert abs(last['jj'] - (3 * last['k'] - 2 * last['d'])) < 0.03, \
+        'J 算错：jj=%s 而 3K−2D=%s' % (last['jj'], 3 * last['k'] - 2 * last['d'])
     for k in ('k', 'd', 'rsi6', 'rsi12', 'rsi24'):
         assert 0 <= last[k] <= 100, '%s 越界：%s' % (k, last[k])
     # BOLL：中轨 == 20 日均值；上下轨对称
@@ -6712,6 +6945,29 @@ def t_watchlist():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _via_pop(pg, loc, want=None):
+    """点代码/名称 -> **不跳走**，弹速览浮层；「完整页 ↗」才是去个股页的出口。
+
+    🔴 原来这几处断言「点了必须落到 /stock.html」。而点名称开浮层是
+      **刻意改掉**的行为（实盘页往往一直开着：待办、正在录一半的成交，
+      跳走再回来这些状态就没了）。所以那个断言测的是已经不存在的交互，
+      它一挂**失败的是断言不是产品**（同 `#d_hold .note` 那条）。
+    ★ 但它原本要保的东西不能丢 ——「独立页面之间不许断链」是独立页面
+      最大的风险。新判据两段：浮层真的开了（点了没反应是最难查的那种坏），
+      且浮层里那个出口指向**这只票**的个股页。
+    """
+    loc.click()
+    pg.wait_for_selector('#spwrap', state='visible', timeout=20000)
+    href = pg.locator('#spfull').get_attribute('href') or ''
+    assert '/stock.html' in href, '浮层里没有去个股页的出口：%r' % href
+    if want:
+        assert want in href, '浮层出口指向错了：%r 里没有 %s' % (href, want)
+    pg.keyboard.press('Escape')
+    pg.wait_for_timeout(250)
+    assert not pg.locator('#spwrap').is_visible(), 'Esc 关不掉浮层'
+    return href
+
+
 @case('买点页面真实渲染：手工填表 + 互算 + 到价点亮（playwright）', tag='web')
 def t_alerts_ui():
     """那张 Excel 的页面版。**手工填**是这一页的全部意义，所以这里真的去填。
@@ -6866,13 +7122,8 @@ def t_alerts_ui():
                     "() => (document.querySelector('#navdot2')||{}).style"
                     "?.display") == 'inline-block', \
                     '有票到价，顶栏「买点」的红点却没亮'
-            # 名称能点进个股页（独立页面之间不许断链）
-            pg.locator('table.pkt a[href*="/stock.html"]').first.click()
-            pg.wait_for_selector('#kcv', timeout=40000)
-            assert '000423' in pg.url, '从买点页点不到个股页：%s' % pg.url
-            pg.go_back()
-            pg.wait_for_selector('table.pkt', timeout=40000)
-            pg.wait_for_timeout(800)
+            # 名称点开速览浮层，浮层里有去个股页的出口（不许断链）
+            _via_pop(pg, pg.locator('table.pkt a[data-sp]').first, '000423')
 
             # ---- 改一行：编辑器要回填【存的那个】口径 ----
             #   表里显示的是换算后的两个数，照着显示值回填会把"我填的是
@@ -6898,7 +7149,7 @@ def t_alerts_ui():
                 '另一口径当参考显示) -> 填目标价 49 当场'
                 '换算 2.7/49=5.51% -> 第二档改按股息率 6% 换算出 45.00 -> 保存；'
                 '表里给"目标价+股息率"、到价整行点亮且顶栏红点亮；'
-                '点名称进个股页；改一行回填的是【存的那个口径】'
+                '点名称弹速览浮层（不跳走）且浮层里能去个股页；改一行回填的是【存的那个口径】'
                 '(price/yield 而不是换算值)；备注不占列而是名称后的 ✎ + title；'
                 '头上有分红更新状态与「刷新分红」；'
                 '1024 宽无横滚；0 个 JS 错误')
@@ -6994,9 +7245,7 @@ def t_new_pages_ui():
             d1 = pg.locator('#mdate').input_value()
             assert d1 < d0, '「前一日」没生效（%s -> %s）' % (d0, d1)
             # 盘面 → 个股（断链是独立页面最大的风险）
-            pg.locator('.pgrid.c2 a[href*="/stock.html"]').first.click()
-            pg.wait_for_selector('#kcv', timeout=40000)
-            assert '/stock.html' in pg.url, '从盘面点不到个股页'
+            _via_pop(pg, pg.locator('.pgrid.c2 a[data-sp]').first)
 
             # ================= 板块 =================
             pg.goto(base + '/sector.html', wait_until='networkidle')
@@ -7024,9 +7273,7 @@ def t_new_pages_ui():
             # 板块 → 个股
             pg.locator('.lvsec a.pick').first.click()
             pg.wait_for_timeout(2500)
-            pg.locator('a[href*="/stock.html"]').first.click()
-            pg.wait_for_selector('#kcv', timeout=40000)
-            assert '/stock.html' in pg.url, '从板块成分点不到个股页'
+            _via_pop(pg, pg.locator('a[data-sp]').first)
 
             # ================= 自选 =================
             pg.goto(base + '/watchlist.html', wait_until='networkidle')
@@ -7099,10 +7346,8 @@ def t_new_pages_ui():
             assert 1 < n_man < n_auto, \
                 '切页签后行数没变（%d -> %d）' % (n_auto, n_man)
             # 自选 → 个股：手工组里只有 601857，所以点它必须落到 601857
-            pg.locator('.lvsec').first.locator(
-                'a[href*="/stock.html"]').first.click()
-            pg.wait_for_selector('#kcv', timeout=40000)
-            assert '601857' in pg.url, '从自选点不到个股页：%s' % pg.url
+            _via_pop(pg, pg.locator('.lvsec').first.locator(
+                'a[data-sp]').first, '601857')
 
             # ================= 对比 =================
             pg.goto(base + '/compare.html?codes=601857.XSHG,601088.XSHG',
@@ -7132,9 +7377,7 @@ def t_new_pages_ui():
             pg.wait_for_timeout(2500)
             assert pg.locator('.rmc.chip').count() == 2, '移除没生效'
             # 对比 → 个股
-            pg.locator('.lvsec a[href*="/stock.html"]').first.click()
-            pg.wait_for_selector('#kcv', timeout=40000)
-            assert '/stock.html' in pg.url, '从对比点不到个股页'
+            _via_pop(pg, pg.locator('.lvsec a[data-sp]').first)
 
             # ================= 窄屏不许把整个 body 撑横滚 =================
             #   🔴 横滚的是【body】的话，读表格时整页会左右晃。
@@ -9822,7 +10065,13 @@ def t_live_nojump():
     assert 'if(quiet&&livePatch(o))' in flat, \
         'quiet 时必须先试原地 patch，patch 得动才不重建 DOM'
     # 一处定义：渲染路径里不许有手写的 data-rt（否则与 lvRtd 两份会分叉）
+    # 🔴 **先剥注释。** 原来直接扫源码，于是 `livePatch` 的那段说明里
+    #   写着「patch 靠 `td[data-rt="code|field"]`」—— 断言匹配到了
+    #   **自己写的注释**而判失败。本会话第 9 次栽在这上面：
+    #   注释是给人看的说明，断言必须只针对会被执行的东西。
     body = src[src.index('async function loadLive'):]
+    body = re.sub(r'/\*.*?\*/', '', body, flags=re.S)
+    body = '\n'.join(re.sub(r'(^|\s)//.*$', '', ln) for ln in body.splitlines())
     assert 'data-rt=' not in body, \
         '渲染路径里有手写的 data-rt —— 那就是第二份定义，迟早与 lvRtd 分叉'
 

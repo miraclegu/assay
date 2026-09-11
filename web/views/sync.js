@@ -107,11 +107,22 @@ async function showSync(){
   if(o.error) warn+=`<div class="lvwarn"><b>状态读取失败</b><br>${esc(o.error)}</div>`;
   if(st.leg_a_lag) warn+=`<div class="lvwarn"><b>行情数据落后 ${st.leg_a_lag} 个交易日</b><br>
      同步没跑成功。点下面「立即同步」，或看最近一次日志。</div>`;
-  if(st.leg_b_days_since>21) warn+=`<div class="lvwarn"><b>财务数据距今 ${st.leg_b_days_since} 天没更新</b><br>
+  /* 🔴 **财务数据的告警判据是「上次抽取」，不是「数据内容多久没变」。**
+     B 腿事件驱动：没公告的日子 pub_date 本来就不前进。只看内容的话，
+     人昨天刚导完、页面照样标红「距今 18 天没更新」 —— 用户原话：
+     「显得我好像没有更新一下」。假告警看多了就不看告警。
+     ★ 老包没有 _manifest.json（ex 为 null）时**退回**看内容 ——
+       不然旧格式包一律不告警，反而把真的过期藏起来。 */
+  const ex = st.extract, exd = ex && ex.days_since_extract;
+  const bStale = (exd!=null) ? exd>14 : (st.leg_b_days_since>21);
+  if(bStale) warn+=`<div class="lvwarn"><b>财务数据${exd!=null
+       ?'已经 '+exd+' 天没从聚宽抽取'
+       :'距今 '+st.leg_b_days_since+' 天没更新'}</b><br>
      行情天天新、财务过期时，回测照跑、报告看着完全正常，而选股用的是旧财报
      （数据字典 E-0「数据新鲜度错配」）。实测代价：2026 中报只覆盖 55.6% 时，
      froec 同日选股与聚宽只对上 6/10；补完升到 9/10。<br>
      去聚宽研究环境跑 <code>raw/jq/_ingest/extract_jq_increment.py</code>。</div>`;
+
   if(o.readonly) warn+=`<div class="lvwarn">只读模式 —— 可以看，不能手动触发。
      这个服务是 <code>--readonly</code> 起的 —— 去掉它重启即可。</div>`;
 
@@ -163,6 +174,27 @@ async function showSync(){
       </div>
     </div>
     <div class="lvsec"><h3>财务数据 · 需手动导出</h3>
+      ${(()=>{
+        /* ★ 这一行回答的是「**我上次导是什么时候**」，下面那张表回答的是
+           「数据内容切到哪天」—— 两件事，摆一起才不矛盾。原来页面上只有
+           后者，于是刚导完也显示「距今 18 天」。
+           ★ 抽取时刻由**抽取端**写进包（聚宽研究环境的 now），本地反推不出来
+             —— 文件 mtime 是下载/解压时刻，不是抽取时刻。 */
+        if(!ex) return `<div class="lvwhy">上次抽取 <b>未知</b> ——
+          最近导入的包是旧格式（没有 <code>_manifest.json</code>）。
+          下次用「① 取聚宽代码」导出的包会带上抽取时刻。</div>`;
+        const d = ex.days_since_extract;
+        const age = d==null?'':(d===0?'今天':(d===1?'昨天':d+' 天前'));
+        return `<div class="lvtags" style="margin:2px 0 6px">
+          <span class="lvtag${d!=null&&d>14?' warn':''}">上次抽取
+            ${esc(ex.extracted_at||ex.extract_date||'未知')}${age?' · '+age:''}</span>
+          ${ex.data_max_date?`<span class="lvtag">数据切到 pub_date
+            ${esc(ex.data_max_date)}</span>`:''}
+          ${ex.since?`<span class="lvtag">SINCE ${esc(ex.since)}</span>`:''}
+          ${ex.merged_at?`<span class="lvtag" title="${esc(ex.tar||'')}">本地合并
+            ${esc(ex.merged_at)}</span>`:''}
+        </div>${ex.recovered?`<div class="lvwhy">${esc(ex.recovered)}</div>`:''}`;
+      })()}
       <table class="lvt"><tr><th>项</th><th>最新</th><th>距今</th></tr>
       ${B.map(row).join('')}</table>
       <div class="lvwhy" style="margin-top:6px">
