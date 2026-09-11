@@ -4893,6 +4893,7 @@ def t_forcast_csv():
     _s.path.insert(0, os.path.join(dl, 'build'))
     from csv_repair import read_forcast_df, read_repaired, split_records
     import duckdb
+    import re as _re
 
     # ---- 1) 修读：内容校验在函数内，读得出来就说明全过 ----
     df, st = read_forcast_df(csvp, verbose=False)
@@ -4901,30 +4902,65 @@ def t_forcast_csv():
     assert df['id'].str.fullmatch(r'\d+').all(), 'id 有非数字'
     assert df['code'].str.fullmatch(r'\d{6}\.XSH[EG]').all(), 'code 有不合法'
 
-    # ---- 2) 与裸 pandas 对照：必须【不一样】，且差值全是垃圾行 ----
+    # ---- 2) 与裸 pandas 对照 ----
+    # 🔴 **不能要求上游一直是坏的。** 头一版写 `assert n_bad > 0`（裸读必须
+    #   产生垃圾行）—— 2026-09-10 那个增量包里上游**修好了**（0 条奇数引号，
+    #   三个解析器与记录头判据四者一致都是 124,083），这条断言就把测试打红了。
+    #   而"上游修好了"是**好事**，不该让测试失败。
+    # ★ 改成**双态**：
+    #     上游坏 -> 仍然钉住「裸读行数 − 垃圾行 == 修读行数」（修读没多吞少吞）
+    #     上游好 -> 钉住「修读与裸读**逐行一致**」（这层不会把好文件读坏）
+    #   两种情况都能验，而且不管上游怎么变都不会有假失败。
     import pandas as pd
     naive = pd.read_csv(csvp, dtype=str, encoding='utf-8-sig')
     n_bad = int((~naive['id'].fillna('').str.fullmatch(r'\d+')).sum())
-    assert n_bad > 0, \
-        '裸 pandas 居然没产生垃圾行 —— 上游可能修好了 CSV，那这层修读可以简化'
-    assert len(naive) - n_bad == n_fix, \
-        ('裸读 %d 行 − 垃圾 %d 行 应等于修读 %d 行，实际不等 —— '
-         '说明修读多吞或少吞了记录' % (len(naive), n_bad, n_fix))
+    if n_bad:
+        assert len(naive) - n_bad == n_fix, \
+            ('裸读 %d 行 − 垃圾 %d 行 应等于修读 %d 行，实际不等 —— '
+             '说明修读多吞或少吞了记录' % (len(naive), n_bad, n_fix))
+        upstream = '坏（裸读 %d 行含 %d 行垃圾）' % (len(naive), n_bad)
+    else:
+        # 🔴 上游干净时，修读**不许**改变任何一行 —— 否则这层本身就是风险。
+        assert len(naive) == n_fix, \
+            ('上游是干净的（裸读无垃圾行），但修读给出 %d 行 ≠ 裸读 %d 行 —— '
+             '这层把好文件读坏了' % (n_fix, len(naive)))
+        for col in ('id', 'code', 'pub_date'):
+            a = df[col].fillna('').reset_index(drop=True)
+            b = naive[col].fillna('').reset_index(drop=True)
+            assert (a == b).all(), \
+                '上游干净时修读与裸读在 %s 列上不一致 —— 这层把好文件读坏了' % col
+        upstream = '干净（裸读 %d 行、无垃圾）' % len(naive)
 
-    # ---- 3) DuckDB 必须仍然读不了（如果它能读了，这层修读就该退役）----
+    # ---- 3) DuckDB 能不能直接读 ----
+    # 🔴 同样不能要求它「必须读不了」。但**这层依然有存在价值**，
+    #   理由与「DuckDB 读不读得了」无关：
+    #     · 它按记录头切并**拼回续行**（实测这个干净文件里有 1068 个续行）
+    #     · 它有四道**内容校验**（id 纯数字 / code 合法 / 两个日期列合法），
+    #       那是「按位置切对了」的唯一证明 —— 当初 11 行垃圾静默进 parquet
+    #       存活一周，就是因为只校验行数不校验内容（CLAUDE.md 那条教训）
+    #   所以这里只**记录**状态，不拿它当失败判据。
     try:
-        duckdb.connect().execute(
+        n_duck = duckdb.connect().execute(
             "SELECT count(*) FROM read_csv_auto('%s', all_varchar=true)" % csvp
-        ).fetchone()
-        duck_ok = True
-    except Exception:                                       # noqa: BLE001
-        duck_ok = False
-    assert not duck_ok, \
-        'DuckDB 现在能直接读这个 CSV 了 —— 上游修好了？那 csv_repair 可以简化'
+        ).fetchone()[0]
+        duck = '能读（%d 行%s）' % (
+            n_duck, '，与修读一致' if n_duck == n_fix else '，**与修读不一致**')
+        # ★ DuckDB 能读时，行数必须与修读一致 —— 不一致说明有一方错了，
+        #   那是真问题（而不是"上游修好了"）。
+        assert n_duck == n_fix, \
+            ('DuckDB 读出 %d 行、修读 %d 行 —— 两个解析器分歧，必须查清'
+             '（多解析器交叉验证比单个解析器的"成功"可信）' % (n_duck, n_fix))
+    except AssertionError:
+        raise
+    except Exception as _e:                                 # noqa: BLE001
+        # 🔴 **把异常类型带出来**，不要只说"读不了"。
+        #   实测踩到：这里曾把一个 `NameError` 当成"DuckDB 读不了"报出去，
+        #   于是摘要写着「DuckDB 仍报错」而它其实能读 —— 吞掉异常类型
+        #   等于让一个**假结论**看着像验过了（同「禁止吞异常」那条）。
+        duck = '读不了（%s: %s）' % (type(_e).__name__, str(_e)[:60])
 
     # ---- 4) 记录头判据不能退化成 ^\d+, ----
     #     content 里有千分位逗号（633,969.04元），松判据会把续行当新记录
-    import re as _re
     _, recs_ok, _ = split_records(csvp)
     _, recs_loose, _ = split_records(csvp, start_re=_re.compile(r'^\d+,'))
     assert len(recs_loose) > len(recs_ok), \
@@ -4944,10 +4980,92 @@ def t_forcast_csv():
         assert n_junk == 0, 'parquet 里还有 %d 行垃圾' % n_junk
         assert n_pq == n_fix, 'parquet %d 行 != 修读 %d 行' % (n_pq, n_fix)
 
-    return ('修读 %s 行（裸 pandas %s 行含 %d 行垃圾，DuckDB 仍报错，'
-            '松判据多切 %d 条）；parquet 无垃圾行'
-            % (format(n_fix, ','), format(len(naive), ','), n_bad,
-               len(recs_loose) - len(recs_ok)))
+    # ---- 5) 🔴 **注入一个坏文件，证明这层不是摆设** ----
+    # 上游修好之后，前面那些断言都只能证明「这层没把好文件读坏」——
+    # 证不了「它还有必要」。而缺陷来自上游（聚宽导出），下次导可能又带，
+    # 所以要用**构造的坏文件**把这层的价值钉住：删掉一个引号，让引号数
+    # 变成奇数（这正是 2026-09-01 定位到的那个缺陷，当时有 10 处）。
+    # ★ 这也回答了「这层还有没有必要」：**有**。实测一个引号就能让裸读
+    #   少 2,118 行并混进垃圾，而修读读得完全正确。
+    import tempfile as _tf
+    _bad = None
+    try:
+        with open(csvp, encoding='utf-8-sig', newline='') as _f0:
+            _lines = _f0.read().split('\n')
+        _k = next((i for i, l in enumerate(_lines)
+                   if _re.match(r'^\d+,\d+,\d{6}\.XSH[EG],', l)
+                   and l.count('"') >= 2), None)
+        assert _k is not None, '找不到带引号的记录 —— 构造不出坏文件，这条测不到'
+        _q = _lines[_k].index('"')
+        _lines[_k] = _lines[_k][:_q] + _lines[_k][_q + 1:]   # 删一个引号
+        _fd, _bad = _tf.mkstemp(suffix='.csv')
+        with os.fdopen(_fd, 'w', encoding='utf-8') as _f:
+            _f.write('\n'.join(_lines))
+        _nv = pd.read_csv(_bad, dtype=str, encoding='utf-8-sig')
+        _nbad = int((~_nv['id'].fillna('').str.fullmatch(r'\d+')).sum())
+        # 裸读必须被这一个引号搞坏（少行 或 混进垃圾）
+        assert len(_nv) != n_fix or _nbad > 0, \
+            ('注入一个未闭合引号之后裸 pandas 居然还读对了（%d 行、%d 垃圾）'
+             ' —— 那这个构造没有重现缺陷，这条断言是空转的'
+             % (len(_nv), _nbad))
+        _df2, _ = read_forcast_df(_bad)
+        # 而修读必须仍然读出全部记录、且内容合法（read_forcast_df 内部会校验）
+        assert len(_df2) == n_fix, \
+            ('坏文件下修读给出 %d 行 ≠ 干净文件的 %d 行 —— 这层没能修好'
+             % (len(_df2), n_fix))
+        _fix_note = ('注入 1 个未闭合引号：裸读 %s 行/%d 垃圾，修读仍 %s 行'
+                     % (format(len(_nv), ','), _nbad, format(len(_df2), ',')))
+    finally:
+        if _bad and os.path.exists(_bad):
+            os.unlink(_bad)
+
+    # ---- 6) 🔴 **字段错位必须被内容校验拦住** ----
+    # 上一条注入的是"未闭合引号"，它只让**裸读**出错、修读照样正确 ——
+    # 所以它证不了那四道内容校验有用。这一条补上：把一个**续行**伪装成
+    # 记录头（`999,888,000001.XSHE,` 前缀），于是那条记录被切成两半、
+    # 后半段的字段整体错位。
+    # ★ 实测：这时 `id` / `code` 恰好**仍然合法**（切出来的前三段就是我
+    #   插进去的那三个），拦住它的是**日期列**那道校验 —— 四道校验各有分工，
+    #   少任何一道都可能让错位静默通过。
+    # 🔴 这正是 CLAUDE.md 那条教训的反面：当初只校验「行数 == pandas 读入
+    #   行数」，两边一样错、检查照样通过，11 行垃圾静默进 parquet 活了一周。
+    _bad2 = None
+    try:
+        with open(csvp, encoding='utf-8-sig', newline='') as _f1:
+            _ls = _f1.read().split('\n')
+        _st = [i for i, l in enumerate(_ls)
+               if _re.match(r'^\d+,\d+,\d{6}\.XSH[EG],', l)]
+        _kk = next((_st[i] for i in range(len(_st) - 1)
+                    if _st[i + 1] - _st[i] > 1), None)
+        assert _kk is not None, \
+            '文件里没有带续行的记录 —— 构造不出字段错位，这条断言是空转的'
+        _ls[_kk + 1] = '999,888,000001.XSHE,' + _ls[_kk + 1]
+        _fd2, _bad2 = _tf.mkstemp(suffix='.csv')
+        with os.fdopen(_fd2, 'w', encoding='utf-8') as _f2:
+            _f2.write('\n'.join(_ls))
+        try:
+            read_forcast_df(_bad2, verbose=False)
+            raise AssertionError(
+                '字段错位（假记录头）居然通过了内容校验 —— 那四道校验'
+                '（id/code/两个日期列）至少有一道失效了，而错位**不报错**、'
+                '只是把垃圾写进 parquet')
+        except ValueError as _ve:
+            assert ('不是日期' in str(_ve) or 'id' in str(_ve)
+                    or 'code' in str(_ve)), \
+                '抛的错不是内容校验给的：%s' % _ve
+            _mis_note = '字段错位被拦住（%s）' % str(_ve).split('有')[-1][:28]
+    finally:
+        if _bad2 and os.path.exists(_bad2):
+            os.unlink(_bad2)
+
+    # 🔴 摘要里的每一句都要来自**检测结果**，不许写死。
+    #   头一版把「DuckDB 仍报错」硬编码在字符串里 —— 而它其实早就能读了
+    #   （124,083 行，与修读一致）。**报告串在说谎，它看着像验过了**
+    #   （同「数字自己算、别写死」那条）。
+    return ('修读 %s 行；上游 %s；DuckDB %s；松判据多切 %d 条；%s；parquet 无垃圾行'
+            % (format(n_fix, ','), upstream, duck,
+               len(recs_loose) - len(recs_ok),
+               _fix_note + '；' + _mis_note))
 
 
 @case('页签图标：能取到 / mimetype 对 / 浏览器真的用了它', tag='fast')
