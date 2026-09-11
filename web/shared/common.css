@@ -729,3 +729,8 @@ a.spl.accent{color:var(--accent)}
      入口 = 没有入口」）。 */
 #main th.hasH{cursor:help}
 #main th .thq{font-size:10px;color:var(--dim);margin-left:2px;vertical-align:top}
+/* 持仓表可排序的表头。★ 必须看得出能点 —— 光能点不给提示的话没人会去点
+   （同「看不出能点的入口 = 没有入口」）。 */
+#main th.lvsth{cursor:pointer;user-select:none}
+#main th.lvsth:hover{color:var(--fg)}
+#main th.lvsth.on{color:var(--accent)}

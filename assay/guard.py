@@ -208,6 +208,14 @@ class GuardedFeed:
                 d.update(close_hfq=b.close_hfq, limit_up=b.limit_up,
                          limit_down=b.limit_down, sealed=b.sealed,
                          touch_up=b.touch_up,
+                         # 🔴 `change_pct` 与 `ma5` 也是**收盘**派生量，同一批。
+                         #   上次加 `touch_up` 时改了这里，这次加这两列**忘了** ——
+                         #   表现是策略里 `row.get('change_pct')` 永远是 None ->
+                         #   规则整段空转、**一个事件都不触发，而且不报错**。
+                         #   ★ 教训：给 `Bar` 加列必须同时改这里（两处要一起动），
+                         #     判据是「策略侧真的收到了那个字段」而不是「Bar 有了」。
+                         change_pct=b.change_pct, ma5=b.ma5,
+                         ma20=b.ma20,
                          high_hfq=b.high_hfq, low_hfq=b.low_hfq)
             out[c] = d
         return out

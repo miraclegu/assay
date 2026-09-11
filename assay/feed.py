@@ -26,7 +26,7 @@ import duckdb
 # 撮合与风控需要的字段。策略要别的列走 query()/panel()，不必挤在这里。
 Bar = namedtuple('Bar', 'open_hfq close_hfq open_raw factor '
                         'open_limit_up open_limit_down limit_up limit_down sealed '
-                        'touch_up '
+                        'touch_up change_pct ma5 ma20 '
                         'amount limit_ok '
                         'high_hfq low_hfq')
 
@@ -46,6 +46,27 @@ _BAR_COLS = """
     -- ★ 纯**投影**改动：只多返回一列，WHERE / ORDER BY 一个字没动，
     --   原策略不读它 —— 行为一行不变（同「末层 SELECT 多返回几列」那条）。
     (high >= limit_up - 0.005)       AS touch_up,
+    -- 🔴 **当日涨幅直接取面板的 `change_pct`**，不要自己拿后复权价算。
+    --   实测（2024 全年 123 万行）：`change_pct` 与 `close_bfq/preclose − 1`
+    --   **零偏差**；而拿后复权比值算会在**低价股**上差很多（27 万行偏差
+    --   > 0.02pp、最大 1.9pp）—— 不复权价只有 2 位小数，0.33 -> 0.34 是
+    --   +3.03%，而后复权价保留更多有效位、算出 +1.75%。
+    --   ★ 两个都"看着像涨幅"，而错的那个在小盘低价股上系统性偏小 ——
+    --     正是这个策略的持仓所在。
+    change_pct,
+    -- 5 日均线（后复权收盘的 5 日移动平均，含当日）。
+    -- ★ 在 SQL 里算而不是让策略自己 `bar_range` 取 5 天再平均：
+    --   窗口函数一次算完，而策略侧循环取数在 500+ 调仓日上很慢；
+    --   更重要的是**口径只有一份**（同「K 线的均线在服务端算」那条）。
+    -- 🔴 `ROWS BETWEEN 4 PRECEDING AND CURRENT ROW` 不足 5 根时给部分均值，
+    --   策略侧要自己判「够不够 5 根」—— 给 NULL 的话建仓头几天会静默不跟踪。
+    avg(close_hfq) OVER (PARTITION BY jq_code ORDER BY date
+                         ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS ma5,
+    -- MA20：给「价格偏离均线的程度」当基准（现价 / MA20 − 1）。
+    -- 🔴 同 ma5：不足 20 根时给的是**部分均值**，用它的策略必须自己判
+    --   够不够 20 根 —— 直接信的话建仓头几天会拿一个 3 根的"均线"去比。
+    avg(close_hfq) OVER (PARTITION BY jq_code ORDER BY date
+                         ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS ma20,
     -- ★ 成交量约束用 amount(元) 而非 volume：实测 volume 的单位是【股 × 100】，
     --   除以 100 才是股数（交叉验证：volume/100 算换手率得 0.4731，
     --   面板 turnover 列 0.473107，精确吻合）。用 amount 元对元，绕开单位陷阱。

@@ -495,6 +495,11 @@ def t_limit_unreliable():
     mk = lambda ok: Bar(open_hfq=10.0, close_hfq=10.0, open_raw=10.0, factor=1.0,
                         open_limit_up=True, open_limit_down=False, limit_up=True,
                         limit_down=False, sealed=True, touch_up=True,
+                        # 🔴 给 `Bar` 加列必须**同时**补这个桩 —— 这是第二次
+                        #   踩：加 touch_up 时补过一次，加 change_pct/ma5/ma20
+                        #   时又漏了。namedtuple 少一个参数就是 TypeError，
+                        #   好在它**会报错**（不像 guard.current 漏字段那样静默）。
+                        change_pct=0.0, ma5=10.0, ma20=10.0,
                         amount=1e8, limit_ok=ok,
                         high_hfq=10.0, low_hfq=10.0)
     b.bars = {'_T_': mk(True)}
@@ -10153,6 +10158,125 @@ def t_strat_bench():
         httpd.shutdown()
     return ('策略色 %s 不在 %d 个指数色里 · 默认不画 · 与指数单选互斥 · '
             '可取消 · 解释跟着选中走' % (sc, len(cols)))
+
+
+@case('持仓表排序：六列可点 / 升降切换 / 刷新不重排（playwright）', tag='web')
+def t_pos_sort():
+    """用户："需要支持点击当日、当日盈亏、市值、浮盈、幅度、仓位从大到小、
+    从小到大排序。"
+
+    钉五件事，每件都对应一种**不报错**的坏法：
+      ① 六列都真的能排 —— 漏一列的表现是"点了没反应"（同对比页「移除」那条）
+      ② **首次点击给降序** —— 这六个都是「越大越好」的量，人点它是想看
+         最赚/最大的那个；一律升序会把最差的排最前面（同回测页那条）
+      ③ 再点一次反向
+      ④ **quiet 刷新（每分钟）不许重排行序** —— `LVSORT` 必须是模块级；
+         存在局部里的话刚点的排序立刻被冲掉
+      ⑤ 排序后 `data-rt` 格子仍在 -> `livePatch` 照常只换数字
+         （它按 `code|field` 找格子，与行序无关）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import re as _re
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+
+    # ---- 静态：null 必须排最后（停牌股取不到价）----
+    src = _io.open('web/views/live.js', encoding='utf-8').read()
+    fn = src[src.index('function lvSortRows'):]
+    fn = fn[:fn.index('\n}\n')]
+    flat = fn.replace(' ', '')
+    assert 'if(x==null)return1' in flat and 'if(y==null)return-1' in flat, \
+        ('null 必须一律排最后（不管升降序）—— 把 null 当 0 参与排序的话，'
+         '停牌股会混在正负之间，看着像"今天不涨不跌"而事实是没有数据')
+    assert 'localStorage' not in fn, \
+        ('排序不该持久化 —— 它是"我现在想看什么"，下次打开该回到默认'
+         '（同「待办折叠状态不持久化」那条）')
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1600, 'height': 1000})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live' % port)
+            pg.wait_for_selector('#lvbody table.lvpos', timeout=25000)
+            pg.wait_for_timeout(3000)
+            WANT = ['当日', '当日盈亏', '市值', '浮盈', '幅度', '仓位']
+            ths = pg.locator('#lvbody th.lvsth')
+            got = [ths.nth(i).inner_text().strip().rstrip('▼▲ ')
+                   for i in range(ths.count())]
+            assert got == WANT, '可排序的列不对：%r（要 %r）' % (got, WANT)
+
+            def vals(name):
+                return pg.evaluate("""(nm) => {
+                  const ts=[...document.querySelectorAll('#lvbody table.lvpos th')];
+                  const i=ts.findIndex(t=>t.textContent.trim()
+                      .replace(/[\\u25bc\\u25b2\\s]/g,'')===nm);
+                  if(i<0) return null;
+                  return [...document.querySelectorAll('#lvbody table.lvpos tr')]
+                    .slice(1).map(tr=>{const td=tr.children[i];
+                      if(!td) return null;
+                      const v=parseFloat(td.textContent.replace(/[,%+]/g,'').trim());
+                      return isNaN(v)?null:v;});
+                }""", name)
+
+            n_checked = 0
+            for name in WANT:
+                pg.locator('#lvbody th.lvsth', has_text=name).first.click()
+                pg.wait_for_timeout(600)
+                v = [x for x in (vals(name) or []) if x is not None]
+                assert len(v) >= 3, '「%s」只取到 %d 个数值，测不出排序' % (name, len(v))
+                assert all(v[i] >= v[i+1] for i in range(len(v)-1)), \
+                    ('「%s」首次点击不是降序：%r —— 这六个都是越大越好的量，'
+                     '人点它是想看最赚/最大的那个' % (name, v[:5]))
+                pg.locator('#lvbody th.lvsth', has_text=name).first.click()
+                pg.wait_for_timeout(600)
+                v2 = [x for x in (vals(name) or []) if x is not None]
+                assert all(v2[i] <= v2[i+1] for i in range(len(v2)-1)), \
+                    '「%s」再点一次没有反向：%r' % (name, v2[:5])
+                n_checked += 1
+
+            # ---- ④ quiet 刷新不许重排 ----
+            pg.locator('#lvbody th.lvsth', has_text='浮盈').first.click()
+            pg.wait_for_timeout(700)
+            ORDER = ("""() => [...document.querySelectorAll(
+                '#lvbody table.lvpos tr')].slice(1)
+                .map(tr => (tr.children[0]||{}).textContent || '')""")
+            o1 = pg.evaluate(ORDER)
+            assert len(o1) >= 3, '持仓行太少（%d），测不出行序' % len(o1)
+            pg.evaluate("async () => { await loadLive(LVSEL, true); }")
+            pg.wait_for_timeout(1200)
+            assert pg.evaluate(ORDER) == o1, \
+                'quiet 刷新（每分钟那次）把行序重排了 —— LVSORT 必须是模块级'
+            # 全量重渲染也要保持
+            pg.evaluate("async () => { await loadLive(LVSEL); }")
+            pg.wait_for_timeout(1500)
+            assert pg.evaluate(ORDER) == o1, '全量重渲染把排序丢了'
+            on = pg.evaluate("""() => { const t=document.querySelector(
+                '#lvbody th.lvsth.on'); return t ? t.textContent.trim() : null; }""")
+            assert on and '浮盈' in on and '▼' in on, \
+                '排序中的列要高亮并标方向，现在是 %r' % on
+            # ---- ⑤ data-rt 还在 ----
+            n_rt = pg.evaluate(
+                "() => document.querySelectorAll('#lvbody td[data-rt]').length")
+            assert n_rt >= 7, \
+                ('排序后只剩 %d 个 data-rt 格子 —— livePatch 靠它们原地刷新，'
+                 '丢了就会退回整块重建（页面跳动）' % n_rt)
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return ('%d 列升降序都对 · null 排最后 · quiet 与全量刷新都不重排 · '
+            '%d 个 data-rt 格子保留' % (n_checked, n_rt))
 
 
 @case('看板页面清单：每个路由都有实现', tag='fast')

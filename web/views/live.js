@@ -290,11 +290,9 @@ async function loadLive(aid, quiet){
       <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
           <th class="rt">成本</th>
           <th class="rt">现价</th>
-          <th class="rt">当日</th><th class="rt">当日盈亏</th>
-          <th class="rt">市值</th>
-          <th class="rt">浮盈</th><th class="rt">幅度</th><th class="rt">仓位</th>
+          ${Object.entries(LVSORT_COLS).map(([k,v])=>lvSortTh(k,v)).join('')}
           <th class="tx">建仓</th></tr>
-      ${it.map(x=>`<tr>
+      ${lvSortRows(it).map(x=>`<tr>
         <td>${skLink(x.code, x.code)}</td>
         <td class="tx">${skLink(x.code, x.name||'')}${lvHoldMark(aid, x.code)}</td>
         <td class="rt">${num(x.shares)}</td>
@@ -318,6 +316,8 @@ async function loadLive(aid, quiet){
   $('#lvstrat').onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256||''); };
   $('#lvset').onclick=()=>openSettings(aid, a, ro);
   $('#lvrec').onclick=()=>openRecord(aid, sig, ro);
+  /* 持仓表的表头排序 —— innerHTML 之后才存在，所以每次全量渲染都要重绑。 */
+  lvSortBind(aid);
   /* 盘中才轮询；收盘后停掉并在页面上说清（不说的话人会以为坏了）。 */
   if(o.rt_live) livePoll(aid); else stopPoll();
 
@@ -436,6 +436,60 @@ async function liveEquityTag(aid){
   }catch(err){ el.innerHTML=cell('业绩','—', esc(String(err))); }
 }
 
+
+/* ---- 持仓表排序 -----------------------------------------------------
+   点表头在【当日 / 当日盈亏 / 市值 / 浮盈 / 幅度 / 仓位】之间切换，
+   再点一次反向。
+   ★ 首次点击给**降序** —— 这六个都是「越大越好」的量，人点它是想看
+     "最赚的/最大的是哪个"（同回测页那条：换列时默认方向按哪边更好给，
+     一律升序会把最差的排最前面）。
+   🔴 排序状态是**模块级**的（`LVSORT`），不是局部变量 —— `loadLive` 每
+     分钟重渲染一次，存在局部里的话刚点的排序立刻被冲掉。
+   🔴 与原地刷新（`livePatch`）**天然兼容**：patch 靠 `td[data-rt="code|field"]`
+     找格子，与 DOM 里的行序无关。所以排序后 60 秒的自动刷新照样只换数字。
+   ★ 不持久化到 localStorage：排序是"我现在想看什么"，下次打开该回到
+     默认（按仓位降序 = 与建仓顺序无关的自然视角）。同「待办折叠状态
+     不持久化」那条。 */
+const LVSORT_COLS = {
+  chg_day: '当日', pnl_day: '当日盈亏', value: '市值',
+  pnl: '浮盈', pnl_pct: '幅度', weight: '仓位',
+};
+let LVSORT = {k: null, desc: true};
+
+function lvSortRows(items){
+  if(!LVSORT.k) return items;
+  const k = LVSORT.k, sgn = LVSORT.desc ? -1 : 1;
+  /* 🔴 `null` 一律排最后（不管升降序）—— 停牌股取不到价，那几行的
+     当日/浮盈都是 null。把 null 当 0 参与排序的话，它们会混在正负之间，
+     看着像"这只票今天不涨不跌"，而事实是**没有数据**。 */
+  return items.slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    if(x == null && y == null) return 0;
+    if(x == null) return 1;
+    if(y == null) return -1;
+    return (x - y) * sgn;
+  });
+}
+
+function lvSortTh(k, label){
+  const on = LVSORT.k === k;
+  return `<th class="rt lvsth${on ? ' on' : ''}" data-sk="${k}"
+    title="点击按${label}排序${on ? '（再点反向）' : ''}">${label}${
+    on ? (LVSORT.desc ? ' ▼' : ' ▲') : ''}</th>`;
+}
+
+/* innerHTML 之后才存在的元素要重新绑事件 —— 只在渲染开头绑的话点了没反应
+   且不报错（对比页「移除」栽过）。所以每次渲染完都调它。 */
+function lvSortBind(aid){
+  document.querySelectorAll('#lvbody th.lvsth').forEach(th => {
+    th.onclick = () => {
+      const k = th.dataset.sk;
+      if(LVSORT.k === k) LVSORT.desc = !LVSORT.desc;
+      else { LVSORT.k = k; LVSORT.desc = true; }   /* 换列 -> 默认降序 */
+      loadLive(aid);        /* 重渲染（不是 quiet：表头与行序都要变） */
+    };
+  });
+}
 
 /* ---- 实盘里的代码/名称 -> 个股速览【浮层】 ---------------------------
    🔴 原来是 `target="_blank"` 新标签页，理由是"实盘页一直开着（待办、
