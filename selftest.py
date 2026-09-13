@@ -11016,6 +11016,65 @@ def t_pos_sort():
             % (n_checked, n_rt))
 
 
+@case('P1 移植件的常量必须【逐个等于正本】（对得上结果 ≠ 移植忠实）', tag='fast')
+def t_p1_constants_match_source():
+    """🔴 2026-09-13：我把 `CLUS_CAP` 抄成了 0.15，正本是 0.20。
+
+    那个 0.15 恰好是 AlphaMiner **2026-08 定稿**的值，于是移植件成了混血：
+    EXIT_BUFFER / BREADTH_FRAC / 汰换规则来自 07 版，簇上限却是 08 版的。
+
+    🔴 **它完整地躲过了对数**：基准 / beta / 波动率三项精确吻合 ——
+      而那三项只取决于数据与撮合，**对策略参数根本不敏感**。年化那 +1.28pp
+      被"幸存者偏差"解释掉了（改对之后只剩 +0.81pp，回撤也从偏浅变偏深）。
+      **对得上结果不代表移植忠实**，逐常量比一遍正本才是判据。
+
+    ★ 正本是 GBK 的 QMT 文件，本用例直接读它、正则抠出常量来比 ——
+      比"记得手工核对一遍"可靠（同「靠人记得 = 迟早不跑」）。
+    """
+    import io as _io
+    import re as _re
+    SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath('.'))),
+                       'finacial', 'commands', 'trend', 'core',
+                       'qmt_p1_rotation.py')
+    if not os.path.exists(SRC):
+        SRC = '/Users/guhao/finacial/commands/trend/core/qmt_p1_rotation.py'
+    if not os.path.exists(SRC):
+        return '正本不在本机（%s），跳过' % SRC
+    try:
+        src = _io.open(SRC, encoding='gbk').read()
+    except Exception:
+        src = _io.open(SRC, encoding='utf-8', errors='replace').read()
+    port = _io.open('strategies/ETF/etf_p1_rotation.py', encoding='utf-8').read()
+
+    def grab(text, key):
+        m = _re.search(r'^%s\s*=\s*([0-9.]+)' % key, text, _re.M)
+        if m:
+            return float(m.group(1))
+        m = _re.search(r'\b%s\b\s*=\s*([0-9.]+)' % key, text)
+        return float(m.group(1)) if m else None
+
+    KEYS = ('MOM_LB', 'VOL_LB', 'N_MAX', 'EXIT_BUFFER', 'W_CAP', 'GROSS',
+            'REBAL_WEEKDAY', 'POOL_N', 'LIQ_WIN', 'MIN_VOL_ANN', 'RS_LB',
+            'RS_KEEP', 'CORR_WIN', 'CLUS_THR', 'CLUS_CAP', 'CLUS_CAP_HI',
+            'BREADTH_FRAC', 'MEGA_TOPK')
+    bad, checked = [], 0
+    for k in KEYS:
+        a, b = grab(src, k), grab(port, k)
+        if a is None or b is None:
+            continue
+        checked += 1
+        if abs(a - b) > 1e-12:
+            bad.append('%s 正本=%s 移植=%s' % (k, a, b))
+    assert checked >= 12, '只比到 %d 个常量，正则大概率没匹配上' % checked
+    assert not bad, ('移植件与正本的常量不一致（对得上结果 ≠ 移植忠实）：\n  %s'
+                     % '\n  '.join(bad))
+    # ★ 反向自证：这条断言不是空转 —— 换一个值必须被抓到
+    fake = port.replace('CLUS_CAP = 0.20', 'CLUS_CAP = 0.15', 1)
+    assert grab(fake, 'CLUS_CAP') == 0.15 and grab(src, 'CLUS_CAP') == 0.20, \
+        '反向自证失败：抠常量的正则没真的读到值'
+    return '%d 个常量与正本（qmt_p1_rotation.py，GBK）逐个相同；反向自证通过' % checked
+
+
 @case('策略声明数据源与费率：不靠人记得传参（ETF 跑错 lake 会静默出结果）', tag='fast')
 def t_strategy_declares_lake():
     """🔴 2026-09-13 用户报的 bug，根因不是那个 IOException，是【谁来记得】。
