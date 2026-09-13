@@ -27,3 +27,6 @@
 {"uid": "392b195d399d", "ts": "2026-09-03T14:22:51", "act": "add", "code": "301292.XSHE", "group": "主观持仓"}
 {"uid": "ef3670bd4739", "ts": "2026-09-03T14:35:39", "act": "add", "code": "002027.XSHE", "group": "我的观察"}
 {"uid": "2d4e75f62215", "ts": "2026-09-03T14:35:51", "act": "remove", "code": "002027.XSHE"}
+{"uid": "cd5df4cc68d3", "ts": "2026-09-11T18:07:44", "act": "order", "groups": ["主观持仓", "实盘·FROEC-TRADE账户", "实盘·红利混合-M"]}
+{"uid": "1811c8acd7a4", "ts": "2026-09-11T18:08:00", "act": "order", "groups": ["实盘·FROEC-TRADE账户", "实盘·红利混合-M", "主观持仓"]}
+{"uid": "53a14d8e87b6", "ts": "2026-09-11T18:47:32", "act": "order", "groups": ["主观持仓", "实盘·FROEC-TRADE账户", "实盘·红利混合-M"]}

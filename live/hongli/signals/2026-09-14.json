@@ -1,36 +1,36 @@
 {
  "account": "hongli",
- "built_at": "2026-09-09T16:02:45",
+ "built_at": "2026-09-11T23:08:33",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 61569.55,
  "code_sha": "edbdaeb0",
  "code_sha256": "edbdaeb00fe58a560712f687b7712b43113ad113e9f0088c168cc3fef12864a7",
- "data_asof": "2026-09-08",
+ "data_asof": "2026-09-11",
  "data_fingerprint": {
-  "overall": "b682a3f36348",
+  "overall": "8b94a5d7df38",
   "parts": {
    "index": {
-    "hash": "0e2402fd1ece",
+    "hash": "2f49e6b6e4bd",
     "n_files": 24,
-    "newest_mtime": "2026-09-09T16:02:04",
-    "total_bytes": 64646171
+    "newest_mtime": "2026-09-11T16:22:05",
+    "total_bytes": 64682940
    },
    "panel": {
-    "hash": "11663e3f999b",
+    "hash": "cf5757199484",
     "n_files": 24,
-    "newest_mtime": "2026-09-09T16:02:33",
-    "total_bytes": 1337884720
+    "newest_mtime": "2026-09-11T16:22:33",
+    "total_bytes": 1339082668
    },
    "std": {
-    "hash": "7f8daa3bd6b1",
+    "hash": "71703f39cba8",
     "n_files": 18,
-    "newest_mtime": "2026-09-09T16:02:42",
-    "total_bytes": 373861762
+    "newest_mtime": "2026-09-11T16:22:42",
+    "total_bytes": 374089059
    }
   }
  },
- "days_until_rebalance": 15,
+ "days_until_rebalance": 12,
  "explain": {
   "captured": false,
   "codes_total": 0,
@@ -96,7 +96,7 @@
   "set_labels": {},
   "steps": []
  },
- "for_date": "2026-09-09",
+ "for_date": "2026-09-14",
  "freed_est": 0,
  "held_codes": [
   "600012.XSHG",
@@ -216,33 +216,17 @@
  },
  "recomputed": false,
  "recomputed_at": [
-  "2026-09-08T17:00:12",
-  "2026-09-08T18:00:14",
-  "2026-09-08T19:00:08",
-  "2026-09-08T20:00:08",
-  "2026-09-08T21:15:57",
-  "2026-09-08T22:00:08",
-  "2026-09-08T23:00:07",
-  "2026-09-09T16:02:45"
+  "2026-09-11T17:00:11",
+  "2026-09-11T18:00:10",
+  "2026-09-11T19:26:20",
+  "2026-09-11T20:15:57",
+  "2026-09-11T21:06:19",
+  "2026-09-11T22:07:50",
+  "2026-09-11T23:08:33"
  ],
  "revisions": [],
  "sell": [],
  "upcoming": [
-  {
-   "date": "2026-09-10",
-   "is_rebal": false,
-   "wday": 4
-  },
-  {
-   "date": "2026-09-11",
-   "is_rebal": false,
-   "wday": 5
-  },
-  {
-   "date": "2026-09-14",
-   "is_rebal": false,
-   "wday": 1
-  },
   {
    "date": "2026-09-15",
    "is_rebal": false,
@@ -302,6 +286,21 @@
    "date": "2026-10-08",
    "is_rebal": true,
    "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": false,
+   "wday": 2
   }
  ],
  "warnings": []
