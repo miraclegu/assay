@@ -100,6 +100,17 @@ _STD_TABLES = {
     't_dividend':  'dividend',
     't_beta':      'beta_daily',
     't_jqfactor':  'jqfactor_q',
+    # 指数成分。两张表是【同一份数据的两种形状】，按问法选：
+    #   t_index_member       区间表(valid_from/last_seen/valid_to)——
+    #                        问「某日谁在指数里」用它，一次比较搞定
+    #   t_index_member_asof  原始时点快照(as_of/index_code/stock_code)——
+    #                        问「某个采样时点的花名册」或要自己做区间逻辑时用
+    # 🔴 覆盖 28 个指数，由 raw/jq/_ingest/extract_jq_index_members.py 的清单
+    #   决定。**不在清单里的指数本地没有成分数据，而查询只会返回空集、不报错。**
+    # 🔴 采样是月频(定期调整型)/周频(中小板综、创业板综)，所以区间边界有
+    #   ~1 个月 / ~1 周的分辨率 —— 不是公告驱动的精确生效日。
+    't_index_member':      'index_member',
+    't_index_member_asof': 'index_member_asof',
 }
 
 
