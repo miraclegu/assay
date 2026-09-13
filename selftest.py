@@ -11016,6 +11016,102 @@ def t_pos_sort():
             % (n_checked, n_rt))
 
 
+@case('策略声明数据源与费率：不靠人记得传参（ETF 跑错 lake 会静默出结果）', tag='fast')
+def t_strategy_declares_lake():
+    """🔴 2026-09-13 用户报的 bug，根因不是那个 IOException，是【谁来记得】。
+
+    `etf_p1_rotation.py` 不传 `--datalake` 时，一路跑到第一个重选日取名称
+    才崩在 `etf_master.parquet` 不存在 —— 在那之前它已经拿**股票**的 K 线
+    算完了成交额排名、选出了"动态池"。要是那张表恰好存在，它会产出一份
+    **看着完全正常**的回测。`etf_trend_momentum` 更糟：主面板 0 行 ETF ->
+    候选池恒空 -> 全程空仓，**一条平线且不报任何错**。
+
+    这个失效模式当初**写进了 docstring**，却没有任何东西强制它 ——
+    同「靠人记得跑的步骤 = 迟早不跑」。费率同理：ETF **不征印花税**是
+    事实不是偏好，用股票默认值跑会凭空多扣一笔卖出税。
+    """
+    import ast as _ast
+    import io as _io
+    import run as _run
+    notes = []
+    # ① 三个 ETF 策略都必须【声明】lake 与费率，判据走 ast（注释里提到不算）
+    etfs = sorted(f for f in os.listdir('strategies/ETF') if f.endswith('.py')
+                  and not f.startswith('_'))
+    assert len(etfs) >= 3, 'ETF 策略只剩 %d 个？' % len(etfs)
+    for f in etfs:
+        src = _io.open(os.path.join('strategies/ETF', f), encoding='utf-8').read()
+        tree = _ast.parse(src)
+        decl = [n for n in tree.body if isinstance(n, _ast.Assign)
+                and any(getattr(t, 'id', None) == 'DATALAKE' for t in n.targets)]
+        assert len(decl) == 1, '%s 没有模块级 DATALAKE 声明' % f
+        assert decl[0].value.value == 'etf_lake', \
+            '%s 的 DATALAKE 不是 etf_lake：%r' % (f, decl[0].value.value)
+        calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+                 and getattr(n.func, 'id', None) == 'set_order_cost']
+        assert calls, ('%s 没调 set_order_cost —— ETF 不征印花税是【事实】，'
+                       '靠人记得传 --stamp-tax 0 迟早漏，而漏了不报错' % f)
+        kw = {k.arg: k.value.value for k in calls[0].keywords}
+        assert kw.get('close_tax') == 0.0, \
+            '%s 的 close_tax 不是 0（ETF 无印花税）：%r' % (f, kw.get('close_tax'))
+    notes.append('%d 个 ETF 策略都声明了 lake 与 close_tax=0' % len(etfs))
+
+    # ② resolve_lake 四条路径
+    class M(object):
+        pass
+    base = _run.default_lake()
+    m = M(); m.DATALAKE = 'etf_lake'
+    want = os.path.normpath(os.path.join(base, 'etf_lake'))
+    assert _run.resolve_lake(m, None) == want, '没声明时该自动落到 etf_lake'
+    assert _run.resolve_lake(m, want) == want, '命令行给了对的应放行'
+    try:
+        _run.resolve_lake(m, base)
+        raise AssertionError('命令行给了【错的】lake 必须报错，不许猜哪个对')
+    except SystemExit as e:
+        assert 'etf_lake' in str(e), '报错要说清该用哪个：%s' % e
+    m2 = M(); m2.DATALAKE = 'lake_that_does_not_exist'
+    try:
+        _run.resolve_lake(m2, None)
+        raise AssertionError('声明的 lake 不存在必须报错')
+    except SystemExit as e:
+        assert 'build_etf_lake' in str(e), '报错要给下一步怎么办：%s' % e
+    m3 = M()          # 没声明的策略（股票）一律照旧
+    assert _run.resolve_lake(m3, None) is None
+    assert _run.resolve_lake(m3, '/x') == '/x'
+    notes.append('resolve_lake 五条路径都对（自动/一致/冲突报错/不存在报错/不声明照旧）')
+
+    # ③ 🔴 抬头打的成本必须是【策略声明之后】的那份
+    #    判据不是"源码里有 boot" —— 是 run.py 里 boot 确实排在 print 之前。
+    src = _io.open('run.py', encoding='utf-8').read()
+    assert 'eng.boot(' in src, \
+        ('run.py 根本没调 eng.boot() —— 策略的 set_order_cost 在 initialize '
+         '里执行，不先 boot 的话抬头报的是默认值而实际跑策略那套')
+    i_boot = src.index('eng.boot(')
+    i_cost = src.index("print('成本 %s'")
+    assert i_boot < i_cost, \
+        ('run.py 里 eng.boot() 必须排在打印成本【之前】 —— 策略的 '
+         'set_order_cost 在 initialize 里执行，不先 boot 的话抬头报默认值、'
+         '实际跑策略那套，而**两个数都看着正常**')
+    # boot 必须可重入（run() 里还会再调一次，跑两遍 = 任务注册两份）
+    from assay.engine import Engine
+    from assay.feed import PanelFeed
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location('s_etf', 'strategies/ETF/etf_p1_rotation.py')
+    mod = _iu.module_from_spec(spec); spec.loader.exec_module(mod)
+    fd = PanelFeed('2024-01-02', '2024-01-10',
+                   root=os.path.join(_run.default_lake(), 'etf_lake'))
+    from assay.broker import Cost
+    eng = Engine(mod, fd, cash=100000, cost=Cost())
+    eng.boot(); n1 = len(eng._tasks)
+    eng.boot(); n2 = len(eng._tasks)
+    assert n1 == n2 == 1, 'boot 不可重入：任务数 %d -> %d' % (n1, n2)
+    assert eng.cost.close_tax == 0.0, \
+        'boot 之后 cost 必须已是策略声明的那份，实得 close_tax=%r' % eng.cost.close_tax
+    import assay.api as _api
+    _api._unbind()
+    notes.append('boot 排在打印成本之前且可重入（任务 1 个不翻倍、close_tax 已是 0）')
+    return '；'.join(notes)
+
+
 @case('看板页面清单：每个路由都有实现', tag='fast')
 def t_page_inventory():
     """★ 这条用例的存在理由是一次真实事故：重构实盘页时，我用「切掉

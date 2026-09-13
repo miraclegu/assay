@@ -13,7 +13,8 @@
     top_n=5, momentum_windows=[60,120], abs_window=60, risk_adjusted=False
 
 跑法与成本口径见 `etf_trend_momentum.py` 文件头（同一套，必须传
-`--datalake .../etf_lake` 且 `--commission 0.00005 --stamp-tax 0`）。
+lake 与费率都由文件自己声明，裸命令即可 ——
+见 `DATALAKE` 与 `initialize` 里的 `set_order_cost`）。
 
 ## 实测（2020-01-02 ~ 2026-08-31，本金 100 万，佣金万0.5 / 无印花税 / 滑点默认 0.0015）
 
@@ -72,6 +73,12 @@
 ★ **默认值没有改**（`min_vol_ann=0.0`）—— 改了就不是原规格那套策略了。
   这个开关是给"想知道差在哪"用的。
 """
+# 🔴 **这个策略只能跑在 ETF lake 上**（`run.py` 的 `resolve_lake` 读它）。
+#   不声明的话主面板是纯股票的，候选池恒空、全程空仓，
+#   **一条平线且不报任何错**
+#   —— 声明之后不传 --datalake 也会自动落到对的 lake，传错了则直接报错。
+DATALAKE = 'etf_lake'
+
 import importlib.util as _ilu
 import os as _os
 
@@ -86,6 +93,13 @@ _spec.loader.exec_module(_core)
 
 
 def initialize(context):
+    # 🔴 **ETF 的费率是【事实】不是偏好，所以写在策略里，不靠人记得传参。**
+    #   ETF **不征印花税**（A 股股票卖出千一/万五），佣金约万 0.5、无过户费。
+    #   用股票默认值（含印花税）跑 ETF 会凭空多扣一笔卖出税，而这个策略
+    #   年换手 9 次以上 —— 拖累是系统性的，**且不报错**。
+    #   ★ 命令行仍然优先（`--commission` 等会覆盖并告警），对标时照样能压平。
+    set_order_cost(commission=0.00005, min_commission=5,      # noqa: F405
+                   close_tax=0.0, open_tax=0.0)
     g.top_n = getattr(g, 'top_n', 5)
     g.momentum_windows = getattr(g, 'momentum_windows', '60,120')
     g.abs_window = getattr(g, 'abs_window', 60)

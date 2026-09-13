@@ -61,6 +61,12 @@ ETF lake + assay 引擎搭得对不对 —— 这是"探针必须带已知真值
    `if not name` 那道守卫拦不住它，`k in name` 直接 TypeError。
    缺名必须在取数出口就归一成 `None`。
 """
+# 🔴 **这个策略只能跑在 ETF lake 上**（`run.py` 的 `resolve_lake` 读它）。
+#   不声明的话主面板是纯股票的，策略会拿股票 K 线算完成交额排名再崩在取名称那一步，
+#   而要是那张表恰好存在，它会产出一份**看着完全正常**的回测
+#   —— 声明之后不传 --datalake 也会自动落到对的 lake，传错了则直接报错。
+DATALAKE = 'etf_lake'
+
 import numpy as np
 import pandas as pd
 
@@ -369,6 +375,15 @@ def initialize(context):
     g._nm = None
     g.n_breadth = 0
     set_benchmark('000300.XSHG')                        # noqa: F405
+    # 🔴 **ETF 的费率是【事实】不是偏好，所以写在策略里，不靠人记得传参。**
+    #   ETF **不征印花税**（A 股股票卖出千一/万五），佣金约万 0.5、无过户费。
+    #   用股票默认值（含印花税）跑 ETF 会凭空多扣一笔卖出税，而这个策略
+    #   年换手 9 次以上 —— 拖累是系统性的，**且不报错**。
+    #   ★ 命令行仍然优先（`--commission` 等会覆盖并告警），对标时照样能压平。
+    set_order_cost(commission=0.00005, min_commission=5,      # noqa: F405
+                   close_tax=0.0, open_tax=0.0)
+    # 原版 PriceRelatedSlippage(0.001) —— 双边 0.1%
+    set_slippage(0.001)                                 # noqa: F405
     # 原版是 run_daily 09:30：每日查离场，重选逻辑在函数内按周判定
     run_daily(my_trade, time='09:30')                   # noqa: F405
 

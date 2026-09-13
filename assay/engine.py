@@ -113,6 +113,10 @@ class Engine:
             return monthday == pos or monthday == neg
         return False
 
+    def boot(self, verbose=False):
+        """对外名字（可重入）。"""
+        return self._boot(verbose)
+
     def _boot(self, verbose=False):
         """绑定 api、应用参数、跑 initialize、排任务、算日历序号。
 
@@ -123,7 +127,17 @@ class Engine:
 
         绑定成功后【不】解绑，由调用方负责（run 的 finally / live 的 finally）；
         初始化途中抛错则就地解绑，不把全局绑定泄漏出去。
+
+        🔴 **可重入**：run.py 要在打印成本【之前】先 boot 一次 ——
+          策略的 `set_order_cost` 是在 initialize 里执行的，不先 boot 就
+          打印，抬头报的是默认值而实际跑的是策略声明的那套，
+          **两个数都看着正常**（实测 ETF 策略抬头写"印花税 分段"、
+          真实跑的是 0）。之后 run() 再调一次必须是空操作，
+          否则 initialize 跑两遍 = 任务注册两份。
         """
+        if getattr(self, '_booted', False):
+            return
+        self._booted = True
         api._bind(self)          # 之后 self.g is api.g
         self.ctx.g = self.g
         api.log.verbose = verbose
@@ -163,6 +177,7 @@ class Engine:
             self._tasks.sort(key=lambda t: t[0])
             self._build_ordinals()
         except Exception:
+            self._booted = False     # 失败不算 booted，调用方可重试
             api._unbind()        # 初始化失败不留全局绑定
             raise
 

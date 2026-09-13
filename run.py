@@ -45,6 +45,48 @@ def load(path):
     return mod
 
 
+def default_lake():
+    """PanelFeed 不传 root 时会用的那个根 —— 声明的相对路径以它为基准。"""
+    return os.environ.get('ASSAY_DATALAKE') or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'datalake')
+
+
+def resolve_lake(mod, cli):
+    """策略用模块级 `DATALAKE` 声明它要跑在哪个 lake 上。
+
+    🔴🔴 **不声明的话，ETF 策略会【静默跑在股票面板上】。**
+      实测 2026-09-13：`etf_p1_rotation.py` 不传 `--datalake` 时一路跑到
+      `_names()`（第 190 行、第一个重选日）才因 `etf_master.parquet` 不存在
+      而崩 —— 在那之前它已经拿**股票**的 K 线算完了成交额排名、选出了
+      "动态池"。要是那张表恰好存在，它会产出一份**看着完全正常**的回测。
+      `etf_trend_momentum` 更糟：主面板 0 行 ETF -> 候选池恒空 -> 全程空仓，
+      **一条平线，不报任何错**（这个失效模式当初写进了 docstring，
+      却没有任何东西强制它 —— 同「靠人记得跑的步骤 = 迟早不跑」那条）。
+
+    ★ 相对路径以 `default_lake()` 为基准（`etf_lake` 就是主 lake 下的子目录）。
+    🔴 命令行显式给了、又与声明**不一致**时一律**报错**，不猜哪个是对的：
+      两个都是明确表达的意图，冲突说明其中一个是错的。
+    """
+    dec = getattr(mod, 'DATALAKE', None)
+    if not dec:
+        return cli
+    want = dec if os.path.isabs(dec) else os.path.join(default_lake(), dec)
+    want = os.path.normpath(want)
+    if cli:
+        if os.path.realpath(cli) != os.path.realpath(want):
+            raise SystemExit(
+                '策略声明要跑在 %s（DATALAKE=%r），命令行却给了 %s。\n'
+                '两个都是明确的意图，冲突不猜 —— 去掉 --datalake，'
+                '或把策略里的 DATALAKE 改掉。' % (want, dec, cli))
+        return cli
+    if not os.path.isdir(want):
+        raise SystemExit(
+            '策略声明要跑在 %s（DATALAKE=%r），但它不存在。\n'
+            '先建这个 lake（ETF 的是 '
+            'python3 datalake/build/build_etf_lake.py）。' % (want, dec))
+    return want
+
+
 def parse_params(items):
     """K=V -> 带类型推断的 dict。int/float/bool 自动识别，其余当字符串。"""
     out = {}
@@ -148,14 +190,28 @@ def main():
     t0 = time.time()
     try:
         registry.set_runs(a.runs)
-        feed = PanelFeed(a.start, a.end, root=a.datalake)
+        # 🔴 **先加载策略，再建 feed** —— 策略可能声明了它要哪个 lake，
+        #    而 feed 一旦按错的根建好，后面每一行都在错的数据上跑。
+        mod = load(a.strategy)
+        lake = resolve_lake(mod, a.datalake)
+        feed = PanelFeed(a.start, a.end, root=lake)
         cost = _build_cost(a)
-        eng = Engine(load(a.strategy), feed, cash=a.cash, cost=cost,
+        eng = Engine(mod, feed, cash=a.cash, cost=cost,
                      params=parse_params(a.param))
         group = a.group or registry.derive_group(a.strategy)
+        # ★ **数据源必须打印出来**，同「成本假设必须打印出来」那条：
+        #   它和成本一样直接决定结果，绝不能只躺在默认值里。
         print('策略 %s | 分组 %s | 区间 %s ~ %s | 交易日 %d | 初始资金 %s'
               % (os.path.basename(a.strategy), group, feed.trading_days[0],
                  feed.trading_days[-1], len(feed.trading_days), format(int(a.cash), ',')))
+        print('数据 %s%s' % (feed.root,
+                             '（策略声明）' if getattr(mod, 'DATALAKE', None)
+                             and not a.datalake else ''))
+        # 🔴 **先 boot 再打印成本** —— 策略的 set_order_cost 在 initialize 里
+        #    执行，不先 boot 的话抬头报的是默认值、实际跑的是策略那套，
+        #    而**两个数都看着正常**（实测 ETF 策略抬头写"印花税 按日期分段"、
+        #    真跑的是 0）。boot 可重入，下面 eng.run() 里那次是空操作。
+        eng.boot(a.verbose)
         # 成本假设必须打印出来 —— 它直接决定结果，绝不能只躺在默认值里
         print('成本 %s' % cost.describe())
         if cost.locked:

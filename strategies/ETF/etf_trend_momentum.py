@@ -8,21 +8,26 @@
 规格出处：`AlphaMiner/docs/strategies/etf/DESIGN.md` §3，
 默认参数取自 `strategies/etf/trend_momentum/grid_full.yml` 的 ParamSpec 默认值。
 
-## 🔴 必须用 ETF lake 跑，不是主面板
+## 数据源与费率都【在文件里声明】，裸命令就是对的口径
 
     python3 run.py strategies/ETF/etf_trend_momentum.py \
-        --datalake /Users/guhao/finacial/datalake/etf_lake \
         --start 2020-01-01 --end 2026-08-31 --benchmark 000300.XSHG
 
-主面板 `mart/panel_daily/` 是**纯股票**的（实测 0 行 ETF），不传 `--datalake`
-的话候选池恒空、策略全程空仓 —— **而那不报错**，只会给出一条平线。
+模块级 `DATALAKE = 'etf_lake'` + `initialize` 里的 `set_order_cost`，
+`run.py` 会自己落到对的 lake、用对的费率。
 ETF lake 由 `datalake/build/build_etf_lake.py` 生成。
+
+🔴 **2026-09-13 之前这两件事都靠人记得传参，而漏了不报错：**
+主面板 `mart/panel_daily/` 是**纯股票**的（实测 0 行 ETF），不传 `--datalake`
+的话候选池恒空、策略全程空仓 —— 只给出一条平线；不传 `--stamp-tax 0`
+则按股票口径多扣一笔卖出印花税，而这个策略换手不低，拖累是系统性的。
+**这两个失效模式当初就写在这段 docstring 里，却没有任何东西强制它** ——
+同「靠人记得跑的步骤 = 迟早不跑」。现在判据在 `run.py` 与 selftest 里。
 
 ## 成本口径
 
-ETF **无印花税**、佣金约万 0.5。所以跑它必须显式传：
-
-    --commission 0.00005 --stamp-tax 0 --min-commission 5
+ETF **无印花税**、佣金约万 0.5 —— 这是**事实不是偏好**，所以写在
+`initialize` 的 `set_order_cost` 里。命令行仍然优先（会覆盖并告警）。
 
 ★ 引擎默认是**股票**的口径（佣金万 2.5 + 卖出印花税），直接套到 ETF 上会
   系统性低估收益。DESIGN.md §4 记的是「佣金约万 0.5（双边），无印花税」。
@@ -86,6 +91,12 @@ ETF **无印花税**、佣金约万 0.5。所以跑它必须显式传：
 ★ **默认值没有改**（`min_vol_ann=0.0`）—— 改了就不是原规格那套策略了。
   这个开关是给"想知道差在哪"用的。
 """
+# 🔴 **这个策略只能跑在 ETF lake 上**（`run.py` 的 `resolve_lake` 读它）。
+#   不声明的话主面板是纯股票的，候选池恒空、全程空仓，
+#   **一条平线且不报任何错**
+#   —— 声明之后不传 --datalake 也会自动落到对的 lake，传错了则直接报错。
+DATALAKE = 'etf_lake'
+
 import importlib.util as _ilu
 import os as _os
 
@@ -102,6 +113,13 @@ _spec.loader.exec_module(_core)
 
 
 def initialize(context):
+    # 🔴 **ETF 的费率是【事实】不是偏好，所以写在策略里，不靠人记得传参。**
+    #   ETF **不征印花税**（A 股股票卖出千一/万五），佣金约万 0.5、无过户费。
+    #   用股票默认值（含印花税）跑 ETF 会凭空多扣一笔卖出税，而这个策略
+    #   年换手 9 次以上 —— 拖累是系统性的，**且不报错**。
+    #   ★ 命令行仍然优先（`--commission` 等会覆盖并告警），对标时照样能压平。
+    set_order_cost(commission=0.00005, min_commission=5,      # noqa: F405
+                   close_tax=0.0, open_tax=0.0)
     g.top_n = getattr(g, 'top_n', 5)
     g.momentum_windows = getattr(g, 'momentum_windows', '20,60,120')
     g.trend_ma = getattr(g, 'trend_ma', 200)
