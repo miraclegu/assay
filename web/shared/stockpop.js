@@ -18,7 +18,12 @@
 /* 固定用**不复权**：成交价是不复权实际价，切后复权买卖点会整体飘走，
    而它不报错（同 CLAUDE.md 里"区间涨幅一律后复权、K 线默认不复权"那条 ——
    这里要的是"和我的成交价对得上"）。要看后复权去完整个股页。 */
-const SP_FQ = 'bfq';
+/* 🔴 复权口径**跟着数据来源走**，不能写死。
+   实盘成交价是【不复权】实际价 -> 浮层用 bfq，标记才落在对的价位上；
+   而回测全程用【后复权】记账（entry_price/exit_price 都是 hfq）->
+   从回测详情页打开时必须切 hfq，否则标记整体飘走，**而它不报错**，
+   看着像"买在了那根阴线上面"。 */
+const spFq = () => (SP && SP.run) ? 'hfq' : 'bfq';
 const SP_NS = [60, 120, 250];
 let SP = null;            /* {code, n, bars, trades, prof, geo} */
 /* 对数坐标记在 localStorage：跟 4 个页面共用这个浮层，每次点开都要
@@ -37,7 +42,8 @@ function spClose(){
 function spEsc(e){ if(e.key === 'Escape') spClose(); }
 
 /* 打开浮层。★ 幂等：已经开着时换一只票就重载内容，不叠两层浮层。 */
-async function spOpen(code, name){
+async function spOpen(code, name, opt){
+  opt = opt || {};
   if(!code) return;
   let w = document.getElementById('spwrap');
   if(!w){
@@ -71,9 +77,20 @@ async function spOpen(code, name){
      写 `SP.n` 的话第一次点开就崩在这里，表现是**浮层弹出来但一片空白**，
      而画布停在 canvas 默认的 300x150 —— 看着像「这只票没数据」而不是
      「它崩了」。实测就是这么发现的（pageerror: reading n）。 */
-  SP = {code: code, n: (SP && SP.n) || 120};
+  /* `center`：把这一天的 K 线放到图中央（回测详情页点某一行时传它）。
+     ★ 带日期打开时默认 84 根 ≈ **前后各两个月** —— 看某笔成交时想知道的是
+       "那前后发生了什么"，给 250 根会把那根柱子压成一像素。
+     `run`：那次回测的 id。浮层要用**它的 datalake**（ETF 回测跑在平行的
+       etf_lake 上，主面板里一行都没有）与**它的买卖点**。 */
+  SP = {code: code, n: (opt.date ? 84 : ((SP && SP.n) || 120)),
+        center: opt.date || null, run: opt.run || null};
   document.getElementById('sptitle').textContent = name || code;
-  document.getElementById('spsub').textContent = code;
+  /* 副标题要把**口径**说出来：定位到哪天、以及价格是不是后复权。
+     不说的话，同一只票从实盘点开（不复权）和从回测点开（后复权）会给出
+     两套价，人会以为其中一个错了。 */
+  document.getElementById('spsub').textContent = code
+    + (SP.center ? '  ·  定位 ' + SP.center : '')
+    + (SP.run ? '  ·  回测口径（后复权）' : '');
   document.getElementById('spfull').href = spHref(code);
   document.getElementById('spkpi').innerHTML = '<span class="spdim">载入中…</span>';
   document.getElementById('spmine').innerHTML = '';
@@ -110,12 +127,28 @@ function spNsBar(){
 
 async function spLoad(){
   const code = SP.code;
+  const run = SP.run, qr = run ? ('&run=' + encodeURIComponent(run)) : '';
+  /* 定位：取到 `center + 一半窗口` 为止，于是那一天大致落在图中央。
+     ★ 交易日与自然日的换算是近似的（×1.45），所以**不保证像素级居中** ——
+       但那一天本身有 B/S 标记，看得出来是哪根。刻意不做"精确居中"：
+       那要先问服务端"这天往后第 N 个交易日是哪天"，多一轮请求换一点点
+       对齐，不值。 */
+  let qe = '';
+  if(SP.center){
+    const d = new Date(SP.center + 'T00:00:00');
+    d.setDate(d.getDate() + Math.round(SP.n / 2 * 1.45));
+    qe = '&end=' + d.toISOString().slice(0, 10);
+  }
   const [k, tr, pf] = await Promise.all([
-    j(`/api/stock/kline?n=${SP.n}&fq=${SP_FQ}&code=` + encodeURIComponent(code))
-      .catch(e => ({error: String(e)})),
-    j('/api/live/trades_of?code=' + encodeURIComponent(code))
+    j(`/api/stock/kline?n=${SP.n}&fq=${spFq()}&code=`
+      + encodeURIComponent(code) + qe + qr).catch(e => ({error: String(e)})),
+    /* 买卖点：回测看**那次回测**的，别处看实盘的 —— 两个接口返回同一形状
+       （date/side/shares/price/fee），所以下面画图与明细的代码是同一段。 */
+    j(run ? ('/api/run/trades_of?id=' + encodeURIComponent(run)
+             + '&code=' + encodeURIComponent(code))
+          : ('/api/live/trades_of?code=' + encodeURIComponent(code)))
       .catch(() => ({trades: []})),
-    j('/api/stock/profile?code=' + encodeURIComponent(code))
+    j('/api/stock/profile?code=' + encodeURIComponent(code) + qr)
       .catch(() => ({})),
   ]);
   if(!SP || SP.code !== code) return;        /* 期间又点了别只票 —— 丢弃这批 */
@@ -182,7 +215,15 @@ function spMine(){
   const ts = SP.trades || [];
   if(!el) return;
   if(!ts.length){
-    el.innerHTML = '<div class="spdim spnote">这只票没有实盘成交记录。</div>';
+    /* 🔴 回测那支的措辞要**准确**：归档 `trades.parquet` 只在【平仓】时写行，
+       所以期末仍持有的那几只，它们的买入压根不在里面 —— 从持仓页点开这种票时
+       写"没有买卖过"是**错的**（它就在持仓里摆着），人会以为功能坏了。 */
+    el.innerHTML = '<div class="spdim spnote">'
+      + (SP.run
+         ? '本次回测没有这只票的<b>平仓</b>记录 —— 归档只在平仓时写行，'
+           + '期末仍持有的买入不在其中（去「持仓」页看）。'
+         : '这只票没有实盘成交记录。')
+      + '</div>';
     return;
   }
   let net = 0;
@@ -295,12 +336,21 @@ function spBindHover(cv){
    ★ 仍然是 `<a href>` 而不是 `<span>`：中键/右键"在新标签打开"照旧可用
      （有人就爱开标签页），左键才拦下来开浮层。href 也让它看起来能点 ——
      「看不出能点的入口 = 没有入口」。 */
-function spLink(code, text, cls){
+function spLink(code, text, cls, opt){
   if(!code) return esc(text || '');
+  opt = opt || {};
+  /* `opt.html`：调用方要在链接里放**带标签的内容**时用（回测页要
+     「名称 + 小字代码」两段样式）。★ 传 html 的一方**自己负责转义** ——
+     加这个口子是为了让 `<a data-sp>` 只有【一处】定义：否则调用方会自己
+     拼一个 `<a>`，而那份迟早与这里分叉（漏个 data-spr 就是"点了不定位"）。 */
+  /* `date` / `run` 走 data-*，由下面那个**文档级**委托读出来再传给 spOpen ——
+     不能在渲染时逐个绑 handler（这些链接绝大多数是 innerHTML 填进去的）。 */
+  const d = opt.date ? ` data-spd="${esc(String(opt.date).slice(0, 10))}"` : '';
+  const r = opt.run ? ` data-spr="${esc(opt.run)}"` : '';
   return `<a href="${spHref(code)}" class="spl ${cls || ''}"
-    data-sp="${esc(code)}" data-spn="${esc(text == null ? '' : text)}"
-    title="点开速览（Esc 关）· 中键在新标签打开完整页">${
-    esc(text == null ? code : text)}</a>`;
+    data-sp="${esc(code)}" data-spn="${esc(text == null ? '' : text)}"${d}${r}
+    title="点开速览（Esc 关）${opt.date ? ' · 定位到 ' + esc(String(opt.date).slice(0,10)) : ''}· 中键在新标签打开完整页">${
+    opt.html != null ? opt.html : esc(text == null ? code : text)}</a>`;
 }
 
 /* 🔴 **事件委托挂在 document 上**，不是渲染时逐个绑：这些链接绝大多数是
@@ -313,6 +363,7 @@ if(typeof document !== 'undefined' && !window.__spOn){
     if(!a) return;
     if(e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;  /* 让它照旧开新标签 */
     e.preventDefault();
-    spOpen(a.dataset.sp, a.dataset.spn || '');
+    spOpen(a.dataset.sp, a.dataset.spn || '',
+           {date: a.dataset.spd || '', run: a.dataset.spr || ''});
   });
 }

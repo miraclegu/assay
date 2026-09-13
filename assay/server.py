@@ -48,6 +48,7 @@ ROUTES = {
     '/api/run': runs.api_run,
     '/api/equity': runs.api_equity,
     '/api/trades': runs.api_trades,
+    '/api/run/trades_of': runs.api_run_trades_of,
     '/api/holdings': runs.api_holdings,
     '/api/day': runs.api_day,
     '/api/rejects': runs.api_rejects,

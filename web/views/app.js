@@ -35,7 +35,7 @@ function modal(html, onReady){
    拿当前名称标一笔 2016 年的交易是误导：002711 走过
    欧浦钢网→欧浦智网→ST欧浦→*ST欧浦→欧浦退。名称缺失时退化为只显示代码。 */
 const nmcode=(v,r)=>r.name?`${r.name}<span class="cd">${v}</span>`:`<span class="cd0">${v}</span>`;
-let RUNS=[], CUR=null, DATA={}, HD={off:0,lim:100};
+let RUNS=[], CUR=null, DATA={}, HD={off:0,lim:100}, TD={off:0,lim:100};
 
 /* 直接 r.json() 会把服务端的纯文本错误（404 的 "not found"）变成
    "Unexpected token 'o'…" 这种看不懂的解析报错 —— 而真实原因往往是

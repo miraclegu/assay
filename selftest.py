@@ -9990,10 +9990,20 @@ def t_stockpop():
         assert t.index('shared/stockpop.js') > t.index('shared/common.js'), \
             '%s 里 stockpop.js 必须在 common.js 之后（它用 esc/num/j/_tipAt）' % f
     assert len(pops) >= 7, '只有 %d 个页面有浮层：%s' % (len(pops), pops)
-    # ④ 固定 bfq
+    # ④ 复权口径**跟着数据来源走**（2026-09-13 改）
+    # ★ 原来钉的是 `const SP_FQ = 'bfq'` —— 那时浮层只有一个来源（实盘）。
+    #   现在回测详情页也能开浮层，而**回测全程用后复权记账**，用 bfq 会把
+    #   B/S 标记整体画飘。所以规则从"固定 bfq"变成"按来源定"，
+    #   断言也跟着变成**两向都钉**（只钉一半的话另一半改错了不会被发现）。
     sp = _io.open('web/shared/stockpop.js', encoding='utf-8').read()
-    assert "const SP_FQ = 'bfq'" in sp.replace('"', "'"), \
-        '浮层必须固定不复权 —— 成交价是不复权实际价，切后复权标记会整体飘走'
+    flat = sp.replace('"', "'").replace(' ', '')
+    assert "constspFq=()=>(SP&&SP.run)?'hfq':'bfq'" in flat, \
+        ('浮层的复权口径必须【按来源定】：实盘成交价是不复权 -> bfq；'
+         '回测记账是后复权 -> hfq。两者搞反都会让标记整体飘走，**而它不报错**')
+    assert 'SP_FQ' not in sp, \
+        '还留着 SP_FQ 这个旧常量 —— 两处定义迟早分叉（同「删字段要连带清干净」那条）'
+    # 取数时真的用了它，而不是把 fq 写死在 URL 里
+    assert 'fq=${spFq()}' in sp, 'kline 请求没有用 spFq()，口径切换等于没生效'
 
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
@@ -10159,6 +10169,165 @@ def t_stockpop():
     finally:
         httpd.shutdown()
     return '；'.join(notes)
+
+
+@case('交易记录：买卖分行 / 分页 / 点名称弹浮层并定位到那天（playwright）', tag='web')
+def t_trades_pane():
+    """用户三条：「交易记录应该也要分页」「应该是买、卖各一笔」「点击名称/编码
+    弹出个股页面，同时自动定位到那一行所在的日期，前后默认展示 2 个月」。
+
+    每条都对应一种**不报错**的坏法：
+      ① 不分页：3946 行一次塞进 DOM —— 页面不报错，只是卡住
+      ② 拆分若放在**前端**做：分页边界会错（一页 100 拆完变 200，
+         且跨页的买卖被切开）。所以判据是**服务端**返回的就是拆好的
+      ③ 买入行的"收益率/持有天/卖出原因"必须**留空**而不是 0 ——
+         填 0 会被读成"这笔没赚没亏"（同实盘「费用留空 ≠ 填 0」那条）
+      ④ 浮层的 `run` 不带上的话，ETF 回测点开是**一片空白**
+         （ETF 跑在平行的 etf_lake 上，主面板里一行都没有）
+      ⑤ 定位：目标那天要落在图中段，且窗口≈前后各两个月
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import json as _json
+    import threading
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    from assay import server as sv
+    from assay.srv import runs as _sr
+
+    # 找一个有成交的归档（优先 ETF —— 它跑在平行 lake 上，最容易暴露 ④）
+    _sr._scan()
+    with _sr._lock:
+        idx = dict(_sr._index)
+    cand = []
+    for rid, d in idx.items():
+        if os.path.exists(os.path.join(d, 'trades.parquet')):
+            cand.append((0 if os.sep + 'ETF' + os.sep in d else 1, rid))
+    assert cand, '没有带成交记录的归档，测不了'
+    cand.sort()
+    rid = cand[0][1]
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    try:
+        def get(path):
+            return _json.loads(urlopen(base + path, timeout=60).read())
+
+        # ---- ①② 服务端就拆好了，且分页 ----
+        t = get('/api/trades?id=%s&limit=10' % rid)
+        assert t['limit'] == 10 and len(t['rows']) <= 10, \
+            '交易记录没分页：limit=%s 却回了 %d 行' % (t.get('limit'), len(t['rows']))
+        assert t['n_buy'] == t['n_sell'] and t['total'] == t['n_buy'] + t['n_sell'], \
+            ('一笔平仓必须拆成买、卖【各一行】：total=%d buy=%d sell=%d'
+             % (t['total'], t['n_buy'], t['n_sell']))
+        raw = _sr._read(rid, 'trades')
+        assert t['total'] == 2 * len(raw), \
+            '拆分后应是归档行数的两倍（%d vs %d）' % (t['total'], len(raw))
+        sides = set(r['side'] for r in t['rows'])
+        assert sides <= {'buy', 'sell'}, '方向只能是 buy/sell：%s' % sides
+        # 倒序 + 同日先卖后买
+        ds = [str(r['date'])[:10] for r in t['rows']]
+        assert ds == sorted(ds, reverse=True), '交易记录要按日期倒序：%s' % ds[:5]
+
+        # ---- ③ 买入行不许把"卖出才有的量"填成 0 ----
+        big = get('/api/trades?id=%s&limit=400' % rid)
+        buys = [r for r in big['rows'] if r['side'] == 'buy']
+        sells = [r for r in big['rows'] if r['side'] == 'sell']
+        assert buys and sells, '这一页里买卖都要有才测得到（买 %d 卖 %d）' % (len(buys), len(sells))
+        for k in ('ret', 'holding_days', 'reason', 'div_tax'):
+            bad = [r for r in buys if r.get(k) is not None]
+            assert not bad, \
+                ('买入行的 `%s` 必须留空 —— 那个量在买入那一刻不存在，'
+                 '填 0/填值会被读成"确实是 0"。实得 %r' % (k, bad[0].get(k)))
+        assert all(r.get('ret') is not None for r in sells), '卖出行必须有收益率'
+        assert all(r.get('price') is not None for r in buys), '买入行必须有价格'
+
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1600, 'height': 1000})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('%s/#/run/%s' % (base, rid))
+            pg.wait_for_timeout(4500)
+            pg.get_by_text('交易记录', exact=True).first.click()
+            pg.wait_for_timeout(2500)
+
+            hdr = [h.inner_text().strip() for h in pg.locator('#p3 table th').all()]
+            for want in ('日期', '方向', '股票'):
+                assert any(want in h for h in hdr), '列头缺「%s」：%s' % (want, hdr)
+            assert not any('建仓日' in h or '平仓日' in h for h in hdr), \
+                '建仓日/平仓日应合并成「日期」：%s' % hdr
+            assert pg.locator('#p3 .pg').count() >= 1, '交易记录没有分页控件'
+
+            # ---- ④⑤ 点名称 -> 浮层 + 定位 ----
+            lk = pg.locator('#p3 table a[data-sp]').first
+            assert lk.count(), '交易记录里名称不可点'
+            want_d = lk.get_attribute('data-spd')
+            assert want_d, '链接没带 data-spd —— 浮层无从定位'
+            assert lk.get_attribute('data-spr') == rid, \
+                ('链接必须带 data-spr（run id）—— 不带的话浮层去主面板取数，'
+                 '而 ETF 回测跑在平行 lake 上，会开出一片空白')
+            lk.click()
+            pg.wait_for_selector('#spwrap', state='visible', timeout=25000)
+            pg.wait_for_timeout(2500)
+            info = pg.evaluate("""() => ({n: (SP.bars||[]).length,
+                center: SP.center, run: SP.run,
+                dates: (SP.bars||[]).map(b => b.date)})""")
+            assert info['n'] > 20, \
+                ('浮层画不出 K 线（%d 根）—— ETF 回测最容易在这里空掉'
+                 % info['n'])
+            assert info['center'] == want_d, \
+                '浮层没收到定位日期：%r vs %r' % (info['center'], want_d)
+            # 窗口 ≈ 前后各两个月（84 根 ≈ 4 个月）
+            assert 60 <= info['n'] <= 110, \
+                '带日期打开时默认窗口应≈前后各两个月，实得 %d 根' % info['n']
+            # 🔴 目标那天必须**在窗口里**，且前面留足上下文。
+            #   ★ 这里**不能直接断言"居中"**：第一页是最近的成交，而数据就到
+            #     那几天为止 —— 目标日之后根本没有两个月的 K 线可显示，窗口被
+            #     钳到右边缘是**物理限制不是 bug**（实测落在 82%）。
+            #     所以"居中"那一条放到下面用**老成交**验（两侧都有数据）。
+            assert want_d in info['dates'], \
+                ('定位那天不在窗口里（%s 不在 %s ~ %s）'
+                 % (want_d, info['dates'][0], info['dates'][-1]))
+            i0 = info['dates'].index(want_d)
+            assert i0 >= 30, \
+                ('定位那天前面只有 %d 根 K 线 —— "前后各两个月"的【前】那半段'
+                 '任何时候都该满足（它不受数据末日影响）' % i0)
+            where = '%.0f%%' % (i0 / float(info['n']) * 100)
+
+            # ---- 居中：翻到**末页**（最老的成交），那时两侧都有数据 ----
+            pg.keyboard.press('Escape')
+            pg.wait_for_timeout(500)
+            pg.locator('#p3 .tl').first.click()          # 末页
+            pg.wait_for_timeout(2500)
+            lk2 = pg.locator('#p3 table a[data-sp]').first
+            d2 = lk2.get_attribute('data-spd')
+            lk2.click()
+            pg.wait_for_selector('#spwrap', state='visible', timeout=25000)
+            pg.wait_for_timeout(2500)
+            i2 = pg.evaluate(
+                "() => ({n: (SP.bars||[]).length,"
+                "        dates: (SP.bars||[]).map(b => b.date)})")
+            assert d2 in i2['dates'], '老成交也该定位得到：%s' % d2
+            pos2 = i2['dates'].index(d2) / float(i2['n'])
+            assert 0.3 <= pos2 <= 0.7, \
+                ('两侧都有数据时必须**居中**，实得 %.0f%% —— 偏到边上就等于没定位'
+                 % (pos2 * 100))
+            where += '，老成交 %s 落在 %.0f%%' % (d2, pos2 * 100)
+            assert not errs, '页面有运行时错误：%s' % errs[:2]
+            b.close()
+        return ('拆分 %d 笔平仓 -> %d 行（买 %d/卖 %d）；分页 limit 生效；'
+                '买入行的收益率/持有天/卖出原因均留空；'
+                '点名称弹浮层、带 run=%s、定位 %s 落在 %s'
+                % (len(raw), t['total'], t['n_buy'], t['n_sell'],
+                   rid[:8], want_d, where))
+    finally:
+        httpd.shutdown()
 
 
 @case('实盘页刷新不许【跳动】：只换数字，DOM 与滚动位置不动（playwright）', tag='web')

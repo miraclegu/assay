@@ -6,7 +6,7 @@
    拒单 / 源码 / 日志 / 元信息。 */
 /* ============ 详情页 ============ */
 async function openRun(id, initTab){
-  CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100};
+  CUR=id; DATA={}; HD={off:0,lim:HD?HD.lim:100}; TD={off:0,lim:TD?TD.lim:100};
   MSEL=null; DSEL=null; YOPEN=null;   // 下钻状态跟着回测走，不跨回测残留
   EQR={a:null,b:null};
                               // ★ YPAGE 由 route() 先设好，这里不能清
@@ -444,22 +444,65 @@ function tbl(el,rows,cols,note,opt){
   };
   draw();
 }
+/* 「股票」格：名称 + 小字代码，点开**速览浮层**并定位到这一行的日期。
+   ★ 与实盘持仓同一个交互（点了不跳走）。`run` 必须带上 —— ETF 回测跑在
+     平行的 etf_lake 上，不带的话浮层去主面板找，一行都取不到、画出一片空白。
+   ★ `html` 里的 name/code 自己转义：`nmcode` 那个老写法是直接插值的，
+     这里不沿用（名称来自我们自己的 parquet，风险低，但没理由把它扩散）。 */
+const nmpop=(v,r)=>spLink(v, r.name||v, '', {date:r.date||r.entry_date, run:CUR,
+  html:(r.name?`${esc(r.name)}<span class="cd">${esc(v)}</span>`
+              :`<span class="cd0">${esc(v)}</span>`)});
+
 async function paneTrades(){
-  if(!DATA.tr) DATA.tr=await j('/api/trades?id='+CUR);
-  const R={rebalance:'调仓',intraday:'盘中(涨停打开)',delist:'退市清算'};
-  tbl($('#p3'),DATA.tr.rows,[
-    {k:'code',t:'股票',l:1,f:nmcode},{k:'entry_date',t:'建仓日',l:1},{k:'exit_date',t:'平仓日',l:1},
-    {k:'holding_days',t:'持有天'},
-    {k:'entry_price',t:'建仓价(后复权)',f:v=>fmtN(v,3)},
-    {k:'exit_price',t:'平仓价',f:v=>fmtN(v,3)},
-    {k:'ret',t:'收益率',f:v=>pct(v,2),s:1},
-    {k:'pnl',t:'盈亏',f:v=>v==null?'—':(+v).toFixed(0),s:1},
-    {k:'fee',t:'费用',f:v=>fmtN(v,0)},
-    {k:'div_gross',t:'分红',f:v=>fmtN(v,0)},{k:'div_tax',t:'红利税',f:v=>fmtN(v,0)},
-    {k:'reason',t:'卖出原因',l:1,f:v=>R[v]||v},
-  ],`共 ${DATA.tr.total} 笔平仓。<b>同一天同一只票可能有多行</b> ——
-     加减仓走 FIFO 分批，每行是一批，带的是<b>该批</b>的建仓日与持有期
-     （红利税按批的持有期分档，所以必须分开记）。收益率只反映<b>价差</b>，分红单列。`);
+  const t=await j(`/api/trades?id=${CUR}&offset=${TD.off}&limit=${TD.lim}`);
+  if(!t.total){ $('#p3').innerHTML='<div class="note">这次回测没有平仓记录。</div>'; return; }
+  const R={rebalance:'调仓',intraday:'盘中(涨停打开)',delist:'退市清算',stop:'止损'};
+  const pg=Math.floor(t.offset/t.limit)+1, np=Math.max(1,Math.ceil(t.total/t.limit));
+  const nav=`<div class="pg">
+     <button class="tf" ${pg<=1?'disabled':''}>« 首页</button>
+     <button class="tp" ${pg<=1?'disabled':''}>‹ 上一页</button>
+     <span>第 <input class="ti" value="${pg}"> / ${np} 页</span>
+     <button class="tn" ${pg>=np?'disabled':''}>下一页 ›</button>
+     <button class="tl" ${pg>=np?'disabled':''}>末页 »</button>
+     <span style="margin-left:10px">每页
+       <select class="ts">${[50,100,200].map(x=>
+         `<option ${x===t.limit?'selected':''}>${x}</option>`).join('')}</select> 条</span>
+     <span style="margin-left:10px">共 ${t.total.toLocaleString()} 行
+       （买 ${t.n_buy.toLocaleString()} / 卖 ${t.n_sell.toLocaleString()}）</span></div>`;
+  $('#p3').innerHTML=`<div class="note">成交流水，<b>一笔平仓拆成买入、卖出两行</b>，
+     各自挂在自己的日期上；<b>按日期倒序</b>（最近的在前），同日<b>先卖后买</b>
+     （与引擎撮合顺序一致：卖出先回笼现金）。点<b>名称/代码</b>弹出速览浮层，
+     并定位到该行日期（前后各约两个月）。
+     <br>🔴 两条口径限制：①「费用」<b>只含卖出侧</b> —— 买入侧的费用没有逐笔落进归档
+     （只进了现金流与费用合计）；②<b>期末仍持有的那几只，它们的买入不在本表</b>
+     —— 归档只在平仓时写行，去「持仓」页看。
+     <br>同一天同一只票可能有多行：加减仓走 FIFO 分批，每行是<b>一批</b>，
+     红利税按该批的持有期分档，所以必须分开记。收益率只反映<b>价差</b>，分红单列。</div>
+     ${nav}<div id="trt"></div>${nav}`;
+  tbl($('#trt'),t.rows,[
+    {k:'date',t:'日期',l:1},
+    {k:'side',t:'方向',l:1,f:v=>`<b style="color:${
+       v==='buy'?'var(--up)':'var(--down)'}">${v==='buy'?'买':'卖'}</b>`},
+    {k:'code',t:'股票',l:1,f:nmpop},
+    {k:'price',t:'价格(后复权)',f:v=>fmtN(v,3)},
+    {k:'shares',t:'份额',f:v=>fmtN(v,1)},
+    {k:'amount',t:'金额',f:v=>v==null?'—':(+v).toFixed(0)},
+    {k:'holding_days',t:'持有天',f:v=>v==null?'':v},
+    {k:'ret',t:'收益率',f:v=>v==null?'':pct(v,2),s:1},
+    {k:'pnl',t:'盈亏',f:v=>v==null?'':(+v).toFixed(0),s:1},
+    {k:'fee',t:'费用(卖出侧)',f:v=>v==null?'':fmtN(v,0)},
+    {k:'div_gross',t:'分红',f:v=>v==null?'':fmtN(v,0)},
+    {k:'div_tax',t:'红利税',f:v=>v==null?'':fmtN(v,0)},
+    {k:'reason',t:'卖出原因',l:1,f:v=>v==null?'':(R[v]||v)},
+  ]);
+  /* ★ 上下两套导航用 class 不用 id —— 同 paneHoldings 那条（id 拼接过歧义）。 */
+  const go=o=>{TD.off=Math.max(0,Math.min(o,(np-1)*TD.lim));paneTrades();};
+  const on=(cls,fn,ev)=>document.querySelectorAll('#p3 .'+cls)
+      .forEach(e=>e[ev||'onclick']=fn);
+  on('tf',()=>go(0)); on('tp',()=>go(TD.off-TD.lim));
+  on('tn',()=>go(TD.off+TD.lim)); on('tl',()=>go((np-1)*TD.lim));
+  on('ts',e=>{TD.lim=+e.target.value;TD.off=0;paneTrades();},'onchange');
+  on('ti',e=>go((Math.max(1,+e.target.value)-1)*TD.lim),'onchange');
 }
 async function paneHoldings(){
   const h=await j(`/api/holdings?id=${CUR}&offset=${HD.off}&limit=${HD.lim}`);
@@ -490,11 +533,12 @@ async function paneHoldings(){
      <span style="margin-left:10px">共 ${h.total.toLocaleString()} 条 /
        ${h.n_days.toLocaleString()} 个交易日</span></div>`;
   $('#p4').innerHTML=`<div class="note">逐日持仓快照，<b>按日期倒序</b>（最近的在前），
+     点<b>名称/代码</b>弹出速览浮层并定位到该快照日（前后各约两个月）。
      同日内按权重降序。份额是<b>后复权记账单位</b>，真实股数 = 份额 × 当日复权因子。
      点列头排序会打散日期分块（同组行不再相邻）。</div>
      ${nav}<div id="hdt"></div>${nav}`;
   tbl($('#hdt'),h.rows,[
-    {k:'code',t:'股票',l:1,f:nmcode},{k:'weight',t:'权重',f:v=>pct(v,2)},
+    {k:'code',t:'股票',l:1,f:nmpop},{k:'weight',t:'权重',f:v=>pct(v,2)},
     {k:'value',t:'市值',f:v=>v==null?'—':(+v).toFixed(0)},
     {k:'shares',t:'份额(后复权)',f:v=>fmtN(v,1)},
     {k:'last_price',t:'现价',f:v=>fmtN(v,3)},

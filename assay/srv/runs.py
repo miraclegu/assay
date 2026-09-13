@@ -240,18 +240,108 @@ def api_equity(q):
 
 
 def api_trades(q):
-    df = _read(q.get('id'), 'trades')
+    """成交流水：**一笔平仓拆成「买入」「卖出」两行**，按日期倒序分页。
+
+    🔴 归档里 `trades.parquet` 是**一批一行**（FIFO 批次，在卖出时记录），
+      同时带着建仓日与平仓日 —— 那是"往返"视角。但人看流水是按**时间**看的：
+      "这天我买了什么、卖了什么"。所以展示层拆成两行，各自挂在自己的日期上。
+
+    ★ **拆分必须在服务端做**，不能让前端拿到分页结果再拆 ——
+      那样页边界会错（一页 100 条拆完变 200 条，且跨页的买卖会被切开）。
+
+    字段落在哪一行，以**这件事什么时候发生**为准：
+        买入行  日期/价格/份额/金额
+        卖出行  日期/价格/份额/金额 + 持有天 / 收益率 / 盈亏 / 费用 /
+                分红 / 红利税 / 卖出原因
+    🔴 买入行**留空而不是填 0**：那些量在买入那一刻根本不存在
+      （同实盘「费用留空 ≠ 填 0」那条：默认 0 会被读成"确实没有费用"）。
+
+    ⚠️ 两条口径限制，页面上要说明：
+      1. `fee` 只含**卖出侧**费用 —— 引擎在成交时按整笔委托算一次费，
+         买入侧的费用没有逐笔落进 `trades.parquet`（只进了现金流与 `fee_paid` 合计）。
+      2. **未平仓持仓的买入不在本表** —— `trades.parquet` 只在平仓时才写行。
+         期末还持有的那几只，去「持仓」页看。
+    """
+    import pandas as pd
+    rid = q.get('id')
+    df = _read(rid, 'trades')
     if df is None:
         return None
-    df = df.sort_values('exit_date')
-    rows = _records(df)
-    root = _dl_root(q.get('id'))
-    if root:
-        # 用【建仓日】的名称 —— 一笔交易的身份以建仓时为准；
-        # 若持有期内改名（如变成 *ST），平仓日名称会不同，那属于另一个信息。
-        _resolve_names(rows, root, 'entry_date')
-    return {'total': len(df), 'rows': rows}
+    if df.empty:
+        return {'total': 0, 'offset': 0, 'limit': 0, 'rows': [], 'n_buy': 0,
+                'n_sell': 0}
 
+    buy = pd.DataFrame({
+        'date': df['entry_date'], 'side': 'buy', 'code': df['code'],
+        'shares': df['shares'], 'price': df['entry_price'],
+        'amount': df['shares'] * df['entry_price'],
+    })
+    sell = pd.DataFrame({
+        'date': df['exit_date'], 'side': 'sell', 'code': df['code'],
+        'shares': df['shares'], 'price': df['exit_price'],
+        'amount': df['gross_amount'], 'holding_days': df['holding_days'],
+        'ret': df['ret'], 'pnl': df['pnl'], 'fee': df['fee'],
+        'div_gross': df['div_gross'], 'div_tax': df['div_tax'],
+        'reason': df['reason'],
+    })
+    out = pd.concat([buy, sell], ignore_index=True)
+    # 倒序（最近的先看，与「持仓」页一致）；同日**先卖后买** —— 与引擎的
+    # 撮合顺序一致（卖出先回笼现金），这样同一天的两组读起来是因果顺序。
+    out['_s'] = (out['side'] == 'buy').astype(int)
+    out = out.sort_values(['date', '_s', 'code'],
+                          ascending=[False, True, True]).drop(columns=['_s'])
+    total = len(out)
+    try:
+        limit = max(10, min(500, int(q.get('limit', 100))))
+        offset = max(0, min(max(total - 1, 0), int(q.get('offset', 0))))
+    except ValueError:
+        limit, offset = 100, 0
+    rows = _records(out.iloc[offset:offset + limit])
+    root = _dl_root(rid)
+    if root:
+        # 🔴 名称按**这一行自己的日期**解析，不再统一用建仓日 ——
+        #   拆开之后买入行与卖出行是两个时点，持有期内改过名（如变 *ST）时
+        #   各自显示当时的名字才是事实。
+        _resolve_names(rows, root, 'date')
+    return {'total': total, 'offset': offset, 'limit': limit, 'rows': rows,
+            'n_buy': int(len(buy)), 'n_sell': int(len(sell))}
+
+
+
+
+def api_run_trades_of(q):
+    """GET /api/run/trades_of?id=<run_id>&code= —— 这次回测在这只票上的买卖点。
+
+    返回形状与 `/api/live/trades_of` **一致**（date/side/shares/price/fee），
+    个股浮层用同一段代码画 B/S 标记 —— 两处形状不一样的话，浮层就得按来源
+    分支渲染，而那种分支迟早只维护其中一条。
+
+    🔴 **价格是【后复权】的。** 回测全程用后复权价记账（`entry_price` /
+      `exit_price` 都是 hfq），所以浮层从回测打开时必须切到后复权 K 线，
+      否则标记会整体飘走 —— **而它不报错**，看着像"买在了那根阴线上面"
+      （同 `api_live_trades_of` 那条，只是方向相反：实盘成交价是不复权的）。
+    """
+    rid, code = q.get('id') or '', (q.get('code') or '')
+    if not rid or not code:
+        return {'error': '缺 id 或 code'}
+    df = _read(rid, 'trades')
+    if df is None:
+        return None
+    out = []
+    if not df.empty:
+        sub = df[df['code'] == code]
+        for i, r in enumerate(sub.itertuples(index=False)):
+            out.append({'account': rid, 'account_name': '回测',
+                        'date': str(r.entry_date)[:10], 'side': 'buy',
+                        'shares': float(r.shares), 'price': float(r.entry_price),
+                        'fee': None, 'note': '', 'seq': i * 2})
+            out.append({'account': rid, 'account_name': '回测',
+                        'date': str(r.exit_date)[:10], 'side': 'sell',
+                        'shares': float(r.shares), 'price': float(r.exit_price),
+                        'fee': float(r.fee) if r.fee == r.fee else None,
+                        'note': str(r.reason or ''), 'seq': i * 2 + 1})
+    out.sort(key=lambda x: (x['date'], x['seq']))
+    return {'code': code, 'trades': out, 'fq': 'hfq'}
 
 
 def _pruned(run_id, what):
