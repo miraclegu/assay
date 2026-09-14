@@ -255,8 +255,26 @@ def equity_curve(aid, datalake=None):
         """ % (feed.root, q, days[0])).fetchall():
             px[(c, dd)] = p
     last = {}
+    # 🔴🔴 **分红【不是】外部现金流 —— 它是投资收益。**（2026-09-14 修）
+    #   TWR 的做法是"在每个有外部现金流的日子把区间切开"，目的是让
+    #   入金/出金不被当成收益。而分红到账走的也是 `cashflows.jsonl`
+    #   （账本设计如此：它是个事件，不该改 init_cash），于是原来这里把它
+    #   一并当成了外部资金 ——
+    #
+    #     除权日：股价掉下去 -> 权益跌 -> TWR 记一笔【负收益】
+    #     到账日：现金加回来 -> 被当成"入金" -> **不计入收益**
+    #
+    #   一来一回，分红那部分收益被**扣掉两次**。实测模拟盘红利账户：
+    #   期末/起点−1 = 5.83%，而 TWR 只有 4.39% —— 差 1.44pp，
+    #   恰好是分红 7,876 / 500,000 = 1.575% 那个量级。
+    #   ★ 这是**实盘也有的 bug**，只是当前两个真实账户还没收到过分红，
+    #     所以一直没暴露；是模拟盘按引擎跑出分红之后才把它逼出来的。
+    #   ★ `adjust`（手工调整）仍算外部：它的语义就是"这笔钱不是交易来的"。
+    FLOW_KINDS = ('deposit', 'withdraw', 'adjust')
     flow_by_day = {}
     for f in flows:
+        if (f.get('kind') or 'deposit') not in FLOW_KINDS:
+            continue                    # 分红：进现金，但不当外部资金
         flow_by_day[_base._d(f['date'])] = flow_by_day.get(_base._d(f['date']), 0.0) \
             + float(f.get('signed') or 0)
 

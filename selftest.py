@@ -7810,6 +7810,190 @@ def t_new_pages_ui():
         httpd.shutdown()
 
 
+@case('模拟盘：成交由【引擎】产生 / 幂等 / 账本对得上 / 对账不一致不改写账本',
+       tag='slow')
+def t_paper_trading():
+    """2026-09-14 用户："增加一个模拟盘功能，模拟盘开始后会在数据更新后
+    自动执行策略到最新的时间。"
+
+    **模拟盘 = 一个 `mode='paper'` 的实盘账户，成交由引擎产生写进同一本账。**
+    于是持仓/TWR/业绩页/流水/选股理由一行新代码都不用写。
+
+    🔴 **成交必须来自引擎**：整手取整、T+1、涨跌停无对手盘、成交量上限、
+      最低佣金、印花税分段、红利税档位全在 broker.py 里，在模拟盘里照抄
+      一遍就是第二份实现（同「核心原则：不重写任何交易规则」）。
+
+    🔴 **账本仍然 append-only**：数据被修正之后重跑，过去那几天的成交可能
+      就变了 —— 这时**报出来**，不静默改写（同「复算结果不许写回信号文件」）。
+    """
+    import io as _io
+    import json as _json
+    import shutil as _sh
+    import tempfile as _tf
+    from assay import live as lv
+
+    # 🔴 重定向账本 —— selftest 绝不许写真账本（跑完 git status live/ 必须干净）
+    real = lv.LIVE
+    src_id = next((a['id'] for a in lv.load_accounts()
+                   if not a.get('archived') and a.get('code_sha256')), None)
+    if not src_id:
+        return '跳过（没有已绑定策略的账户可以借版本快照）'
+    FR = next(a for a in lv.load_accounts() if a['id'] == src_id)
+    src = os.path.join(real, src_id)
+    tmp = _tf.mkdtemp(prefix='selftest_paper_')
+    lv.LIVE = tmp
+    notes = []
+    try:
+        # ---- ① 建模拟盘 + 绑版本 ----
+        lv.upsert_account('sim', name='模拟', init_cash=500000, mode='paper')
+        assert lv.is_paper(lv.get_account('sim')), 'mode 没存成 paper'
+        # 🔴 建好之后不能改类型 —— 同一本账混着真实成交与引擎成交，
+        #   之后没法复盘。判据在 base.upsert_account 一处。
+        try:
+            lv.upsert_account('sim', mode='live')
+            raise AssertionError('把模拟盘改成实盘竟然放行了 —— '
+                                 '同一本账里混着真实成交与引擎成交，'
+                                 '之后再也说不清哪一段是真的')
+        except lv.LiveError:
+            pass
+        dst = os.path.join(tmp, 'sim')
+        _sh.copytree(os.path.join(src, 'code'), os.path.join(dst, 'code'))
+        _sh.copy(os.path.join(src, 'versions.jsonl'),
+                 os.path.join(dst, 'versions.jsonl'))
+        _rf = os.path.join(src, 'fee_rates.jsonl')
+        if os.path.isfile(_rf):
+            _sh.copy(_rf, os.path.join(dst, 'fee_rates.jsonl'))
+        ac = lv.load_accounts()
+        for x in ac:
+            if x['id'] == 'sim':
+                x['created'] = '2026-08-01'
+                x['code_sha256'] = FR['code_sha256']
+                x['strategy_path'] = FR.get('strategy_path')
+                x['params'] = FR.get('params') or {}
+        lv._save_accounts(ac)
+
+        # ---- ② 推进 ----
+        r = lv.advance('sim')
+        assert r.get('ok'), '推进失败：%s' % r
+        n1 = r['added']
+        assert n1 > 0, '一笔成交都没跑出来 —— 引擎的 fills 没接上？'
+        fills = lv.fills('sim')
+        assert all(f['source'] == 'paper' for f in fills), \
+            '模拟盘写的成交 source 必须是 paper（流水页要分得出人敲的和引擎跑的）'
+        assert all(('side' in f and 'trade_date' in f) for f in fills), \
+            ('账本里的成交缺字段 —— 多半是拿 `broker.trades`（往返记录）'
+             '当流水了，它的字段是 entry_date/exit_date，没有 date/side')
+        assert any(f['side'] == 'buy' for f in fills), \
+            ('一笔买入都没有 —— broker.trades 只记**往返**（卖出时才写），'
+             '拿它当流水会丢掉所有买入；要用 broker.fills')
+        notes.append('推进出 %d 笔成交（买卖都有）' % n1)
+
+        # ---- ③ 幂等：再推一次不许多出东西 ----
+        r2 = lv.advance('sim')
+        assert r2.get('ok') and r2['added'] == 0, \
+            '再推一次又写了 %s 笔 —— 不幂等，账本会越推越胖' % r2.get('added')
+        assert len(lv.fills('sim')) == len(fills), '账本行数变了'
+        notes.append('幂等（再推 0 新增）')
+
+        # ---- ④ 账本忠实：与引擎终态对得上，差额【必须报出来】 ----
+        rc = r.get('recon') or {}
+        assert rc.get('engine_equity'), '没有对账结果'
+        rel = abs(rc['ledger_equity'] - rc['engine_equity']) / rc['engine_equity']
+        assert rel < 0.005, \
+            ('账本权益 %.2f 与引擎权益 %.2f 差 %.3f%% —— 超过 0.5%% 说明'
+             '不是舍入，是股数/价格/费用的换算错了'
+             % (rc['ledger_equity'], rc['engine_equity'], rel * 100))
+        assert 'diff' in rc and 'by_code' in rc, \
+            ('对账结果必须给出【差额与逐只明细】—— 两边天然差一点'
+             '（舍入；以及复权因子里含着分红表没有的那些），'
+             '假装相等的话它会一路悄悄漂')
+        notes.append('账本 vs 引擎 差 %.2f 元（%.4f%%）'
+                     % (rc['diff'], rel * 100))
+
+        # ---- ⑤ 分红不是外部资金（TWR 的 bug，模拟盘把它逼出来的）----
+        # 🔴 构造：一笔分红 + 一笔入金。分红不许进 net_deposit，入金必须进。
+        #   ★ 只测分红的话分不出"全都没算"和"只没算分红"。
+        lv.add_cashflow('sim', '2026-08-20', 1000.0, kind='dividend', note='t')
+        lv.add_cashflow('sim', '2026-08-21', 2000.0, kind='deposit', note='t')
+        cur = lv.equity_curve('sim')
+        nd = cur['stats']['net_deposit']
+        assert abs(nd - 2000.0) < 0.01, \
+            ('净入金该只含【入金 2000】，实得 %s —— 分红被当成了外部资金：'
+             '除权日股价掉下去记一笔负收益，到账日现金加回来又不计收益，'
+             '一来一回把分红收益扣了两次' % nd)
+        notes.append('分红不进 net_deposit（入金 2000 进、分红 1000 不进）')
+
+        # ---- ⑥ 对账不一致：报出来，**不改写账本** ----
+        # 构造：把账本里某一笔的股数改掉，再推进
+        fp = os.path.join(lv.acct_dir('sim'), 'fills.jsonl')
+        raw = _io.open(fp, encoding='utf-8').read()
+        lines = [x for x in raw.split('\n') if x.strip()]
+        j = _json.loads(lines[0]); j['shares'] = int(j['shares']) + 100
+        lines[0] = _json.dumps(j, ensure_ascii=False)
+        _io.open(fp, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+        before = _io.open(fp, encoding='utf-8').read()
+        r3 = lv.advance('sim')
+        assert r3.get('mismatch'), \
+            ('账本被改过之后重跑竟然没报不一致 —— 那条对账是空转的')
+        assert not r3.get('ok') and r3.get('added') == 0, \
+            '对账不一致时不该继续写入'
+        assert _io.open(fp, encoding='utf-8').read() == before, \
+            ('🔴 账本被改写了 —— 它是 append-only 的证据，数据修正之后'
+             '重跑出不同答案是**另一件事**，只能报出来让人决定')
+        notes.append('对账不一致 -> 报出来且账本一个字节没动')
+
+        # ---- ⑦ reset 只删引擎写的那些，不碰手工录的 ----
+        lv.add_fill('sim', '2026-08-05', FR and fills[0]['code'], 'buy', 100,
+                    price=10.0, fee=5.0, source='manual', force_price=True)
+        n_manual = len([f for f in lv.fills('sim') if f['source'] == 'manual'])
+        assert n_manual == 1
+        lv.reset('sim')
+        left = lv.fills('sim')
+        assert len(left) == 1 and left[0]['source'] == 'manual', \
+            ('reset 把手工录的那笔也删了 —— 它只该删引擎跑出来的'
+             '（模拟盘本来就是可重来的推演，手敲的那几笔不是）')
+        notes.append('reset 只删 paper 的行，手工录的留着')
+
+        # ---- ⑧ 实盘账户调 reset 必须被拒 ----
+        lv.upsert_account('realacct', name='真', init_cash=1000, mode='live')
+        try:
+            lv.reset('realacct')
+            raise AssertionError('实盘账本竟然允许重写 —— 那是不可重写的')
+        except lv.LiveError:
+            pass
+        notes.append('实盘账户拒绝 reset')
+    finally:
+        lv.LIVE = real
+        _sh.rmtree(tmp, ignore_errors=True)
+
+    # ---- ⑨ 静态：成交不许在模拟盘里【重新撮合】 ----
+    import ast as _ast
+    src_p = _io.open('assay/lv/paper.py', encoding='utf-8').read()
+    tree = _ast.parse(src_p)
+    names = {n.func.attr for n in _ast.walk(tree)
+             if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)}
+    assert 'build_engine' in names, \
+        ('模拟盘没走 bench.build_engine —— 它必须与业绩页那条策略曲线'
+         '【同一次构建】，各建一份的话费率/滑点/起点任何一处不同，'
+         '就会出现"模拟盘的成交与策略曲线对不上"')
+    for banned in ('Cost', 'Broker', 'PanelFeed'):
+        assert banned not in {getattr(n, 'id', None) for n in _ast.walk(tree)
+                              if isinstance(n, _ast.Name)}, \
+            ('paper.py 里自己建了 %s —— 撮合与费率配置只能有一处'
+             '（bench.build_engine），两份迟早分叉' % banned)
+
+    # ---- ⑩ 自动触发必须排在「没有要重算的」那个提前返回【之前】----
+    tk = _io.open('tick_daily.py', encoding='utf-8').read()
+    i_paper = tk.index('lv.is_paper')
+    i_ret = tk.index("_say('\\n没有要重算的。')")
+    assert i_paper < i_ret, \
+        ('模拟盘推进那段写在「没有要重算的」提前返回之后了 —— 那它永远'
+         '跑不到：信号没变不代表模拟盘不用推（新建的账户一笔成交都没有，'
+         '而它的指纹当然"没变过"）')
+    notes.append('自动推进挂在 tick_daily 且排在提前返回之前')
+    return '；'.join(notes)
+
+
 @case('顶栏合并：板块收进盘面 / 对比收进个股，且【一个功能都没藏起来】（playwright）',
        tag='web')
 def t_nav_merge():
@@ -9490,7 +9674,13 @@ def t_signal_revision():
     assert 'returnw+rv+' in flat, \
         'rv 必须拼在正文之前 —— 藏在下面等于没提示'
     #   数据动过但清单没变：低调显示，**不许**用警告样式
-    rcseg = js.split('const rc=')[1][:320]
+    #   🔴 锚点要**唯一**：原来写的是 `split('const rc=')[1]`，而 `rc` 是个
+    #     太常见的局部名 —— 2026-09-14 加模拟盘标记时我在前面也写了一个
+    #     `const rc=`，锚点当场被抢走，这条断言去查的是**另一段代码**，
+    #     于是报"低调显示没做"而产品根本没坏（同「判据比断言宽」那条）。
+    assert js.count('const rc=(!revs.length') == 1, \
+        '「重算过但清单未变」那段的锚点不唯一了'
+    rcseg = js.split('const rc=(!revs.length')[1][:320]
     assert 'recomputed_at' in rcseg and 'lvwhy' in rcseg, \
         '「重算过但清单未变」应低调显示（lvwhy）'
     assert 'lvwarn' not in rcseg, \

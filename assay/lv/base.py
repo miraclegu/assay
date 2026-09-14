@@ -213,7 +213,7 @@ def get_account(aid):
 
 
 def upsert_account(aid, name=None, init_cash=None, broker_note=None,
-                   tick_time=None, warmup_start=None, fee=None):
+                   tick_time=None, warmup_start=None, fee=None, mode=None):
     lst = load_accounts()
     hit = next((a for a in lst if a['id'] == aid), None)
     if hit is None:
@@ -221,8 +221,18 @@ def upsert_account(aid, name=None, init_cash=None, broker_note=None,
         hit = {'id': aid, 'name': name or aid, 'init_cash': float(init_cash or 0),
                'broker_note': broker_note or '', 'tick_time': DEFAULT_TICK_TIME,
                'warmup_start': DEFAULT_WARMUP_START, 'created': _now(),
+               # 🔴 `mode` 只在**建账户时**定，之后不给改（见下）。
+               'mode': mode if mode in ('live', 'paper') else 'live',
                'code_sha256': None, 'strategy_path': None, 'params': {}}
         lst.append(hit)
+    elif mode is not None and mode != hit.get('mode', 'live'):
+        # 🔴 **不许把实盘改成模拟盘，也不许反过来。** 账本是同一本：
+        #   改过去之后，同一条流水里一半是真金白银、一半是引擎跑出来的，
+        #   而 TWR / 持仓 / 业绩全都照单全收 —— **看着完全正常**，
+        #   却再也说不清哪一段是真的。要换就新建一个账户。
+        raise LiveError('账户类型（实盘/模拟盘）建好之后不能改 —— '
+                        '同一本账里混着真实成交与引擎成交，之后没法复盘。'
+                        '请新建一个账户。')
     if name is not None:
         hit['name'] = name
     if init_cash is not None:

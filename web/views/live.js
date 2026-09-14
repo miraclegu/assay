@@ -70,11 +70,16 @@ async function showLive(aid){
         <div class="lvform" style="padding:0 8px">
           <input id="nn" placeholder="账户名称" style="flex:1;min-width:110px">
           <input id="nc" size="6" placeholder="初始资金">
+          <label class="lvwhy" style="display:flex;align-items:center;gap:4px"
+                 title="成交由引擎按绑定策略跑出来，不用人录；数据更新后自动推进到最新">
+            <input type="checkbox" id="npaper"> 模拟盘</label>
           <button class="btn" id="nb" ${o.readonly?'disabled':''}>建</button>
         </div>
         <div class="lvwhy" style="padding:2px 8px">
           id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>）。
-          id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。
+          id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。<br>
+          🔴 <b>实盘 / 模拟盘建好之后不能改</b> —— 同一本账里混着真实成交与
+          引擎成交，之后就说不清哪一段是真的了。要换请新建一个账户。
         </div>
         <div class="lvmsg" id="nmsg"></div>
       </div>
@@ -93,7 +98,8 @@ async function showLive(aid){
     const m=$('#nmsg');
     try{
       const r=await post('/api/live/save',{
-        name:$('#nn').value.trim(), init_cash:parseFloat($('#nc').value||'0')});
+        name:$('#nn').value.trim(), init_cash:parseFloat($('#nc').value||'0'),
+        mode:$('#npaper').checked?'paper':'live'});
       m.className='lvmsg ok'; m.textContent='已建';
       showLive(r.account.id);
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
@@ -262,6 +268,7 @@ async function loadLive(aid, quiet){
   b.innerHTML=`
   <div class="lvhead">
     <h2>${esc(a.name)}</h2>
+    ${paperTag(o)}
     <span id="lvday">${dataDayTag(o)}</span>
     ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
         title="源码 / 参数 / 版本历史 / 用这个版本跑过的回测">${esc(a.strategy_path.split('/').pop())}
@@ -277,6 +284,9 @@ async function loadLive(aid, quiet){
          "版本 9FB82061" 一模一样，实测**人找不到它** ——
          看不出能点的入口 = 没有入口（同 backLink 那条的反面）。 -->
     <a class="btn" href="#/live/${a.id}/why">选股理由</a>
+    ${a.mode==='paper'?`<button class="btn" id="lvadv" ${ro?'disabled':''}
+       title="按绑定策略跑到最新数据日，把新成交写进账本（幂等，没新交易日就什么都不做）"
+       >▷ 推进</button>`:''}
     <button class="btn" id="lvset">⚙</button>
   </div>
   <div class="lvmsg" id="lvmsg"></div>
@@ -316,6 +326,23 @@ async function loadLive(aid, quiet){
   $('#lvstrat').onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256||''); };
   $('#lvset').onclick=()=>openSettings(aid, a, ro);
   $('#lvrec').onclick=()=>openRecord(aid, sig, ro);
+  /* 模拟盘手动推进。★ 自动那条挂在 tick_daily（数据更新后），这里是
+     "我现在就想看看"的入口 —— 两者调的是同一个接口，不是两套逻辑。
+     🔴 innerHTML 之后才存在的元素要在这里绑，不是渲染开头
+       （对比页「移除」栽过：点了没反应且不报错）。 */
+  if($('#lvadv')) $('#lvadv').onclick=async()=>{
+    const b=$('#lvadv'), old=b.textContent;
+    b.textContent='推进中…';
+    try{
+      const r=await post('/api/live/paper',{id:aid});
+      /* 🔴 对账不一致时**不刷新成"好像成功了"** —— 说清楚再让人决定。 */
+      if(r.mismatch){
+        alert('重跑结果与账本对不上（到 '+r.mismatch.until+'）：\n'
+          + r.mismatch.why + '\n账本没有被改动。');
+      }
+      await loadLive(aid);
+    }catch(e){ b.textContent=old; alert(String(e)); }
+  };
   /* 持仓表的表头排序 —— innerHTML 之后才存在，所以每次全量渲染都要重绑。 */
   lvSortBind(aid);
   /* 盘中才轮询；收盘后停掉并在页面上说清（不说的话人会以为坏了）。 */
@@ -536,6 +563,29 @@ function lvSortBind(aid){
    ★ 实现在 `shared/stockpop.js`（`spLink`）—— 盘面/自选/买点那些页面
      也要同样的效果，所以放共享层，不放实盘页。 */
 const skLink=(code, text, cls)=>spLink(code, text, cls)
+
+/* 模拟盘标记 + 推进状态。**必须一眼看得出这是模拟盘** ——
+   这一页上所有数字（持仓、浮盈、累计收益）长得和实盘一模一样，
+   不标的话把推演当成真金白银只是时间问题。
+   ★ 顺带给出「推进到哪天」与对账差额：
+     🔴 差额不进 ⓘ —— 那是"这个数可能不对"，而 ⓘ 只放"这个数怎么算的"
+       （同「警告不许进 ⓘ」那条）。 */
+function paperTag(o){
+  const a=o.account||{}, p=o.paper;
+  if(a.mode!=='paper') return '';
+  const st=p||{};
+  const to=st.advanced_to||'—';
+  /* 对账差：账本与引擎天然差一点（舍入 + 复权因子里含着分红表没有的那些），
+     超过本金万分之五就标出来 —— 低于它是舍入，高于它是有话要说。 */
+  const rec=st.recon||{}, dp=rec.diff_pct;
+  const bad=(dp!=null && Math.abs(dp)>0.0005);
+  const mm=st.mismatch;
+  return `<span class="lvtag on" style="background:#6b5bd6;border-color:#6b5bd6"
+      title="成交由引擎按绑定策略跑出来，不是真实成交">模拟盘</span>
+    <span class="lvtag" id="lvpaper" title="${esc(mm?mm.why:'数据更新后自动推进到最新数据日')}"
+      >推进到 ${esc(to)}${mm?' · 🔴 对账不一致':''}${
+        bad?` · 对账差 ${num(rec.diff,2)} 元`:''}</span>`;
+}
 
 /* ★ 数据日与报价时间写在【同一个标签】里，紧跟账户名。
      原来数据日在账户后面、"实时 09-03 13:19"在持仓浮盈下面 —— 两处各写

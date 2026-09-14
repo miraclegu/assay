@@ -52,34 +52,41 @@ def _repo():
         os.path.abspath(__file__))))
 
 
-def compute(aid, force=False, datalake=None):
-    """跑一次「完全照做」的回测，返回 {dates, nav, ...}。
+def build_engine(aid, datalake=None):
+    """按【这个账户】的绑定版本 + 参数 + 费率建一个引擎，**还没跑**。
 
-    ★ 三层缓存同 explain：进程内 -> 旁挂文件 -> 真跑。
+    返回 `(eng, meta)`；`meta` 含 start/end/cash/sha/fp/fee 等。
+    出错时返回 `(None, {'error': ...})` —— 调用方照原样把原因给页面。
+
+    🔴 **抽出来是为了让【策略曲线】与【模拟盘】共用同一次构建。**
+      模拟盘的成交必须与业绩页那条策略曲线来自**同一个引擎配置**，
+      各建一份的话迟早分叉（费率、滑点、gated 起点任何一处不同，
+      就会出现"模拟盘的成交与策略曲线对不上"，而那不报错）。
+      这也是本项目反复吃过亏的模式：同一件事两处写。
     """
     a = next((x for x in _base.load_accounts() if x['id'] == aid), None)
     if a is None:
         raise _base.LiveError('没有这个账户：%s' % aid)
     sha = a.get('code_sha256')
     if not sha:
-        return {'error': '账户还没绑定策略 —— 没有"策略曲线"可算'}
+        return None, {'error': '账户还没绑定策略 —— 没有"策略曲线"可算'}
     start = (a.get('created') or '')[:10]
     if not start:
-        return {'error': '账户没有开户日 —— 两条曲线没法对齐起点'}
+        return None, {'error': '账户没有开户日 —— 两条曲线没法对齐起点'}
     cash = float(a.get('init_cash') or 0)
     if cash <= 0:
-        return {'error': '账户没有初始资金'}
+        return None, {'error': '账户没有初始资金'}
     params = a.get('params') or {}
 
     # 🔴 版本快照才是"绑定的那份代码"；磁盘上的文件可能已经改了。
     row = _ver._version_row(aid, sha)
     if not row:
-        return {'error': '找不到版本 %s 的快照' % sha[:8]}
+        return None, {'error': '找不到版本 %s 的快照' % sha[:8]}
     snap = os.path.join(_base.acct_dir(aid), 'code', sha[:8])
     main = row.get('strategy_path') or ''
     entry = os.path.join(snap, os.path.basename(main))
     if not os.path.isfile(entry):
-        return {'error': '版本快照缺主文件：%s' % entry}
+        return None, {'error': '版本快照缺主文件：%s' % entry}
 
     sys.path.insert(0, _repo())
     try:
@@ -91,16 +98,6 @@ def compute(aid, force=False, datalake=None):
         end = feed_probe.trading_days[-1]
         fp = feed_probe.fingerprint()
         k = _key(aid, sha, params, start, end, fp)
-        if not force and k in _MEM:
-            return _MEM[k]
-        side = os.path.join(_bench_dir(aid), k + '.json')
-        if not force and os.path.isfile(side):
-            try:
-                with open(side, encoding='utf-8') as f:
-                    _MEM[k] = json.load(f)
-                return _MEM[k]
-            except Exception:                               # noqa: BLE001
-                pass                    # 坏了就重算，不让它打挂整页
 
         # ---- 费率：用**这个账户**的，不是引擎默认 ----
         # 🔴 三个接口形状都被我猜错过一次，逐个说清：
@@ -154,6 +151,39 @@ def compute(aid, force=False, datalake=None):
              - datetime.timedelta(days=40)).isoformat(), end, root=datalake)
         eng = _GatedEngine(_load(entry), feed, cash=cash, cost=cost,
                            params=params)
+        return eng, {'start': start, 'end': end, 'cash': cash, 'sha': sha,
+                     'main_sha256': row.get('main_sha256'), 'params': params,
+                     'data_fingerprint': fp, 'key': k,
+                     'fee': {'buy': eff.get('buy_rate'),
+                             'sell': eff.get('sell_rate'), 'commission': comm,
+                             'note': 'sell_rate 含印花税；引擎另按日期分段加，'
+                                     '所以 commission 只取 buy_rate'}}
+    finally:
+        if sys.path and sys.path[0] == _repo():
+            sys.path.pop(0)
+
+
+def compute(aid, force=False, datalake=None):
+    """跑一次「完全照做」的回测，返回 {dates, nav, ...}。
+
+    ★ 三层缓存同 explain：进程内 -> 旁挂文件 -> 真跑。
+    """
+    eng, meta = build_engine(aid, datalake=datalake)
+    if eng is None:
+        return meta
+    start, end, cash = meta['start'], meta['end'], meta['cash']
+    k, fp = meta['key'], meta['data_fingerprint']
+    if not force and k in _MEM:
+        return _MEM[k]
+    side = os.path.join(_bench_dir(aid), k + '.json')
+    if not force and os.path.isfile(side):
+        try:
+            with open(side, encoding='utf-8') as f:
+                _MEM[k] = json.load(f)
+            return _MEM[k]
+        except Exception:                                   # noqa: BLE001
+            pass                        # 坏了就重算，不让它打挂整页
+    try:
         curve = eng.run(verbose=False)
         # 从开户日截断。★ 基点用 `cash`：warmup 期没有任何交易，所以开户日
         #   前一天的权益就是 init_cash —— 与实盘 TWR 的起点（开户那一刻的
@@ -170,11 +200,9 @@ def compute(aid, force=False, datalake=None):
             'nav': [None if v is None else float(v) / base0 for v in tv],
             'equity': [None if v is None else float(v) for v in tv],
             'start': start, 'end': end, 'cash': cash,
-            'sha': sha, 'main_sha256': row.get('main_sha256'),
-            'params': params, 'data_fingerprint': fp,
-            'fee': {'buy': eff.get('buy_rate'), 'sell': eff.get('sell_rate'),
-                    'commission': comm,
-                    'note': 'sell_rate 含印花税；引擎另按日期分段加，所以 commission 只取 buy_rate'},
+            'sha': meta['sha'], 'main_sha256': meta['main_sha256'],
+            'params': meta['params'], 'data_fingerprint': fp,
+            'fee': meta['fee'],
             'computed_at': _base._now(),
         }
         os.makedirs(_bench_dir(aid), exist_ok=True)

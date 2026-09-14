@@ -123,6 +123,22 @@ class Broker:
         self._prev_factor = {}
         self.rejects = []            # (date, code, side, reason) —— 拒单必须可见，不静默
         self.trades = []             # (entry_date, exit_date, code, ret)
+        # 🔴 **逐笔成交流水**（2026-09-14 加，模拟盘要用）。
+        #   `trades` 记的是**往返**（FIFO 批次，卖出时才写），回答"这一笔赚了
+        #   多少"；`fills` 记的是**每一次真的买/卖**，回答"哪天做了什么" ——
+        #   模拟盘要把它写进实盘账本，而账本是逐笔的。
+        #   ★ 纯**投影**：只记录，不参与任何判定，一行行为都没改
+        #     （等价性回归对过：froec / 红利 2024 全年报告逐行相同）。
+        #   🔴 **股数与价格一律记【真实/不复权】口径** —— 实盘账本存的就是
+        #     不复权成交价（`live.add_fill`），而引擎内部用后复权记账。
+        #     搞反了不报错，只是模拟盘的成本价与实盘对不上一个复权因子。
+        self.fills = []              # {date, code, side, shares, price, amount, fee, reason}
+        # 🔴 **分红到账也要逐笔留痕**（同上，纯投影）。引擎把分红计进现金
+        #   （`pf.cash += cash_in`）并按后复权口径缩减记账股数；而实盘账本的
+        #   现金是"初始 − 买入 + 卖出"算出来的 —— 不把分红作为**现金流**
+        #   补进去，模拟盘的现金就会**少掉所有分红**，而它不报错，
+        #   只是权益一路偏低（红利那种策略一年能差几个点）。
+        self.dividends = []          # {date, code, cash}
         self.div_tax_paid = 0.0
         self.n_adds = 0              # 加仓次数（往已有持仓追加批次）
         self.n_vol_capped = 0        # 因成交量上限被削减的委托笔数
@@ -193,6 +209,8 @@ class Broker:
                 #   总额都对，但归因错了。trades 里的 ret/pnl 只该反映【价差】。
             self.pf.cash += cash_in
             self.div_cash_received += cash_in
+            self.dividends.append({'date': date, 'code': c,
+                                   'cash': float(cash_in)})
 
         for c, b in self.bars.items():
             p = self.pf.positions.get(c)
@@ -426,6 +444,14 @@ class Broker:
             lot.div_gross -= dg
         p.lots = [l for l in p.lots if l.shares > 1e-9]
 
+        # 逐笔流水：换回真实口径。★ `sold`/`eff` 是后复权记账单位，
+        #   除以/乘以 factor 才是券商对账单上的股数与价格。
+        _fac = self.bars[code].factor if code in self.bars else None
+        self.fills.append({
+            'date': self.date, 'code': code, 'side': 'sell',
+            'shares': (sold * _fac) if _fac else sold,
+            'price': (eff / _fac) if _fac else eff,
+            'amount': amt, 'fee': fee + dtax, 'reason': reason})
         self.pf.cash += amt - fee - dtax
         self.sell_amount += amt
         self.fee_paid += fee
@@ -488,6 +514,10 @@ class Broker:
         self.buy_amount += cost_amt
         self.fee_paid += fee
         shares = lots * 100 / b.factor          # 换算回后复权记账单位
+        # 逐笔流水：`lots*100` 是真实股数、`raw_eff` 是不复权成交价（含滑点）
+        self.fills.append({'date': self.date, 'code': code, 'side': 'buy',
+                           'shares': lots * 100, 'price': raw_eff,
+                           'amount': cost_amt, 'fee': fee, 'reason': 'open'})
         lot = Lot(shares=shares, entry_date=self.date,
                   entry_price=px * (1 + self.cost.slippage / 2
                                     + self.cost.buy_slippage))

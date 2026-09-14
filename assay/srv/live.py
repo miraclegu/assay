@@ -136,8 +136,13 @@ def api_live_account(q):
             except Exception:                               # noqa: BLE001
                 pass
         rows = m.fills(aid)
+        _acct = m.get_account(aid)
+        # ★ 模拟盘的推进状态跟着账户一起给 —— 页面要显示"推进到哪天了"、
+        #   以及对账差了多少。非模拟盘不带这个字段（页面按有无判断）。
+        _paper = m.state(aid) if m.is_paper(_acct) else None
         return {
-            'account': m.get_account(aid),
+            'account': _acct,
+            'paper': _paper,
             # ★ 前端不要自己维护一份费率默认值 —— 那是第二份实现，
             #   会和后端 FEE_DEFAULT 漂移（实测：前端漏了 regulatory，
             #   输入框读出 undefined，保存直接被后端拒）。
@@ -664,6 +669,33 @@ def _live_guard():
 
 
 
+def api_live_paper(_q, body):
+    """模拟盘：推进到最新数据日 / 删档重建。
+
+    🔴 `reset` 是**唯一会删账本行的入口**，所以要显式传 `confirm` ——
+      它删掉的是引擎跑出来的那些成交（模拟盘本来就是可重来的推演），
+      但手滑点一下就没了，而账本里那几十笔是看过的东西。
+    ★ 实盘账户调它会被 `lv/paper.py` 直接拒 —— 判据在那边一处。
+    """
+    bad = _live_guard()
+    if bad:
+        return bad
+    m = _live()
+    b = body or {}
+    aid = (b.get('id') or '').strip()
+    act = (b.get('act') or 'advance').strip()
+
+    def _go():
+        if act == 'reset':
+            if not b.get('confirm'):
+                return {'error': '重建会删掉模拟盘已有的成交，请确认'}
+            r = m.reset(aid)
+            r.update(m.advance(aid))
+            return r
+        return m.advance(aid, rebuild=bool(b.get('rebuild')))
+    return _live_err(_go)
+
+
 def api_live_save(_q, body):
     """建/改账户；带 strategy_path 时顺便绑版本（append-only 留痕）。"""
     bad = _live_guard()
@@ -678,7 +710,7 @@ def api_live_save(_q, body):
                          broker_note=b.get('broker_note'),
                          tick_time=b.get('tick_time'),
                          warmup_start=b.get('warmup_start'),
-                         fee=b.get('fee'))
+                         fee=b.get('fee'), mode=b.get('mode'))
         if b.get('strategy_path'):
             m.bind_version(aid, b['strategy_path'], b.get('params') or {},
                            b.get('reason') or '')

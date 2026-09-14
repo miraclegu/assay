@@ -79,13 +79,15 @@ def _leg_a_ok():
     try:
         from build import sync_status as ss
     except Exception as e:                                     # noqa: BLE001
-        return None, 'sync_status 导不进来：%s' % e
+        return None, 'sync_status 导不进来：%s' % e, None
     st = ss.collect()
     lag = st.get('leg_a_lag')
     exp = st.get('expect_trade_day')
     if lag is None:
-        return None, 'sync_status 没给 leg_a_lag'
-    return (lag == 0), 'A 腿落后 %s 个交易日（应到 %s）' % (lag, exp)
+        return None, 'sync_status 没给 leg_a_lag', None
+    # ★ 顺带把"数据该到哪天"带出来 —— 模拟盘用它判"推进到最新没有"。
+    #   自己再算一遍就是第二处判据（同上一段那条纪律）。
+    return (lag == 0), 'A 腿落后 %s 个交易日（应到 %s）' % (lag, exp), exp
 
 
 def _now_fp():
@@ -118,7 +120,7 @@ def main():
     _say('① 今天 %s 是交易日 ✓' % today)
 
     # ---- 判据 2：A 腿数据新鲜 ----
-    ok, why = _leg_a_ok()
+    ok, why, last_day = _leg_a_ok()
     _say('② %s' % why)
     if ok is None:
         _say('   ⚠️ 判断不了新鲜度 —— **不重算**（宁可用昨晚那份，'
@@ -155,6 +157,35 @@ def main():
         _say('   %-8s 跳过 —— %s' % (aid, w))
     for aid, w in todo:
         _say('   %-8s 要算 —— %s' % (aid, w))
+    # ---- 模拟盘：数据更新了就把它推进到最新数据日 ----
+    # 🔴 **挂在这里而不是另起一个定时器。**"数据更新了没有"的判据
+    #   （A 腿新鲜度 + 指纹）已经在这个脚本的三道判据里了 —— 另写一份必然
+    #   分叉，而分叉的表现是"该推的没推"或"拿半截数据推了"
+    #   （同「依赖写进调用顺序比写进常量可靠」那条）。
+    # 🔴 **放在「没有要重算的」那个提前返回【之前】** —— 信号没变不代表
+    #   模拟盘不用推：新建的模拟盘账户一笔成交都还没有，而它的指纹当然
+    #   "没变过"。踩过一次：块写在末尾，结果永远跑不到。
+    # ★ 判据是**推进到哪天了 vs 数据到哪天**，不是"指纹变没变" ——
+    #   推进一次要重跑一遍回测（1~3 秒），而 tick 每小时一个点位，
+    #   无脑重跑是白烧。`advance` 本身幂等，这道判据只是省那几秒。
+    papers = [x for x in lv.load_accounts()
+              if lv.is_paper(x) and not x.get('archived')]
+    due = [x for x in papers
+           if (lv.state(x['id']) or {}).get('advanced_to') != last_day]
+    if papers:
+        _say('')
+        _say('④ 模拟盘 %d 个，要推进 %d 个' % (len(papers), len(due)))
+        for x in papers:
+            if x not in due:
+                _say('   %-10s 已经是最新（%s）'
+                     % (x['id'], (lv.state(x['id']) or {}).get('advanced_to')))
+        if due and not a.dry:
+            for x in due:
+                r = lv.advance(x['id'])
+                _say('   %-10s %s' % (x['id'], lv._brief(r)))
+        elif due:
+            _say('   （--dry：不推进）')
+
     if not todo:
         _say('\n没有要重算的。')
         return 0
@@ -190,6 +221,7 @@ def main():
         _say('')
         _say('🔴 有 %d 个账户的清单变了 —— 如果已经按之前那份准备了委托，'
              '请照新的核对。旧版存在 signals/<日期>.rev<N>.json。' % changed)
+
     return 0
 
 

@@ -121,6 +121,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/live/save': live.api_live_save,
                  '/api/live/fill': live.api_live_fill,
                  '/api/live/tick': live.api_live_tick,
+                 '/api/live/paper': live.api_live_paper,
                  '/api/live/cash': live.api_live_cash,
                  '/api/live/fee_infer': live.api_live_fee_infer,
                  '/api/live/fee_rate': live.api_live_fee_add,
