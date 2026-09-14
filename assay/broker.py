@@ -447,10 +447,13 @@ class Broker:
         # 逐笔流水：换回真实口径。★ `sold`/`eff` 是后复权记账单位，
         #   除以/乘以 factor 才是券商对账单上的股数与价格。
         _fac = self.bars[code].factor if code in self.bars else None
+        # 🔴 **股数取整** —— 真实股数本来就是整数，而 `sold * _fac` 会带出
+        #   浮点噪声（实测 3899.9999999999995）。那个数摆到页面上看着像
+        #   "份额还有小数"，而它只是二进制表示的残渣。
         self.fills.append({
             'date': self.date, 'code': code, 'side': 'sell',
-            'shares': (sold * _fac) if _fac else sold,
-            'price': (eff / _fac) if _fac else eff,
+            'shares': int(round(sold * _fac)) if _fac else sold,
+            'price': round(eff / _fac, 6) if _fac else eff,
             'amount': amt, 'fee': fee + dtax, 'reason': reason})
         self.pf.cash += amt - fee - dtax
         self.sell_amount += amt
@@ -516,7 +519,7 @@ class Broker:
         shares = lots * 100 / b.factor          # 换算回后复权记账单位
         # 逐笔流水：`lots*100` 是真实股数、`raw_eff` 是不复权成交价（含滑点）
         self.fills.append({'date': self.date, 'code': code, 'side': 'buy',
-                           'shares': lots * 100, 'price': raw_eff,
+                           'shares': int(lots * 100), 'price': round(raw_eff, 6),
                            'amount': cost_amt, 'fee': fee, 'reason': 'open'})
         lot = Lot(shares=shares, entry_date=self.date,
                   entry_price=px * (1 + self.cost.slippage / 2

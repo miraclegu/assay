@@ -365,7 +365,7 @@ async function drawDay(S){
     <div id="d_sell"></div><div id="d_buy"></div><div id="d_hold"></div>`;
   tbl($('#d_sell'),o.sells,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
+    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'exit_price',t:'卖出价',f:px},
@@ -377,7 +377,7 @@ async function drawDay(S){
   ],'当日卖出 '+o.sells.length+' 笔'+(o.sells.length?'':'（无）'));
   tbl($('#d_buy'),o.buys,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
+    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'gross_amount',t:'成交金额',f:v=>money(v)},
     {k:'exit_date',t:'后来平仓于'},
@@ -391,7 +391,7 @@ async function drawDay(S){
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
     {k:'weight',t:'权重',f:v=>pct(v,1)},
     {k:'value',t:'市值',f:v=>money(v)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'后复权记账单位，**不是真实股数**。引擎下单时按【真实价】算整手（lots = int(value / (真实价 * 100))），落账时除以复权因子。&#10;真实股数 = 份额 × 复权因子（实测一律是 100 的整数倍）。'},
+    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'last_price',t:'现价',f:px},
@@ -486,7 +486,7 @@ async function paneTrades(){
     {k:'side',t:'方向',l:1,f:v=>`<b style="color:${
        v==='buy'?'var(--up)':'var(--down)'}">${v==='buy'?'买':'卖'}</b>`},
     {k:'code',t:'股票',l:1,f:nmpop},
-    {k:'price',t:'价格(后复权)',f:v=>fmtN(v,3)},
+    {k:'price',t:'价格',f:v=>fmtN(v,3),h:'当时的**不复权**成交价（含滑点），与券商对账单同一口径。'},
     {k:'shares',t:'份额',f:v=>fmtN(v,1)},
     {k:'amount',t:'金额',f:v=>v==null?'—':(+v).toFixed(0)},
     {k:'holding_days',t:'持有天',f:v=>v==null?'':v},
@@ -536,13 +536,14 @@ async function paneHoldings(){
        ${h.n_days.toLocaleString()} 个交易日</span></div>`;
   $('#p4').innerHTML=`<div class="note">逐日持仓快照，<b>按日期倒序</b>（最近的在前），
      点<b>名称/代码</b>弹出速览浮层并定位到该快照日（前后各约两个月）。
-     同日内按权重降序。份额是<b>后复权记账单位</b>，真实股数 = 份额 × 当日复权因子。
+     同日内按权重降序。份额与价格都是<b>当时真实的那个数</b>（不复权）——
+     归档内部按后复权记账，展示层换算回去。
      点列头排序会打散日期分块（同组行不再相邻）。</div>
      ${nav}<div id="hdt"></div>${nav}`;
   tbl($('#hdt'),h.rows,[
     {k:'code',t:'股票',l:1,f:nmpop},{k:'weight',t:'权重',f:v=>pct(v,2)},
     {k:'value',t:'市值',f:v=>v==null?'—':(+v).toFixed(0)},
-    {k:'shares',t:'份额(后复权)',f:v=>fmtN(v,1)},
+    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'last_price',t:'现价',f:v=>fmtN(v,3)},
     {k:'entry_date',t:'建仓日',l:1},{k:'entry_price',t:'建仓价',f:v=>fmtN(v,3)},
     {k:'unrealized_ret',t:'浮动收益',f:v=>pct(v,2),s:1},

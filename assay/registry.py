@@ -20,7 +20,10 @@
       stats.json        最终统计
       equity.parquet    每日账户：cash / positions_value / total_value / n_positions
       holdings.parquet  每日逐持仓：shares / value / weight / 浮动盈亏
-      trades.parquet    每笔平仓：进出价、持有天数、盈亏、红利税、卖出原因
+      trades.parquet    每笔平仓（往返视角）：进出价、持有天数、盈亏、红利税、卖出原因
+                        —— 股数/价格是**后复权记账单位**
+      fills.parquet     逐笔成交（时间视角）：**真实股数 + 不复权价**，
+                        撮合当场记的，不用换算；含未平仓持仓的买入
       rejects.parquet   拒单：日期/代码/方向/原因 —— 失败必须留痕，不静默
       run.log           完整日志
 
@@ -196,6 +199,22 @@ def save(strategy_path, group, engine, stats, args, log_text, elapsed):
     _w(engine.daily, os.path.join(d, 'equity.parquet'))
     _w(engine.holdings, os.path.join(d, 'holdings.parquet'))
     _w(b.trades, os.path.join(d, 'trades.parquet'))
+    # 🔴 **逐笔成交（真实股数 + 不复权价）**（2026-09-14 加）。
+    #   `trades.parquet` 是**往返**视角（FIFO 批次，卖出时才写），而且里面的
+    #   股数/价格是**后复权记账单位** —— 摆到页面上是 `774.835189 股 @ 25.40`，
+    #   而当时真实是 `5700 股 @ 3.4526`。
+    #   换算要靠 `hfq_factor`，可它与 `dividend` 表**并不总是对齐**（实测两个
+    #   方向都有：002293 引擎缩了股数而因子没跳、601318 因子跳了而分红表没有
+    #   那一条）—— 于是约 4% 的行换出来不是整手。
+    #   ★ 所以把 broker 记的**真实成交**直接存下来：它是撮合当场的数，
+    #     不需要任何换算，也顺带把「未平仓持仓的买入不在表里」那个缺口补上。
+    #   ★ 旧归档没有这张表，展示层仍退回「按因子换算」——**能精确就精确，
+    #     退化也要退化得说得清**。
+    _w([{'date': f['date'], 'code': f['code'], 'side': f['side'],
+         'shares': float(f['shares']), 'price': float(f['price']),
+         'amount': float(f['amount']), 'fee': float(f['fee']),
+         'reason': f.get('reason') or ''} for f in getattr(b, 'fills', [])],
+       os.path.join(d, 'fills.parquet'))
     _w([{'date': r[0], 'code': r[1], 'side': r[2], 'reason': r[3]}
         for r in b.rejects], os.path.join(d, 'rejects.parquet'))
     return d, run_id

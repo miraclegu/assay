@@ -7810,6 +7810,193 @@ def t_new_pages_ui():
         httpd.shutdown()
 
 
+@case('回测的份额与价格展示【不复权】：真实股数必须是整手', tag='slow')
+def t_backtest_raw_units():
+    """2026-09-14 用户："交易记录的价格为什么是后复权的？展示出来的应该是
+    当时不复权的价格。份额也同样。持仓的份额也有相同的问题。"—— 他是对的。
+
+    引擎全程按**后复权**记账（那是对的：跨除权日比价必须复权），于是归档里
+    `shares` 是后复权记账单位、价格是后复权价。直接摆到页面上就是：
+
+        份额 774.835189  ← 券商那边没有这种数，真实是 **5700 股**
+        价格 25.3986     ← 当时实际成交在 **3.4526**
+
+    🔴 **判据是「整手」**，不是"有没有换算过" —— 真实股数一定是 100 的
+      整数倍，这是**可证的事实**；而"调了个函数"这种判据，换算错了方向
+      （乘变除）照样绿。
+
+    ★ 两条路都要验：
+      ① 新归档有 `fills.parquet`（撮合当场记的真实股数+不复权价，不用换算）
+      ② 旧归档只能**按当日复权因子换算** —— 而 `hfq_factor` 与 `dividend`
+        表并不总是对齐（实测两个方向都有：002293 引擎缩了股数而因子没跳、
+        601318 因子跳了而分红表没那条），所以这条路允许少量不整手。
+    """
+    import glob as _g
+    import json as _json
+    import pandas as _pd
+    from assay.srv import runs as R
+
+    # ---- ① 新归档：fills.parquet 必须存在且**全部整手** ----
+    cand = sorted(_g.glob('runs/_fqtest/*/*/fills.parquet'))
+    if not cand:
+        return '跳过（没有带 fills.parquet 的归档，先跑一次回测）'
+    d = os.path.dirname(cand[-1])
+    rid = os.path.basename(d)
+    fl = _pd.read_parquet(cand[-1])
+    assert len(fl) > 0, 'fills.parquet 是空的'
+    assert {'date', 'code', 'side', 'shares', 'price'} <= set(fl.columns), \
+        'fills.parquet 缺字段：%s' % list(fl.columns)
+    bad = fl[(fl['shares'] % 100) != 0]
+    assert bad.empty, \
+        ('fills.parquet 里有 %d 行不是整手 —— 它记的是**撮合当场的真实股数**，'
+         '不该需要任何换算：\n%s' % (len(bad), bad.head(3).to_string()))
+    assert (fl['side'] == 'buy').any() and (fl['side'] == 'sell').any(), \
+        'fills 里买卖必须都有（trades 只在平仓时写行，会丢掉所有买入）'
+    notes = ['fills.parquet %d 笔全整手（买 %d / 卖 %d）'
+             % (len(fl), int((fl['side'] == 'buy').sum()),
+                int((fl['side'] == 'sell').sum()))]
+
+    # 接口必须**优先用它**
+    got = R.api_trades({'id': rid, 'limit': '500'})
+    assert got and got.get('src') == 'fills', \
+        ('有 fills.parquet 却没用它（src=%s）—— 那条路不用换算、而且含'
+         '未平仓持仓的买入' % (got or {}).get('src'))
+    assert all(float(r['shares']) % 100 == 0 for r in got['rows']), \
+        '接口回出来的份额不是整手'
+    # 价格必须是**不复权**：拿面板的 close_bfq 量级比一比（后复权会差好几倍）
+    root = R._dl_root(rid)
+    assert root, '归档没记 datalake 根'
+    r0 = got['rows'][0]
+    fac = R._factors(root, {(r0['code'], str(r0['date'])[:10])})
+    f = list(fac.values())[0] if fac else None
+    assert f and f > 1.05, '挑到的样本复权因子 ~1，验不出口径（换一只票）'
+    # 🔴 **价格也要单独验方向**：只钉股数整手的话，把价格的 ÷ 改成 ×
+    #   照样全绿（变异测试实测漏过）。判据是「显示价 × 因子 == 后复权价」。
+    #   ★ fills 那条路没有 `price_hfq`（它本来就是不复权的），
+    #     所以拿**面板当日 close_bfq 的量级**比：后复权价会差好几倍。
+    px = float(r0['price'])
+    con = __import__('duckdb').connect(':memory:')
+    try:
+        row = con.execute(
+            "SELECT close_bfq, close_hfq FROM read_parquet('%s/mart/panel_daily/"
+            "panel_*.parquet') WHERE jq_code='%s' AND date=DATE '%s'"
+            % (root, r0['code'], str(r0['date'])[:10])).fetchone()
+    finally:
+        con.close()
+    assert row, '面板里没有这一天的行，换个样本'
+    bfq, hfq = float(row[0]), float(row[1])
+    assert abs(px / bfq - 1) < 0.15, \
+        ('展示价 %.4f 与当日**不复权**收盘 %.4f 不在一个量级（后复权是 %.4f）'
+         ' —— 价格换算的方向反了（不复权 = 后复权 ÷ 因子）' % (px, bfq, hfq))
+    notes.append('价格贴不复权收盘（%.4f vs %.4f，后复权 %.4f）' % (px, bfq, hfq))
+
+    # ---- ② 旧归档（只有 trades.parquet）：按因子换算，绝大多数整手 ----
+    old = [p for p in _g.glob('runs/*/*/*/trades.parquet')
+           if not os.path.exists(os.path.join(os.path.dirname(p),
+                                              'fills.parquet'))]
+    assert old, '没有旧归档可验换算路径'
+    old.sort(key=os.path.getsize)
+    orid = os.path.basename(os.path.dirname(old[-1]))
+    g2 = R.api_trades({'id': orid, 'limit': '500'})
+    assert g2 and g2.get('src') != 'fills', '挑到的不是旧归档'
+    rows = g2['rows']
+    n_bad = sum(1 for r in rows if float(r['shares'] or 0) % 100)
+    assert n_bad < len(rows) * 0.10, \
+        ('旧归档按因子换算之后 %d/%d 行不是整手（>10%%）—— 换算多半反了'
+         '（真实股数 = 后复权股数 × 因子，价格是 ÷）' % (n_bad, len(rows)))
+    assert any(float(r['shares'] or 0) >= 100 for r in rows), \
+        '换算后份额还是零点几 —— 方向反了（乘写成了除）'
+    # 后复权原值要留着（tooltip 要用），但**不能**是展示值
+    got_hfq = [r for r in rows if r.get('shares_hfq') is not None]
+    assert got_hfq, '换算之后没保留后复权原值（tooltip 说不清口径）'
+    assert any(abs(float(r['shares']) - float(r['shares_hfq'])) > 1
+               for r in got_hfq), \
+        '展示值与后复权值完全一样 —— 等于没换算'
+    # 🔴 **股数与价格必须用【同一个因子】的两个方向。**
+    #   前面那条价格断言用的是 fills 那条路的行，而它根本不走 `_to_raw`
+    #   —— 于是"价格换算反了"那个变异照样绿（实测漏过两轮）。
+    #   判据做成不依赖外部数据的：`价格比 = 后复权价/展示价` 应该等于
+    #   `股数比 = 展示股数/后复权股数`（都等于当日因子）。方向反了的话
+    #   一个是 f、另一个是 1/f，差出 f² 倍。
+    checked = 0
+    for r in rows:
+        sh, shh = r.get('shares'), r.get('shares_hfq')
+        px, pxh = r.get('price'), r.get('price_hfq')
+        if not (sh and shh and px and pxh):
+            continue
+        f_sh = float(sh) / float(shh)
+        f_px = float(pxh) / float(px)
+        if f_sh < 1.05:
+            continue                    # 因子 ~1 的票验不出方向
+        checked += 1
+        assert abs(f_sh / f_px - 1) < 0.02, \
+            ('同一行里股数与价格用的不是同一个因子：股数比 %.4f / 价格比 '
+             '%.4f（%s %s）—— 价格换算的方向反了（不复权 = 后复权 ÷ 因子）'
+             % (f_sh, f_px, r.get('date'), r.get('code')))
+    assert checked >= 5, \
+        '只比到 %d 行有复权因子的 —— 这条方向判据基本没生效' % checked
+    notes.append('旧归档按因子换算：%d 行里 %d 行非整手（因子与分红表不总对齐）；'
+                 '%d 行的股数比与价格比是同一个因子' % (len(rows), n_bad, checked))
+
+    # ---- ③ 持仓页同样 ----
+    # 🔴 **必须挑 holdings 还在的归档** —— prune_runs.py 会清掉旧归档的
+    #   holdings.parquet，而我第一版直接用了上面那个 `orid`，它的明细正好
+    #   被清过：`rows` 是空的，于是**整块断言空转**（变异"持仓不换算"
+    #   照样全绿）。判据是"真的有行"，不是"接口没报错"。
+    hold_cands = [os.path.basename(os.path.dirname(x))
+                  for x in _g.glob('runs/*/*/*/holdings.parquet')]
+    horid = None
+    for c in reversed(sorted(hold_cands)):
+        hh = R.api_holdings({'id': c, 'limit': '300'})
+        if hh and hh.get('rows'):
+            horid, h = c, hh
+            break
+    assert horid, '没有任何归档还留着 holdings 明细 —— 这条验不了'
+    if h and h.get('rows'):
+        hb = sum(1 for r in h['rows'] if float(r['shares'] or 0) % 100)
+        assert hb < len(h['rows']) * 0.10, \
+            '持仓换算后 %d/%d 行不是整手' % (hb, len(h['rows']))
+        assert any(r.get('shares_hfq') is not None for r in h['rows']), \
+            '持仓没保留后复权原值'
+        assert any(abs(float(r['shares']) - float(r.get('shares_hfq') or 0)) > 1
+                   for r in h['rows']), \
+            '持仓的展示份额与后复权原值一样 —— 等于没换算'
+        notes.append('持仓 %d 行同样换算（%d 行非整手）' % (len(h['rows']), hb))
+
+    # ---- ④ 🔴 现跑一小段，验【产生 fills 的代码】而不是磁盘上那个旧文件 ----
+    #   上面读的是已经落盘的 parquet —— 改坏 broker 不会让它重新生成，
+    #   于是"fills 里记后复权股数"那种变异照样全绿（实测漏过）。
+    from assay.broker import Cost
+    from assay.engine import Engine
+    from assay.feed import PanelFeed
+    import run as _run
+    _mod = _run.load('strategies/小市值/froec_traded.py')
+    _feed = PanelFeed('2026-05-06', '2026-06-30')
+    _eng = Engine(_mod, _feed, cash=500000, cost=Cost())
+    _eng.run(verbose=False)
+    _fills = getattr(_eng.broker, 'fills', None)
+    assert _fills, 'broker 没有记 fills'
+    for _f in _fills:
+        assert isinstance(_f['shares'], int), \
+            ('broker.fills 的 shares 不是整数（%r）—— 真实股数本来就是整数，'
+             '而 `sold * factor` 会带出浮点噪声（实测 3899.9999999999995）'
+             % _f['shares'])
+        assert _f['shares'] % 100 == 0, \
+            ('broker.fills 里 %s %s 的股数 %s 不是整手 —— 它记的该是**真实**'
+             '股数，后复权记账单位不是整手' % (_f['date'], _f['code'], _f['shares']))
+    notes.append('现跑一段：broker.fills %d 笔全是整手的整数' % len(_fills))
+
+    # ---- ⑤ 🔴 金额【不许】跟着换 —— 因子在 hfq股×hfq价 里天然约掉了 ----
+    t = _pd.read_parquet(old[-1])
+    r = t.iloc[0]
+    assert abs(float(r.shares) * float(r.exit_price)
+               - float(r.gross_amount)) < 0.01, \
+        ('gross_amount 不等于 后复权股数×后复权价 —— 那说明归档里的金额'
+         '口径变了，展示层"金额不用换"这个前提就不成立了')
+    notes.append('金额不换（因子在 hfq股×hfq价 里约掉，实测逐笔相同）')
+    return '；'.join(notes)
+
+
 @case('模拟盘：成交由【引擎】产生 / 幂等 / 账本对得上 / 对账不一致不改写账本',
        tag='slow')
 def t_paper_trading():
@@ -10569,20 +10756,28 @@ def t_stockpop():
         assert t.index('shared/stockpop.js') > t.index('shared/common.js'), \
             '%s 里 stockpop.js 必须在 common.js 之后（它用 esc/num/j/_tipAt）' % f
     assert len(pops) >= 7, '只有 %d 个页面有浮层：%s' % (len(pops), pops)
-    # ④ 复权口径**跟着数据来源走**（2026-09-13 改）
-    # ★ 原来钉的是 `const SP_FQ = 'bfq'` —— 那时浮层只有一个来源（实盘）。
-    #   现在回测详情页也能开浮层，而**回测全程用后复权记账**，用 bfq 会把
-    #   B/S 标记整体画飘。所以规则从"固定 bfq"变成"按来源定"，
-    #   断言也跟着变成**两向都钉**（只钉一半的话另一半改错了不会被发现）。
+    # ④ 复权口径：**一律不复权**（2026-09-14 又改回来了，理由变了）
+    # ★ 这条断言的历史值得记，它是「判据要跟着【事实】走」的活样本：
+    #     原版      固定 `SP_FQ='bfq'` —— 那时浮层只有实盘一个来源
+    #     09-13     改成"按来源定"（回测 -> hfq）—— 因为**归档存的是后复权**
+    #     09-14     改回"一律 bfq" —— 因为归档的展示层换算回不复权了
+    #   中间那一版不是错的，它只是**将就了当时的存储口径**；把数据源本身
+    #   修正之后，那个分支就该消失。**规则只有一条，实盘与回测再没有分支。**
     sp = _io.open('web/shared/stockpop.js', encoding='utf-8').read()
     flat = sp.replace('"', "'").replace(' ', '')
-    assert "constspFq=()=>(SP&&SP.run)?'hfq':'bfq'" in flat, \
-        ('浮层的复权口径必须【按来源定】：实盘成交价是不复权 -> bfq；'
-         '回测记账是后复权 -> hfq。两者搞反都会让标记整体飘走，**而它不报错**')
+    assert "constspFq=()=>'bfq'" in flat, \
+        ('浮层必须一律用【不复权】：两个来源的成交价现在都是不复权'
+         '（实盘账本本来就是；回测展示层 2026-09-14 起也换算回去了）。'
+         '用 hfq 会让 B/S 标记整体飘走，**而它不报错**')
     assert 'SP_FQ' not in sp, \
         '还留着 SP_FQ 这个旧常量 —— 两处定义迟早分叉（同「删字段要连带清干净」那条）'
     # 取数时真的用了它，而不是把 fq 写死在 URL 里
     assert 'fq=${spFq()}' in sp, 'kline 请求没有用 spFq()，口径切换等于没生效'
+    # 🔴 而服务端给的成交价也必须是不复权 —— 前端切了 K 线口径、后端还给
+    #   后复权价的话，标记照样飘，而两边各自看都"正常"。
+    rs = _io.open('assay/srv/runs.py', encoding='utf-8').read()
+    assert "'fq': 'bfq'" in rs and "'fq': 'hfq'" not in rs, \
+        'api_run_trades_of 还在声明 hfq —— 与浮层的口径对不上'
 
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]

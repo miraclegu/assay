@@ -115,6 +115,112 @@ def _resolve_names(rows, root, date_key='date'):
 
 
 
+def _factors(root, pairs):
+    """取 `{(code, 'YYYY-MM-DD'): hfq_factor}`。
+
+    🔴 **不能按 (code, 当日) 直接查** —— 停牌那天面板里根本没有行，
+      于是查不到因子、那一格就保持后复权原样，页面上混出一个
+      `1051.4037819988175` 这种"份额"（实测 603137 停牌日就是这样，
+      而它**不报错**，只是那一行看着像别的量纲）。
+      持仓是**逐日快照**，而引擎对停牌持仓是按最后已知价挂账的 ——
+      快照里必然出现没有面板行的日子。
+
+    ★ 复权因子是**阶梯函数**（只在除权日跳），所以取「≤ 该日的最后一个
+      变更点」就是对的，而且只要查**变更点**（`GROUP BY code, factor`）——
+      比逐日取整段小两个数量级。
+    """
+    if not pairs or not root:
+        return {}
+    codes = sorted(set(c for c, _d in pairs))
+    days = sorted(set(d for _c, d in pairs if d))
+    if not codes or not days:
+        return {}
+    import bisect
+    import duckdb
+    con = duckdb.connect(':memory:')
+    try:
+        q = ("SELECT jq_code, CAST(min(date) AS VARCHAR) AS d0, hfq_factor FROM "
+             "read_parquet('%s/mart/panel_daily/panel_*.parquet') "
+             "WHERE jq_code IN ('%s') AND date <= DATE '%s' "
+             "GROUP BY jq_code, hfq_factor ORDER BY jq_code, d0"
+             % (root, "','".join(codes), days[-1]))
+        seg = {}
+        for c, d0, f in con.execute(q).fetchall():
+            if f:
+                seg.setdefault(c, []).append((str(d0)[:10], float(f)))
+    except Exception:                                       # noqa: BLE001
+        return {}                       # 取不到就不换算，不让整页打不开
+    finally:
+        con.close()
+    for v in seg.values():
+        v.sort()
+    out = {}
+    for c, d in pairs:
+        v = seg.get(c)
+        if not v:
+            continue
+        i = bisect.bisect_right([x[0] for x in v], d) - 1
+        # ★ 早于第一个变更点（新股上市前不该有持仓，但归档里出现过
+        #   退市清算这类边角）—— 退回最早那个，不要静默跳过。
+        out[(c, d)] = v[i][1] if i >= 0 else v[0][1]
+    return out
+
+
+def _to_raw(rows, root, specs):
+    """把**后复权**的股数/价格就地换算成【不复权】（当时真实的那个数）。
+
+    🔴🔴 **这是用户 2026-09-14 指出的：「交易记录的价格为什么是后复权的？
+      展示出来的应该是当时不复权的价格。份额也同样。持仓的份额也有相同的
+      问题。」—— 他是对的，而且这不只是标签问题。**
+
+    引擎全程用后复权记账（那是对的：跨除权日比价必须复权），于是归档里
+    `shares` 是**后复权记账单位**、`entry_price`/`exit_price` 是后复权价。
+    直接摆到页面上的后果是：
+
+        份额 774.835189  ← 券商那边根本没有这种数，真实是 **5700 股**
+        价格 25.3986     ← 当时实际成交在 **3.4526**
+
+    换算只要一个因子：`真实股数 = 后复权股数 × factor`、
+    `不复权价 = 后复权价 ÷ factor`。实测三笔换出来全是**整手**
+    （5700 / 600 / 3100），不复权价与面板 `open` 对得上。
+
+    ★ **金额不用换** —— 因子在 `hfq股 × hfq价` 里天然约掉了，
+      归档的 `gross_amount` 本来就是真实金额（实测三笔逐笔相同）。
+      所以只动股数与价格，`pnl` / `ret` / `fee` 一律不碰。
+
+    🔴 已知偏差：**引擎不知道的那些分红**（复权因子里有、而 `dividend` 表里
+      没有那一条）会让 `hfq股 × factor` 偏大 —— 实测红利账户 601318
+      偏 1.77%。这种偏差在模拟盘的 `recon` 里有量化，这里不静默取整掩盖它：
+      **算出来多少就是多少**，只做四舍五入到整数（真实股数本来就是整数）。
+
+    `specs`：`[(日期字段, 股数字段, 价格字段…)]`，见调用处。
+    """
+    if not root:
+        return
+    pairs = set()
+    for r in rows:
+        for dk, _sk, _pks in specs:
+            d = str(r.get(dk) or '')[:10]
+            if d and r.get('code'):
+                pairs.add((r['code'], d))
+    fac = _factors(root, pairs)
+    if not fac:
+        return
+    for r in rows:
+        for dk, sk, pks in specs:
+            d = str(r.get(dk) or '')[:10]
+            f = fac.get((r.get('code'), d))
+            if not f:
+                continue
+            if sk and r.get(sk) is not None:
+                r[sk + '_hfq'] = r[sk]          # 后复权口径留着（tooltip 用）
+                r[sk] = int(round(float(r[sk]) * f))
+            for pk in pks:
+                if r.get(pk) is not None:
+                    r[pk + '_hfq'] = r[pk]
+                    r[pk] = round(float(r[pk]) / f, 4)
+
+
 def _dl_root(run_id):
     d = _dir(run_id)
     if d is None:
@@ -264,6 +370,15 @@ def api_trades(q):
     """
     import pandas as pd
     rid = q.get('id')
+    root = _dl_root(rid)
+    # ---- 优先用【逐笔成交】：真实股数 + 不复权价，撮合当场记的 ----
+    # 🔴 `trades.parquet` 的股数/价格是**后复权记账单位**，换算回真实值要靠
+    #   `hfq_factor`，而它与 `dividend` 表并不总是对齐（实测两个方向都有），
+    #   约 4% 的行换出来不是整手。`fills.parquet`（2026-09-14 起归档）是
+    #   **不需要换算**的那份，还顺带含未平仓持仓的买入。
+    fl = _read(rid, 'fills')
+    if fl is not None and not fl.empty:
+        return _trades_from_fills(rid, fl, root, q)
     df = _read(rid, 'trades')
     if df is None:
         return None
@@ -297,16 +412,80 @@ def api_trades(q):
     except ValueError:
         limit, offset = 100, 0
     rows = _records(out.iloc[offset:offset + limit])
-    root = _dl_root(rid)
     if root:
         # 🔴 名称按**这一行自己的日期**解析，不再统一用建仓日 ——
         #   拆开之后买入行与卖出行是两个时点，持有期内改过名（如变 *ST）时
         #   各自显示当时的名字才是事实。
         _resolve_names(rows, root, 'date')
+        # 🔴 **展示的是当时【不复权】的股数与价格** —— 券商对账单上的那个数。
+        #   拆成买/卖两行之后每行只有一个日期一个价，正好按这一行自己的
+        #   日期换算（买行用建仓日的因子、卖行用平仓日的）。
+        _to_raw(rows, root, [('date', 'shares', ('price',))])
     return {'total': total, 'offset': offset, 'limit': limit, 'rows': rows,
             'n_buy': int(len(buy)), 'n_sell': int(len(sell))}
 
 
+
+
+def _trades_from_fills(rid, fl, root, q):
+    """用 `fills.parquet` 出成交流水 —— **一行就是一笔真成交**，不用拆也不用换算。
+
+    与 `trades.parquet` 那条路的差别，页面上要说得出来：
+
+        份额 / 价格   真实股数 + 不复权价（那条路要按因子换算，约 4% 不准）
+        未平仓的买入  **在表里**（那条路只在平仓时才写行，所以看不到）
+        收益率/盈亏   只有卖出行有，而且来自 `trades`（往返口径）—— 这里没有，
+                      所以逐笔这条路的卖出行**不带 ret/pnl**：宁可留空，
+                      也不拿"这一笔卖了多少钱"去冒充"这一笔赚了多少"
+    """
+    import pandas as pd
+    out = fl.copy()
+    out['date'] = out['date'].astype(str).str[:10]
+    out['_s'] = (out['side'] == 'buy').astype(int)
+    out = out.sort_values(['date', '_s', 'code'],
+                          ascending=[False, True, True]).drop(columns=['_s'])
+    total = len(out)
+    try:
+        limit = max(10, min(500, int(q.get('limit', 100))))
+        offset = max(0, min(max(total - 1, 0), int(q.get('offset', 0))))
+    except ValueError:
+        limit, offset = 100, 0
+    rows = _records(out.iloc[offset:offset + limit])
+    # 卖出行补上往返口径的收益率/盈亏（按 code+日期 聚合到那一笔卖出上）
+    tdf = _read(rid, 'trades')
+    if tdf is not None and not tdf.empty:
+        agg = {}
+        for r in tdf.itertuples(index=False):
+            k = (r.code, str(r.exit_date)[:10])
+            a = agg.setdefault(k, {'pnl': 0.0, 'div_gross': 0.0,
+                                   'div_tax': 0.0, 'hd': 0, 'n': 0,
+                                   'reason': r.reason, 'cost': 0.0, 'amt': 0.0})
+            a['pnl'] += float(r.pnl or 0)
+            a['div_gross'] += float(r.div_gross or 0)
+            a['div_tax'] += float(r.div_tax or 0)
+            a['hd'] = max(a['hd'], int(r.holding_days or 0))
+            a['cost'] += float(r.shares or 0) * float(r.entry_price or 0)
+            a['amt'] += float(r.gross_amount or 0)
+            a['n'] += 1
+        for r in rows:
+            if r.get('side') != 'sell':
+                continue
+            a = agg.get((r.get('code'), str(r.get('date'))[:10]))
+            if not a:
+                continue
+            r['pnl'] = round(a['pnl'], 2)
+            r['div_gross'] = round(a['div_gross'], 2)
+            r['div_tax'] = round(a['div_tax'], 2)
+            r['holding_days'] = a['hd']
+            r['reason'] = a['reason']
+            # ★ 收益率按**金额**算（Σ卖出额 / Σ成本 − 1），不是把各批的
+            #   ret 平均 —— 批次大小不同，算术平均会给出一个谁都没拿到的数。
+            r['ret'] = round(a['amt'] / a['cost'] - 1, 6) if a['cost'] else None
+    if root:
+        _resolve_names(rows, root, 'date')
+    n_buy = int((fl['side'] == 'buy').sum())
+    return {'total': total, 'offset': offset, 'limit': limit, 'rows': rows,
+            'n_buy': n_buy, 'n_sell': int(total - n_buy), 'src': 'fills'}
 
 
 def api_run_trades_of(q):
@@ -341,7 +520,12 @@ def api_run_trades_of(q):
                         'fee': float(r.fee) if r.fee == r.fee else None,
                         'note': str(r.reason or ''), 'seq': i * 2 + 1})
     out.sort(key=lambda x: (x['date'], x['seq']))
-    return {'code': code, 'trades': out, 'fq': 'hfq'}
+    # 🔴 换成【不复权】，与页面上的成交记录同一口径（2026-09-14）。
+    #   之前这里返回后复权价、浮层跟着切后复权 K 线 —— 那是**将就归档的
+    #   存储口径**。现在归档展示层统一换算回不复权了，浮层也就回到 bfq：
+    #   **规则只有一条 —— 成交价一律不复权**，实盘与回测再没有分支。
+    _to_raw(out, _dl_root(rid), [('date', 'shares', ('price',))])
+    return {'code': code, 'trades': out, 'fq': 'bfq'}
 
 
 def _pruned(run_id, what):
@@ -388,6 +572,13 @@ def api_holdings(q):
     root = _dl_root(rid)
     if root:
         _resolve_names(rows, root, 'date')      # 持仓用【快照当日】的名称
+        # 🔴 份额与价格都换回【不复权】—— 同 api_trades 那条。
+        #   `shares`/`last_price` 按**快照当日**换；`entry_price` 是建仓那天
+        #   的价，必须按**建仓日**的因子换（拿当日因子去除会算出一个
+        #   当时根本不存在的价，而它看着完全正常）。
+        #   ★ `value` / `unrealized_pnl` / `weight` 不动：因子已经约掉了。
+        _to_raw(rows, root, [('date', 'shares', ('last_price',)),
+                             ('entry_date', None, ('entry_price',))])
     return {'total': total, 'offset': offset, 'limit': limit,
             'n_days': int(df['date'].nunique()), 'rows': rows}
 
