@@ -5812,7 +5812,15 @@ def t_stock_ui():
             # ★ 这一页上【不该出现 SQL 输入框】—— 要写任意查询去 /#/query
             assert pg.locator('#qsql').count() == 0, '个股页不该有 SQL 输入框'
             # 顶栏导航：一处定义，当前页高亮
-            assert pg.locator('#top .btn.nav').count() >= 8, '顶栏导航没渲染'
+            #   🔴 **数字自己算**，不写死：原来钉的是 `>= 8`，顶栏一合并
+            #     （9 -> 7）这条就挂了，而挂的是断言不是产品。判据取 NAV
+            #     自己的长度 —— 下次再增减入口不用手改，而"忘了改"的表现
+            #     是报告在说谎（同「断言直接扫目录而不是照清单拼」那条）。
+            n_nav = pg.evaluate('() => NAV.length')
+            assert n_nav >= 5, '顶栏入口只剩 %d 个？' % n_nav
+            assert pg.locator('#top .btn.nav').count() == n_nav, \
+                ('顶栏渲染出 %d 个入口，而 NAV 里有 %d 个'
+                 % (pg.locator('#top .btn.nav').count(), n_nav))
             assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
                 '当前页没高亮'
 
@@ -7547,8 +7555,15 @@ def t_new_pages_ui():
             pg.goto(base + '/sector.html', wait_until='networkidle')
             pg.wait_for_selector('table.pkt', timeout=40000)
             pg.wait_for_timeout(800)
-            assert '板块' in pg.locator('#top .btn.nav.on').inner_text(), \
-                '板块页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
+            #   🔴 **2026-09-14 起点亮的是父级「🌡 盘面」**：板块已从 NAV
+            #     收进盘面，它自己那一项不存在了。这条原来钉「板块」高亮，
+            #     属于被改动作废的断言 —— 要保的东西没变（"我在哪"必须有
+            #     指示），只是答案从"它自己"变成了"它所属的那一组"。
+            assert '盘面' in pg.locator('#top .btn.nav.on').inner_text(), \
+                ('板块页该点亮父级「🌡 盘面」，实得：%s'
+                 % pg.locator('#top .btn.nav.on').inner_text())
+            assert '板块' in pg.locator('#top h1').inner_text(), \
+                '板块页的标题该仍是它自己'
             kinds = pg.locator('.lvhead .kd').count()
             assert kinds >= 4, '板块分类入口只有 %d 个' % kinds
             n_sw = pg.locator('.lvsec table.pkt tr').count() - 1
@@ -7709,8 +7724,12 @@ def t_new_pages_ui():
                     wait_until='networkidle')
             pg.wait_for_selector('#ccv', timeout=40000)
             pg.wait_for_timeout(1500)
-            assert '对比' in pg.locator('#top .btn.nav.on').inner_text(), \
-                '对比页没高亮：%s' % pg.locator('#top .btn.nav.on').inner_text()
+            #   🔴 同板块那条：对比已从 NAV 收进个股，点亮的是父级「📈 个股」。
+            assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
+                ('对比页该点亮父级「📈 个股」，实得：%s'
+                 % pg.locator('#top .btn.nav.on').inner_text())
+            assert '对比' in pg.locator('#top h1').inner_text(), \
+                '对比页的标题该仍是它自己'
             nz2 = pg.evaluate(NZ('#ccv'))
             assert nz2 > 3000, '对比曲线没画出来：%d' % nz2
             t = clean()
@@ -7754,10 +7773,17 @@ def t_new_pages_ui():
             assert not over, '窄屏(1024)下这些页面把 body 撑出横滚：%s' % over
 
             # ================= 顶栏导航：每页都能走到每页 =================
-            for href in ('/market.html', '/sector.html', '/watchlist.html',
-                         '/compare.html', '/stock.html'):
+            for href in ('/market.html', '/watchlist.html', '/stock.html'):
                 assert pg.locator('#top a.nav[href="%s"]' % href).count() == 1, \
                     '顶栏缺 %s 的入口' % href
+            # 🔴 **2026-09-14 反过来了**：板块与对比收进了父页（盘面 / 个股），
+            #   顶栏不该再有它们。原来这里断言它们**必须在**顶栏 ——
+            #   那是被改动作废的断言，不是删掉保护：真正要保的是
+            #   「独立页面之间不许断链」，所以下面改成**从父页能不能走到**。
+            for href in ('/sector.html', '/compare.html'):
+                assert pg.locator('#top a.nav[href="%s"]' % href).count() == 0, \
+                    ('%s 又回到顶栏了 —— 它已经收进父页（板块->盘面、'
+                     '对比->个股），顶栏平铺 9 个时每次都要扫一遍' % href)
             assert pg.locator('#top a.nav[href="/#/live"]').count() == 1, \
                 '顶栏缺实盘入口'
             # ★ 分组分隔线是【信息】不是装饰：告诉人"这几个是一类"。
@@ -7776,12 +7802,132 @@ def t_new_pages_ui():
                     ' + 页签可拖动改顺序、重开页面仍在、接口与页面一致'
                     '（%s））、'
                     '对比（曲线 %d 像素 + 读数 + '
-                    '加减只数）；四页都能点到个股页；顶栏 6 个入口齐'
+                    '加减只数）；四页都能点到个股页；顶栏 5 个入口齐'
                     % (nz, d0, d1, n_ranks, kinds, n_sw, n_cc, _ordered, nz2))
     finally:
         sv.ALLOW_LIVE, wl.LIVE = old_live, old_dir
         shutil.rmtree(tmp, ignore_errors=True)
         httpd.shutdown()
+
+
+@case('顶栏合并：板块收进盘面 / 对比收进个股，且【一个功能都没藏起来】（playwright）',
+       tag='web')
+def t_nav_merge():
+    """2026-09-14 用户："上方的按钮做一些合并。对比功能放到个股中，板块的功能
+    放到盘面中（确认是否已经包含了，如果已经包含则不需要了）。"
+
+    先回答那个"是否已经包含"：**没有**。盘面只有「行业涨幅（申万一级）」
+    一张表，而板块页是 **5 类 926 个**（申万 + 通达信 概念/风格/地区/研究）
+    带成分股穿透 —— 盘面只覆盖了其中申万那一类。
+
+    🔴 **合并的风险不是少两个按钮，是把功能藏起来。** 合并前通达信那 657 个
+      （概念 269 / 风格 158 / 地区 32 / 研究 467）**只能从顶栏进**；顶栏一撤，
+      它们就再也没有入口了 —— 而那不报错，只是从此没人找得到
+      （同「独立页面最大的风险不是单页坏，是页面之间断链」那条）。
+      所以这条用例的核心判据是：**服务端说有几类，盘面就得链得到几类**
+      —— 照清单写死的话，将来加一类不会有人发现（同「断言直接扫目录
+      而不是照清单拼」那条）。
+
+    ★ 两个页面都还在（书签与深链接是产品契约），只是不在顶栏；
+      进去之后顶栏点亮**父级**，否则"我在哪"没有任何指示。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    notes = []
+    try:
+        # 服务端先自证：到底有几类板块（判据的来源，不写死）
+        import json as _json
+        import urllib.request as _u
+        ks = _json.load(_u.urlopen(base + '/api/sector/kinds'))['kinds']
+        want = sorted(k['kind'] for k in ks)
+        assert len(want) >= 4, '板块类别只有 %d 类？判据没意义了' % len(want)
+
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            # ---------- ① 顶栏 ----------
+            pg.goto(base + '/market.html', wait_until='networkidle')
+            pg.wait_for_selector('.lvsec', timeout=60000)
+            navs = pg.locator('#top a.nav').all_inner_texts()
+            assert len(navs) == 7, '顶栏该是 7 个入口：%s' % navs
+            j0 = ' '.join(navs)
+            assert '板块' not in j0 and '对比' not in j0, \
+                '顶栏还留着板块/对比：%s' % navs
+
+            # ---------- ② 盘面必须链得到【全部】板块类别 ----------
+            got = pg.evaluate("""() => [...new Set(
+                [...document.querySelectorAll('a[href*="sector.html"]')]
+                  .map(a => new URL(a.href).searchParams.get('kind'))
+                  .filter(Boolean))]""")
+            missing = [k for k in want if k not in got]
+            assert not missing, \
+                ('盘面上走不到这几类板块：%s（服务端说有 %s）—— 顶栏撤掉之后'
+                 '它们就**再也没有入口**了，而那不报错，只是从此没人找得到'
+                 % (missing, want))
+            n_chip = pg.locator('.lvsec a.chip[href*="sector.html"][href*="kind="]').count()
+            assert n_chip >= len(want) - 1, \
+                '盘面上的板块类别 chip 太少（%d 个）' % n_chip
+            notes.append('盘面链得到全部 %d 类板块（服务端清单为准，不写死）'
+                         % len(want))
+
+            # ---------- ③ 板块页仍可直达，且顶栏点亮父级 ----------
+            pg.goto(base + '/sector.html?kind=concept', wait_until='networkidle')
+            pg.wait_for_timeout(1500)
+            on = pg.locator('#top a.nav.on')
+            assert on.count() == 1 and '盘面' in on.inner_text(), \
+                ('板块页的顶栏该点亮父级「🌡 盘面」，实得 %s —— NAV 里已经没有'
+                 '它自己那一项，传旧 key 的话一个都不亮，"我在哪"没有指示'
+                 % (on.all_inner_texts()))
+            assert '板块' in pg.locator('#top h1').inner_text(), \
+                '板块页的标题该仍是它自己（亮的是所属组，写的是它是什么）'
+            assert pg.locator('table').count() >= 1, '板块页没渲染出来'
+
+            # ---------- ④ 个股的对比入口必须【带上当前这只票】 ----------
+            pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
+            pg.wait_for_selector('#cmp', timeout=60000)
+            href = pg.locator('#cmp').get_attribute('href')
+            assert 'codes=' in href and '601857' in href, \
+                ('个股页的对比入口没带当前这只票（href=%s）—— 对比天然是'
+                 '"拿【这只】和别的比"，链到裸页面等于到了那边还要再搜一遍，'
+                 '那是把入口做成了摆设' % href)
+            #   点过去要真的画出这只票的曲线（不是只改了 href）
+            pg.locator('#cmp').click()
+            pg.wait_for_timeout(2500)
+            assert 'compare.html' in pg.url, '点对比入口没跳到对比页：%s' % pg.url
+            px = pg.evaluate("""() => {
+              const c = document.querySelector('canvas');
+              if(!c) return 0;
+              const x = c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+              let n = 0; for(let i=3;i<x.length;i+=4) if(x[i]) n++;
+              return n;}""")
+            assert px > 500, \
+                ('对比页没画出曲线（非透明像素 %d）—— 带着代码跳过去却是'
+                 '一张空图，等于入口没通' % px)
+            on2 = pg.locator('#top a.nav.on')
+            assert on2.count() == 1 and '个股' in on2.inner_text(), \
+                '对比页的顶栏该点亮父级「📈 个股」，实得 %s' % on2.all_inner_texts()
+            notes.append('个股 -> 对比带着代码过去并真的画出曲线（%d 像素）' % px)
+            notes.append('两个子页仍可直达、顶栏点亮父级')
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
 
 
 @case('总览首页 / 顶栏分组 / 数据页签（playwright）', tag='web')
@@ -7850,7 +7996,12 @@ def t_home_ui():
 
             # ---------------- 顶栏分组 ----------------
             navs = pg.locator('#top a.nav').all_inner_texts()
-            assert len(navs) == 9, '顶栏应是 9 个入口：%s' % navs
+            #   🔴 9 -> 7（2026-09-14）：板块收进盘面、对比收进个股。
+            assert len(navs) == 7, '顶栏应是 7 个入口：%s' % navs
+            joined0 = ' '.join(navs)
+            for gone in ('板块', '对比'):
+                assert gone not in joined0, \
+                    ('顶栏还有「%s」—— 它已经收进父页了：%s' % (gone, navs))
             assert '实盘' in navs[0], \
                 '实盘应排最前 —— 它是唯一回答"今天要做什么"的入口：%s' % navs
             # 买点紧跟实盘（同属"每天必看"那一组，都是回答"今天要做什么"）
@@ -7913,7 +8064,7 @@ def t_home_ui():
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('首页是总览（6 块，标题即入口，站名点亮，不再是回测目录树）；'
-                    '顶栏 9 个入口分 4 组 3 条分隔、实盘排最前、'
+                    '顶栏 7 个入口分 4 组 3 条分隔、实盘排最前、板块与对比已收进父页、'
                     '已取消的「查数据」与并入页签的「数据字典」都不在顶栏；'
                     '回测归档在 #/runs 且过滤框只在那里；'
                     '数据页两个页签互切、顶栏高亮不跑、URL 可直达；'

@@ -22,7 +22,9 @@ let N = +(qs('n') || 250), HOVER = null, DATA = null;
 const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
 const PAL = ['#5b9cf0','#f05b5b','#2fb87a','#e0a33c','#a06bf0','#3ec8d8'];
 
-pageHead('compare', '⚖ 对比');
+/* 🔴 顶栏点亮父级**「📈 个股」** —— 对比已从 NAV 收进个股页（2026-09-14）。
+   不改的话传一个 NAV 里不存在的 key，整条顶栏一个都不高亮。 */
+pageHead('stock', '⚖ 对比');
 render();
 
 function nav() {

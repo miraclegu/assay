@@ -36,9 +36,19 @@ pageHead('stock', '📈 个股');
 $('#pg').innerHTML = `<div class="lvhead">
     <div id="sbox" style="flex:0 0 320px"></div>
     <span style="flex:1"></span>
-    <a class="lvtag" href="/compare.html" title="2~6 只叠加后复权涨幅">⚖ 拉去对比</a>
+    <a class="lvtag" id="cmp" href="/compare.html"
+       title="2~6 只叠加后复权涨幅曲线">⚖ 拉去对比</a>
     <a class="lvtag" href="/watchlist.html">⭐ 自选</a>
   </div><div id="body"></div>`;
+/* 🔴 **对比入口要带上当前这只票**（2026-09-14）。对比已经从顶栏收进个股页，
+   而"对比"这件事天然是"拿【这只】和别的比" —— 链到裸的 /compare.html
+   等于到了那边还要把刚才看的票再搜一遍，那是把入口做成了摆设。
+   ★ 没选票时（刚进页面）就保持裸链接：那时确实还没有"这一只"。 */
+if (CODE) {
+  const c = $('#cmp');
+  c.href = '/compare.html?codes=' + encodeURIComponent(CODE);
+  c.title = '把 ' + CODE + ' 拉去和别的票叠加对比（2~6 只，后复权）';
+}
 mountSearch($('#sbox'), {onPick: r => { location.href = stockHref(r.code); }});
 if (CODE) load(); else $('#body').innerHTML =
   '<div class="none">搜代码或名称开始 —— 支持 601857 / 601857.SH / sh601857 / 中国石油</div>';

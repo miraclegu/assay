@@ -29,9 +29,18 @@ async function load() {
   const pg = $('#pg');
   pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
   try {
-    const o = await j('/api/market/overview?top=' + MTOP
-      + (MDATE ? '&date=' + encodeURIComponent(MDATE) : ''));
-    pg.innerHTML = head(o) + kpi(o) + dist(o) + inds(o) + ranks(o);
+    /* 🔴 **板块类别要一并取**（2026-09-14 顶栏合并）：板块页已经从顶栏
+       收进盘面，而盘面原来只链得到申万那一类（行业表每行）——
+       通达信那 657 个（概念 269 / 风格 158 / 地区 32 / 研究 467）
+       就再也没有入口了。**合并不能变成把功能藏起来。**
+       ★ 与主数据**并行**取，且取不到只是少几个 chip，不该让整页打不开
+         （同「外部挂了退回本地那份并把 err 给页面」那条）。 */
+    const [o, ks] = await Promise.all([
+      j('/api/market/overview?top=' + MTOP
+        + (MDATE ? '&date=' + encodeURIComponent(MDATE) : '')),
+      j('/api/sector/kinds').catch(() => null),
+    ]);
+    pg.innerHTML = head(o) + kpi(o) + dist(o) + inds(o, ks) + ranks(o);
     wireStarsAll();
     $('#mdate').onchange = () => { MDATE = $('#mdate').value; go(); };
     $('#mgo').onclick = () => { MDATE = $('#mdate').value; go(); };
@@ -131,10 +140,18 @@ function drawDist(o) {
   });
 }
 
-function inds(o) {
+function inds(o, ks) {
   const rows = o.industries || [];
+  /* ★ 类别 chip 放在**标题行右侧**：它回答的是"还能按别的分法看吗"，
+       属于这一块的导航，不是一条新内容。申万那一类不给 chip ——
+       下面这张表就是它，再给一个入口等于同一件事两个门。 */
+  const kinds = ((ks && ks.kinds) || []).filter(k => k.kind !== 'sw');
   return `<div class="lvsec" style="margin-top:14px"><h3>行业涨幅（申万一级，等权）
-    <span class="lvwhy">${rows.length} 个</span></h3>
+    <span class="lvwhy">${rows.length} 个</span>
+    ${kinds.length ? `<span class="lvwhy" style="margin-left:10px">按别的分法看：</span>`
+      + kinds.map(k => `<a class="chip" href="${sectorHref('', k.kind)}"
+          title="${esc(k.note || '')}">${esc(k.name)} ${k.n || ''} ›</a>`).join('')
+      : ''}</h3>
     <div class="pw"><table class="pkt">
       <tr><th class="tx">行业</th><th class="rt">平均涨幅</th><th class="rt">中位</th>
         <th class="rt">家数</th><th class="rt">上涨</th><th class="rt">涨停</th>
