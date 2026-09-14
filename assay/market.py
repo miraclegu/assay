@@ -254,8 +254,22 @@ def sector_list(date=None, kind='sw', root=None):
             'kind_name': BLOCK_TYPE.get(kind, kind), 'rows': out}
 
 
-def sector_members(code, date=None, kind='sw', limit=300, root=None):
-    """一个板块的成分股 + 当天行情。"""
+def sector_members(code, date=None, kind='sw', limit=2000, root=None):
+    """一个板块的成分股 + 当天行情。
+
+    🔴🔴 **默认上限原来是 300，而它会【悄悄截断】。**（2026-09-14 修）
+      `n` 取的是返回行数，于是行业涨过 300 只之后：榜上写 478、成分表
+      给 300、`n` 也报 300 —— **三处自洽**，没有任何地方说得出少了 178 只。
+      同「没写 LIMIT 会自动补，并在返回里带 truncated，页面必须显示」那条：
+      **悄悄截断比查不出来更糟** —— 少的那部分你不知道，而结论已经下了。
+
+      是 selftest 抓到的，而且是**数据长出来**才抓到的（面板更新到
+      2026-09-14 之后某个申万一级到了 478 只）—— 写死的阈值就是这样过期的。
+
+    ★ 两条一起改：默认拉到硬上限 2000（申万一级最大也就几百只），
+      并且**总数单独查**、真截断时给 `truncated` —— 这样即使哪天又撞上限，
+      页面也说得出来，而不是再来一次"三处自洽的谎"。
+    """
     c = con()
     p = panel(root)
     d = _day(c, p, date)
@@ -275,6 +289,9 @@ def sector_members(code, date=None, kind='sw', limit=300, root=None):
         nm = c.execute('SELECT DISTINCT sw_l1_name FROM %s AND sw_l1_code = ?'
                        % (base,), [str(code)]).fetchone()
         name = nm[0] if nm else str(code)
+        # ★ 总数**单独查**，不拿 len(rows) 充数 —— 那正是上面那个谎的来源。
+        total = c.execute('SELECT count(*) FROM %s AND sw_l1_code = ?'
+                          % (base,), [str(code)]).fetchone()[0]
     else:
         blk = blocks(root).get(str(code))
         if not blk:
@@ -287,13 +304,16 @@ def sector_members(code, date=None, kind='sw', limit=300, root=None):
         rows = c.execute(
             "SELECT %s FROM %s AND symbol IN ('%s') ORDER BY change_pct DESC "
             'LIMIT %d' % (cols, base, q, lim)).fetchall()
+        total = c.execute("SELECT count(*) FROM %s AND symbol IN ('%s')"
+                          % (base, q)).fetchone()[0]
     out = [dict(zip(keys, r)) for r in rows]
     for x in out:
         x['limit_up'] = bool(x['limit_up'])
         x['limit_down'] = bool(x['limit_down'])
     cps = [x['change_pct'] for x in out if x['change_pct'] is not None]
     return {'date': str(d), 'code': str(code), 'name': name, 'kind': kind,
-            'n': len(out), 'rows': out,
+            # 🔴 `n` 是**真实成分数**（单独 count 出来的），不是返回了几行。
+            'n': int(total), 'rows': out, 'truncated': len(out) < int(total),
             'avg_change': (sum(cps) / len(cps)) if cps else None}
 
 

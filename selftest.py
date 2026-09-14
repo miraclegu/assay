@@ -5760,6 +5760,107 @@ def t_stock():
             % (len(p), len(b), k['warmup_dropped'], rh_ * 100, rb_ * 100, len(rd)))
 
 
+@case('K 线柱子有最大宽度：新股不许拉伸填满，往左贴（playwright）', tag='web')
+def t_kchart_min_span():
+    """2026-09-14 用户："新股的 K 线展示特别大，因为有几根 K 线就展示几根，
+    然后填满。应该设置一个最小展示天数，不足天数的往左边贴，不要占满。"
+
+    原来 `step = w / n` —— 有几根画几根、平分整个宽度。实测 688835
+    上市 15 个交易日、画布 1334px，于是**每根 K 线 60px 宽**：一屏几个
+    大色块，既看不出形态、也让人误以为"这只票就长这样"。
+
+    ★ 判据用**单根最大像素宽**（14px）而不是写死"最少 N 天"：画布宽度
+      本来就不一样（个股页 ~1334、浮层 1180），写死天数在窄画布上又太挤。
+    ★ 也不能反过来按"请求了多少天"留槽 —— 选「1 年」时 15 根票会被压成
+      15 条发丝，那是另一个极端。
+
+    🔴 **两头都要钉**：只钉"新股不占满"的话，把 `MAXSTEP` 调到 1px 也全绿，
+      而那会把**所有**图都压成左边一条 —— 正常股票必须**仍然占满**。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    # 先在服务端挑一只**真正的新股**（上市天数 < 30）—— 写死代码的话
+    # 它总有一天不再是新股，而那时这条用例会静默变成"又一次测老股"。
+    import duckdb as _dd
+    from assay import live as _lv
+    root = _lv._lake()
+    con = _dd.connect(':memory:')
+    try:
+        pan = ("read_parquet('%s/mart/panel_daily/panel_*.parquet')" % root)
+        row = con.execute(
+            "SELECT jq_code, listed_days FROM %s WHERE date = "
+            "(SELECT max(date) FROM %s) AND listed_days BETWEEN 3 AND 30 "
+            "ORDER BY listed_days LIMIT 1" % (pan, pan)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        httpd.shutdown()
+        return '跳过（当前面板里没有上市 30 天内的新股）'
+    new_code, listed = row[0], int(row[1])
+    notes = []
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            def geo(code):
+                pg.goto('http://127.0.0.1:%d/stock.html?code=%s' % (port, code),
+                        wait_until='networkidle')
+                pg.wait_for_selector('#kcv', timeout=90000)
+                pg.wait_for_timeout(2000)
+                return pg.evaluate("""() => {
+                  const cv = document.getElementById('kcv');
+                  const g = drawKChart(cv, {bars: BARS});
+                  if (!g) return null;
+                  const n = (BARS || []).length;
+                  return {n: n, step: g.step, last: g.X(n - 1),
+                          W: cv.getBoundingClientRect().width};}""")
+
+            # ---- ① 新股：柱子不许变宽，且**往左贴** ----
+            a = geo(new_code)
+            assert a and a['n'] > 0, '新股 %s 没渲染出 K 线' % new_code
+            assert a['n'] <= 40, \
+                '挑到的 %s 有 %d 根，不算新股了' % (new_code, a['n'])
+            assert a['step'] <= 15.0, \
+                ('新股 %s（%d 根）每根 %.1f px —— 拉伸去填满画布了，'
+                 '一屏几个大色块看不出形态' % (new_code, a['n'], a['step']))
+            assert a['last'] < a['W'] * 0.6, \
+                ('新股的最后一根画在 %.0f/%.0f（%.0f%%）—— 还是占满了；'
+                 '不足的天数该**往左贴**、右边留白'
+                 % (a['last'], a['W'], a['last'] / a['W'] * 100))
+            notes.append('新股 %s：%d 根 · 每根 %.1f px · 只占 %.0f%%'
+                         % (new_code, a['n'], a['step'], a['last'] / a['W'] * 100))
+
+            # ---- ② 🔴 正常股票必须【仍然占满】 ----
+            #   只钉上面那条的话，把 MAXSTEP 调到 1px 也全绿 —— 而那会
+            #   把所有图都压成左边一条。
+            b = geo('601857.XSHG')
+            assert b and b['n'] >= 100, '老股该有上百根：%s' % (b or {}).get('n')
+            assert b['last'] > b['W'] * 0.9, \
+                ('老股（%d 根）只画到 %.0f%% —— 最大宽度限制误伤了正常图，'
+                 '它本来就该占满' % (b['n'], b['last'] / b['W'] * 100))
+            assert b['step'] < a['step'], \
+                ('老股每根 %.2f px 不比新股 %.2f px 窄 —— 说明限制没生效'
+                 % (b['step'], a['step']))
+            notes.append('老股 601857：%d 根 · 每根 %.2f px · 占 %.0f%%'
+                         % (b['n'], b['step'], b['last'] / b['W'] * 100))
+            assert not errs, 'JS 报错：%s' % errs[:2]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('个股页面真实渲染（playwright）', tag='web')
 def t_stock_ui():
     """独立页 /stock.html：搜索 → K 线 → 副图 → 事件 → 联动 → 同业 → 板块。
@@ -6194,6 +6295,22 @@ def t_sector():
     m2 = mk.sector_members(sw['rows'][0]['code'], kind='sw')
     assert m2['n'] == sw['rows'][0]['n'], \
         '申万成分数不一致：%d vs %d' % (m2['n'], sw['rows'][0]['n'])
+    assert len(m2['rows']) == m2['n'], \
+        ('成分表只给了 %d 行却报 n=%d —— **悄悄截断**：少的那部分你不知道，'
+         '而结论已经下了（2026-09-14 实测：默认上限 300，行业涨到 478 只之后'
+         '榜上写 478、表给 300、n 也报 300，三处自洽地说了个谎）'
+         % (len(m2['rows']), m2['n']))
+    assert m2.get('truncated') is False, \
+        '这一次不该截断，truncated=%r' % m2.get('truncated')
+    # 🔴 **真截断时必须说得出来** —— 只把上限拉大是不够的，数据还会长。
+    #   构造：显式给一个小 limit，`n` 必须仍是真实总数、`truncated` 为真。
+    m3 = mk.sector_members(sw['rows'][0]['code'], kind='sw', limit=5)
+    assert m3['n'] == m2['n'] and len(m3['rows']) == 5, \
+        ('截断之后 n 该仍是真实总数（%d），行数才是 5 —— 实得 n=%d 行=%d；'
+         '拿 len(rows) 当 n 就是上面那个谎的来源'
+         % (m2['n'], m3['n'], len(m3['rows'])))
+    assert m3.get('truncated') is True, \
+        '截断了却没标 truncated —— 页面就没法说出"只给了前 N 只"'
 
     # 个股归属：代码几种写法都要认（不归一就查不到，报"面板里没有"）
     for raw in ('601857', '601857.SH', 'sh601857', '601857.XSHG'):
@@ -11312,31 +11429,49 @@ def t_updown_color():
               /* 数柱体内部的像素密度 —— 空心柱中间是背景色，密度会低一截。
                  🔴 判据必须是**像素**，不是源码里有没有 strokeRect：
                  那个词出现在注释里也算命中（自检误报过一次）。 */
+              /* 🔴 **采样位置跟着 drawKChart 返回的几何走，不能写死。**
+                 原来硬编码 `getImageData(120, ...)` —— 那是"1 根柱子平分
+                 整个画布"时它所在的位置（宽 96px）。2026-09-14 给柱子加了
+                 最大宽度（14px）之后那根柱子挪到了 x≈61、宽 10px，
+                 采样点落在空白处，密度从 82 掉到 8 —— **失败的是构造不是
+                 产品**（好在这条用例自己有"构造不对"的护栏，当场报了出来）。 */
               const dens = (o, c) => {
-                drawKChart(cv, {bars: [{date: '2026-01-01', open: o,
+                const g0 = drawKChart(cv, {bars: [{date: '2026-01-01', open: o,
                   high: Math.max(o, c) + 1, low: Math.min(o, c) - 1,
                   close: c, volume: 100}]});
-                const d = cv.getContext('2d').getImageData(120, 90, 8, 20).data;
+                const bw = Math.max(1, g0.step * 0.7);
+                const x0 = Math.round(g0.X(0) - bw / 2) + 1;
+                const wpx = Math.max(2, Math.round(bw) - 2);
+                const d = cv.getContext('2d').getImageData(x0, 90, wpx, 20).data;
                 let n = 0;
                 for(let i = 3; i < d.length; i += 4) if(d[i] > 60) n++;
                 return n;
               };
               /* 平盘柱子的颜色：取柱体上那一个像素 */
-              drawKChart(cv, {bars: [{date: '2026-01-01', open: 11, high: 12,
-                low: 10, close: 11, volume: 100}]});
+              const gf = drawKChart(cv, {bars: [{date: '2026-01-01', open: 11,
+                high: 12, low: 10, close: 11, volume: 100}]});
               const g = cv.getContext('2d');
-              const px = g.getImageData(124, 0, 1, 200).data;
+              /* 同上：取柱心那一列，不写死 x */
+              const px = g.getImageData(Math.round(gf.X(0)), 0, 1, 200).data;
               let flatRGB = null;
               for(let y = 0; y < 200; y++){
                 const i = y * 4;
                 if(px[i + 3] > 200){ flatRGB = [px[i], px[i+1], px[i+2]]; break; }
               }
-              return {up: dens(10, 12), dn: dens(12, 10),
+              const _g = drawKChart(cv, {bars: [{date: '2026-01-01', open: 10,
+                high: 13, low: 9, close: 12, volume: 100}]});
+              const _cap = Math.max(2, Math.round(Math.max(1, _g.step * 0.7)) - 2) * 20;
+              return {cap: _cap, up: dens(10, 12), dn: dens(12, 10),
                       zero: upc(0), pos: upc(0.01), neg: upc(-0.01),
                       flatRGB: flatRGB};
             }""")
             # ③ 阳线阴线同样实心
-            assert r['up'] > 40 and r['dn'] > 40, \
+            #   ★ 这一条只是**构造有效性护栏**（真正的判据是下一行的
+            #     "阳 == 阴"）。阈值按采样窗口的比例给，不写死绝对值 ——
+            #     柱宽随画布变，写死 40 的话下次改柱宽又会挂（这次就挂了）。
+            #     🔴 但也不能卡太紧：实测 82/160 = 51%，取 0.5 只差 2 个像素，
+            #     那种阈值迟早偶发。护栏取 **0.25**，判别交给下一条。
+            assert r['up'] > r['cap'] * 0.25 and r['dn'] > r['cap'] * 0.25, \
                 '柱体密度太低（阳 %d / 阴 %d）—— 构造不对，这条测不到' \
                 % (r['up'], r['dn'])
             assert abs(r['up'] - r['dn']) <= 2, \

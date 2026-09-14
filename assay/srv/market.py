@@ -26,7 +26,7 @@ def api_sector_members(q):
     return _market_err(lambda: mk.sector_members(q.get('code') or '',
                                                  q.get('date'),
                                                  kind=(q.get('kind') or 'sw'),
-                                                 limit=q.get('limit') or 300))
+                                                 limit=q.get('limit') or 2000))
 
 
 
