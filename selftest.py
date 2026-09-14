@@ -7913,15 +7913,29 @@ def t_paper_trading():
         # ---- ⑤ 分红不是外部资金（TWR 的 bug，模拟盘把它逼出来的）----
         # 🔴 构造：一笔分红 + 一笔入金。分红不许进 net_deposit，入金必须进。
         #   ★ 只测分红的话分不出"全都没算"和"只没算分红"。
+        # ★ 先只加**分红**：这时没有任何外部资金，所以项目的那条不变式
+        #   「没有外部现金流时 TWR == 期末/起点 − 1」必须仍然成立。
+        #   🔴 这才是这个 bug 的**用户可见后果** —— 只钉 net_deposit 的话，
+        #     "TWR 把分红收益扣掉了"这件事本身没有被任何断言覆盖。
         lv.add_cashflow('sim', '2026-08-20', 1000.0, kind='dividend', note='t')
-        lv.add_cashflow('sim', '2026-08-21', 2000.0, kind='deposit', note='t')
         cur = lv.equity_curve('sim')
-        nd = cur['stats']['net_deposit']
+        st0 = cur['stats']
+        simple = cur['equity'][-1] / st0['equity_start'] - 1.0
+        assert abs(st0['twr'] - simple) < 1e-5, \
+            ('只有分红、没有入金时 TWR（%.6f%%）必须等于 期末/起点−1'
+             '（%.6f%%）—— 差这一截就是分红被当成了外部资金：除权日股价掉'
+             '下去记一笔负收益，到账日现金加回来又不计收益，**一来一回把'
+             '分红收益扣了两次**。实测红利模拟盘差 1.44pp'
+             % (st0['twr'] * 100, simple * 100))
+        assert abs(st0['net_deposit']) < 0.01, \
+            '只有分红时净入金该是 0，实得 %s' % st0['net_deposit']
+        # 再加一笔**真入金**：它必须进 net_deposit —— 只测分红的话，
+        # 分不出"全都没算"和"只没算分红"（把 FLOW_KINDS 清空也能全绿）。
+        lv.add_cashflow('sim', '2026-08-21', 2000.0, kind='deposit', note='t')
+        nd = lv.equity_curve('sim')['stats']['net_deposit']
         assert abs(nd - 2000.0) < 0.01, \
-            ('净入金该只含【入金 2000】，实得 %s —— 分红被当成了外部资金：'
-             '除权日股价掉下去记一笔负收益，到账日现金加回来又不计收益，'
-             '一来一回把分红收益扣了两次' % nd)
-        notes.append('分红不进 net_deposit（入金 2000 进、分红 1000 不进）')
+            '净入金该只含【入金 2000】，实得 %s' % nd
+        notes.append('分红：TWR 不受影响且不进 net_deposit；入金 2000 照常进')
 
         # ---- ⑥ 对账不一致：报出来，**不改写账本** ----
         # 构造：把账本里某一笔的股数改掉，再推进
