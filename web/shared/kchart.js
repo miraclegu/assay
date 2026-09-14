@@ -26,7 +26,8 @@ const EV_COLOR = {xr: '#ff8fb1', fin: '#8ea9ff', unlock: '#ffb066',
 const BOLL_COLOR = '#7b8794';
 
 /* 主图 K 线 + 成交量 + 可选事件标记与副图。
-   opts: {bars, events, sub, subKind, hover} —— hover 是索引或 null。
+   opts: {bars, events, sub, subKind, hover, sel} —— hover 是索引或 null；
+   sel = {i0, i1} 是框选区间（按**索引**给，不是像素 —— 重画后要落在同样那几天）。
    返回几何信息供命中测试用。 */
 function drawKChart(cv, opts) {
   const bars = opts.bars || [];
@@ -308,6 +309,25 @@ function drawKChart(cv, opts) {
     g.strokeStyle = DIM; g.globalAlpha = .6; g.setLineDash([3, 3]);
     g.beginPath(); g.moveTo(x, PADT); g.lineTo(x, subTop + (sub ? subH : 0) || volTop + volH);
     g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  }
+  /* 框选出来的区间：一条半透明带 + 两条边界线，**贯穿主图/量/副图** ——
+     只在主图上画的话，量能那一段对不上就没法看"这几天是不是放量"。
+     ★ 画在**最后**：它压在蜡烛上面，否则被后画的柱子盖住一半。
+     ★ 用 `bars` 的索引而不是像素：重画（换区间/换副图/resize）之后
+       选区必须还在同样的那几天上，而像素会随画布宽度变。 */
+  if (opts.sel && opts.sel.i0 != null && opts.sel.i1 != null) {
+    const a = Math.max(0, Math.min(opts.sel.i0, opts.sel.i1));
+    const b = Math.min(n - 1, Math.max(opts.sel.i0, opts.sel.i1));
+    const x0 = X(a) - step / 2, x1 = X(b) + step / 2;
+    const yb = (sub ? subTop + subH : volTop + volH);
+    g.fillStyle = cssv('--accent', '#5b9cf0');
+    g.globalAlpha = .12;
+    g.fillRect(x0, PADT, Math.max(1, x1 - x0), yb - PADT);
+    g.globalAlpha = .55;
+    g.strokeStyle = cssv('--accent', '#5b9cf0'); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x0, PADT); g.lineTo(x0, yb);
+    g.moveTo(x1, PADT); g.lineTo(x1, yb); g.stroke();
+    g.globalAlpha = 1;
   }
   return {trHits: trHits, PADL, PADR, step, n, X};
 }

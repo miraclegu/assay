@@ -232,8 +232,16 @@ def profile(code, root=None):
 
 
 # ---------------------------------------------------------------- K 线
-def kline(code, n=250, fq='bfq', end=None, root=None):
+def kline(code, n=250, fq='bfq', end=None, off=0, root=None):
     """日 K。`fq`：'bfq' 不复权（默认）/ 'hfq' 后复权。
+
+    `off` = **往回翻几根**（跳过最新的 off 根）。K 线图左右移动用它。
+    🔴 **不用「把 end 往前挪」来实现翻页** —— 那要前端自己算交易日，
+      而前端没有交易日历（本项目为此栽过：硬编码判据误报了一整页假告警）。
+      按**根数**偏移是纯索引运算，服务端一句 OFFSET 就够。
+    ★ 预热那 60 根仍然取在窗口**之外**（DESC + OFFSET 之后再多取 warm 根），
+      所以翻到哪一页，那一页的 ma60 都是对的 —— 否则每翻一页头部均线就缺一截，
+      而它不报错，只是曲线不对。
 
     ★ 返回里带 ma5/10/20/60 —— 均线在**服务端**算：前端要算就得多取 60 根
       预热数据，而"少取了 60 根导致头部均线是错的"不会报错，只是曲线不对。
@@ -245,6 +253,7 @@ def kline(code, n=250, fq='bfq', end=None, root=None):
     if fq not in ('bfq', 'hfq'):
         raise StockError("fq 只能是 bfq / hfq，收到 %r" % fq)
     n = max(10, min(int(n or 250), 3000))
+    off = max(0, int(off or 0))
     c = con()
     p = panel(root)
     # 多取 60 根用来预热均线，返回时切掉 —— 否则头 60 根的 ma60 是空的
@@ -257,8 +266,8 @@ def kline(code, n=250, fq='bfq', end=None, root=None):
         SELECT date, open, high, low, close_bfq, close_hfq, hfq_factor,
                volume_shares, amount, change_pct, turnover,
                is_limit_up, is_limit_down, preclose
-        FROM %s WHERE %s ORDER BY date DESC LIMIT %d""" % (p, where, n + warm),
-        args).fetchall()
+        FROM %s WHERE %s ORDER BY date DESC LIMIT %d OFFSET %d"""
+        % (p, where, n + warm, off), args).fetchall()
     if not rows:
         raise StockError('取不到 %s 的日线' % jc)
     rows = list(reversed(rows))
@@ -282,7 +291,12 @@ def kline(code, n=250, fq='bfq', end=None, root=None):
         })
     for w in (5, 10, 20, 60):
         _ma(out, w)
+    # 这只票总共有多少根 —— 前端据此知道还能不能往左翻（到头了要说，
+    # 不能让「←」点了没反应：同「给一个点了没反应的按钮比不给更糟」）。
+    total = c.execute('SELECT count(*) FROM %s WHERE %s' % (p, where),
+                      args).fetchone()[0]
     return {'code': jc, 'fq': fq, 'bars': out[-n:], 'n': min(len(out), n),
+            'off': off, 'total': int(total),
             'warmup_dropped': max(0, len(out) - n)}
 
 
@@ -366,7 +380,7 @@ def _ema(xs, n):
     return out
 
 
-def indicators(code, n=250, fq='bfq', end=None, root=None,
+def indicators(code, n=250, fq='bfq', end=None, off=0, root=None,
                macd=(12, 26, 9), kdj=(9, 3, 3), rsi=(6, 12, 24), boll=(20, 2)):
     """MACD / KDJ / RSI / BOLL。
 
@@ -381,7 +395,9 @@ def indicators(code, n=250, fq='bfq', end=None, root=None,
     #   直接 n + IND_WARM 会抛 "can only concatenate str"，
     #   而那个报错完全指不到"参数没转型"这件事上。
     n = max(10, min(int(n or 250), 3000))
-    k = kline(code, n=n + IND_WARM, fq=fq, end=end, root=root)
+    # 🔴 `off` 必须一路传下去 —— 不传的话翻页后副图画的还是最新那一段，
+    #   与主图**上下对不上**，而它不报错，看着像"指标和 K 线不同步"。
+    k = kline(code, n=n + IND_WARM, fq=fq, end=end, off=off, root=root)
     bars = k['bars']
     cl = [b['close'] for b in bars]
     hi = [b['high'] for b in bars]

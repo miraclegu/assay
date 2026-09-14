@@ -5760,6 +5760,202 @@ def t_stock():
             % (len(p), len(b), k['warmup_dropped'], rh_ * 100, rb_ * 100, len(rd)))
 
 
+_BANDJS = r"""() => {
+  const cv = document.getElementById('kcv');
+  const g = cv.getContext('2d');
+  const dpr = cv.width / cv.getBoundingClientRect().width;
+  const sel = {i0: KSEL.i0, i1: KSEL.i1};
+  const grab = (px) => Array.from(
+    g.getImageData(Math.round(px * dpr), 40, 3, 60).data).join(',');
+  const opt = (s) => ({bars: BARS, log: KLOG, events: SHOWEV ? EVS : [],
+    sub: SUB ? IND : null, subKind: SUB, hover: null, sel: s});
+  const geo = drawKChart(cv, opt(null));
+  const a = Math.min(sel.i0, sel.i1), b = Math.max(sel.i0, sel.i1);
+  const xin = (geo.X(a) + geo.X(b)) / 2;
+  const xout = geo.X(Math.max(0, a - 6));
+  const in0 = grab(xin), out0 = grab(xout);
+  drawKChart(cv, opt(sel));
+  return {inChanged: in0 !== grab(xin), outChanged: out0 !== grab(xout),
+          xin: xin, xout: xout};
+}"""
+
+
+@case('K 线左右移动 + 框选测算区间（playwright）', tag='web')
+def t_kchart_pan_select():
+    """2026-09-14 用户："K线图还需要有左右移动、框选一段范围自动测算区间
+    涨跌幅、最低价、最高价、振幅的功能。"
+
+    🔴 **翻页按【根数】不按日期**（服务端 `off` = 跳过最新几根）：按日期翻
+      要前端自己算交易日，而前端没有交易日历 —— 本项目为此栽过一次
+      （硬编码判据误报了一整页假告警）。
+    🔴 **副图也要带 off**：不带的话翻页后 MACD 画的还是最新那一段，
+      两张图上下对不上，**而它不报错**。
+    🔴 **区间涨跌幅的基点取首根的【前收】**，不是它自己的收盘 —— 用首日收盘
+      做基点等于把首日那根的涨跌排除在外，而那正是人框进来想看的
+      （同「基准基点取第一天的前一交易日收盘」，实测差过 9.5pp）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG&sub=macd'
+                    % port, wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=90000)
+            pg.wait_for_timeout(2500)
+
+            def win():
+                return pg.evaluate("""() => ({a: BARS[0].date,
+                    b: BARS[BARS.length - 1].date, off: KOFF, tot: KTOTAL,
+                    ind: (IND && IND.length) ? IND.length : 0,
+                    ma60: BARS[0].ma60});""")
+
+            w0 = win()
+            assert w0['tot'] > 1000, '总根数 %s —— 换一只历史长的票' % w0['tot']
+            # ---- ① 往早翻：窗口必须真的移走，且【接得上】----
+            pg.click('.kpan[data-pan="-1"]')
+            pg.wait_for_timeout(3000)
+            w1 = win()
+            assert w1['b'] < w0['a'] or w1['a'] < w0['a'], \
+                '点「‹ 早」之后窗口没往回移：%s~%s -> %s~%s' \
+                % (w0['a'], w0['b'], w1['a'], w1['b'])
+            assert w1['off'] > 0, 'KOFF 还是 0'
+            #   半屏一步：两页必须**有重叠**，不然接不上形态
+            assert w1['b'] > w0['a'], \
+                ('翻一页跳过头了（新窗口 %s~%s 与原窗口 %s~ 没有重叠）—— '
+                 '一步该是半屏' % (w1['a'], w1['b'], w0['a']))
+            #   🔴 翻到哪一页，那一页的 ma60 都要是对的（预热取在窗口之外）
+            assert w1['ma60'] is not None, \
+                ('翻页后首根没有 ma60 —— 预热那 60 根没跟着 off 一起偏移，'
+                 '于是每翻一页头部均线就缺一截，**而它不报错**')
+            #   🔴 副图跟着走：不跟的话两张图上下对不上
+            assert w1['ind'] == len(pg.evaluate('() => BARS')), \
+                '副图行数 %d 与 K 线 %d 对不上 —— indicators 没带 off' \
+                % (w1['ind'], len(pg.evaluate('() => BARS')))
+            ind0 = pg.evaluate("() => IND[0] && IND[0].date")
+            assert ind0 == w1['a'], \
+                ('副图第一行是 %s，而 K 线第一根是 %s —— 翻页后副图画的还是'
+                 '别的时间段，两张图上下对不上' % (ind0, w1['a']))
+            notes.append('往早翻：%s~%s -> %s~%s（有重叠、ma60 与副图都跟上）'
+                         % (w0['a'], w0['b'], w1['a'], w1['b']))
+            # ---- ② 回最新 ----
+            pg.click('.kpan[data-pan="0"]')
+            pg.wait_for_timeout(3000)
+            w2 = win()
+            assert w2['off'] == 0 and w2['b'] == w0['b'], \
+                '「最新」没回到最新一页：%s' % w2
+            notes.append('「最新」回得去')
+
+            # ---- ③ 框选 ----
+            box = pg.query_selector('#kcv').bounding_box()
+            y = box['y'] + box['height'] * 0.3
+            x0 = box['x'] + box['width'] * 0.35
+            x1 = box['x'] + box['width'] * 0.65
+            pg.mouse.move(x0, y)
+            pg.mouse.down()
+            pg.mouse.move(x0 + 40, y)
+            pg.mouse.move(x1, y, steps=8)
+            pg.mouse.up()
+            pg.wait_for_timeout(600)
+            sel = pg.evaluate('() => KSEL')
+            assert sel and sel['i0'] != sel['i1'], '拖动之后没有选区：%s' % sel
+            txt = pg.inner_text('#ksel')
+            for k in ('区间涨跌', '最高', '最低', '振幅'):
+                assert k in txt, '框选读数缺「%s」：%s' % (k, txt[:120])
+            # 🔴 **数字要自己复算一遍** —— 只查"有没有这四个字"的话，
+            #   算错了照样绿（把 max 写成 min 也有"最高"两个字）。
+            chk = pg.evaluate("""() => {
+              const a = Math.min(KSEL.i0, KSEL.i1), b = Math.max(KSEL.i0, KSEL.i1);
+              const seg = BARS.slice(a, b + 1);
+              const hi = Math.max(...seg.map(x => x.high));
+              const lo = Math.min(...seg.map(x => x.low));
+              const base = seg[0].preclose;
+              return {hi: hi, lo: lo, base: base,
+                      ret: seg[seg.length - 1].close / base - 1,
+                      amp: (hi - lo) / base, n: seg.length,
+                      firstClose: seg[0].close};}""")
+            assert ('最高 %s' % chk['hi']) in txt.replace('　', ' '), \
+                '最高价对不上：读数 %s / 复算 %s' % (txt[:140], chk['hi'])
+            assert ('最低 %s' % chk['lo']) in txt.replace('　', ' '), \
+                '最低价对不上：读数 %s / 复算 %s' % (txt[:140], chk['lo'])
+            import re as _re
+            m = _re.search(r'区间涨跌\s*([+-][\d.]+)%', txt.replace('　', ' '))
+            assert m, '读不出区间涨跌幅：%s' % txt[:140]
+            shown = float(m.group(1))
+            assert abs(shown - chk['ret'] * 100) < 0.02, \
+                '区间涨跌幅对不上：页面 %.2f%% / 按【首根前收】复算 %.2f%%' \
+                % (shown, chk['ret'] * 100)
+            #   🔴 反向自证：用**首根收盘**当基点会算出另一个数，
+            #     两者必须不同 —— 否则这条断言分不出用的是哪个基点。
+            alt = (chk['firstClose'] and
+                   pg.evaluate("() => BARS[Math.max(KSEL.i0,KSEL.i1)].close")
+                   / chk['firstClose'] - 1)
+            assert abs(alt * 100 - chk['ret'] * 100) > 0.05, \
+                ('首根前收与首根收盘算出来一样（%.4f vs %.4f）—— 换个选区，'
+                 '这条基点断言测不到' % (alt * 100, chk['ret'] * 100))
+            m2 = _re.search(r'振幅\s*([\d.]+)%', txt.replace('　', ' '))
+            assert m2 and abs(float(m2.group(1)) - chk['amp'] * 100) < 0.02, \
+                '振幅对不上：%s / 复算 %.2f%%' % (txt[:140], chk['amp'] * 100)
+            notes.append('框选 %d 天：涨跌 %.2f%% / 高 %s / 低 %s / 振幅 %.2f%%'
+                         % (chk['n'], shown, chk['hi'], chk['lo'],
+                            chk['amp'] * 100))
+            # 🔴 **选区带必须真的画在画布上** —— 只验读数的话，把那段绘制
+            #   注掉照样全绿（变异实测漏过），而那时人根本看不出自己框了哪一段。
+            #   判据两头都要：**带内像素变了** + **带外像素没变**
+            #   （只判"画布变了"的话，整块涂一层也算通过）。
+            band = pg.evaluate(_BANDJS)
+            assert band['inChanged'], \
+                ('框选之后带【内】的像素一点没变 —— 选区带根本没画出来，'
+                 '人看不出自己框了哪一段（读数对不代表图上有标记）')
+            assert not band['outChanged'], \
+                ('带【外】的像素也变了（x=%.0f）—— 那不是"一条带"，'
+                 '是把整张图涂了一层' % band['xout'])
+            notes.append('选区带真的画出来了（带内变、带外不变）')
+
+            # ---- ④ 点一下取消 ----
+            pg.mouse.move(box['x'] + box['width'] * 0.5, y)
+            pg.mouse.down()
+            pg.mouse.up()
+            pg.wait_for_timeout(500)
+            assert pg.evaluate('() => KSEL') is None, '点一下没清掉选区'
+            notes.append('点一下取消')
+
+            # ---- ⑤ 🔴 选中的标签不许【蓝字压蓝底】----
+            #   `class="lvtag rg on"` 上两条规则优先级相同（都 0,2,0），
+            #   靠先后决胜负 —— `.lvtag.on` 把 `.rg.on` 的深色字覆盖成 accent，
+            #   而背景还是 accent：那个按钮整个看不见（实测个股页「1年」、
+            #   对比页同样）。判据扫全站，不是只看这一处。
+            for u in ('/stock.html?code=601857.XSHG', '/compare.html?codes=601857.XSHG,601088.XSHG',
+                      '/market.html', '/sector.html', '/watchlist.html', '/alerts.html'):
+                pg.goto('http://127.0.0.1:%d%s' % (port, u), wait_until='networkidle')
+                pg.wait_for_timeout(1800)
+                same = pg.evaluate("""() => [...document.querySelectorAll(
+                    '.lvtag.on,.lvtag.off,.rg.on')].filter(a => {
+                    const c = getComputedStyle(a);
+                    return c.color === c.backgroundColor;})
+                  .map(a => a.className + '|' + a.textContent.trim().slice(0, 8))""")
+                assert not same, \
+                    ('%s 上这些标签前景色 == 背景色（整个看不见）：%s' % (u, same))
+            notes.append('6 个页面上没有"同色不可见"的标签')
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('K 线柱子有最大宽度：新股不许拉伸填满，往左贴（playwright）', tag='web')
 def t_kchart_min_span():
     """2026-09-14 用户："新股的 K 线展示特别大，因为有几根 K 线就展示几根，

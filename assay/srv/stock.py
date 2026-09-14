@@ -64,6 +64,7 @@ def api_stock_kline(q):
                                       n=q.get('n') or 250,
                                       fq=(q.get('fq') or 'bfq'),
                                       end=q.get('end'),
+                                      off=q.get('off') or 0,
                                       root=_root(q)))
 
 
@@ -81,7 +82,8 @@ def api_stock_indicators(q):
     m = _stock()
     return _stock_err(lambda: m.indicators(q.get('code') or '',
                                            n=q.get('n') or 250,
-                                           fq=(q.get('fq') or 'bfq')))
+                                           fq=(q.get('fq') or 'bfq'),
+                                           off=q.get('off') or 0))
 
 
 

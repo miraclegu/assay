@@ -162,6 +162,9 @@ svg{display:block;width:100%;overflow:visible}
 .cd.on{outline-color:var(--accent)}
 .cd .d{color:#d2dae4;font-size:10px}
 .cd .v{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--fg)}
+/* 「点了也没用」的标签：变淡但**仍然可点、仍然有 title** ——
+   设 disabled 的话连提示都不触发，人连"为什么点不动"都看不到。 */
+.lvtag.off{opacity:.45}
 .cd.off{opacity:.3;cursor:default;background:repeating-linear-gradient(135deg,
   transparent 0 5px,var(--line) 5px 6px)}
 .cd.off:hover{outline-color:transparent}
@@ -380,6 +383,16 @@ table.dt td:first-child{color:var(--fg)}
 /* 数据日落后时标出来 —— 单独给个位置还不够，得能一眼看出新不新。 */
 .lvtag.warn{color:var(--warn);border-color:var(--warn)}
 .lvtag.on{color:var(--accent);border-color:var(--accent)}
+/* 🔴 **`.lvtag` 与 `.rg` 撞在同一个元素上**（区间按钮写的是
+   `class="lvtag rg on"`），而 `.rg.on`(128 行) 与 `.lvtag.on`(上一行)
+   **优先级相同**（都是 0,2,0）—— 靠先后决胜负，于是 `.lvtag.on` 的
+   `color:var(--accent)` 覆盖掉 `.rg.on` 的 `color:#0f1216`，而背景仍是
+   accent：**蓝字压蓝底，选中的那个区间按钮整个看不见**（个股页的「1年」、
+   对比页同样）。
+   ★ 修法是把它写成 0,3,0 —— **不依赖书写顺序**。靠"把 .rg.on 挪到后面"
+     是个定时炸弹：下次谁加一条 `.lvtag.on` 之后的规则又会翻过来。
+   ★ 判据在 selftest：全站 `.lvtag.on/.off` 的前景色不许等于背景色。 */
+.lvtag.rg.on{color:#0f1216}
 .lvgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}
 /* 表多列的两节给双倍宽度 —— 版本表 3 列挤在 230px 里，参数 chip 会一个一行 */
 .lvsec.wide{grid-column:span 2}

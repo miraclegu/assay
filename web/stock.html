@@ -29,6 +29,12 @@ let KLOG = qs('log') === '1';
    MA5 撞色 —— 表现正是"5 日线看着有两条、两条都不对"。 */
 let BOLL = qs('boll') === '1';
 let BARS = null, IND = null, EVS = null, HOVER = null, SHOWEV = true;
+/* K 线左右移动：往回翻几根（0 = 最新）。**按根数不按日期** ——
+   按日期翻要前端自己算交易日，而前端没有交易日历（本项目为此栽过：
+   硬编码判据误报了一整页假告警）。服务端一句 OFFSET 就够。 */
+let KOFF = 0, KTOTAL = 0;
+/* 框选出来的区间（**索引**，不是像素）：重画之后要落在同样那几天上。 */
+let KSEL = null;
 const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
 const SUBS = [['macd','MACD'],['kdj','KDJ'],['rsi','RSI'],['','无副图']];
 
@@ -59,8 +65,10 @@ async function load() {
   const one = u => j(u).catch(e => ({error: String(e)}));
   const [p, k, ind, f, ev, pe, sc, lk] = await Promise.all([
     one('/api/stock/profile?code=' + encodeURIComponent(CODE)),
-    one(`/api/stock/kline?n=${N}&fq=${FQ}&code=` + encodeURIComponent(CODE)),
-    SUB ? one(`/api/stock/indicators?n=${N}&fq=${FQ}&code=` + encodeURIComponent(CODE))
+    one(`/api/stock/kline?n=${N}&fq=${FQ}&off=${KOFF}&code=` + encodeURIComponent(CODE)),
+    /* 🔴 副图也要带 `off` —— 不带的话翻页之后 MACD/KDJ 画的还是最新那一段，
+       两张图**上下对不上**，而它不报错，看着像"指标和 K 线不同步"。 */
+    SUB ? one(`/api/stock/indicators?n=${N}&fq=${FQ}&off=${KOFF}&code=` + encodeURIComponent(CODE))
         : Promise.resolve({rows: []}),
     one('/api/stock/finance?n=12&code=' + encodeURIComponent(CODE)),
     one('/api/stock/events?code=' + encodeURIComponent(CODE)),
@@ -71,6 +79,8 @@ async function load() {
   if (p.error) { b.innerHTML = '<div class="lvmsg bad">' + esc(p.error) + '</div>'; return; }
   CODE = p.jq_code; localStorage.setItem('skcode', CODE);
   BARS = k.error ? null : k.bars;
+  /* 翻页用：总根数（还能不能往左翻）+ 服务端实际落到的 off（钳过的） */
+  if (!k.error) { KTOTAL = k.total || 0; KOFF = k.off || 0; }
   IND = (ind && !ind.error) ? ind.rows : null;
   EVS = (ev && !ev.error) ? ev.events : [];
   b.innerHTML = head(p, lk) + kpiBox(p) + chartBox(k, ind)
@@ -136,7 +146,19 @@ function kpiBox(p) {
 function chartBox(k, ind) {
   if (k.error) return '<div class="lvmsg bad">K 线：' + esc(k.error) + '</div>';
   const ie = ind && ind.error;
+  /* 🔴 「到头了」必须**看得出来**：往左翻到底、或已经在最新那一页时，
+       按钮加 `.off` 变灰并把原因写进 title —— 点了没反应是最难查的那种坏
+       （同 backLink 那条）。★ 但**不设 disabled**：那种元素连 title 都
+       不触发，人连"为什么点不动"都看不到（本项目明令：按钮一律不 disabled）。 */
+  const atNew = KOFF <= 0, atOld = KTOTAL && (KOFF + N >= KTOTAL);
   return `<div class="lvsec" style="margin-bottom:14px"><h3>日 K
+      <a href="#" class="lvtag kpan${atOld ? ' off' : ''}" data-pan="-1"
+        title="${atOld ? '已经到最早的一根了' : '往前看半屏（' + Math.ceil(N / 2) + ' 根）'}">‹ 早</a>
+      <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="1"
+        title="${atNew ? '已经是最新的一页' : '往后看半屏'}">晚 ›</a>
+      <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="0"
+        title="回到最新">最新</a>
+      <span class="lvwhy">|</span>
       <span style="flex:1"></span>
       ${RANGES.map(([n, t]) => `<a href="#" class="lvtag rg${N === n ? ' on' : ''}" data-n="${n}">${t}</a>`).join('')}
       <span class="lvwhy">|</span>
@@ -154,9 +176,13 @@ function chartBox(k, ind) {
       <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
     </h3>
     <div class="cvbox" id="cbox">
-      <canvas id="kcv" style="width:100%;height:${SUB ? 500 : 420}px;display:block"></canvas>
+      <canvas id="kcv" style="width:100%;height:${SUB ? 500 : 420}px;display:block;cursor:crosshair"></canvas>
       <div class="cvtip" id="ktip"></div>
     </div>
+    <!-- 框选读数。★ 常驻一行提示（没选时说怎么用）而不是选了才出现：
+         **看不出能用的功能 = 没有这个功能**（同"看不出能点的入口"那条）。 -->
+    <div id="ksel" class="lvwhy" style="margin-top:6px">
+      在图上<b>按住拖动</b>可框选一段，自动算区间涨跌幅 / 最高 / 最低 / 振幅。</div>
     <div class="lvwhy" style="margin-top:4px">
       MA 与副图指标都由<b>服务端</b>算（多取预热再切掉）—— 前端自己算就得多取，
       而"少取了导致头部值是错的"不报错，只是曲线不对。
@@ -368,6 +394,19 @@ function wire() {
   };
   const ck = $('#evck');
   if (ck) ck.onchange = () => { SHOWEV = ck.checked; geo = redraw(); };
+  /* ---- 左右移动 ---- */
+  $$('.kpan').forEach(a => a.onclick = ev => {
+    ev.preventDefault();
+    const d = +a.dataset.pan;
+    /* 半屏一步：整屏跳的话左右两页**没有重叠**，接不上形态。 */
+    const stepN = Math.ceil(N / 2);
+    const was = KOFF;
+    KOFF = d === 0 ? 0 : Math.max(0, KOFF + (d < 0 ? stepN : -stepN));
+    if (KTOTAL) KOFF = Math.min(KOFF, Math.max(0, KTOTAL - N));
+    if (KOFF === was) return;           /* 到头了：不白打一次接口 */
+    KSEL = null;                        /* 换了时间段，旧选区不再成立 */
+    load();
+  });
   geo = redraw();
   const cv = $('#kcv');
   if (!cv) return;
@@ -411,10 +450,84 @@ function wire() {
     tip.style.left = x + 'px';
     tip.style.top = Math.min(y, box.height - 170) + 'px';
   };
+  /* ---- 框选测算 ----
+     🔴 **与十字光标共存**：按下不动只是"准备选"，拖过 4px 才算框选，
+       这期间隐藏读数浮层（两个东西同时跟着鼠标会互相打架）。
+       松手没拖动 = 普通点击 -> 清掉选区。
+     ★ 选区存**索引**不是像素：换副图/换对数/resize 之后重画，
+       它必须还落在同样那几天上。 */
+  let dragFrom = null, dragging = false;
+  cv.onmousedown = ev => {
+    if (ev.button !== 0) return;
+    dragFrom = hit(ev); dragging = false;
+    ev.preventDefault();                /* 不然拖动会选中页面文字 */
+  };
+  window.addEventListener('mouseup', ev => {
+    if (dragFrom == null) return;
+    const to = hit(ev);
+    if (!dragging) { KSEL = null; renderSel(); geo = redraw(); }
+    dragFrom = null; dragging = false;
+  });
+  const onDrag = ev => {
+    if (dragFrom == null) return false;
+    const i = hit(ev);
+    if (i == null) return true;
+    if (!dragging && Math.abs(i - dragFrom) < 1) return true;
+    dragging = true;
+    KSEL = {i0: dragFrom, i1: i};
+    tip.style.display = 'none';
+    HOVER = null;
+    renderSel(); geo = redraw();
+    return true;
+  };
+  const oldMove = cv.onmousemove;
+  cv.onmousemove = ev => { if (onDrag(ev)) return; oldMove(ev); };
   cv.onmouseleave = () => { HOVER = null; tip.style.display = 'none'; geo = redraw(); };
   if (!wire._rs) { wire._rs = true; window.addEventListener('resize', () => redraw()); }
   geo = redraw();
 }
+/* 框选区间的读数。
+   🔴 **区间涨跌幅的基点取第一根的【前收】，不是它自己的收盘** ——
+     用首日收盘做基点等于把首日那根的涨跌排除在外，而那正是人框进来
+     想看的东西（同「基准的基点取第一天的前一交易日收盘」那条，
+     本项目实测差过 9.5pp）。
+   ★ 前收取不到（面板第一根、或数据缺）时退回"上一根的收盘"，
+     再取不到就用当根开盘并**把口径写出来** —— 不静默换一个基准。
+   ★ 振幅 = (区间最高 − 区间最低) / 基点，与"单日振幅"同一个形状，
+     这样两个数可以直接比。 */
+function renderSel() {
+  const el = $('#ksel');
+  if (!el) return;
+  if (!KSEL || !BARS) {
+    el.innerHTML = '在图上<b>按住拖动</b>可框选一段，'
+      + '自动算区间涨跌幅 / 最高 / 最低 / 振幅。';
+    return;
+  }
+  const a = Math.max(0, Math.min(KSEL.i0, KSEL.i1));
+  const b = Math.min(BARS.length - 1, Math.max(KSEL.i0, KSEL.i1));
+  const seg = BARS.slice(a, b + 1);
+  if (!seg.length) { el.textContent = '选区里没有数据'; return; }
+  let base = seg[0].preclose, how = '首根前收';
+  if (base == null && a > 0) { base = BARS[a - 1].close; how = '上一根收盘'; }
+  if (base == null) { base = seg[0].open; how = '首根开盘（前收取不到）'; }
+  const hi = Math.max(...seg.map(x => x.high).filter(v => v != null));
+  const lo = Math.min(...seg.map(x => x.low).filter(v => v != null));
+  const last = seg[seg.length - 1].close;
+  const ret = (base && last != null) ? (last / base - 1) : null;
+  const amp = (base && isFinite(hi) && isFinite(lo)) ? (hi - lo) / base : null;
+  const vol = seg.reduce((s, x) => s + (x.volume || 0), 0);
+  const amt = seg.reduce((s, x) => s + (x.amount || 0), 0);
+  const up = seg.filter(x => x.change_pct > 0).length;
+  el.innerHTML = `<b>${esc(seg[0].date)} ~ ${esc(seg[seg.length-1].date)}</b>`
+    + `　${seg.length} 个交易日（${up} 涨 / ${seg.length - up} 跌平）`
+    + `　区间涨跌 <b style="color:${upc(ret)}">${ret == null ? '—' : ratv(ret)}</b>`
+    + `　最高 <b>${isFinite(hi) ? hi : '—'}</b>　最低 <b>${isFinite(lo) ? lo : '—'}</b>`
+    + `　振幅 <b>${amp == null ? '—' : (amp * 100).toFixed(2) + '%'}</b>`
+    + `　量 ${yiv(vol)} 股　额 ${yiv(amt)}`
+    + `<span class="lvwhy">　基点 ${esc(how)} ${base == null ? '—' : base}`
+    + `　· 点一下图上任意处取消选区</span>`;
+}
+
 function redraw() {
   const cv = $('#kcv');
   if (!cv || !BARS) return null;
@@ -424,6 +537,6 @@ function redraw() {
   const bars = (BOLL && IND) ? BARS.map((b, i) => IND[i]
     ? Object.assign({}, b, {ub: IND[i].ub, lb: IND[i].lb}) : b) : BARS;
   return drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
-    sub: SUB ? IND : null, subKind: SUB, hover: HOVER});
+    sub: SUB ? IND : null, subKind: SUB, hover: HOVER, sel: KSEL});
 }
 </script>
