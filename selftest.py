@@ -4159,6 +4159,20 @@ def t_live_poll():
         sv.ALLOW_LIVE = old_live
 
 
+_DDJS = r"""() => {
+  const svg = document.querySelector('#lp_dd svg');
+  if(!svg) return null;
+  const p = svg.querySelector('path[stroke]:not([stroke="none"])');
+  const d = p ? p.getAttribute('d') : '';
+  const ys = [...d.matchAll(/[ML]\s*[\d.]+\s+([\d.]+)/g)].map(m => +m[1]);
+  const zl = [...svg.querySelectorAll('line')]
+    .find(l => (l.getAttribute('stroke') || '').includes('91,156,240'));
+  return {nM: (d.match(/M/g) || []).length,
+          topY: ys.length ? Math.min.apply(null, ys) : null,
+          zeroY: zl ? +zl.getAttribute('y1') : null};
+}"""
+
+
 @case('业绩页：回撤是【副图】不是页签 / 全页只有一个返回按钮（playwright）',
        tag='web')
 def t_live_perf_dd_and_back():
@@ -4281,6 +4295,26 @@ def t_live_perf_dd_and_back():
                  '主图 %.0f' % (g['dh'], g['mh']))
             notes.append('主副图同 x 同宽（x=%.0f w=%.0f）、副图在下方且更矮'
                          % (g['mx'], g['mw']))
+            # ---- ① 回撤曲线必须【连续】且**碰到水面线**（2026-09-14）----
+            #   🔴 用户："0 回撤到有回撤、有回撤到 0 回撤之间没有相连。"
+            #     原来 ddGap 把所有 0 抹成 null，于是每段回撤两头都悬空，
+            #     "回到历史最高"成了一个空档 —— 而空档读作"没有数据"。
+            #   ★ 只判"连续"是不够的：把 0 抹掉之后每段各自仍然是连续的
+            #     （froec 那份数据实测断成 2 段、每段内部都连着）。
+            #     判据必须是**曲线顶点落在水面线上**。
+            t = pg.evaluate(_DDJS)
+            assert t and t['topY'] is not None and t['zeroY'] is not None, \
+                '取不到回撤副图的曲线顶点或水面线'
+            assert t['nM'] == 1, \
+                ('回撤副图断成了 %d 段 —— 规则没有例外：**断开 = 没有数据**。'
+                 '回撤为 0 的点要照画，好让每段回撤两头都接上水面线'
+                 % t['nM'])
+            assert abs(t['topY'] - t['zeroY']) < 1.0, \
+                ('回撤曲线顶点 y=%.1f 没落在水面线 y=%.1f 上 —— 创新高那天'
+                 '回撤正好是 0，曲线必须**碰到**水面线（froec 账户 09-08 '
+                 '就是创新高那天）' % (t['topY'], t['zeroY']))
+            notes.append('回撤曲线连续(1 段)且顶点碰到水面线')
+
 
             # ---- ① 口径【跟随主图】：必须用构造数据才测得到 ----
             #   造一段有入金的行情：equity 在中途跳一截（入金），nav 不跳。
@@ -10782,7 +10816,7 @@ def t_updown_color():
                                         tuple(r['flatRGB'])))
 
 
-@case('K 线对数坐标 / 回撤图顶到 0 且水面上不画（playwright）', tag='web')
+@case('K 线对数坐标 / 回撤图顶到 0 且【连续、碰到水面线】（playwright）', tag='web')
 def t_log_and_dd():
     """用户："K线图需要支持对数"、"回撤水下图最高刻度应该是 0.0%，没有发生
     回撤的那一段线是不是应该没有颜色？"
@@ -10882,10 +10916,19 @@ def t_log_and_dd():
                 .filter(t => +t.getAttribute('x') < 60)
                 .map(t => ({y: +t.getAttribute('y'), s: t.textContent}))
                 .sort((a, b) => a.y - b.y);
-              const path = c2.querySelector('path[d]');
+              /* 🔴 取【描边】那条（面积图是 fill、没有 stroke），
+                 否则量到的是填充路径，它本来就逐段闭合、M 段数不同。 */
+              const path = c2.querySelector('path[stroke]:not([stroke="none"])');
               const dd = path ? path.getAttribute('d') : '';
+              /* 曲线最高点（y 最小）与水面线的 y —— 曲线必须真的碰到它 */
+              const ys2 = [...dd.matchAll(/[ML]\\s*[\\d.]+\\s+([\\d.]+)/g)]
+                            .map(m => +m[1]);
+              const zl = [...c2.querySelectorAll('line')]
+                .find(l => (l.getAttribute('stroke') || '').includes('91,156,240'));
               return {ticks: ys.map(o => o.s),
                       nM: (dd.match(/M/g) || []).length,
+                      topY: ys2.length ? Math.min.apply(null, ys2) : null,
+                      zeroY: zl ? +zl.getAttribute('y1') : null,
                       vis: !!(c2.querySelector('svg') || {}).getBoundingClientRect
                            && c2.querySelector('svg').getBoundingClientRect().height > 0};
             }""")
@@ -10898,10 +10941,26 @@ def t_log_and_dd():
                 ('回撤图最高刻度是 %r，应当是 0 —— lineChart 默认在顶端留 6%% 白，'
                  '会印出 +0.4%%，而"比历史最高还高"是没有意义的数（要传 hiCap）'
                  % d['ticks'][0])
-            assert d['nM'] > 1, \
-                ('回撤曲线只有 1 个 M 段（一整条连着）—— 回撤 = 0 的那几段'
-                 '是"在水面上"，不该画成贴顶的实线')
-            notes.append('回撤顶到 %s · 水面上断成 %d 段' % (top, d['nM']))
+            # 🔴 **2026-09-14 反过来了**：原来这里断言 `nM > 1`（回撤 0 的那几段
+            #   必须断开）。用户指出"0 回撤到有回撤、有回撤到 0 回撤之间没有
+            #   相连，看着有点怪" —— 而那不只是观感：每段回撤**两头都不接
+            #   水面线**，入水那天凭空开始、出水那天凭空停住，于是"回到历史
+            #   最高"这个最明确的事实在图上成了一个**空档**，而空档在图表
+            #   惯例里读作"没有数据"，意思正好反了。
+            #   ★ **失败的是断言不是产品**（同 `#d_hold .note` 那条）：
+            #     不是删掉保护，而是改钉新规矩 —— 连续 + 真的碰到水面线。
+            assert d['nM'] == 1, \
+                ('回撤曲线断成了 %d 段 —— 现在的规则没有例外：**断开 = 没有'
+                 '数据**。回撤为 0 的点要照画，让每段回撤两头都接上水面线'
+                 % d['nM'])
+            assert d['topY'] is not None and d['zeroY'] is not None, \
+                '取不到曲线顶点或水面线的 y（选择器没命中描边那条路径？）'
+            assert abs(d['topY'] - d['zeroY']) < 1.0, \
+                ('回撤曲线的最高点 y=%.1f 没有落在水面线 y=%.1f 上 —— '
+                 '创新高那天回撤正好是 0，曲线必须**碰到**水面线；'
+                 '差这一截说明 0 那些点又被抹掉了' % (d['topY'], d['zeroY']))
+            notes.append('回撤顶到 %s · 曲线连续(1 段)且碰到水面线(y=%.1f)'
+                         % (top, d['zeroY']))
             assert not errs, 'JS 错误：%s' % errs[:2]
             b.close()
     finally:

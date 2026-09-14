@@ -471,7 +471,7 @@ function renderDD(aid, o, st){
   /* 🔴 `hiCap: 0` —— 回撤的最高点**永远是 0**（在最高点时回撤为 0，
      不可能为正）。不钳的话 y 轴留白会显示成 +0.1%，而那个数没有意义，
      读的人会以为"曾经比历史最高还高 0.1%"。 */
-  lineChart(el, [{n: '回撤', v: ddGap(dd), c: '#f05b5b', w: 1.3, fill: '#f05b5b'}],
+  lineChart(el, [{n: '回撤', v: dd, c: '#f05b5b', w: 1.3, fill: '#f05b5b'}],
     {dates: o.dates, h: 150, ratioAxis: true, hiCap: 0, zero: 0});
   /* ★ 说明放在图**下面**（lineChart 的 ctl 是塞在 svg 上方的，
        放那儿会把主图和副图撑开、破坏"贴在一起"的观感）。 */
