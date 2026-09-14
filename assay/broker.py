@@ -566,11 +566,31 @@ class RecordingBroker(Broker):
       kind: 'target'（order_target_value/percent）/ 'stop'（order_stop_sell）
       target_value == 0 -> 清仓；> 0 -> 目标市值
 
-    ★ 不填单意味着 portfolio 保持播种时的状态，后续任务看到的持仓仍是
-      **你的真实持仓** —— 这正是预览要的语义（"如果现在执行，会发生什么"）。
-      副作用：同一天内策略若先卖后买、且买入依赖卖出腾出的现金，
-      记到的 target_value 会偏小。所以**下单股数由实盘模块按真实现金重算**，
-      这里只取「它想动哪些票、方向是什么」。
+    🔴🔴 **清仓委托必须在 portfolio 里【落地】**（2026-09-14 修）。
+
+      原来一笔都不落地，理由写的是"后续任务看到的持仓仍是你的真实持仓"，
+      并且承认了一个副作用：「同一天先卖后买、买入依赖卖出腾出的现金时，
+      记到的 target_value 会偏小」，靠实盘模块按真实现金重算股数兜住。
+
+      **但真正的后果不是"金额偏小"，是【那笔买入根本不产生】** ——
+      froec 的买入腿是按**只数**截断的：
+
+          need = [c for c in target if c not in positions]
+          need = need[:max(0, len(target) - len(positions))]
+
+      卖出没落地 -> `positions` 还是 10 只 -> `10 - 10 = 0` -> `need[:0]`
+      **空**。于是实盘待办给出"卖 1 只、买 0 只"，而同一份策略在回测里
+      会买第 10 名那只（2026-09-15 froec 实测：卖 600774（第 12 名），
+      而第 10 名 300980 状态是 `not_taken`、标着"可买"，就是没进清单）。
+      **人照这份清单下单，卖完之后那笔钱就晾在账上了。**
+
+    ★ 所以 `target_value == 0`（清仓）要真的把这只票从 portfolio 里去掉，
+      并把估算的现金加回去 —— 「如果现在执行会发生什么」本来就包括
+      "卖掉的那只不再持有、钱回到账上"。**只落地清仓这一种**：
+      买入需要成交价，而信号是给**下一个交易日**的，那天的价还不存在
+      （这正是 RecordingBroker 存在的理由）。
+    ★ 股数仍由实盘模块按真实现金重算 —— 这里只让**只数与现金**对得上，
+      好让策略自己的规则算出正确的清单。
     """
 
     def __init__(self, *a, **kw):
@@ -582,7 +602,25 @@ class RecordingBroker(Broker):
             'code': code, 'kind': kind, 'target_value': float(value),
             'price': price, 'phase': self.phase, 'date': self.date,
         })
+        if float(value) == 0.0:
+            self._settle_clear(code)
         return Order(code, 'sell' if not value else 'buy', 0, 0.0, True, 'recorded')
+
+    def _settle_clear(self, code):
+        """清仓落地：去掉持仓 + 把估算的钱加回现金。
+
+        ★ 估价按 `last_price`（最后已知收盘）—— 下一个交易日的价还不存在，
+          而这里只是为了让"还剩多少钱能买"这个**量级**对。真实股数与金额
+          由实盘模块按当日真实价重算（`lv/sig.py` 的 twopass）。
+        """
+        p = self.pf.positions.pop(code, None)
+        if p is None:
+            return
+        px = getattr(p, 'last_price', None) or 0.0
+        try:
+            self.pf.cash += sum(l.shares for l in p.lots) * px
+        except Exception:                                   # noqa: BLE001
+            pass
 
     def order_target_value(self, code, value):
         return self._rec(code, 'target', value)

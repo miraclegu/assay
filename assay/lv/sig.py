@@ -333,6 +333,29 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
     # filter_tradable 换成记账包装，判定一律还是原来那套（见 lv/explain.py）。
     rec = _explain.attach(eng, rb)
     eng._boot()
+    # 🔴🔴 **「起点」在实盘里是【开户日】，不是重放窗口的第一天。**
+    #   策略里有 `g.start_date`，`prepare` 第一次跑时把它设成
+    #   `context.current_date` —— 回测里那就是回测起点，对；但实盘的
+    #   第一天是**重放窗口**的第一天（30 个交易日前），而账户是后来才开的。
+    #
+    #   实测 2026-09-14：重放窗口 08-04 起、账户 09-01 开户，于是
+    #   `lu_since_start=1`（"起点前的涨停不算"）只能把黑名单窗口抬到 08-04，
+    #   而 301152 / 603506 的涨停在 08-19 / 08-24 —— **仍在窗口内**。
+    #   也就是说这个开关在实盘里**表达不了它名字说的那件事**，
+    #   打开了也没用，而它不报错。
+    #
+    #   ★ 喂真实初始状态本来就是实盘模块的职责（持仓、现金都是这么来的），
+    #     `start_date` 是同一类东西，所以在这里补上。
+    #   ★ 只在策略**确实有这个概念**时才设（`hasattr`）—— 给没有它的策略
+    #     凭空加个属性是另一种污染。
+    #   ★ 判据与「策略曲线」同一个（`lv/bench.py` 用 `created`）：
+    #     "实盘起点"只能有一个定义，两处各写一份迟早分叉。
+    _live_start = (acct.get('created') or '')[:10]
+    if _live_start and hasattr(eng.g, 'start_date'):
+        try:
+            eng.g.start_date = _base._d(_live_start)
+        except Exception:                                   # noqa: BLE001
+            pass
     try:
         _extend_ordinals(eng, feed, _base.calendar_days())
         # --- 1) 重放 warmup：建起逐日累积的路径状态（黑名单/冷静期/峰值）---

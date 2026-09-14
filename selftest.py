@@ -118,11 +118,71 @@ def t_defaults():
 @case('唯一卖出出口')
 def t_single_sell_exit():
     """卖出有 6 件副作用；分散写会漏。旧引擎三处各写一遍，
-    交易日志只挂在其中一处，直接导致一次归因诊断全错。"""
-    src = open('assay/broker.py', encoding='utf-8').read()
-    n = src.count('self.pf.positions.pop(')
-    assert n == 1, '发现 %d 处直接平仓，必须收敛到 _fill_sell 一处' % n
-    return 'positions.pop 仅 1 处'
+    交易日志只挂在其中一处，直接导致一次归因诊断全错。
+
+    🔴 **判据从"全文件数一次"改成按【类】判**（2026-09-14）。原来是
+      `src.count('self.pf.positions.pop(') == 1` —— 一个全文件计数。
+      给 `RecordingBroker`（**预览**用，只记委托不撮合）加"清仓落地"时它红了，
+      而那一处恰恰**一件副作用都没有**：不记 trades、不记 fills、不收费、
+      不扣红利税。
+
+      ★ 但**不能把 1 改成 2** —— 那正是守卫烂掉的方式（下次谁再加一处，
+        改成 3 就行了）。改成：
+          · 记账那条路（`Broker`）仍然**只许一处**，且必须在 `_fill_sell` 里
+          · 预览那条路（`RecordingBroker`）允许一处，但必须**证明无副作用**
+        这比原来的计数**更严**：原来只数个数，现在连"在哪个方法里"
+        和"有没有偷偷记账"都钉住了。
+    """
+    import ast as _ast
+    import io as _io
+    src = _io.open('assay/broker.py', encoding='utf-8').read()
+    tree = _ast.parse(src)
+
+    def _pops(fn):
+        """这个函数体里有几处 `self.pf.positions.pop(`。"""
+        n = 0
+        for x in _ast.walk(fn):
+            if not isinstance(x, _ast.Call):
+                continue
+            f = x.func
+            if (isinstance(f, _ast.Attribute) and f.attr == 'pop'
+                    and isinstance(f.value, _ast.Attribute)
+                    and f.value.attr == 'positions'):
+                n += 1
+        return n
+
+    by_cls = {}
+    for cls in [c for c in _ast.walk(tree) if isinstance(c, _ast.ClassDef)]:
+        for fn in [f for f in cls.body
+                   if isinstance(f, (_ast.FunctionDef, _ast.AsyncFunctionDef))]:
+            k = _pops(fn)
+            if k:
+                by_cls.setdefault(cls.name, []).append((fn.name, k, fn))
+    acct = by_cls.get('Broker', [])
+    prev = by_cls.get('RecordingBroker', [])
+    other = {k: [(n, c) for n, c, _f in v] for k, v in by_cls.items()
+             if k not in ('Broker', 'RecordingBroker')}
+    assert not other, '这些类里也直接平仓了：%s' % other
+    assert len(acct) == 1 and acct[0][1] == 1, \
+        '记账 Broker 里的平仓必须【只有一处】，实得 %s' \
+        % [(n, c) for n, c, _f in acct]
+    assert acct[0][0] == '_fill_sell', \
+        '记账的那一处平仓不在 `_fill_sell` 里，而在 %s —— 卖出的 6 件副作用' \
+        '（trades / 费用 / 红利税 / 现金 / 批次 / 持仓）必须收在同一个出口' \
+        % acct[0][0]
+    assert len(prev) <= 1, 'RecordingBroker 里有 %d 处平仓' % len(prev)
+    if prev:
+        name, _c, fn = prev[0]
+        body = _ast.dump(fn)
+        # 🔴 预览那一处**不许有任何记账副作用** —— 有的话它就不是预览了，
+        #   而是第二条卖出路径（正是这条用例当初要防的东西）。
+        for bad in ('trades', 'fills', 'fee_paid', 'div_tax_paid',
+                    'sell_amount', 'buy_amount'):
+            assert "attr='%s'" % bad not in body, \
+                ('RecordingBroker.%s 里碰了 `%s` —— 预览路径一旦开始记账，'
+                 '就成了第二条卖出出口' % (name, bad))
+    return ('记账平仓 1 处且在 _fill_sell；预览平仓 %d 处且无记账副作用'
+            % len(prev))
 
 
 @case('基准基点取首日前一交易日')
@@ -8308,6 +8368,151 @@ def t_backtest_raw_units():
          '口径变了，展示层"金额不用换"这个前提就不成立了')
     notes.append('金额不换（因子在 hfq股×hfq价 里约掉，实测逐笔相同）')
     return '；'.join(notes)
+
+
+@case('实盘待办：卖出必须在预览里【落地】，否则买入腿凭空消失', tag='slow')
+def t_preview_sell_settles():
+    """2026-09-14 用户问「为什么是卖出一只、买入 0 只」，查出**两个叠在一起**
+    的缺陷。这一条钉第一个。
+
+    🔴 `RecordingBroker` 只记委托不撮合，于是卖出**不改 portfolio**。而
+      froec 的买入腿是按**只数**截断的：
+
+          need = [c for c in target if c not in positions]
+          need = need[:max(0, len(target) - len(positions))]
+
+      卖出没落地 -> positions 还是 10 -> `10-10=0` -> `need[:0]` **空**。
+      于是待办说"卖 1 只、买 0 只"，而同一份策略在回测里会买进替补。
+      **人照这份清单下单，卖完那笔钱就晾在账上了。**
+
+    ★ 原 docstring 预见到的是"金额偏小"（并说股数由实盘模块按真实现金重算），
+      **没预见到"那笔委托根本不产生"** —— 副作用被低估了一档。
+    """
+    from assay.broker import RecordingBroker, Cost
+    from assay.context import Lot, Portfolio, Position
+    from assay.feed import PanelFeed
+
+    feed = PanelFeed('2026-06-01', '2026-06-30')
+    d = feed.trading_days[-1]
+
+    def _mk():
+        pf = Portfolio(cash=10000.0, starting_cash=10000.0, positions={})
+        rb = RecordingBroker(pf, feed, Cost())
+        rb.date, rb.phase = d, 'OPEN'
+        pf.positions['600000.XSHG'] = Position(
+            code='600000.XSHG',
+            lots=[Lot(shares=1000.0, entry_date=feed.trading_days[0],
+                      entry_price=10.0)],
+            last_price=12.0)
+        return pf, rb
+
+    pf, rb = _mk()
+    assert len(pf.positions) == 1
+    rb.order_target_value('600000.XSHG', 0)
+    assert '600000.XSHG' not in pf.positions, \
+        ('清仓委托没有在预览的 portfolio 里落地 —— 后面按「只数」算买入名额的'
+         '策略会算出 0，那笔买入**凭空消失**（froec 的 _do_buy 就是这么写的）')
+    assert pf.cash > 10000.0, \
+        ('清仓之后现金没加回去（还是 %.2f）—— 买入腿按现金分配金额时会偏小'
+         % pf.cash)
+    assert abs(pf.cash - (10000.0 + 1000.0 * 12.0)) < 1.0, \
+        '现金应按最后已知价估算，实得 %.2f' % pf.cash
+
+    # 🔴 **买入委托不许落地** —— 下一个交易日的价还不存在，
+    #   凭空给个成交价就是在编数据（这正是 RecordingBroker 存在的理由）。
+    pf2, rb2 = _mk()
+    n0 = len(pf2.positions)
+    rb2.order_target_value('600519.XSHG', 50000)
+    assert len(pf2.positions) == n0 and '600519.XSHG' not in pf2.positions, \
+        '买入委托也落地了 —— 那需要一个还不存在的成交价'
+    assert len(rb2.orders) == 1, '买入委托没被记下来'
+
+    # 🔴 预览路径**不许记账**：一旦记 trades/费用，它就成了第二条卖出出口
+    assert not rb.trades, 'RecordingBroker 记了 trades'
+    assert not getattr(rb, 'fills', []), 'RecordingBroker 记了 fills'
+    assert rb.fee_paid == 0 and rb.div_tax_paid == 0, \
+        'RecordingBroker 收了费 —— 预览不该产生任何账务'
+    return ('清仓落地（持仓去掉 + 现金 %.0f）、买入不落地、无任何记账副作用'
+            % pf.cash)
+
+
+@case('黑名单的「起点」在实盘里是【开户日】，不是重放窗口第一天', tag='slow')
+def t_live_start_date():
+    """用户："我新绑定的策略，黑名单不是应该只看实盘开始后吗" —— 是。
+    这一条钉第二个缺陷。
+
+    froec 有 `lu_since_start`（"起点前的涨停不算"），判据是 `g.start_date`。
+    而 `g.start_date` 是 `prepare` 第一次跑时的 `current_date`：
+    回测里那是回测起点（对），**实盘里那是【重放窗口】的第一天**
+    （30 个交易日前），不是账户开户的那天。
+
+    🔴 实测 2026-09-14：重放窗口 08-04 起、账户 09-01 开户，于是
+      `lu_since_start=1` 只能把黑名单窗口抬到 08-04，而那两只的涨停在
+      08-19 / 08-24 —— **仍在窗口内**。这个开关在实盘里**表达不了它名字
+      说的那件事**，打开了也没用，而它不报错。
+
+    ★ 修法：实盘模块把 `g.start_date` 设成**开户日** —— 喂真实初始状态本来
+      就是它的职责（持仓、现金都是这么来的）。定义与「策略曲线」同一个
+      （`lv/bench.py` 的 `created`），两处各写一份迟早分叉。
+    """
+    import io as _io
+    import ast as _ast
+    from assay import live as lv
+
+    src = _io.open('assay/lv/sig.py', encoding='utf-8').read()
+    assert 'start_date' in src, 'lv/sig.py 里没有设 start_date'
+    # 判据走 ast：注释里提到 start_date 不算
+    tree = _ast.parse(src)
+    sets = [n for n in _ast.walk(tree) if isinstance(n, _ast.Assign)
+            and any(isinstance(t, _ast.Attribute) and t.attr == 'start_date'
+                    for t in n.targets)]
+    assert sets, \
+        ('lv/sig.py 没有给 `g.start_date` 赋值 —— 那它就还是重放窗口的第一天，'
+         '`lu_since_start` 在实盘里表达不了"实盘开始之后"')
+    # 🔴 必须用**开户日**，不是 feed/重放起点。判据看赋的是不是 created。
+    seg = src[max(0, sets[0].lineno * 0):]
+    assert "acct.get('created')" in src, \
+        '`g.start_date` 不是取账户的 created —— "实盘起点"只能有一个定义'
+
+    # ---- 真跑一遍：黑名单查询的【窗口起点】必须落在开户日 ----
+    # 🔴 判据钉在 `had_limit_up(codes, lo, d)` 的 `lo` 上，不是内部变量：
+    #   那才是这个修复**真正要改的东西**（黑名单往回看到哪天）。
+    #   ★ 也不钩 `prepare` —— `run_daily(prepare, ...)` 在 initialize 里注册的是
+    #     那一刻的函数对象，事后换模块属性对已注册的引用毫无影响
+    #     （CLAUDE.md 里 bench 那次踩过，这次又踩了一遍）。
+    # ★ 要挑**支持这个开关**的账户 —— 红利那套没有 `lu_since_start`，
+    #   传进去引擎会直接报"策略里没有这个参数"（那是它该有的行为）。
+    from assay.lv import sig as S
+    from assay import guard as _guard
+    seen, aid, created = [], None, None
+    for a in lv.load_accounts():
+        if a.get('archived') or not a.get('code_sha256'):
+            continue
+        pr = dict(a.get('params') or {})
+        pr['lu_since_start'] = 1
+        seen = []
+        orig = _guard.GuardedFeed.had_limit_up
+        def spy(self, codes, start, end):
+            seen.append(str(start)[:10])
+            return orig(self, codes, start, end)
+        _guard.GuardedFeed.had_limit_up = spy
+        try:
+            S.build_signal(a['id'], params=pr)
+        except KeyError:
+            continue                     # 这套策略没有这个开关，换下一个
+        finally:
+            _guard.GuardedFeed.had_limit_up = orig
+        if seen:
+            aid, created = a['id'], (a.get('created') or '')[:10]
+            break
+    if not aid:
+        return '静态断言通过（没有账户用得上涨停黑名单）'
+    lo = max(seen)              # 最后一期（调仓那一次）用的窗口起点
+    assert lo >= created, \
+        ('开了 `lu_since_start=1`，黑名单窗口却从 %s 起算，而开户日是 %s '
+         '—— 抬到的是【重放窗口】第一天而不是实盘起点，于是开户前的涨停'
+         '照样把票拉黑，**而它不报错**' % (lo, created))
+    return '黑名单窗口起点 %s == 开户日 %s（不是重放窗口第一天）' % (lo, created)
 
 
 @case('模拟盘：成交由【引擎】产生 / 幂等 / 账本对得上 / 对账不一致不改写账本',
