@@ -18,3 +18,6 @@
 {"ts": "2026-09-11T09:35:03", "code": "000423.XSHE", "name": "东阿阿胶", "tier": 1, "kind": "near", "target": 45.5, "yield": 0.059464, "price": 45.69, "src": "snap"}
 {"ts": "2026-09-11T09:35:03", "code": "600690.XSHG", "name": "海尔智家", "tier": 0, "kind": "near", "target": 20.8, "yield": 0.055803, "price": 20.94, "src": "snap"}
 {"ts": "2026-09-11T09:45:12", "code": "000423.XSHE", "name": "东阿阿胶", "tier": 1, "kind": "hit", "target": 45.5, "yield": 0.059464, "price": 45.5, "src": "snap"}
+{"ts": "2026-09-14T09:30:49", "code": "000423.XSHE", "name": "东阿阿胶", "tier": 0, "kind": "hit", "target": 47.5, "yield": 0.05696, "price": 45.76, "src": "snap"}
+{"ts": "2026-09-14T09:30:49", "code": "000423.XSHE", "name": "东阿阿胶", "tier": 1, "kind": "near", "target": 45.5, "yield": 0.059464, "price": 45.76, "src": "snap"}
+{"ts": "2026-09-14T09:30:49", "code": "600690.XSHG", "name": "海尔智家", "tier": 0, "kind": "near", "target": 20.8, "yield": 0.055803, "price": 21.04, "src": "snap"}

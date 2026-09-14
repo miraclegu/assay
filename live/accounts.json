@@ -36,6 +36,7 @@
   "name": "FROEC-TRADE账户",
   "params": {
    "lu_buy_only": 1,
+   "lu_since_start": 1,
    "stop_intraday": 1,
    "stop_loss": 0.35,
    "weekday": 2

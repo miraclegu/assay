@@ -1,6 +1,6 @@
 {
  "account": "froec",
- "built_at": "2026-09-11T23:08:51",
+ "built_at": "2026-09-14T16:13:29",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 22413.49,
@@ -8,25 +8,25 @@
  "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
  "data_asof": "2026-09-11",
  "data_fingerprint": {
-  "overall": "8b94a5d7df38",
+  "overall": "679a5258990b",
   "parts": {
    "index": {
-    "hash": "2f49e6b6e4bd",
+    "hash": "6e3016579f3e",
     "n_files": 24,
-    "newest_mtime": "2026-09-11T16:22:05",
+    "newest_mtime": "2026-09-14T16:12:41",
     "total_bytes": 64682940
    },
    "panel": {
-    "hash": "cf5757199484",
+    "hash": "c120a751c5ce",
     "n_files": 24,
-    "newest_mtime": "2026-09-11T16:22:33",
-    "total_bytes": 1339082668
+    "newest_mtime": "2026-09-14T16:13:12",
+    "total_bytes": 1339091929
    },
    "std": {
-    "hash": "71703f39cba8",
+    "hash": "da369ea02c1d",
     "n_files": 18,
-    "newest_mtime": "2026-09-11T16:22:42",
-    "total_bytes": 374089059
+    "newest_mtime": "2026-09-14T16:13:21",
+    "total_bytes": 375502523
    }
   }
  },
@@ -201,7 +201,9 @@
   "2026-09-11T20:16:14",
   "2026-09-11T21:06:39",
   "2026-09-11T22:08:08",
-  "2026-09-11T23:08:51"
+  "2026-09-11T23:08:51",
+  "2026-09-14T00:00:14",
+  "2026-09-14T16:13:29"
  ],
  "revisions": [],
  "sell": [],

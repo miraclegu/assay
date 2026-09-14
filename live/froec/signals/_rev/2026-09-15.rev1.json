@@ -1,0 +1,939 @@
+{
+ "account": "froec",
+ "built_at": "2026-09-14T20:43:31",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 22413.49,
+ "code_sha": "c3118f7d",
+ "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
+ "data_asof": "2026-09-14",
+ "data_fingerprint": {
+  "overall": "46b550296764",
+  "parts": {
+   "index": {
+    "hash": "10b529a3e3f8",
+    "n_files": 24,
+    "newest_mtime": "2026-09-14T16:22:58",
+    "total_bytes": 64694964
+   },
+   "panel": {
+    "hash": "4a98889d222c",
+    "n_files": 24,
+    "newest_mtime": "2026-09-14T16:23:43",
+    "total_bytes": 1339500308
+   },
+   "std": {
+    "hash": "a6c09a8dfc12",
+    "n_files": 18,
+    "newest_mtime": "2026-09-14T16:23:58",
+    "total_bytes": 375754517
+   }
+  }
+ },
+ "days_until_rebalance": 0,
+ "explain": {
+  "captured": true,
+  "codes_total": 20,
+  "g_sets": {
+   "pos_state": [
+    "002910.XSHE",
+    "300375.XSHE",
+    "300500.XSHE",
+    "300575.XSHE",
+    "301126.XSHE",
+    "301152.XSHE",
+    "600774.XSHG",
+    "603168.XSHG",
+    "603506.XSHG",
+    "605122.XSHG"
+   ]
+  },
+  "groups": [
+   {
+    "arg_labels": {
+     "cand": "取候选数",
+     "excl": "排除行业",
+     "kcb": "科创板排除",
+     "listed": "上市满(天)",
+     "pbcut": "PB 截断",
+     "pert": "扰动",
+     "pin": "停牌股进池",
+     "roecut": "ROE 加速度截断",
+     "salt": "扰动盐",
+     "sd": "决策日",
+     "skip": "跳过前几名"
+    },
+    "args": {
+     "cand": 20,
+     "excl": "'钢铁I','煤炭I','石油石化I','采掘I','银行I','非银金融I','金融服务I','交运设备I','交通运输I','传媒I','环保I'",
+     "kcb": "68%",
+     "listed": 250,
+     "pbcut": "floor(0.5 * n)",
+     "pert": 0,
+     "pin": "FALSE",
+     "roecut": "floor(0.1 * n2)",
+     "salt": "a",
+     "sd": "2026-09-14",
+     "skip": 0
+    },
+    "metric_meta": [
+     {
+      "key": "floatmv",
+      "kind": "money",
+      "label": "流通市值"
+     },
+     {
+      "key": "pb",
+      "kind": "num",
+      "label": "市净率 PB"
+     },
+     {
+      "key": "eps",
+      "kind": "num",
+      "label": "每股收益"
+     },
+     {
+      "key": "roe_inc",
+      "kind": "pct",
+      "label": "ROE 加速度"
+     },
+     {
+      "key": "sw_l1_name",
+      "kind": "text",
+      "label": "申万一级"
+     },
+     {
+      "key": "pb_rn",
+      "kind": "rank",
+      "label": "PB 名次（升序，取前半区）",
+      "of": [
+       "pb_n"
+      ]
+     },
+     {
+      "key": "roe_rn",
+      "kind": "rank",
+      "label": "ROE 加速度名次（降序，取前 10%）",
+      "of": [
+       "roe_n"
+      ]
+     }
+    ],
+    "n_rows": 20,
+    "rows": [
+     {
+      "also_in": [],
+      "code": "002910.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0358,
+       "floatmv": 1370788647.8200002,
+       "pb": 1.9851485139282519,
+       "pb_n": 3274,
+       "pb_rn": 1343,
+       "roe_inc": 0.10590000000000001,
+       "roe_n": 1629,
+       "roe_rn": 112,
+       "sw_l1_name": "食品饮料I"
+      },
+      "name": "庄园牧场",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 1,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "301126.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0063,
+       "floatmv": 1435675401.51,
+       "pb": 1.4088653593345288,
+       "pb_n": 3274,
+       "pb_rn": 721,
+       "roe_inc": 0.15159999999999998,
+       "roe_n": 1629,
+       "roe_rn": 50,
+       "sw_l1_name": "医药生物I"
+      },
+      "name": "达嘉维康",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 2,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "301152.XSHE",
+      "dropped_by": null,
+      "facts": [
+       "窗口内涨停过"
+      ],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0661,
+       "floatmv": 1500436946.1599998,
+       "pb": 2.0470735964404425,
+       "pb_n": 3274,
+       "pb_rn": 1403,
+       "roe_inc": 0.1456,
+       "roe_n": 1629,
+       "roe_rn": 58,
+       "sw_l1_name": "电气设备I"
+      },
+      "name": "天力锂能",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 3,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300500.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0993,
+       "floatmv": 1587152633.8500001,
+       "pb": 1.653867952739758,
+       "pb_n": 3274,
+       "pb_rn": 1002,
+       "roe_inc": 0.152,
+       "roe_n": 1629,
+       "roe_rn": 49,
+       "sw_l1_name": "建筑装饰I"
+      },
+      "name": "启迪设计",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 4,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "605122.XSHG",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0038,
+       "floatmv": 1978623920.0,
+       "pb": 1.1381934542536554,
+       "pb_n": 3274,
+       "pb_rn": 445,
+       "roe_inc": 0.16230000000000003,
+       "roe_n": 1629,
+       "roe_rn": 44,
+       "sw_l1_name": "建筑材料I"
+      },
+      "name": "四方新材",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 5,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "603506.XSHG",
+      "dropped_by": null,
+      "facts": [
+       "窗口内涨停过"
+      ],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.3621,
+       "floatmv": 2076822235.74,
+       "pb": 1.676897384546767,
+       "pb_n": 3274,
+       "pb_rn": 1020,
+       "roe_inc": 0.11759999999999998,
+       "roe_n": 1629,
+       "roe_rn": 91,
+       "sw_l1_name": "房地产I"
+      },
+      "name": "南都物业",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 6,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300575.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.1018,
+       "floatmv": 2084698705.32,
+       "pb": 1.4351405553021221,
+       "pb_n": 3274,
+       "pb_rn": 754,
+       "roe_inc": 0.1768,
+       "roe_n": 1629,
+       "roe_rn": 34,
+       "sw_l1_name": "化工I"
+      },
+      "name": "中旗股份",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 7,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "603168.XSHG",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.1219,
+       "floatmv": 2171756649.1500006,
+       "pb": 1.646062054929063,
+       "pb_n": 3274,
+       "pb_rn": 990,
+       "roe_inc": 0.32239999999999996,
+       "roe_n": 1629,
+       "roe_rn": 13,
+       "sw_l1_name": "医药生物I"
+      },
+      "name": "莎普爱思",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 8,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300375.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0177,
+       "floatmv": 2199855667.52,
+       "pb": 1.5318163578940607,
+       "pb_n": 3274,
+       "pb_rn": 859,
+       "roe_inc": 0.12320000000000002,
+       "roe_n": 1629,
+       "roe_rn": 84,
+       "sw_l1_name": "汽车I"
+      },
+      "name": "鹏翎股份",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 9,
+      "status": "hold",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300980.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.3397,
+       "floatmv": 2222193269.56,
+       "pb": 2.1551430717129905,
+       "pb_n": 3274,
+       "pb_rn": 1502,
+       "roe_inc": 0.08869999999999997,
+       "roe_n": 1629,
+       "roe_rn": 148,
+       "sw_l1_name": "化工I"
+      },
+      "name": "祥源新材",
+      "of": 20,
+      "passed": [
+       "可买"
+      ],
+      "rank": 10,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "301062.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.0436,
+       "floatmv": 2233425712.94,
+       "pb": 2.2923008847157353,
+       "pb_n": 3274,
+       "pb_rn": 1632,
+       "roe_inc": 0.14259999999999998,
+       "roe_n": 1629,
+       "roe_rn": 60,
+       "sw_l1_name": "轻工制造I"
+      },
+      "name": "上海艾录",
+      "of": 20,
+      "passed": [],
+      "rank": 11,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "600774.XSHG",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [
+       "pos_state"
+      ],
+      "metrics": {
+       "eps": 0.0324,
+       "floatmv": 2270577362.9,
+       "pb": 1.5033960652095226,
+       "pb_n": 3274,
+       "pb_rn": 822,
+       "roe_inc": 0.1421,
+       "roe_n": 1629,
+       "roe_rn": 61,
+       "sw_l1_name": "医药生物I"
+      },
+      "name": "汉商集团",
+      "of": 20,
+      "passed": [],
+      "rank": 12,
+      "status": "sell",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "002942.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.3607,
+       "floatmv": 2318647566.9300003,
+       "pb": 2.0366398563049035,
+       "pb_n": 3274,
+       "pb_rn": 1395,
+       "roe_inc": 0.0945,
+       "roe_n": 1629,
+       "roe_rn": 131,
+       "sw_l1_name": "化工I"
+      },
+      "name": "新农股份",
+      "of": 20,
+      "passed": [],
+      "rank": 13,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "000055.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.0245,
+       "floatmv": 2412800311.5299997,
+       "pb": 0.6858716416787904,
+       "pb_n": 3274,
+       "pb_rn": 94,
+       "roe_inc": 0.1077,
+       "roe_n": 1629,
+       "roe_rn": 109,
+       "sw_l1_name": "建筑材料I"
+      },
+      "name": "方大集团",
+      "of": 20,
+      "passed": [],
+      "rank": 14,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300583.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.1403,
+       "floatmv": 2414351570.2200003,
+       "pb": 1.3933862134299024,
+       "pb_n": 3274,
+       "pb_rn": 704,
+       "roe_inc": 0.0838,
+       "roe_n": 1629,
+       "roe_rn": 159,
+       "sw_l1_name": "医药生物I"
+      },
+      "name": "赛托生物",
+      "of": 20,
+      "passed": [],
+      "rank": 15,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "301118.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.3497,
+       "floatmv": 2424814541.73,
+       "pb": 1.8536944900918901,
+       "pb_n": 3274,
+       "pb_rn": 1196,
+       "roe_inc": 0.108,
+       "roe_n": 1629,
+       "roe_rn": 108,
+       "sw_l1_name": "化工I"
+      },
+      "name": "恒光股份",
+      "of": 20,
+      "passed": [],
+      "rank": 16,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "600854.XSHG",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.1864,
+       "floatmv": 2431065957.8399997,
+       "pb": 0.9805985221745155,
+       "pb_n": 3274,
+       "pb_rn": 313,
+       "roe_inc": 0.10500000000000001,
+       "roe_n": 1629,
+       "roe_rn": 113,
+       "sw_l1_name": "房地产I"
+      },
+      "name": "春兰股份",
+      "of": 20,
+      "passed": [],
+      "rank": 17,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "300690.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.6833,
+       "floatmv": 2511671607.5800004,
+       "pb": 2.2974326566415026,
+       "pb_n": 3274,
+       "pb_rn": 1636,
+       "roe_inc": 0.17809999999999998,
+       "roe_n": 1629,
+       "roe_rn": 33,
+       "sw_l1_name": "电气设备I"
+      },
+      "name": "双一科技",
+      "of": 20,
+      "passed": [],
+      "rank": 18,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "002136.XSHE",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.1916,
+       "floatmv": 2560601774.4,
+       "pb": 2.269698997804531,
+       "pb_n": 3274,
+       "pb_rn": 1608,
+       "roe_inc": 0.21480000000000002,
+       "roe_n": 1629,
+       "roe_rn": 22,
+       "sw_l1_name": "化工I"
+      },
+      "name": "安纳达",
+      "of": 20,
+      "passed": [],
+      "rank": 19,
+      "status": "not_taken",
+      "step": 1
+     },
+     {
+      "also_in": [],
+      "code": "603839.XSHG",
+      "dropped_by": null,
+      "facts": [],
+      "in_sets": [],
+      "metrics": {
+       "eps": 0.1149,
+       "floatmv": 2585268216.0,
+       "pb": 1.5373321929206436,
+       "pb_n": 3274,
+       "pb_rn": 865,
+       "roe_inc": 0.2074,
+       "roe_n": 1629,
+       "roe_rn": 26,
+       "sw_l1_name": "纺织服装I"
+      },
+      "name": "安正时尚",
+      "of": 20,
+      "passed": [],
+      "rank": 20,
+      "status": "not_taken",
+      "step": 1
+     }
+    ],
+    "shown": 20,
+    "sql": "\n-- FROEC 候选池：在册宇宙 -> eps>0 / 非ST -> PB 低半区 -> ROE 加速度前 10%\n--              -> 排除周期与金融行业 -> 按流通市值升序取前 N\n-- ★ 首行注释是这条查询的【名字】，实盘的\"选股理由\"页拿它当组名\n--   （lv/explain.py 的 _sql_head）。注释改不了任何行为。\nWITH univ AS (\n  -- ★★ 候选宇宙必须是【权威在册股票】，不能用面板当日行。\n  --   面板是 K 线驱动的：停牌股当日无 K 线 -> 无行 -> 根本不进漏斗。\n  --   实测 2015-12-31：面板 2542 行 vs 权威在市 2811 只，缺 267 只，\n  --   而 paused_daily 当日停牌 266 只 —— 缺的就是停牌股。\n  --   聚宽 get_all_securities() 含停牌股，它们会参与 PB 半区与 ROE 十分位的\n  --   【切点计算】，还能先占掉 [:10] 的名额再被 filter_paused_stock 删掉。\n  --   漏掉它们的后果（2015-12-31 实测）：\n  --     L5 eps>0   1863 -> 2054  (JQ 2050)\n  --     L7 pb半区   931 -> 1027  (JQ 1025)\n  --     L10/L11    数量从对不上到【精确等于 101 / 94】\n  SELECT code FROM {t_universe}\n  WHERE sec_type='stock' AND list_date <= DATE '2026-09-14'\n    AND (delist_date IS NULL OR delist_date > DATE '2026-09-14')\n    AND date_diff('day', list_date::DATE, DATE '2026-09-14') >= 250\n    AND code NOT LIKE '68%'\n    AND hash(code || 'a') % 10000 >= 0\n), today AS (\n  SELECT jq_code, pb, floatmv, is_risk_warned, sw_l1_name\n  FROM {panel} WHERE date = DATE '2026-09-14'\n), miss AS (\n  -- 当日无 K 线（停牌）：只结转【价格派生量】(pb/floatmv)，与聚宽一致 ——\n  -- 停牌股的 valuation 按最后收盘价算。★ 基本面【不结转】：聚宽的\n  -- get_fundamentals 无论是否停牌都给当前最新报告，结转会拿到过期报告。\n  -- 实测 002379.XSHE@2015-12-31：结转基本面得 2015-06-30 的 eps=-0.0286\n  -- 被 eps>0 误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽选中了它）。\n  SELECT u.code AS jq_code, p.pb, p.floatmv, p.is_risk_warned, p.sw_l1_name\n  FROM (SELECT code, DATE '2026-09-14' AS d FROM univ\n        WHERE code NOT IN (SELECT jq_code FROM today)) u\n  ASOF LEFT JOIN (\n      SELECT jq_code, date, pb, floatmv, is_risk_warned, sw_l1_name\n      FROM {panel} WHERE date > DATE '2026-09-14' - INTERVAL 400 DAY\n  ) p ON p.jq_code = u.code AND p.date <= u.d\n), ind AS (\n  SELECT code, roe, report_date,\n         row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn\n  FROM {t_indicator}\n  WHERE pub_date <= DATE '2026-09-14' AND roe IS NOT NULL\n), eps1 AS (\n  -- ★ eps 取 fin_indicator_q（聚宽 indicator.eps）按【决策日】as-of，\n  --   不从面板结转。面板的 eps_q 值与 indicator.eps 完全一致\n  --   （2015-12-31 实测 2512 只有行情票 100.00% 数值相同，名字带 _q 但不是单季），\n  --   所以对【有行情】的票用哪边都一样；差别只出在停牌股：\n  --   结转面板会拿到该股【最后交易日】那天的基本面，可能是过期报告。\n  --   实测 002379.XSHE@2015-12-31：结转得 2015-06-30 的 eps=-0.0286 被 eps>0\n  --   误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽正是选中了它）。\n  --   聚宽 get_fundamentals 无论是否停牌都返回当前最新报告 —— 基本面不结转。\n  SELECT code, eps FROM (\n    SELECT code, eps, row_number() OVER (PARTITION BY code\n             ORDER BY report_date DESC, pub_date DESC) rn\n    FROM {t_indicator}\n    WHERE pub_date <= DATE '2026-09-14' AND eps IS NOT NULL\n  ) WHERE rn = 1\n), roec AS (\n  SELECT code, 4*max(CASE WHEN rn=1 THEN roe END)\n         - max(CASE WHEN rn=2 THEN roe END) - max(CASE WHEN rn=3 THEN roe END)\n         - max(CASE WHEN rn=4 THEN roe END) - max(CASE WHEN rn=5 THEN roe END) AS increase\n  FROM ind WHERE rn <= 5 GROUP BY 1 HAVING count(*) = 5\n), base AS (\n  -- ★ `e.eps` 只是【多带一列出去】给实盘的\"选股理由\"用（见 lv/explain.py）：\n  --   WHERE 一个字没动，行与行序完全不变。指标必须从**策略自己这条查询**里出，\n  --   另写一条\"取指标的 SQL\"就是第二份口径，迟早与它分叉而没人发现。\n  SELECT r.*, e.eps FROM (\n    SELECT * FROM today WHERE jq_code IN (SELECT code FROM univ)\n    UNION ALL SELECT * FROM miss WHERE FALSE\n  ) r JOIN eps1 e ON e.code = r.jq_code\n  WHERE NOT COALESCE(r.is_risk_warned, FALSE)\n    AND e.eps > 0 AND r.pb > 0 AND r.floatmv > 0\n), pb_half AS (\n  SELECT * FROM (SELECT *, row_number() OVER (ORDER BY pb ASC) rn,\n                        count(*) OVER () AS n FROM base)\n  WHERE rn <= floor(0.5 * n)\n), roe_top AS (\n  SELECT * FROM (\n    SELECT b.jq_code, b.floatmv, b.sw_l1_name,\n           -- ↓ 这四列只是【带出去解释用】：pb 与它在 PB 半区里的名次、\n           --   ROE 加速度、EPS。参与筛选的仍然只有下面那个 rn2。\n           b.pb, b.rn AS pb_rn, b.n AS pb_n, b.eps, r.increase AS roe_inc,\n           row_number() OVER (ORDER BY r.increase DESC) rn2,\n           count(*) OVER () AS n2\n    FROM pb_half b JOIN roec r ON r.code = b.jq_code\n  ) WHERE rn2 <= floor(0.1 * n2)\n)\n-- 🔴 末层多返回几列 = **投影**改动：WHERE / ORDER BY / LIMIT / OFFSET 一个字没动，\n--    所以行与行序完全相同，`df['jq_code'].tolist()` 拿到的还是同一个列表。\n--    这几列给实盘的\"为什么选它\"用（lv/explain.py），回测一行行为都不变：\n--      · selftest 每次都跑：同一天把宽投影与\"只返回 jq_code\"对跑，代码列表逐位相同\n--      · 加这几列时另跑过一次全历史（2016-01~2026-08）：逐日权益指纹 +\n--        成交流水指纹（进出场日/代码/股数/价/原因）**逐位相同**\nSELECT jq_code, floatmv, pb, eps, roe_inc, sw_l1_name,\n       pb_rn, pb_n, rn2 AS roe_rn, n2 AS roe_n\nFROM roe_top\nWHERE sw_l1_name IS NULL OR sw_l1_name NOT IN ('钢铁I','煤炭I','石油石化I','采掘I','银行I','非银金融I','金融服务I','交运设备I','交通运输I','传媒I','环保I')\nORDER BY floatmv ASC LIMIT 20 OFFSET 0\n",
+    "sql_head": "FROEC 候选池：在册宇宙 -> eps>0 / 非ST -> PB 低半区 -> ROE 加速度前 10%",
+    "step": 1,
+    "where": "rebalance:487"
+   }
+  ],
+  "n_groups": 1,
+  "notes": [],
+  "params": {
+   "buy_delay": "",
+   "candidate_num": 10,
+   "chand_k": 0.0,
+   "chand_n": 22,
+   "exit_time": "14:00",
+   "explain_pool": 20,
+   "fill_blacklist": 0,
+   "fill_paused": 0,
+   "fill_pool": 40,
+   "hold_buffer": 0,
+   "hold_buffer_strict": 0,
+   "kcb_688_only": 0,
+   "limit_days": 20,
+   "limit_up_exit": 1,
+   "listed_days": 250,
+   "lu_buy_only": 1,
+   "lu_hold_only": 0,
+   "lu_need_held": 1,
+   "lu_since_start": 0,
+   "n_pf_stop": 0,
+   "n_stop": 0,
+   "paused_in_pool": 0,
+   "pb_fixed": 0,
+   "pert": 0,
+   "pert_salt": "a",
+   "pf_bench": "000905.XSHG",
+   "pf_cut": 1.0,
+   "pf_halt": false,
+   "pf_ma": 0,
+   "pf_peak": 0.0,
+   "pf_stop": 0.0,
+   "pf_wait": 20,
+   "pf_wait_left": 0,
+   "rebal_every": 0,
+   "rebal_phase": 0,
+   "rebal_time": "09:30",
+   "roe_fixed": 0,
+   "skip_n": 0,
+   "stock_num": 10,
+   "stop_ban": 0,
+   "stop_intraday": 1,
+   "stop_loss": 0.35,
+   "stop_time": "14:00",
+   "trail_stop": 0.0,
+   "weekday": 2
+  },
+  "pool_shown": 20,
+  "pool_total": 20,
+  "set_labels": {
+   "pos_state": "持仓状态"
+  },
+  "steps": [
+   {
+    "args": {
+     "cand": 20,
+     "excl": "'钢铁I','煤炭I','石油石化I','采掘I','银行I','非银金融I','金融服务I','交运设备I','交通运输I','传媒I','环保I'",
+     "kcb": "68%",
+     "listed": 250,
+     "pbcut": "floor(0.5 * n)",
+     "pert": 0,
+     "pin": "FALSE",
+     "roecut": "floor(0.1 * n2)",
+     "salt": "a",
+     "sd": "2026-09-14",
+     "skip": 0
+    },
+    "i": 1,
+    "kind": "query",
+    "n_out": 20,
+    "phase": "rebalance",
+    "sql": "\n-- FROEC 候选池：在册宇宙 -> eps>0 / 非ST -> PB 低半区 -> ROE 加速度前 10%\n--              -> 排除周期与金融行业 -> 按流通市值升序取前 N\n-- ★ 首行注释是这条查询的【名字】，实盘的\"选股理由\"页拿它当组名\n--   （lv/explain.py 的 _sql_head）。注释改不了任何行为。\nWITH univ AS (\n  -- ★★ 候选宇宙必须是【权威在册股票】，不能用面板当日行。\n  --   面板是 K 线驱动的：停牌股当日无 K 线 -> 无行 -> 根本不进漏斗。\n  --   实测 2015-12-31：面板 2542 行 vs 权威在市 2811 只，缺 267 只，\n  --   而 paused_daily 当日停牌 266 只 —— 缺的就是停牌股。\n  --   聚宽 get_all_securities() 含停牌股，它们会参与 PB 半区与 ROE 十分位的\n  --   【切点计算】，还能先占掉 [:10] 的名额再被 filter_paused_stock 删掉。\n  --   漏掉它们的后果（2015-12-31 实测）：\n  --     L5 eps>0   1863 -> 2054  (JQ 2050)\n  --     L7 pb半区   931 -> 1027  (JQ 1025)\n  --     L10/L11    数量从对不上到【精确等于 101 / 94】\n  SELECT code FROM {t_universe}\n  WHERE sec_type='stock' AND list_date <= DATE '2026-09-14'\n    AND (delist_date IS NULL OR delist_date > DATE '2026-09-14')\n    AND date_diff('day', list_date::DATE, DATE '2026-09-14') >= 250\n    AND code NOT LIKE '68%'\n    AND hash(code || 'a') % 10000 >= 0\n), today AS (\n  SELECT jq_code, pb, floatmv, is_risk_warned, sw_l1_name\n  FROM {panel} WHERE date = DATE '2026-09-14'\n), miss AS (\n  -- 当日无 K 线（停牌）：只结转【价格派生量】(pb/floatmv)，与聚宽一致 ——\n  -- 停牌股的 valuation 按最后收盘价算。★ 基本面【不结转】：聚宽的\n  -- get_fundamentals 无论是否停牌都给当前最新报告，结转会拿到过期报告。\n  -- 实测 002379.XSHE@2015-12-31：结转基本面得 2015-06-30 的 eps=-0.0286\n  -- 被 eps>0 误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽选中了它）。\n  SELECT u.code AS jq_code, p.pb, p.floatmv, p.is_risk_warned, p.sw_l1_name\n  FROM (SELECT code, DATE '2026-09-14' AS d FROM univ\n        WHERE code NOT IN (SELECT jq_code FROM today)) u\n  ASOF LEFT JOIN (\n      SELECT jq_code, date, pb, floatmv, is_risk_warned, sw_l1_name\n      FROM {panel} WHERE date > DATE '2026-09-14' - INTERVAL 400 DAY\n  ) p ON p.jq_code = u.code AND p.date <= u.d\n), ind AS (\n  SELECT code, roe, report_date,\n         row_number() OVER (PARTITION BY code ORDER BY report_date DESC) rn\n  FROM {t_indicator}\n  WHERE pub_date <= DATE '2026-09-14' AND roe IS NOT NULL\n), eps1 AS (\n  -- ★ eps 取 fin_indicator_q（聚宽 indicator.eps）按【决策日】as-of，\n  --   不从面板结转。面板的 eps_q 值与 indicator.eps 完全一致\n  --   （2015-12-31 实测 2512 只有行情票 100.00% 数值相同，名字带 _q 但不是单季），\n  --   所以对【有行情】的票用哪边都一样；差别只出在停牌股：\n  --   结转面板会拿到该股【最后交易日】那天的基本面，可能是过期报告。\n  --   实测 002379.XSHE@2015-12-31：结转得 2015-06-30 的 eps=-0.0286 被 eps>0\n  --   误剔，而当日最新是 2015-09-30 的 eps=+0.08（聚宽正是选中了它）。\n  --   聚宽 get_fundamentals 无论是否停牌都返回当前最新报告 —— 基本面不结转。\n  SELECT code, eps FROM (\n    SELECT code, eps, row_number() OVER (PARTITION BY code\n             ORDER BY report_date DESC, pub_date DESC) rn\n    FROM {t_indicator}\n    WHERE pub_date <= DATE '2026-09-14' AND eps IS NOT NULL\n  ) WHERE rn = 1\n), roec AS (\n  SELECT code, 4*max(CASE WHEN rn=1 THEN roe END)\n         - max(CASE WHEN rn=2 THEN roe END) - max(CASE WHEN rn=3 THEN roe END)\n         - max(CASE WHEN rn=4 THEN roe END) - max(CASE WHEN rn=5 THEN roe END) AS increase\n  FROM ind WHERE rn <= 5 GROUP BY 1 HAVING count(*) = 5\n), base AS (\n  -- ★ `e.eps` 只是【多带一列出去】给实盘的\"选股理由\"用（见 lv/explain.py）：\n  --   WHERE 一个字没动，行与行序完全不变。指标必须从**策略自己这条查询**里出，\n  --   另写一条\"取指标的 SQL\"就是第二份口径，迟早与它分叉而没人发现。\n  SELECT r.*, e.eps FROM (\n    SELECT * FROM today WHERE jq_code IN (SELECT code FROM univ)\n    UNION ALL SELECT * FROM miss WHERE FALSE\n  ) r JOIN eps1 e ON e.code = r.jq_code\n  WHERE NOT COALESCE(r.is_risk_warned, FALSE)\n    AND e.eps > 0 AND r.pb > 0 AND r.floatmv > 0\n), pb_half AS (\n  SELECT * FROM (SELECT *, row_number() OVER (ORDER BY pb ASC) rn,\n                        count(*) OVER () AS n FROM base)\n  WHERE rn <= floor(0.5 * n)\n), roe_top AS (\n  SELECT * FROM (\n    SELECT b.jq_code, b.floatmv, b.sw_l1_name,\n           -- ↓ 这四列只是【带出去解释用】：pb 与它在 PB 半区里的名次、\n           --   ROE 加速度、EPS。参与筛选的仍然只有下面那个 rn2。\n           b.pb, b.rn AS pb_rn, b.n AS pb_n, b.eps, r.increase AS roe_inc,\n           row_number() OVER (ORDER BY r.increase DESC) rn2,\n           count(*) OVER () AS n2\n    FROM pb_half b JOIN roec r ON r.code = b.jq_code\n  ) WHERE rn2 <= floor(0.1 * n2)\n)\n-- 🔴 末层多返回几列 = **投影**改动：WHERE / ORDER BY / LIMIT / OFFSET 一个字没动，\n--    所以行与行序完全相同，`df['jq_code'].tolist()` 拿到的还是同一个列表。\n--    这几列给实盘的\"为什么选它\"用（lv/explain.py），回测一行行为都不变：\n--      · selftest 每次都跑：同一天把宽投影与\"只返回 jq_code\"对跑，代码列表逐位相同\n--      · 加这几列时另跑过一次全历史（2016-01~2026-08）：逐日权益指纹 +\n--        成交流水指纹（进出场日/代码/股数/价/原因）**逐位相同**\nSELECT jq_code, floatmv, pb, eps, roe_inc, sw_l1_name,\n       pb_rn, pb_n, rn2 AS roe_rn, n2 AS roe_n\nFROM roe_top\nWHERE sw_l1_name IS NULL OR sw_l1_name NOT IN ('钢铁I','煤炭I','石油石化I','采掘I','银行I','非银金融I','金融服务I','交运设备I','交通运输I','传媒I','环保I')\nORDER BY floatmv ASC LIMIT 20 OFFSET 0\n",
+    "sql_head": "FROEC 候选池：在册宇宙 -> eps>0 / 非ST -> PB 低半区 -> ROE 加速度前 10%",
+    "where": "rebalance:487"
+   },
+   {
+    "args": {
+     "side": "buy"
+    },
+    "i": 2,
+    "kind": "tradable",
+    "n_in": 10,
+    "n_out": 10,
+    "phase": "rebalance",
+    "where": "rebalance:505"
+   },
+   {
+    "args": {
+     "end": "2026-09-14",
+     "start": "2026-08-18"
+    },
+    "i": 3,
+    "kind": "had_limit_up",
+    "n_in": 10,
+    "n_out": 2,
+    "phase": "rebalance",
+    "where": "blacklist:470"
+   }
+  ]
+ },
+ "for_date": "2026-09-15",
+ "freed_est": 38500.0,
+ "held_codes": [
+  "002910.XSHE",
+  "300375.XSHE",
+  "300500.XSHE",
+  "300575.XSHE",
+  "301126.XSHE",
+  "301152.XSHE",
+  "603168.XSHG",
+  "603506.XSHG",
+  "605122.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "002910.XSHE",
+   "name": "庄园牧场",
+   "shares": 3700,
+   "why": "候选池第 1/20 名 · 可买"
+  },
+  {
+   "code": "300375.XSHE",
+   "name": "鹏翎股份",
+   "shares": 9100,
+   "why": "候选池第 9/20 名 · 可买"
+  },
+  {
+   "code": "300500.XSHE",
+   "name": "启迪设计",
+   "shares": 3800,
+   "why": "候选池第 4/20 名 · 可买"
+  },
+  {
+   "code": "300575.XSHE",
+   "name": "中旗股份",
+   "shares": 6000,
+   "why": "候选池第 7/20 名 · 可买"
+  },
+  {
+   "code": "301126.XSHE",
+   "name": "达嘉维康",
+   "shares": 3600,
+   "why": "候选池第 2/20 名 · 可买"
+  },
+  {
+   "code": "301152.XSHE",
+   "name": "天力锂能",
+   "shares": 1600,
+   "why": "候选池第 3/20 名 · 可买 · 窗口内涨停过"
+  },
+  {
+   "code": "603168.XSHG",
+   "name": "莎普爱思",
+   "shares": 6400,
+   "why": "候选池第 8/20 名 · 可买"
+  },
+  {
+   "code": "603506.XSHG",
+   "name": "南都物业",
+   "shares": 3300,
+   "why": "候选池第 6/20 名 · 可买 · 窗口内涨停过"
+  },
+  {
+   "code": "605122.XSHG",
+   "name": "四方新材",
+   "shares": 3200,
+   "why": "候选池第 5/20 名 · 可买"
+  }
+ ],
+ "is_rebalance_day": true,
+ "left_est": 60913.49,
+ "next_rebalance": "2026-09-15",
+ "no_price": [],
+ "params": {
+  "lu_buy_only": 1,
+  "stop_intraday": 1,
+  "stop_loss": 0.35,
+  "weekday": 2
+ },
+ "recomputed": false,
+ "recomputed_at": [
+  "2026-09-14T17:00:15",
+  "2026-09-14T18:00:15",
+  "2026-09-14T19:00:16",
+  "2026-09-14T20:00:15",
+  "2026-09-14T20:15:27",
+  "2026-09-14T20:16:12",
+  "2026-09-14T20:16:51",
+  "2026-09-14T20:18:02",
+  "2026-09-14T20:18:35",
+  "2026-09-14T20:43:31"
+ ],
+ "revisions": [],
+ "sell": [
+  {
+   "code": "600774.XSHG",
+   "name": "汉商集团",
+   "reason": "rebalance_out",
+   "ref_price": 7.7,
+   "shares": 5000,
+   "why": "候选池第 12/20 名"
+  }
+ ],
+ "upcoming": [
+  {
+   "date": "2026-09-16",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-17",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-18",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-09-21",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-22",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-23",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-24",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-29",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-08",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": true,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-14",
+   "is_rebal": false,
+   "wday": 3
+  }
+ ],
+ "warnings": []
+}
