@@ -631,6 +631,10 @@ tr.whygap td{color:var(--dim);font-size:10px;text-align:center;
 /* 实盘业绩页的图块。★ 不复用 .pane —— 那个是回测页签容器，
    样式表里 display:none，用了就静默不显示（且不报错）。 */
 .lpbox{padding-top:14px}
+/* 回撤副图【贴着】主图 —— 它是对上面那条曲线的注解，不是独立的一块。
+   留出正常间距的话看着像两张不相干的图，而"同一段时间对着看"正是
+   把它从页签改成副图的理由。 */
+.lpsub{padding-top:0;margin-top:-6px}
 .lpbox svg{width:100%;height:auto}
 
 /* 曲线 hover 高亮：竖线 + 数据点 + 日期。

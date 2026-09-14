@@ -96,7 +96,7 @@ function renderPerf(aid){
   const o = LPD, st = (o && o.stats) || {};
   const b = $('#main');
   if(!o || !o.dates || !o.dates.length){
-    b.innerHTML = backLink() + '<div class="none">还没有权益曲线 ——'
+    b.innerHTML = '<div class="none">还没有权益曲线 ——'
       + '录入第一笔成交之后就有了</div>';
     return;
   }
@@ -105,8 +105,15 @@ function renderPerf(aid){
   const col = upc;
   const pc = x => x == null ? '—' : sgn(x) + (x * 100).toFixed(2) + '%';
 
-  b.innerHTML = backLink()
-    + `<div class="ttl">业绩 · ${esc(aid)}
+  /* 🔴 **这里不再自己放「‹ 返回」。** 顶栏（`pageHead` -> `backLink`）已经有
+       一个，而且是**绑了事件**的那个。这里原来也吐一份同样的 HTML 却从没调
+       `wireBack()` —— 于是页面上有两个一模一样的按钮，**下面那个点了没反应**
+       （2026-09-14 用户报的）。更糟的是两个都叫 `id="goback"`：`wireBack()`
+       用 `$('#goback')` 只取第一个，所以就算补调一次也只会把顶栏那个重绑一遍，
+       body 这个永远是死的 —— **同一个 id 出现两次本身就是 bug**。
+     ★ 判据在 selftest：全页 `#goback` 只许有一个，且它必须绑上了 onclick。 */
+  b.innerHTML =
+    `<div class="ttl">业绩 · ${esc(aid)}
         <span class="lvwhy">${esc(o.dates[0])} ~ ${esc(o.dates[n-1])}
         · ${n} 个交易日</span></div>`
     /* ★ 用 shared/common.js 的 cell() —— 与实盘 KPI 板同一个件。
@@ -129,11 +136,18 @@ function renderPerf(aid){
         ${cell('当前回撤<span class="lvwhy"> · 全程</span>', st.drawdown_now == null ? '—'
                  : (st.drawdown_now * 100).toFixed(2) + '%', '距历史最高')}
        </div>`
-    /* 🔴 三条曲线放**一个框**、上方切换 —— 三张图竖着排的话要上下滚动
-         才能对比同一天；同一个位置切换才看得出差别。 */
+    /* 🔴 **主图切换（收益 / 资金），回撤永远在下方当副图。**
+         原来三条曲线并列成三个页签 —— 而回撤不是与另两条并列的"第三种
+         看法"，它是**对当前这条曲线的注解**（"这一段跌下去有多深"）。
+         放进页签的代价是：要看"那个坑有多深"必须切走，而切走之后上面
+         那条曲线就不在眼前了，只能靠记。副图共用 x 轴，一眼就能对上。
+       ★ 两张图都走 `lineChart`，而它的 W/L/R 是固定的（1160/54/16）、
+         SVG 又是 `width:100%` 等比缩放 —— 所以**同宽即同刻度**，
+         x 轴天然对齐，不需要额外对位代码。 */
     + '<div id="lp_rgwrap"></div>'
     + '<div class="lpbar" id="lp_tab"></div>'
     + '<div id="lp_chart" class="lpbox"></div>'
+    + '<div id="lp_dd" class="lpbox lpsub"></div>'
     + '<div id="lp_tbl" class="lpbox"></div>'
     /* ★ 执行差异放在收益表之后：它是复盘时才看的，而「我涨了多少」是第一眼要看的。 */
     + '<div id="lp_exec" class="lpbox"></div>';
@@ -304,8 +318,11 @@ function renderChart(aid){
   o.day_pnls.forEach(v => { acc += (v || 0); cum.push(Math.round(acc)); });
   const money = v => (v >= 0 ? '+' : '') + num(v, 0) + ' 元';
 
-  /* 顺序 = 看的顺序：收益（默认）-> 资金 -> 回撤 */
-  const TABS = [['nav', '收益曲线'], ['eq', '资金曲线'], ['dd', '回撤曲线']];
+  /* 顺序 = 看的顺序：收益（默认）-> 资金。**回撤不在这里** —— 它是副图。
+     🔴 旧状态兜底：上一版 LPC 可能是 'dd'（页签已经没了），不归一的话
+        会落进 else 分支画出收益曲线却没有任何页签高亮，看着像坏了。 */
+  if(LPC !== 'eq') LPC = 'nav';
+  const TABS = [['nav', '收益曲线'], ['eq', '资金曲线']];
   bar.innerHTML = '<span class="lvwhy">曲线</span>'
     + TABS.map(([k, t]) => `<a href="#" class="lpc${LPC === k ? ' on' : ''}"
         data-c="${k}">${t}</a>`).join('');
@@ -422,20 +439,53 @@ function renderChart(aid){
       lpbSet(a.id === 'lp_bclr' ? '' : (LPB[0] === a.dataset.b ? '' : a.dataset.b));
       renderChart(aid);
     });
-  } else {
-    /* 🔴 `hiCap: 0` —— 回撤的最高点**永远是 0**（在最高点时回撤为 0，
-       不可能为正）。不钳的话 y 轴留白会显示成 +0.1%，而那个数没有意义，
-       读的人会以为"曾经比历史最高还高 0.1%"。 */
-    lineChart(el, [{n: '回撤', v: ddGap(dd), c: '#f05b5b', w: 1.3,
-                    fill: '#f05b5b'}],
-      {dates: o.dates, h: 300, ratioAxis: true, hiCap: 0, zero: 0,
-       ctl: rgNote(o) + '<div class="note">距历史最高还差多少。峰值从<b>起点资金</b>'
-          + '起算 —— 只看曲线上的点会把第一天的下跌算成"没有回撤"。　最深 '
-          + (st.max_drawdown == null ? '—'
-             : (st.max_drawdown * 100).toFixed(2) + '%')
-          + (st.max_drawdown_at ? '（' + esc(st.max_drawdown_at) + '）' : '')
-          + '</div>'});
   }
+  renderDD(aid, o, st);
+}
+
+/* 回撤副图：**跟着上面那条曲线走**，与它共用 x 轴。
+
+   🔴 **口径必须跟随主图，否则两张图在同一屏上会自相矛盾。**
+     资金曲线含入金，收益曲线（TWR 净值）不含 —— 入金那天总资产跳一截、
+     峰值跟着抬高，于是"按总资产算的回撤"会把后面每一天都量深一点，
+     而净值那条根本没这回事。今天两个账户 `net_deposit=0`，两种口径
+     **逐日完全相同**（实测最大差 0.000000）—— 正因为现在看不出差别，
+     才更要把它定死：等哪天真入金了，错的那个口径不会报错，只会
+     悄悄画出一条更深的线。
+
+   ★ 副图高度 150（主图 300）：它是注解不是主角，占一半高度既看得清
+     形状、又不会把收益明细挤到屏幕外。 */
+function renderDD(aid, o, st){
+  const el = $('#lp_dd');
+  if(!el || !o) return;
+  const onNav = (LPC !== 'eq');
+  const base = onNav ? 1.0 : (st.start_equity || o.equity[0]);
+  const src  = onNav ? o.nav : o.equity;
+  if(!src){ el.innerHTML = ''; return; }
+  const dd = drawdownSeries(src, base);
+  const deep = Math.min.apply(null, dd.filter(v => v != null));
+  const at = (() => {                    /* 最深那天 —— 跟着本图口径算 */
+    let i = dd.indexOf(deep);
+    return i >= 0 && o.dates ? o.dates[i] : null;
+  })();
+  /* 🔴 `hiCap: 0` —— 回撤的最高点**永远是 0**（在最高点时回撤为 0，
+     不可能为正）。不钳的话 y 轴留白会显示成 +0.1%，而那个数没有意义，
+     读的人会以为"曾经比历史最高还高 0.1%"。 */
+  lineChart(el, [{n: '回撤', v: ddGap(dd), c: '#f05b5b', w: 1.3, fill: '#f05b5b'}],
+    {dates: o.dates, h: 150, ratioAxis: true, hiCap: 0, zero: 0});
+  /* ★ 说明放在图**下面**（lineChart 的 ctl 是塞在 svg 上方的，
+       放那儿会把主图和副图撑开、破坏"贴在一起"的观感）。 */
+  const note = document.createElement('div');
+  note.className = 'note';
+  note.innerHTML = '回撤 · 按<b>' + (onNav ? '收益曲线（TWR 净值）' : '资金曲线（总资产）')
+    + '</b>算，与上图同一条线。距它自己的历史最高还差多少；峰值从<b>起点</b>'
+    + '起算 —— 只看曲线上的点会把第一天的下跌算成"没有回撤"。　本区间最深 '
+    + (deep == null || !isFinite(deep) ? '—' : (deep * 100).toFixed(2) + '%')
+    + (at ? '（' + esc(at) + '）' : '')
+    + (st.net_deposit ? '　<b>有净入金 ' + num(st.net_deposit, 2)
+        + ' 元</b>，所以两条曲线的回撤不一样：入金抬高总资产的峰值，'
+        + '而净值不受影响。' : '');
+  el.appendChild(note);
 }
 
 /* 收益明细 = **方格热力图**（与回测详情页同一套 calGrid / _hcol / _legend）。

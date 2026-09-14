@@ -4159,6 +4159,184 @@ def t_live_poll():
         sv.ALLOW_LIVE = old_live
 
 
+@case('业绩页：回撤是【副图】不是页签 / 全页只有一个返回按钮（playwright）',
+       tag='web')
+def t_live_perf_dd_and_back():
+    """2026-09-14 用户报的两件事。
+
+    ① 「回撤曲线不应该是一个单独的页签，应该跟随收益曲线和资金曲线，
+       在下方对齐。」—— 对。回撤不是与另两条并列的"第三种看法"，它是
+       **对当前这条曲线的注解**（"这一段跌下去有多深"）。做成页签的代价是：
+       要看那个坑有多深必须切走，而切走之后上面那条曲线就不在眼前了。
+
+    ② 「业绩上方的返回按钮点击没有反应，而且实盘的右边也有一个返回按钮，
+       为什么需要两个？」—— 没有理由，那是 bug。`live-perf.js` 往 body 里
+       又吐了一份 `backLink()` 的 HTML 却**从没调 `wireBack()`**，于是
+       页面上两个一模一样的按钮、下面那个点了没反应。更糟的是两个都叫
+       `id="goback"`，而 `wireBack()` 用 `$('#goback')` 只取第一个 ——
+       就算补调一次也只会把顶栏那个重绑一遍。
+
+    🔴 **「口径跟随主图」这条在真实数据上是空转的**：两个账户
+      `net_deposit=0`，按净值算和按总资产算的回撤**逐日完全相同**。
+      所以必须**构造带入金的数据**才测得到 —— 否则把实现改成"永远用
+      equity"，断言照样全绿（同「四条断言各需不同构造条件」那条）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    from http.server import ThreadingHTTPServer
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        from assay import live as _lv
+        aid = next((a['id'] for a in _lv.load_accounts()
+                    if not a.get('archived')), None)
+        if not aid:
+            return '跳过（没有实盘账户）'
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            # 🔴 从**站内另一页**进来，backLink 才会出现（它要同源 referrer
+            #   + history.length>1）。直接 goto 的话两个按钮都不渲染，
+            #   于是"只有一个"这条断言变成空转 —— 用户报的正是这个场景。
+            pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port,
+                    wait_until='networkidle')
+            pg.click('text=💰 实盘')
+            pg.wait_for_selector('a.lpin', timeout=90000)
+            pg.click('a.lpin')
+            pg.wait_for_selector('#lp_dd svg', timeout=90000)
+            pg.wait_for_timeout(400)
+
+            # ---- ② 返回按钮：只许一个，且必须绑上了事件 ----
+            gb = pg.evaluate("""() => [...document.querySelectorAll('#goback')]
+                .map(x => ({inTop: !!x.closest('#top'), wired: !!x.onclick}))""")
+            assert len(gb) == 1, \
+                ('全页只许有一个「‹ 返回」，实得 %d 个 —— 两个都叫 id=goback，'
+                 '而 wireBack() 用 $(\'#goback\') 只取第一个，另一个必然是'
+                 '**点了没反应**的死按钮（给一个点了没反应的按钮比不给更糟）'
+                 % len(gb))
+            assert gb[0]['inTop'], '那一个该在顶栏（pageHead 统一出的那个）'
+            assert gb[0]['wired'], \
+                '顶栏那个返回按钮没绑 onclick —— wireBack() 没被调到'
+            before = pg.evaluate('() => location.hash')
+            pg.click('#goback')
+            pg.wait_for_timeout(800)
+            assert pg.evaluate('() => location.hash') != before, \
+                '点返回没有任何变化（hash 还是 %s）' % before
+            notes.append('返回按钮只剩顶栏一个且点了真的回退')
+            pg.go_forward()
+            pg.wait_for_selector('#lp_dd svg', timeout=90000)
+            pg.wait_for_timeout(400)
+
+            # ---- ① 回撤不是页签 ----
+            tabs = [t.strip() for t in
+                    pg.locator('#lp_tab a.lpc').all_inner_texts()]
+            assert tabs == ['收益曲线', '资金曲线'], \
+                '页签该只剩收益/资金两个，实得 %s' % tabs
+            assert pg.locator('#lp_dd svg').count() == 1, \
+                '回撤副图该一直在（不是切出来的）'
+
+            # ---- ① 两张图 x 轴【真的对齐】----
+            #   🔴 判据是**量出来的左右边界**，不是"两个 svg 都在" ——
+            #     后者在把副图塞进另一个窄容器时照样绿。
+            def geo():
+                return pg.evaluate("""() => {
+                  const m=document.querySelector('#lp_chart svg'),
+                        d=document.querySelector('#lp_dd svg');
+                  if(!m||!d) return null;
+                  const a=m.getBoundingClientRect(), c=d.getBoundingClientRect();
+                  return {mx:a.x, mw:a.width, mb:a.bottom, mh:a.height,
+                          dx:c.x, dw:c.width, dt:c.top, dh:c.height,
+                          mvb:m.getAttribute('viewBox'),
+                          dvb:d.getAttribute('viewBox')};}""")
+            g = geo()
+            assert g, '主图或副图不在'
+            assert abs(g['mx'] - g['dx']) < 1 and abs(g['mw'] - g['dw']) < 1, \
+                ('两张图左右没对齐：主图 x=%.1f w=%.1f，副图 x=%.1f w=%.1f '
+                 '—— 同一天必须落在同一个横坐标上，否则"对着看"就不成立'
+                 % (g['mx'], g['mw'], g['dx'], g['dw']))
+            #   viewBox 宽必须相同（lineChart 的 W 固定 1160）：宽相同 +
+            #   等比缩放 = 刻度天然一致。宽不同的话就算外框对齐，
+            #   里面的 x 也是错位的，**而那不报错**。
+            assert g['mvb'].split()[2] == g['dvb'].split()[2], \
+                ('两张图 viewBox 宽不同（%s vs %s）—— 外框对齐但内部刻度错位'
+                 % (g['mvb'], g['dvb']))
+            assert g['dt'] >= g['mb'] - 2, \
+                '副图该在主图【下方】，实得 副图 top=%.0f < 主图 bottom=%.0f' \
+                % (g['dt'], g['mb'])
+            #   ★ 副图必须**更矮** —— 它是注解不是主角。原来我这行写成了
+            #     `assert g['dh'] < g['mh'] if 'mh' in g else True`，而 geo()
+            #     根本没返回 mh，于是整句恒真：**一条彻底空转的断言**。
+            assert g['dh'] < g['mh'] * 0.75, \
+                ('回撤副图该明显比主图矮（注解不该抢主角），实得 副图 %.0f / '
+                 '主图 %.0f' % (g['dh'], g['mh']))
+            notes.append('主副图同 x 同宽（x=%.0f w=%.0f）、副图在下方且更矮'
+                         % (g['mx'], g['mw']))
+
+            # ---- ① 口径【跟随主图】：必须用构造数据才测得到 ----
+            #   造一段有入金的行情：equity 在中途跳一截（入金），nav 不跳。
+            #   于是"按总资产算"的回撤会被抬高的峰值量得更深，两条必然不同。
+            diverge = pg.evaluate("""() => {
+              const D=[],E=[],N=[],P=[];
+              let nav=1.0, eq=100000;
+              for(let i=0;i<60;i++){
+                const dt=new Date(Date.UTC(2026,0,5+i));
+                D.push(dt.toISOString().slice(0,10));
+                const r = (i<20? 0.004 : -0.004);      /* 先涨后跌，制造回撤 */
+                nav*=(1+r); eq*=(1+r);
+                /* 🔴 入金必须落在【下跌途中】，不能落在峰值那天 ——
+                   回撤是**尺度无关**的：在峰值入金之后两条同比例下跌，
+                   算出来一模一样，断言就成了空转（第一版我就这么构造的，
+                   是断言自己把它抓出来的）。落在下跌途中时 equity 会创新高、
+                   回撤被重置，而 nav 继续加深 —— 实测逐日最大差 0.0583。 */
+                if(i===34) eq+=500000;                  /* 入金：只动 equity */
+                N.push(nav); E.push(Math.round(eq)); P.push(Math.round(eq*r));
+              }
+              const O={dates:D,nav:N,equity:E,day_rets:N.map(()=>0),day_pnls:P,
+                       bench:{},benchmarks:[],
+                       stats:{start_equity:100000,net_deposit:500000,twr:nav-1,
+                              max_drawdown:0,drawdown_now:0}};
+              LPD=O; LPS=O; LPC='nav'; renderChart('probe');
+              const a=document.querySelector('#lp_dd svg path[stroke]');
+              const pa=a?a.getAttribute('d'):null;
+              const na=document.querySelector('#lp_dd .note:last-of-type');
+              const ta=na?na.textContent:'';
+              LPC='eq'; renderChart('probe');
+              const b=document.querySelector('#lp_dd svg path[stroke]');
+              const pb=b?b.getAttribute('d'):null;
+              const nb=document.querySelector('#lp_dd .note:last-of-type');
+              const tb=nb?nb.textContent:'';
+              return {navPath:pa, eqPath:pb, navTxt:ta, eqTxt:tb};}""")
+            assert diverge['navPath'] and diverge['eqPath'], '构造数据没画出回撤'
+            assert diverge['navPath'] != diverge['eqPath'], \
+                ('切换主图时回撤**没跟着换口径** —— 构造了 50 万入金，'
+                 '按总资产算会被抬高的峰值量得更深，两条曲线必然不同；'
+                 '现在画出来一模一样，说明副图永远在用同一个序列')
+            assert 'TWR 净值' in diverge['navTxt'], \
+                '收益曲线下的回撤该标明按 TWR 净值算：%r' % diverge['navTxt'][:60]
+            assert '总资产' in diverge['eqTxt'], \
+                '资金曲线下的回撤该标明按总资产算：%r' % diverge['eqTxt'][:60]
+            assert '净入金' in diverge['eqTxt'], \
+                ('有净入金时必须说出来 —— 否则"两条曲线的回撤不一样"'
+                 '看着像其中一个算错了')
+            notes.append('口径跟随主图（构造 50 万入金，两条回撤路径确实不同）')
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('实盘业绩页：资金/收益/回撤三条曲线 + 年月日收益表（playwright）',
        tag='web')
 def t_live_perf_ui():
@@ -4237,7 +4415,9 @@ def t_live_perf_ui():
             assert pg.evaluate('()=>location.hash').endswith('/perf'), \
                 '点了没跳到业绩页'
             txt = pg.inner_text('#main')
-            for k in ('资金曲线', '收益曲线', '回撤曲线', '收益明细'):
+            #   ★ 「回撤曲线」不再是页签（2026-09-14 改成副图），所以这里
+            #     只查仍然成块存在的那几个标题；回撤单独在下面按副图验。
+            for k in ('资金曲线', '收益曲线', '收益明细'):
                 assert k in txt, \
                     ('业绩页缺「%s」—— 🔴 第一版把这几块套在 `.pane` 里，'
                      '而它在样式表里是 display:none，于是 SVG 画出来了、'
@@ -4249,8 +4429,9 @@ def t_live_perf_ui():
                     pg.locator('#lp_tab a.lpc').all_inner_texts()]
             #   ★ 顺序 = 看的顺序：打开第一眼要回答"我赚了多少 / 跑赢基准了吗"，
             #     而不是"账上有多少钱"（那在 KPI 板里已经有了）。
-            assert tabs == ['收益曲线', '资金曲线', '回撤曲线'], \
-                '曲线切换条的顺序不对：%s' % tabs
+            assert tabs == ['收益曲线', '资金曲线'], \
+                ('曲线切换条该只剩两个页签（回撤是副图，不是并列的第三种'
+                 '看法）：%s' % tabs)
             assert pg.locator('#lp_chart svg').count() == 1, \
                 '该只有一个图框（三条曲线切换），实得 %d' \
                 % pg.locator('#lp_chart svg').count()
@@ -4293,11 +4474,20 @@ def t_live_perf_ui():
             assert pg.locator('#lp_chart svg path[stroke]').count() > 0, \
                 '资金曲线没画出折线'
 
-            # 回撤曲线：🔴 y 轴最高点必须**正好是 0**
-            pg.locator('#lp_tab a.lpc[data-c="dd"]').click()
-            pg.wait_for_timeout(300)
-            dv = _pcts()
-            assert dv, '回撤曲线没有百分比刻度（该用 ratioAxis）'
+            # 回撤【副图】：🔴 y 轴最高点必须**正好是 0**
+            #   ★ 不再点页签 —— 它现在永远在主图下方（2026-09-14）。
+            def _ddpcts():
+                out = []
+                for t in pg.locator('#lp_dd svg text').all_text_contents():
+                    t = (t or '').strip()
+                    if t.endswith('%'):
+                        try:
+                            out.append(float(t.rstrip('%')))
+                        except ValueError:
+                            pass
+                return out
+            dv = _ddpcts()
+            assert dv, '回撤副图没有百分比刻度（该用 ratioAxis）'
             #   ★ 消息里的 % 都要写成 %% —— 混用的话断言触发时
             #     **消息本身崩掉**（not enough arguments for format string），
             #     于是看不到失败原因，只看到一个格式化错误（变异测试踩到）。
@@ -4307,8 +4497,8 @@ def t_live_perf_ui():
                  '+0.1%% 这种没有意义的数，读的人会以为"曾经比历史最高'
                  '还高 0.1%%"（用 hiCap:0 钳住）' % max(dv))
             assert min(dv) < 0, '回撤该有负值：%s' % dv
-            assert pg.locator('#lp_chart svg path[stroke]').count() > 0, \
-                '回撤曲线没画出折线'
+            assert pg.locator('#lp_dd svg path[stroke]').count() > 0, \
+                '回撤副图没画出折线'
 
             # 收益曲线：百分比刻度 + 量级合理 + 同时给金额读数
             pg.locator('#lp_tab a.lpc[data-c="nav"]').click()
