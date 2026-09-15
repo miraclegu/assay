@@ -1,0 +1,277 @@
+{
+ "account": "froec",
+ "built_at": "2026-09-15T16:19:02",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 9405.04,
+ "code_sha": "c3118f7d",
+ "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
+ "data_asof": "2026-09-15",
+ "data_fingerprint": {
+  "overall": "b3a9e51875f9",
+  "parts": {
+   "index": {
+    "hash": "f3169e08d850",
+    "n_files": 24,
+    "newest_mtime": "2026-09-15T16:17:14",
+    "total_bytes": 64707565
+   },
+   "panel": {
+    "hash": "32e7da9d77ba",
+    "n_files": 24,
+    "newest_mtime": "2026-09-15T16:18:27",
+    "total_bytes": 1340013745
+   },
+   "std": {
+    "hash": "37439f8aaa94",
+    "n_files": 18,
+    "newest_mtime": "2026-09-15T16:18:50",
+    "total_bytes": 375773670
+   }
+  }
+ },
+ "days_until_rebalance": 4,
+ "explain": {
+  "captured": false,
+  "codes_total": 0,
+  "g_sets": {
+   "pos_state": [
+    "002910.XSHE",
+    "300375.XSHE",
+    "300500.XSHE",
+    "300575.XSHE",
+    "300980.XSHE",
+    "301126.XSHE",
+    "301152.XSHE",
+    "603168.XSHG",
+    "603506.XSHG",
+    "605122.XSHG"
+   ]
+  },
+  "groups": [],
+  "n_groups": 0,
+  "notes": [
+   "这一轮策略没有查数据 —— 多半不是调仓日，所以没有候选池。"
+  ],
+  "params": {
+   "buy_delay": "",
+   "candidate_num": 10,
+   "chand_k": 0.0,
+   "chand_n": 22,
+   "exit_time": "14:00",
+   "explain_pool": 20,
+   "fill_blacklist": 0,
+   "fill_paused": 0,
+   "fill_pool": 40,
+   "hold_buffer": 0,
+   "hold_buffer_strict": 0,
+   "kcb_688_only": 0,
+   "limit_days": 20,
+   "limit_up_exit": 1,
+   "listed_days": 250,
+   "lu_buy_only": 1,
+   "lu_hold_only": 0,
+   "lu_need_held": 1,
+   "lu_since_start": 1,
+   "n_pf_stop": 0,
+   "n_stop": 0,
+   "paused_in_pool": 0,
+   "pb_fixed": 0,
+   "pert": 0,
+   "pert_salt": "a",
+   "pf_bench": "000905.XSHG",
+   "pf_cut": 1.0,
+   "pf_halt": false,
+   "pf_ma": 0,
+   "pf_peak": 0.0,
+   "pf_stop": 0.0,
+   "pf_wait": 20,
+   "pf_wait_left": 0,
+   "rebal_every": 0,
+   "rebal_phase": 0,
+   "rebal_time": "09:30",
+   "roe_fixed": 0,
+   "skip_n": 0,
+   "stock_num": 10,
+   "stop_ban": 0,
+   "stop_intraday": 1,
+   "stop_loss": 0.35,
+   "stop_time": "14:00",
+   "trail_stop": 0.0,
+   "weekday": 2
+  },
+  "pool_shown": 0,
+  "pool_total": 0,
+  "set_labels": {
+   "pos_state": "持仓状态"
+  },
+  "steps": []
+ },
+ "for_date": "2026-09-16",
+ "freed_est": 0,
+ "held_codes": [
+  "002910.XSHE",
+  "300375.XSHE",
+  "300500.XSHE",
+  "300575.XSHE",
+  "300980.XSHE",
+  "301126.XSHE",
+  "301152.XSHE",
+  "603168.XSHG",
+  "603506.XSHG",
+  "605122.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "002910.XSHE",
+   "name": "庄园牧场",
+   "shares": 3700,
+   "why": ""
+  },
+  {
+   "code": "300375.XSHE",
+   "name": "鹏翎股份",
+   "shares": 9100,
+   "why": ""
+  },
+  {
+   "code": "300500.XSHE",
+   "name": "启迪设计",
+   "shares": 3800,
+   "why": ""
+  },
+  {
+   "code": "300575.XSHE",
+   "name": "中旗股份",
+   "shares": 6000,
+   "why": ""
+  },
+  {
+   "code": "300980.XSHE",
+   "name": "祥源新材",
+   "shares": 2300,
+   "why": ""
+  },
+  {
+   "code": "301126.XSHE",
+   "name": "达嘉维康",
+   "shares": 3600,
+   "why": ""
+  },
+  {
+   "code": "301152.XSHE",
+   "name": "天力锂能",
+   "shares": 1600,
+   "why": ""
+  },
+  {
+   "code": "603168.XSHG",
+   "name": "莎普爱思",
+   "shares": 6400,
+   "why": ""
+  },
+  {
+   "code": "603506.XSHG",
+   "name": "南都物业",
+   "shares": 3300,
+   "why": ""
+  },
+  {
+   "code": "605122.XSHG",
+   "name": "四方新材",
+   "shares": 3200,
+   "why": ""
+  }
+ ],
+ "is_rebalance_day": false,
+ "left_est": 9405.04,
+ "next_rebalance": "2026-09-22",
+ "no_price": [],
+ "params": {
+  "lu_buy_only": 1,
+  "lu_since_start": 1,
+  "stop_intraday": 1,
+  "stop_loss": 0.35,
+  "weekday": 2
+ },
+ "recomputed": false,
+ "sell": [],
+ "upcoming": [
+  {
+   "date": "2026-09-17",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-18",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-09-21",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-22",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-23",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-24",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-29",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-08",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": true,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": true,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-14",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-15",
+   "is_rebal": false,
+   "wday": 4
+  }
+ ],
+ "warnings": []
+}

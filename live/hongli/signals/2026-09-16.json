@@ -1,0 +1,297 @@
+{
+ "account": "hongli",
+ "built_at": "2026-09-15T16:18:58",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 61569.55,
+ "code_sha": "edbdaeb0",
+ "code_sha256": "edbdaeb00fe58a560712f687b7712b43113ad113e9f0088c168cc3fef12864a7",
+ "data_asof": "2026-09-15",
+ "data_fingerprint": {
+  "overall": "b3a9e51875f9",
+  "parts": {
+   "index": {
+    "hash": "f3169e08d850",
+    "n_files": 24,
+    "newest_mtime": "2026-09-15T16:17:14",
+    "total_bytes": 64707565
+   },
+   "panel": {
+    "hash": "32e7da9d77ba",
+    "n_files": 24,
+    "newest_mtime": "2026-09-15T16:18:27",
+    "total_bytes": 1340013745
+   },
+   "std": {
+    "hash": "37439f8aaa94",
+    "n_files": 18,
+    "newest_mtime": "2026-09-15T16:18:50",
+    "total_bytes": 375773670
+   }
+  }
+ },
+ "days_until_rebalance": 10,
+ "explain": {
+  "captured": false,
+  "codes_total": 0,
+  "g_sets": {},
+  "groups": [],
+  "n_groups": 0,
+  "notes": [
+   "这一轮策略没有查数据 —— 多半不是调仓日，所以没有候选池。"
+  ],
+  "params": {
+   "b1_mode": "orig",
+   "b_mode": "abs",
+   "b_np_pct": 0.3,
+   "b_rev_pct": 0.3,
+   "b_roe_pct": 0.3,
+   "backup_a": 5,
+   "backup_b": 5,
+   "beta_pct": 1.0,
+   "beta_win": 252,
+   "buy_alloc": "fixed",
+   "chand_k": 0.0,
+   "chand_n": 22,
+   "div_method": "fiscal_year",
+   "div_min": 0.03,
+   "div_top_pct": 0.1,
+   "equal_weight": 0,
+   "hold_buffer": 0,
+   "idle_fix": 0,
+   "limit_up_exit": 1,
+   "monthday": 1,
+   "n_exit": 0,
+   "n_pf_stop": 0,
+   "n_reentry": 0,
+   "n_stop": 0,
+   "np_hi": 1.0,
+   "np_lo": 0.1,
+   "num_a": 10,
+   "num_b": 5,
+   "pe_hi": 50.0,
+   "pe_lo": 5.0,
+   "pf_bench": "000015.XSHG",
+   "pf_cut": 1.0,
+   "pf_halt": false,
+   "pf_ma": 0,
+   "pf_peak": 0.0,
+   "pf_stop": 0.0,
+   "pf_wait": 20,
+   "pf_wait_left": 0,
+   "reentry": 1,
+   "rev_hi": 1.0,
+   "rev_lo": 0.05,
+   "roe_hi": 1.0,
+   "roe_lo": 0.05,
+   "stop_ban": 0,
+   "stop_intraday": 0,
+   "stop_loss": 0.0,
+   "stop_time": "14:00",
+   "trail_stop": 0.0,
+   "twopass_min": 0.5
+  },
+  "pool_shown": 0,
+  "pool_total": 0,
+  "set_labels": {},
+  "steps": []
+ },
+ "for_date": "2026-09-16",
+ "freed_est": 0,
+ "held_codes": [
+  "600012.XSHG",
+  "600350.XSHG",
+  "600803.XSHG",
+  "601009.XSHG",
+  "601088.XSHG",
+  "601229.XSHG",
+  "601318.XSHG",
+  "601328.XSHG",
+  "601336.XSHG",
+  "601857.XSHG",
+  "601963.XSHG",
+  "601998.XSHG",
+  "603444.XSHG",
+  "603519.XSHG",
+  "603889.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "600012.XSHG",
+   "name": "皖通高速",
+   "shares": 3900,
+   "why": ""
+  },
+  {
+   "code": "600350.XSHG",
+   "name": "山东高速",
+   "shares": 6300,
+   "why": ""
+  },
+  {
+   "code": "600803.XSHG",
+   "name": "新奥股份",
+   "shares": 3500,
+   "why": ""
+  },
+  {
+   "code": "601009.XSHG",
+   "name": "南京银行",
+   "shares": 5600,
+   "why": ""
+  },
+  {
+   "code": "601088.XSHG",
+   "name": "中国神华",
+   "shares": 1300,
+   "why": ""
+  },
+  {
+   "code": "601229.XSHG",
+   "name": "上海银行",
+   "shares": 6900,
+   "why": ""
+  },
+  {
+   "code": "601318.XSHG",
+   "name": "中国平安",
+   "shares": 1100,
+   "why": ""
+  },
+  {
+   "code": "601328.XSHG",
+   "name": "交通银行",
+   "shares": 9000,
+   "why": ""
+  },
+  {
+   "code": "601336.XSHG",
+   "name": "新华保险",
+   "shares": 1000,
+   "why": ""
+  },
+  {
+   "code": "601857.XSHG",
+   "name": "中国石油",
+   "shares": 5700,
+   "why": ""
+  },
+  {
+   "code": "601963.XSHG",
+   "name": "重庆银行",
+   "shares": 5800,
+   "why": ""
+  },
+  {
+   "code": "601998.XSHG",
+   "name": "中信银行",
+   "shares": 7300,
+   "why": ""
+  },
+  {
+   "code": "603444.XSHG",
+   "name": "吉比特",
+   "shares": 100,
+   "why": ""
+  },
+  {
+   "code": "603519.XSHG",
+   "name": "立霸股份",
+   "shares": 3800,
+   "why": ""
+  },
+  {
+   "code": "603889.XSHG",
+   "name": "新澳股份",
+   "shares": 11000,
+   "why": ""
+  }
+ ],
+ "is_rebalance_day": false,
+ "left_est": 61569.55,
+ "next_rebalance": "2026-10-08",
+ "no_price": [],
+ "params": {
+  "div_method": "fiscal_year"
+ },
+ "recomputed": false,
+ "sell": [],
+ "upcoming": [
+  {
+   "date": "2026-09-17",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-18",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-09-21",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-22",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-23",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-24",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-29",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-08",
+   "is_rebal": true,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-14",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-15",
+   "is_rebal": false,
+   "wday": 4
+  }
+ ],
+ "warnings": []
+}
