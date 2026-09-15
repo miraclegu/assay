@@ -97,7 +97,6 @@ function ipCard(d, i) {
     + '<h4><span style="font-size:15px">' + esc(d.short) + '</span>'
     + '<span class="lvwhy">' + esc(d.label) + '</span>'
     + '<span class="lvtag off" style="cursor:default">' + pan + '</span>'
-    + (d.builtin ? '<span class="lvwhy">常驻位 · 不占那 4 个名额</span>' : '')
     + (d.unit ? '<span class="lvwhy">单位 ' + esc(d.unit) + '</span>' : '')
     + '<span style="flex:1"></span>'
     /* ★ 走 `stockHref`（common.js 里那个唯一定义点）再补参数 ——
@@ -190,9 +189,6 @@ function draw() {
       drawKChart(cv, {bars: bars, hover: null});
       return;
     }
-    /* ★ 成交量有**自己的固定位置**（紧贴主图下方，`builtin`）——
-       再当成普通副图画一遍就是同一块画两处。 */
-    if (p.builtin) { drawKChart(cv, {bars: BARS, hover: null}); return; }
     drawKChart(cv, {bars: BARS, hover: null,
       subs: [{id: p.id, label: p.short || p.label, unit: p.unit,
               rows: ROWS, series: p.series}]});

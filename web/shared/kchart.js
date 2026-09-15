@@ -46,32 +46,27 @@ function drawKChart(cv, opts) {
                                 .slice(0, 4);
   const nSub = subs.length;
   const GAP = 8;
-  /* ★ 成交量那块也能关（`vol:false`）—— 对着屏幕看的人就是把它当一个
-     副图指标挑的。它有**自己的固定位置**（紧贴主图下方），所以不占
-     "最多 4 个副图"的名额。 */
-  const showVol = opts.vol !== false;
-  const volH = showVol ? Math.round(H * (nSub ? 0.15 : 0.22)) : 0;
-  const avail = H - PADT - PADB - volH - GAP * (nSub + (showVol ? 1 : 0));
+  /* 🔴 **成交量不再是内置的一块** —— 它就是一个普通副图（`vol` 指标）。
+     原来它画死在这儿，于是"把第一个副图换成 KDJ"这种事做不到，而用户
+     要的正是"每个副图自己选显示什么"。一处实现，三个调用方都传它。 */
+  const avail = H - PADT - PADB - GAP * (nSub + 1);
   /* ★ 单个副图时**刻意与改造前同高**（H×0.20）—— 那是现在页面的样子，
        没有理由因为"支持多个"就把它改掉。多个时按可用高度分，
        并给主图留住 38%：主图才是主角，副图是注解。 */
-  const subH = nSub ? Math.max(56, Math.min(Math.round(H * 0.20),
-                                            Math.floor(avail * 0.62 / nSub))) : 0;
+  const subH = nSub ? Math.max(56, Math.min(Math.round(H * 0.22),
+                                            Math.floor(avail * 0.66 / nSub))) : 0;
   const mainH = avail - subH * nSub;
-  const volTop = PADT + mainH + GAP;
-  const subTop = showVol ? volTop + volH + GAP : volTop;   /* 第一个副图的顶 */
+  const subTop = PADT + mainH + GAP;           /* 第一个副图的顶 */
   const subY = j => subTop + j * (subH + GAP); /* 第 j 个副图的顶 */
-  const subBot = nSub ? subY(nSub - 1) + subH
-                      : (showVol ? volTop + volH : PADT + mainH);
+  const subBot = nSub ? subY(nSub - 1) + subH : PADT + mainH;
   const w = W - PADL - PADR;
-  let lo = Infinity, hi = -Infinity, vmax = 0;
+  let lo = Infinity, hi = -Infinity;
   bars.forEach(b => {
     if (b.low != null) lo = Math.min(lo, b.low);
     if (b.high != null) hi = Math.max(hi, b.high);
     ['ma5', 'ma10', 'ma20', 'ma60', 'ub', 'lb'].forEach(k => {
       if (b[k] != null) { lo = Math.min(lo, b[k]); hi = Math.max(hi, b[k]); }
     });
-    vmax = Math.max(vmax, b.volume || 0);
   });
   if (!isFinite(lo) || !isFinite(hi)) return null;
   /* 🔴 **对数坐标**（opts.log）。为什么 K 线需要它：线性轴上"涨 1 块"
@@ -119,7 +114,6 @@ function drawKChart(cv, opts) {
   const X = i => PADL + step * (i + 0.5);
   const Y = v => PADT + mainH
     - ((LOG ? lg(v) : v) - plo) / (phi - plo) * mainH;
-  const VY = v => volTop + volH - (vmax ? v / vmax * volH : 0);
 
   g.font = '10px ui-monospace,Menlo,monospace';
   g.textAlign = 'right';
@@ -164,16 +158,11 @@ function drawKChart(cv, opts) {
     const y1 = Y(Math.max(o0, b.close)), y2 = Y(Math.min(o0, b.close));
     const hh = Math.max(1, y2 - y1);
     g.fillRect(x - bw / 2, y1, bw, hh);
-    if (showVol) {
-      g.fillStyle = c; g.globalAlpha = .55;
-      g.fillRect(x - bw / 2, VY(b.volume || 0), bw,
-                 volTop + volH - VY(b.volume || 0));
-      g.globalAlpha = 1;
-      /* 涨跌停那个点钉在量能块下沿 —— 量能关掉了它也就没有落脚处 */
-      if (b.limit_up || b.limit_down) {
-        g.fillStyle = b.limit_up ? UP : DN;
-        g.beginPath(); g.arc(x, volTop + volH + 4, 1.6, 0, 6.284); g.fill();
-      }
+    /* 涨跌停那个点：原来钉在量能块下沿，而量能块已经不是固定的一块了
+       —— 改钉在**主图下沿**，跟着 K 线走，副图怎么换都在。 */
+    if (b.limit_up || b.limit_down) {
+      g.fillStyle = b.limit_up ? UP : DN;
+      g.beginPath(); g.arc(x, PADT + mainH + 3, 1.6, 0, 6.284); g.fill();
     }
   });
   /* 均线：由长到短画 —— 短均线最活跃、要压在上层不被遮住。 */
@@ -259,7 +248,7 @@ function drawKChart(cv, opts) {
     const rows = pane.rows, top = subY(j);
     const ser = (pane.series || []).filter(x => x.style !== 'zero');
     const wantZero = (pane.series || []).some(
-      x => x.style === 'zero' || x.style === 'bar');
+      x => x.style === 'zero' || x.style === 'bar' || x.style === 'vbar');
     let slo = Infinity, shi = -Infinity;
     rows.forEach(r => ser.forEach(x => {
       const v = r[x.key];
@@ -274,9 +263,15 @@ function drawKChart(cv, opts) {
     g.globalAlpha = 1;
     g.font = '10px ui-monospace,Menlo,monospace';
     g.textAlign = 'right'; g.fillStyle = DIM;
-    const fmt = v => (v == null ? '—'
-      : (Math.abs(v) >= 1000 ? v.toFixed(0)
-         : Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(2)));
+    /* 刻度格式：成交量那种上亿的数直接打出来是一串数字，读不出量级 ——
+       按万 / 亿折一下。**只在这儿折**，读数浮层里仍是原始值。 */
+    const fmt = v => {
+      if (v == null) return '—';
+      const a = Math.abs(v);
+      if (a >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+      if (a >= 1e4) return (v / 1e4).toFixed(a >= 1e6 ? 0 : 1) + '万';
+      return a >= 1000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : v.toFixed(2);
+    };
     g.fillText(fmt(shi), PADL - 5, top + 8);
     g.fillText(fmt(slo), PADL - 5, top + subH);
     /* 0 轴：有柱子或指标自己要求时画一条虚线 —— MACD/BIAS/均线差这些
@@ -287,6 +282,22 @@ function drawKChart(cv, opts) {
       g.setLineDash([]); g.globalAlpha = 1;
     }
     ser.forEach(x => {
+      /* 量柱：**按那天的涨跌上色**，不是按这个数的正负 —— 成交量永远是
+         正的，按正负上色的话整片都是涨色（同 `upc` 那条：0 与负都不能
+         并进涨色）。 */
+      if (x.style === 'vbar') {
+        rows.forEach((r, i) => {
+          const v = r[x.key]; if (v == null) return;
+          const b = bars[i] || {};
+          const o0 = b.open == null ? b.close : b.open;
+          g.fillStyle = b.close > o0 ? UP : (b.close < o0 ? DN : DIM);
+          g.globalAlpha = .55;
+          const y0 = SY(0), y1 = SY(v);
+          g.fillRect(X(i) - bw / 2, Math.min(y0, y1), bw, Math.abs(y1 - y0) || 1);
+          g.globalAlpha = 1;
+        });
+        return;
+      }
       if (x.style === 'bar') {
         rows.forEach((r, i) => {
           const v = r[x.key]; if (v == null) return;
@@ -312,12 +323,15 @@ function drawKChart(cv, opts) {
     g.textAlign = 'left';
     const sr = rows[(opts.hover != null && rows[opts.hover]) ? opts.hover
                     : rows.length - 1] || {};
-    let lx = PADL + 2;
+    /* ★ `pane.reserve` = 左上角留给**下拉框**的宽度（页面把一个 <select>
+       浮在画布上，让每个副图自己选显示什么）。留了位就不再画指标名 ——
+       下拉框上写着的就是它（同一份信息不要两处看）。 */
+    let lx = PADL + 2 + (pane.reserve || 0);
     /* ★ 指标名与曲线名**重复时不印两遍**：单序列的副图（ATR/CCI）图例会写成
        "ATR ATR 0.29"，两个 ATR 之间那个空格看着像出了什么错。 */
     const dupe = (pane.series || []).some(
       x => x.style !== 'zero' && x.label === pane.label);
-    if (pane.label && !dupe) {
+    if (pane.label && !dupe && !pane.reserve) {
       g.fillStyle = DIM;
       g.fillText(pane.label, lx, top + 10);
       lx += g.measureText(pane.label).width + 8;
@@ -383,8 +397,10 @@ function drawKChart(cv, opts) {
     g.moveTo(x1, PADT); g.lineTo(x1, yb); g.stroke();
     g.globalAlpha = 1;
   }
-  return {trHits: trHits, PADL, PADR, step, n, X,
-          mainTop: PADT, mainH, volTop, volH, subTop, subH, nSub, subBot};
+  return {trHits: trHits, PADL, PADR, step, n, X, GAP,
+          mainTop: PADT, mainH, subTop, subH, nSub, subBot,
+          /* 第 j 个副图的顶 —— 页面按它把下拉框浮到对应位置 */
+          subY: subY};
 }
 
 /* 多股归一涨幅折线（对比页用）。series: [{code,name,ret:[...]}] */

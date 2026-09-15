@@ -7021,14 +7021,13 @@ def t_stock_ui():
             #   🔴 原来只要选了副图就无条件叠 BOLL，主图上 7 条线；
             #     而 BOLL 中轨就是 MA20（同一条线画两遍、两个颜色），
             #     上下轨的橙色又与 MA5 撞色 —— 表现就是"5 日线看着有两条"。
-            # ★ **入口变了，判据没变**（2026-09-15 改版）：BOLL 从工具条上一个
-            #   独立开关搬进了「📊 指标」面板的**主图指标**那一组 ——
-            #   同一个开关不该在两处出现。要证的仍是那三件事：
+            # ★ **入口变过两次，判据一次没变**：工具条独立开关 -> 指标面板里
+            #   的"主图指标"那组 -> 工具条上的「主图 [均线][布林带]」两个开关
+            #   （副图改成槽位之后，面板整个没了，主图那两个本来就只有两个、
+            #   做成下拉反而绕）。要证的仍是那三件事：
             #   默认关 / 开了画布真的变 / 状态进 URL（刷新不丢）。
-            pg.click('#kpick')
-            pg.wait_for_timeout(300)
-            _bt = pg.locator('#kpbox .ind[data-i="boll"]')
-            assert _bt.count() == 1, 'BOLL 不在指标面板里'
+            _bt = pg.locator('#kpickbox .kmain[data-i="boll"]')
+            assert _bt.count() == 1, '工具条上没有 BOLL 这个主图开关'
             assert 'on' not in (_bt.get_attribute('class') or ''), \
                 'BOLL 默认应该是关的'
             assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
@@ -7039,18 +7038,18 @@ def t_stock_ui():
             pg.mouse.move(bb['x'] + bb['width'] / 2, bb['y'] - 40)
             pg.wait_for_timeout(400)
             _no = pg.evaluate(NZ)
-            pg.locator('#kpbox .ind[data-i="boll"]').click()
-            pg.wait_for_timeout(1200)
+            pg.locator('#kpickbox .kmain[data-i="boll"]').click()
+            pg.wait_for_timeout(1300)
             _yes = pg.evaluate(NZ)
             assert _yes > _no, \
                 '开了 BOLL 画布像素没变多（%d -> %d）' % (_no, _yes)
-            assert 'on' in (pg.locator('#kpbox .ind[data-i="boll"]')
+            assert 'on' in (pg.locator('#kpickbox .kmain[data-i="boll"]')
                             .get_attribute('class') or ''), \
-                'BOLL 开了但那一行没点亮'
+                'BOLL 开了但那个标签没点亮'
             assert 'main=ma%2Cboll' in pg.url or 'main=ma,boll' in pg.url, \
                 'BOLL 状态没进 URL（刷新就丢）：%s' % pg.url
-            pg.locator('#kpbox .ind[data-i="boll"]').click()
-            pg.wait_for_timeout(1200)
+            pg.locator('#kpickbox .kmain[data-i="boll"]').click()
+            pg.wait_for_timeout(1300)
             assert abs(pg.evaluate(NZ) - _no) < 300, \
                 '关掉 BOLL 后画布没回到原样'
 
@@ -7060,7 +7059,9 @@ def t_stock_ui():
             #   原来这条查的是"读数里出现 K/D/J" —— **被改动作废**的判据。
             #   ★ 改成拦 `fillText`：直接验副图图例画了什么，
             #     比数像素准（那条带子里混着柱子与曲线，图例会被淹没）。
-            pg.locator('#body .ind[data-i="kdj"]').click()
+            # ★ 换指标的入口也变了：副图现在是**槽位**，每个左上角一个下拉框
+            #   （用户："副图左上角是一个下拉框，可以选择显示什么指标"）。
+            pg.locator('#kslots .kssel[data-j="1"]').select_option('kdj')
             pg.wait_for_timeout(1800)
             kdj = pg.evaluate("""() => {
                 const cv = document.getElementById('kcv');
@@ -12981,9 +12982,14 @@ def t_log_and_dd():
               cv.width = 400; cv.height = 400;
               cv.style.width = '400px'; cv.style.height = '400px';
               document.body.appendChild(cv);
+              /* 🔴 柱体要**有实体**（open != close）：open==close 画出来是
+                 一条 1px 的线，落在半像素上时抗锯齿会把 alpha 压到阈值
+                 以下，探针就扫不到 —— 2026-09-15 改了副图布局、主图变高
+                 之后当场偶发成"对数轴间距不等"。**失败的是构造不是产品**
+                 （同"涨跌配色那条把采样位置写死"那次）。 */
               const bars = [10, 20, 40, 80].map((v, i) => ({
-                date: '2026-01-0' + (i + 1), open: v, high: v, low: v,
-                close: v, volume: 100}));
+                date: '2026-01-0' + (i + 1), open: v * 0.97, high: v,
+                low: v * 0.97, close: v, volume: 100}));
               const probe = lg => {
                 const geo = drawKChart(cv, {bars: bars, log: lg});
                 const g = cv.getContext('2d');
@@ -13933,21 +13939,25 @@ def t_indicators():
     return '；'.join(notes)
 
 
-@case('个股页：副图最多 4 个 / 指标参数可调 / 画什么由服务端说（playwright）',
+@case('个股页：副图是【槽位】/ 左上角下拉框选指标 / 参数在弹窗里（playwright）',
       tag='web')
 def t_stock_multi_sub():
-    """🔴 2026-09-15 用户："可以在个股下按需展示指标……下面最多可以选择
-    同时展示 4 个指标。"
+    """🔴 这一页的指标选择器**改了三版**，每版都是用户当场指出来的：
 
-    改造前副图只有一个，`kchart.js` 里还硬编码着"画哪几条线"与配色 ——
-    于是加一个指标要同时改前端，**漏了不报错**：选中它副图一片空白。
-    现在 `subs` 是个数组，每个副图画什么由**服务端那份定义**（panels）说。
+        v1 工具条上平铺一排标签（一个指标一个）
+           -> "指标数量上去后一横排也放不下"
+        v2 一个按钮 + 竖排勾选面板（参数也在面板里）
+           -> "点击指标会导致整个页面重新刷新"
+           -> "改参数会让页面高度、宽度变化，影响整个页面的布局"
+        v3（现在）**副图 = 槽位**：默认两个，点「+ 副图」加（最多 4），
+           每个槽位**左上角一个下拉框**选显示什么，参数在**弹窗**里改
 
-    四条判据各有各的构造条件，混在一起测全是空转：
-      ① 选 4 个 -> 真的画出 4 条**各自带值的图例**（拦 fillText，不数像素）
-      ② 选第 5 个 -> **要有一句话**，不许静默不动
-      ③ 改参数 -> 服务端真的按新参数算（值必须变），且面板不被重渲染冲掉
-      ④ URL 带得走（`sub=macd,kdj` 刷新后还是两个）
+    判据各有各的构造条件，混在一起测全是空转：
+      ① 默认就是**两个**槽位，且第一个是成交量（它不再是画死的一块）
+      ② 下拉框**浮在对应副图的左上角**（按 KGEO 摆，不是写死坐标）
+      ③ 换指标 / 加 / 删：只重取**指标那一个接口**、DOM 不重建
+      ④ 参数弹窗开关时**页面布局一个像素都不许动**（这正是用户的原话）
+      ⑤ 到上限要**说一句**，不许静默不动
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -13969,192 +13979,167 @@ def t_stock_multi_sub():
             except Exception as e:                          # noqa: BLE001
                 return '跳过（浏览器不可用: %s）' % type(e).__name__
             pg = br.new_page(viewport={'width': 1500, 'height': 1200})
-            errs = []
+            errs, reqs = [], []
             pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('request', lambda r: reqs.append(r.url))
             pg.goto(base + '/stock.html?code=601857.XSHG',
                     wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
-            pg.wait_for_timeout(800)
+            pg.wait_for_timeout(1200)
 
-            # ---- 面板【照服务端清单】渲染，且**分组**（主图 / 副图）----
-            # 🔴 2026-09-15 改版：原来是工具条上平铺一排标签 —— 指标一多
-            #   就放不下，而且点一下要走整页 `load()`（页面会跳一下）。
-            #   现在是一个按钮 + 已选 chip，点开是竖排分组面板。
-            pg.click('#kpick')
-            pg.wait_for_timeout(400)
-            assert pg.locator('#kpbox').is_visible(), '指标面板打不开'
-            want = [d['id'] for d in pg.evaluate('() => KDEFS.inds')]
-            got = pg.evaluate(
-                "() => [...document.querySelectorAll('#kpbox .ind')]"
-                ".map(e => e.dataset.i)")
-            assert sorted(got) == sorted(want), \
-                ('面板里的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
-                 '页面写死一份的话，加一个指标它根本不出现，而那不报错'
-                 % (got, want))
-            # 分组要真的分开：主图那几个必须排在副图前面（它们是两回事）
-            _pan = {d['id']: d['panel'] for d in pg.evaluate('() => KDEFS.inds')}
-            _seq = [_pan[i] for i in got]
-            assert _seq == sorted(_seq, key=lambda x: 0 if x == 'main' else 1), \
-                ('面板没按主图/副图分组：%r —— 用户要的是"指标也要分类"'
-                 % list(zip(got, _seq)))
-            _txt = pg.locator('#kpbox').inner_text()
-            assert '主图指标' in _txt and '副图指标' in _txt, \
-                '面板里没写出两个分组名：%s' % _txt[:120]
-            # 成交量：也是副图指标，但**不占那 4 个名额**，要说出来
-            assert '常驻' in _txt, \
-                '成交量那行没说明它不占名额 —— 否则"选了 5 个"看着像 bug'
-            h0 = pg.evaluate(
-                "() => document.querySelector('#kcv').getBoundingClientRect().height")
+            # ---- ① 默认两个槽位，第一个是成交量 ----
+            assert pg.evaluate('() => KINDS') == ['vol', 'macd'], \
+                ('默认副图不是【成交量 + MACD】两个：%r —— 用户要的是'
+                 '"下面默认两个副图的位置"' % pg.evaluate('() => KINDS'))
+            # 🔴 成交量**不再是画死的一块**：它就是第一个槽位的默认指标，
+            #   所以能被换掉。判据是"换掉之后 KINDS 里就没有它了"。
+            assert pg.evaluate('() => KGEO.nSub') == 2, \
+                '画布上不是两个副图：%r' % pg.evaluate('() => KGEO.nSub')
+            # 🔴 判据：**第一个副图紧贴主图**（中间只隔一个 GAP）——
+            #   成交量要是还画死在中间那一块，这里就会多出一截，
+            #   而图上"看着差不多"根本看不出来。
+            _g = pg.evaluate('() => ({mt: KGEO.mainTop, mh: KGEO.mainH,'
+                             ' st: KGEO.subTop, gap: KGEO.GAP})')
+            assert abs(_g['st'] - (_g['mt'] + _g['mh'] + _g['gap'])) < 1, \
+                ('主图与第一个副图之间还夹着一块（主图底 %.0f + gap %d '
+                 '!= 副图顶 %.0f）—— 成交量已经是一个槽位了，'
+                 '不该再画死一块' % (_g['mt'] + _g['mh'], _g['gap'], _g['st']))
 
-            # ---- ① 选到 4 个：每个副图都要有**带值**的图例 ----
-            for iid in ('kdj', 'atr', 'spread'):
-                pg.locator('#kpbox .ind[data-i="%s"]' % iid).click()
-                pg.wait_for_timeout(1300)
-            st = pg.evaluate("() => ({k: KINDS, n: kSubs().length})")
-            assert st['k'] == ['macd', 'kdj', 'atr', 'spread'] and st['n'] == 4, \
-                '选了 4 个但 kSubs 只给了 %r' % (st,)
-            # 🔴 判据是**拦 fillText**，不是数像素：那条带子里混着柱子与
-            #   曲线，图例会被淹没（本项目为此试错过三个判据）。
+            # ---- ② 下拉框浮在**对应副图**的左上角 ----
+            sel = pg.locator('#kslots .kssel')
+            assert sel.count() == 2, '副图左上角没有下拉框（实得 %d 个）' % sel.count()
+            geo = pg.evaluate("""() => {
+                const c = document.querySelector('#kcv').getBoundingClientRect();
+                return [...document.querySelectorAll('#kslots .kslot')]
+                  .map(e => { const r = e.getBoundingClientRect();
+                    return {j: +e.dataset.j, top: r.top - c.top,
+                            left: r.left - c.left,
+                            want: KGEO.subY(+e.dataset.j)}; });}""")
+            for g in geo:
+                assert abs(g['top'] - g['want']) < 6 and 0 < g['left'] < 120, \
+                    ('第 %d 个副图的下拉框没落在它左上角：实 top=%.0f / '
+                     '应 %.0f（按 KGEO 摆，别自己算坐标）'
+                     % (g['j'], g['top'], g['want']))
+            notes.append('默认 2 个槽位（成交量+MACD），下拉框各就各位')
+
+            # ---- ③ 换指标：只重取指标接口、DOM 不重建 ----
+            # 🔴 用户："点击指标会导致整个页面重新刷新，这个需要调整。"
+            #   判据要两头钉：接口没多打 + DOM 没重建（只比接口数的话，
+            #   重建出一模一样的 DOM 也算通过，而 hover、选中的文字、
+            #   滚动位置已经断了）。
+            reqs.clear()
+            pg.evaluate("() => { document.querySelector('#kcv')"
+                        ".dataset.mark = 'keep'; }")
+            pg.locator('#kslots .kssel[data-j="1"]').select_option('kdj')
+            pg.wait_for_timeout(1400)
+            _heavy = [u for u in reqs if '/api/stock/profile' in u
+                      or '/api/stock/finance' in u or '/api/stock/peers' in u]
+            assert not _heavy, \
+                ('换一个副图指标把整页那十个接口又打了一遍：%r' % _heavy[:3])
+            assert pg.evaluate(
+                "() => document.querySelector('#kcv').dataset.mark") == 'keep', \
+                '换指标把 #body 整块重建了（画布都换了新的）—— 页面会跳一下'
+            assert len([u for u in reqs if '/api/stock/indicators' in u]) == 1, \
+                '应该只重取【指标那一个】接口'
+            assert pg.evaluate('() => KINDS') == ['vol', 'kdj'], \
+                '下拉框换的不是【那个槽位】：%r' % pg.evaluate('() => KINDS')
+            # 换完之后那个副图画的真是 KDJ（拦 fillText 看图例）
             drew = pg.evaluate(r"""() => {
                 const cv = document.getElementById('kcv');
                 const g = cv.getContext('2d');
                 const orig = g.fillText.bind(g);
                 const seen = [];
-                g.fillText = function (t, x, y) { seen.push([String(t), y]);
+                g.fillText = function (t, x, y) { seen.push(String(t));
                                                   return orig(t, x, y); };
-                try { drawKChart(cv, {bars: BARS, subs: kSubs(), hover: null}); }
+                try { drawKChart(cv, {bars: BARS, subs: kSubs()}); }
                 finally { g.fillText = orig; }
                 return seen;}""")
-            ys = {}
-            for t, y in drew:
-                ys.setdefault(round(y), []).append(t)
-            # 每个副图的图例各在一行（y 不同），且那一行里要有数字
-            # 🔴 按**序列名**找那一行，不按面板名：面板名与某条线重名时
-            #   （ATR/CCI 这种单序列的）**刻意不印两遍** —— 印了就是
-            #   "ATR ATR 0.29"。只认面板名的话，这条断言会把那个刻意的
-            #   去重当成"图例没了"（实测当场误报 MACD）。
-            panes = pg.evaluate(
-                "() => kSubs().map(x => ({lab: x.label,"
-                " keys: x.series.filter(s => s.style !== 'zero')"
-                "        .map(s => s.label)}))")
-            for pn in panes:
-                rows = [r for r in ys.values()
-                        if any(t.split(' ')[0] in pn['keys'] for t in r)]
-                assert rows, \
-                    '副图「%s」左上角没有图例（要画的线：%r）' % (pn['lab'], pn['keys'])
-                vals = [t for t in rows[0] if any(c.isdigit() for c in t)]
-                assert vals, \
-                    ('副图「%s」的图例只有名字没有值：%r —— 用户要的是'
-                     '"数字跟随变化"' % (pn['lab'], rows[0]))
-            notes.append('4 个副图各带一行有值的图例（%s）'
-                         % ' / '.join(x['lab'] for x in panes))
-            h4 = pg.evaluate(
-                "() => document.querySelector('#kcv').getBoundingClientRect().height")
-            assert h4 > h0 + 200, \
-                ('画布没跟着长高（%d -> %d）—— 4 个副图挤进同一个高度里，'
-                 '每个只剩 50px，那种图看不出形态' % (h0, h4))
-            notes.append('画布 %d -> %dpx' % (h0, h4))
+            assert any(t.startswith('K ') for t in drew) \
+                and not any(t.startswith('DIF') for t in drew), \
+                '换成 KDJ 之后画的还是 MACD：%r' % drew[:8]
+            notes.append('换指标只重取指标接口、DOM 不重建')
 
-            # ---- 🔴 点指标【不许走整页 load()】----
-            # 用户 2026-09-15："点击指标会导致整个页面重新刷新，这个需要调整。"
-            #   原来每点一下都走 `load()`：十个接口重打一遍、整块 #body
-            #   重渲染 —— **页面会跳一下**（同实盘页那条「刷新只换数字，
-            #   不许重建 DOM」）。现在只重取**指标那一个接口**并重画。
-            # ★ 判据要两头都钉：接口没多打（不然只是"看着快"）+ DOM 没重建
-            #   （只比接口数的话，重建出一模一样的 DOM 也算通过，
-            #   而 hover/选中的文字/滚动位置已经断了）。
-            _api = []
-            pg.on('request', lambda r: _api.append(r.url))
-            pg.evaluate("() => { document.querySelector('#kcv')"
-                        ".dataset.mark = 'keep'; }")
-            pg.locator('#kpbox .ind[data-i="spread"]').click()
-            pg.wait_for_timeout(1400)
-            _heavy = [u for u in _api if '/api/stock/profile' in u
-                      or '/api/stock/finance' in u or '/api/stock/peers' in u]
-            assert not _heavy, \
-                ('点一下指标把整页那十个接口又打了一遍：%r —— '
-                 '选指标是随手点的动作，不该重来一整页' % _heavy[:3])
-            assert pg.evaluate(
-                "() => document.querySelector('#kcv').dataset.mark") == 'keep', \
-                '点指标把 #body 整块重建了（画布都换了新的）—— 页面会跳一下'
-            _ind_req = [u for u in _api if '/api/stock/indicators' in u]
-            assert len(_ind_req) == 1, \
-                '应该只重取【指标那一个】接口，实得 %d 次' % len(_ind_req)
-            assert pg.evaluate('() => KINDS.length') == 3, '那一下没取消掉'
-            pg.locator('#kpbox .ind[data-i="spread"]').click()
-            pg.wait_for_timeout(1300)
-            notes.append('点指标只重取指标那一个接口、DOM 不重建')
-
-            # ---- 成交量也是【副图指标】，但不占那 4 个名额 ----
-            # 用户："成交量、MACD 就是副图指标"。它有自己的固定位置，
-            # 所以开关它不该挤掉别的指标。
-            assert pg.evaluate('() => KVOL') is True, '成交量默认该是开的'
-            pg.locator('#kpbox .ind[data-i="vol"]').click()
-            pg.wait_for_timeout(1200)
-            assert pg.evaluate('() => KVOL') is False and 'vol=0' in pg.url, \
-                '成交量关不掉或状态没进 URL：%s' % pg.url
+            # ---- ④ 加 / 删槽位，到上限要说一句 ----
+            for _ in range(3):
+                pg.click('#kadd')
+                pg.wait_for_timeout(900)
             assert pg.evaluate('() => KINDS.length') == 4, \
-                '关成交量把副图名额也动了 —— 它是常驻位，不占名额'
-            assert pg.evaluate('() => KGEO.volH') == 0, \
-                ('关了成交量，画布上那一块还占着高度（volH=%r）—— '
-                 '那就是留了一条空带子' % pg.evaluate('() => KGEO.volH'))
-            pg.locator('#kpbox .ind[data-i="vol"]').click()
-            pg.wait_for_timeout(1200)
-            assert pg.evaluate('() => KGEO.volH') > 0, '成交量开不回来'
-            notes.append('成交量可开关（常驻位、不占名额）')
-
-            # ---- ② 第 5 个要【说一句话】，不许静默 ----
-            pg.locator('#kpbox .ind[data-i="rsi"]').click()
+                '「+ 副图」加不到 4 个：%r' % pg.evaluate('() => KINDS')
+            assert pg.evaluate('() => KGEO.nSub') == 4, '画布上没画出 4 个副图'
+            assert len(set(pg.evaluate('() => KINDS'))) == 4, \
+                '加出来的槽位重复了 —— 新槽位该默认放还没用上的那个'
+            pg.click('#kadd')
             pg.wait_for_timeout(500)
-            m = pg.locator('#kimsg').inner_text()
-            assert '4' in m and pg.evaluate('() => KINDS.length') == 4, \
-                ('点第 5 个指标既没拦住也没说明：%r —— 点了没反应是最难查的'
-                 '那种坏' % m)
-            notes.append('第 5 个被拦住并说明了原因')
+            _m = pg.locator('#kimsg').inner_text()
+            assert '4' in _m and pg.evaluate('() => KINDS.length') == 4, \
+                ('到上限时既没拦住也没说明：%r —— 点了没反应是最难查的'
+                 '那种坏' % _m)
+            _before = pg.evaluate('() => KINDS.slice()')
+            pg.locator('#kslots .ksdel[data-j="0"]').click()
+            pg.wait_for_timeout(1000)
+            assert pg.evaluate('() => KINDS') == _before[1:], \
+                '「×」删的不是那个槽位：%r -> %r' % (_before,
+                                                pg.evaluate('() => KINDS'))
+            notes.append('+ 副图 / × 删槽位 / 到 4 个有提示')
 
-            # ---- ③ 改参数：服务端真的按新参数算 ----
-            k_before = pg.evaluate("() => IND[IND.length - 1].k")
-            box = pg.locator('#kpbox .kpi[data-id="kdj"][data-k="n"]').first
+            # ---- ⑤ 参数在【弹窗】里改，且开关它布局一个像素都不动 ----
+            # 🔴 用户原话："修改指标的参数应该在单独的地方（至少是一个单独的
+            #   弹窗，不然每次点击导致页面高度、宽度变化，会影响整个页面的
+            #   布局）。" —— 所以判据不是"能改参数"，是**开关弹窗时页面高度
+            #   与画布尺寸一个像素都不许变**。
+            _h0 = pg.evaluate("() => [document.body.scrollHeight,"
+                              " document.querySelector('#kcv')"
+                              ".getBoundingClientRect().height]")
+            pg.click('#kparam')
+            pg.wait_for_timeout(400)
+            assert pg.locator('#kmwrap .stbox').is_visible(), '参数弹窗打不开'
+            _h1 = pg.evaluate("() => [document.body.scrollHeight,"
+                              " document.querySelector('#kcv')"
+                              ".getBoundingClientRect().height]")
+            assert _h0 == _h1, \
+                ('开参数弹窗把页面布局挤动了：%r -> %r —— 用户明确说这就是'
+                 '要避免的（弹窗必须是 fixed 浮层）' % (_h0, _h1))
+            _k0 = pg.evaluate("() => IND[IND.length - 1].k")
+            box = pg.locator('#kmwrap .kpi[data-id="kdj"][data-k="n"]').first
+            assert box.count() == 1, '弹窗里没有 KDJ 的参数框'
             box.fill('19')
             box.dispatch_event('change')
-            pg.wait_for_timeout(1800)
-            k_after = pg.evaluate("() => IND[IND.length - 1].k")
-            assert k_before != k_after, \
-                ('KDJ 周期 9 -> 19，K 值却没变（%r）—— 参数根本没送到服务端'
-                 % k_before)
-            # 🔴 面板**不能被重渲染冲掉**：改一个参数就 load() 一次，
-            #   存在局部里的话面板立刻合上，要改第二个得重新点开。
-            assert pg.locator('#kpbox').is_visible(), \
-                '改完一个参数面板就自己合上了（KPOPEN 必须是模块级）'
-            assert '19' in pg.locator('#kpickbox').inner_text(), \
-                '改过参数的 chip 上没写出参数 —— 那个数直接决定图形'
-            # 越界当场拒，不发到服务端
+            pg.wait_for_timeout(1600)
+            assert pg.evaluate("() => IND[IND.length - 1].k") != _k0, \
+                'KDJ 周期 9 -> 19，K 值却没变 —— 参数没送到服务端'
+            _h2 = pg.evaluate("() => [document.body.scrollHeight,"
+                              " document.querySelector('#kcv')"
+                              ".getBoundingClientRect().height]")
+            assert _h0 == _h2, '改完参数页面布局变了：%r -> %r' % (_h0, _h2)
+            assert pg.locator('#kmwrap .stbox').is_visible(), \
+                '改完一个参数弹窗就自己关了 —— 要改第二个还得重新点开'
             box.fill('9999')
             box.dispatch_event('change')
             pg.wait_for_timeout(500)
             assert '之间' in pg.locator('#kimsg').inner_text(), \
                 '越界参数没被当场拒'
             pg.click('#kprst')
-            pg.wait_for_timeout(1500)
-            assert abs(pg.evaluate("() => IND[IND.length - 1].k")
-                       - k_before) < 1e-9, '「恢复默认」没还原'
-            notes.append('参数可调且真的生效（K %s -> %s），越界当场拒、面板不被冲掉'
-                         % (k_before, k_after))
+            pg.wait_for_timeout(1600)
+            assert abs(pg.evaluate("() => IND[IND.length - 1].k") - _k0) < 1e-9, \
+                '「恢复默认参数」没还原'
+            pg.keyboard.press('Escape')
+            pg.wait_for_timeout(300)
+            assert pg.locator('#kmwrap').count() == 0, 'Esc 关不掉弹窗'
+            notes.append('参数在弹窗里改：布局一动不动、越界当场拒、Esc 关得掉')
 
-            # ---- ④ URL 带得走 ----
+            # ---- ⑥ URL 带得走 ----
             pg.goto(base + '/stock.html?code=601857.XSHG&sub=kdj,rsi',
                     wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
             pg.wait_for_timeout(1000)
             assert pg.evaluate('() => KINDS') == ['kdj', 'rsi'], \
                 'URL 里的 sub=kdj,rsi 没生效（分享出去的链接看到的是另一张图）'
-            # "一个都不要"要**存得住**：nav() 对空值是删参数，于是写 '0'
             pg.goto(base + '/stock.html?code=601857.XSHG&sub=0',
                     wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
-            pg.wait_for_timeout(600)
-            assert pg.evaluate('() => KINDS.length') == 0 and \
-                pg.evaluate('() => kSubs().length') == 0, \
+            pg.wait_for_timeout(800)
+            assert pg.evaluate('() => KINDS.length') == 0 \
+                and pg.evaluate('() => KGEO.nSub') == 0, \
                 '「一个副图都不要」存不住'
             notes.append('URL 带得走（sub=kdj,rsi / sub=0）')
             assert not errs, 'JS 报错：%r' % errs[:3]
@@ -14498,12 +14483,12 @@ def t_indicator_plaza():
             pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
             pg.wait_for_timeout(800)
-            # ★ 入口在「📊 指标」面板里（挑指标的地方），先点开
-            pg.click('#kpick')
+            # ★ 入口在「⚙ 参数」弹窗里（改指标的地方），先点开
+            pg.click('#kparam')
             pg.wait_for_timeout(400)
             assert pg.locator('#kmore').count() == 1, \
-                '挑指标的面板里没有去指标广场的入口 —— '\
-                '那里只有短名与一句话，"怎么算的"答不了'
+                '参数弹窗里没有去指标广场的入口 —— '\
+                '那里只有参数框，"这个指标是什么、怎么算的"答不了'
             pg.locator('#kmore').click()
             pg.wait_for_selector('.icard', timeout=40000)
             assert '/indicators.html' in pg.url, \

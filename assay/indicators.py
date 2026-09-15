@@ -123,7 +123,7 @@ class Spec(object):
     """
 
     def __init__(self, id, label, panel, params, series, calc, warm,
-                 unit='', desc='', short=None, formula='', builtin=False):
+                 unit='', desc='', short=None, formula=''):
         self.id, self.label, self.panel = id, label, panel
         # ★ 短名给按钮用。**服务端给**而不是让页面去 split 标签 ——
         #   "均线差（金叉）"按空格切出来是整串，而 "ATR 真实波幅" 切出来是
@@ -135,10 +135,6 @@ class Spec(object):
         #   指标广场要同时回答这两个问题，揉成一段话的话，要么公式被埋在
         #   叙述里、要么叙述被公式挤没。
         self.formula = formula
-        # ★ `builtin` = 它有**自己的固定位置**（成交量那块紧贴主图下方），
-        #   所以不占"最多 4 个副图"的名额。标在服务端而不是让页面写死
-        #   "哪个指标比较特殊" —— 页面不该知道这种事。
-        self.builtin = builtin
 
     def merge(self, p):
         """把用户给的参数并进默认值，并做范围校验。
@@ -404,13 +400,14 @@ def _vol_calc(bars, p):
 
 REG = [
     Spec('vol', '成交量', 'sub', [],
-         lambda p: [_S('volume', '成交量', 'bar')],
-         _vol_calc, lambda p: 0, short='成交量', unit='手',
-         builtin=True,
-         formula='当日成交股数。面板里 volume_shares 的单位是【股】，'
-                 '图上按手 / 万手显示',
-         desc='最基本的一块：量在价先。它有自己的固定位置（紧贴主图下方），'
-              '所以不占那 4 个副图名额'),
+         # 🔴 `vbar` 不是普通柱：它**按那天的涨跌上色**，不是按这个数的
+         #   正负 —— 成交量永远是正的，按正负上色整片都会是涨色。
+         lambda p: [_S('volume', '成交量', 'vbar')],
+         _vol_calc, lambda p: 0, short='成交量', unit='股',
+         formula='当日成交股数（面板里 volume_shares 的单位就是股）。'
+                 '副图刻度按万 / 亿折算',
+         desc='最基本的一个：量在价先。它就是**第一个副图的默认指标**，'
+              '可以换成别的'),
     Spec('ma', '均线 MA', 'main',
          [_P('n1', '周期1', 5), _P('n2', '周期2', 10),
           _P('n3', '周期3', 20), _P('n4', '周期4', 60)],
@@ -505,7 +502,7 @@ def defs():
         out.append({'id': s.id, 'label': s.label, 'short': s.short,
                     'panel': s.panel,
                     'unit': s.unit, 'desc': s.desc, 'formula': s.formula,
-                    'builtin': s.builtin, 'params': s.params,
+                    'params': s.params,
                     'series': s.series(None), 'warm': s.warm(None),
                     'defaults': p})
     return out

@@ -320,7 +320,12 @@ function spDraw(hover){
     g.clearRect(0, 0, cv.width, cv.height);
     return;
   }
-  SP.geo = drawKChart(cv, {bars: SP.bars, trades: SP.trades,
+  /* 🔴 成交量**不再是 drawKChart 内置的一块**（2026-09-15 改成普通副图）——
+     不传的话浮层里那块量能就没了，而它不报错，只是少了一块。
+     ★ rows 直接用 bars：量本来就在里面，不用再取一遍。 */
+  const volPane = {id: 'vol', label: '成交量', rows: SP.bars,
+                   series: [{key: 'volume', label: '成交量', style: 'vbar'}]};
+  SP.geo = drawKChart(cv, {bars: SP.bars, trades: SP.trades, subs: [volPane],
                            log: SPLOG, hover: hover});
   spBindHover(cv);
 }

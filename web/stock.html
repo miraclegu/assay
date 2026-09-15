@@ -26,22 +26,27 @@ let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq';
      **删掉这个参数**，于是下次打开又回到默认的 MACD，表现是
      "关不掉的副图"，而它不报错。 */
 const KMAX = 4;
+/* 🔴 副图是**槽位**（一个位置放一个指标），不是"勾中的一堆指标"。
+   用户 2026-09-15："在下面默认两个副图的位置，然后可以点击增加副图增加。
+   副图左上角是一个下拉框，可以选择显示什么指标。"
+   —— 这正是行情软件的形态：默认副图1=成交量、副图2=MACD。
+   ★ 所以**成交量不再是画死的一块**，它就是第一个槽位的默认值。 */
+const KDEFAULT = ['vol', 'macd'];
 let KINDS = kindsFromUrl();
 /* 指标参数（KDJ 看几日之类）。**存 localStorage、不进 URL**：它是
    "我习惯看几日"的个人设置（同实盘页那个区间选择），而 URL 是拿去
    分享/加书签的，塞一段 JSON 进去只会让链接没法看。 */
 let KP = kpLoad();
+/* 参数弹窗开着没开着。★ 参数**不在图旁边改** —— 用户 2026-09-15：
+   "修改指标的参数应该在单独的地方（至少是一个单独的弹窗，不然每次点击
+   导致页面高度、宽度变化，会影响整个页面的布局）"。弹窗是 fixed 的，
+   开关它一个像素的布局都不动。 */
+let KMODAL = false;
 /* 🔴 有哪些指标、各画哪几条线、什么颜色 —— **服务端给**
    （/api/indicators/defs，正本在 assay/indicators.py）。页面硬编码一份的话，
    加一个指标要改两处，而漏改那处的表现是**新指标在页面上根本不出现**：
    不报错，只是没人知道它存在（同「可选基准由服务端给」那条）。 */
 let KDEFS = null, KPANELS = [];
-/* 🔴 参数面板开着没开着必须是**模块级**：改一个参数就 `load()` 一次，
-   而 `load()` 重渲染整块 `#body` —— 存在局部里的话面板立刻合上，
-   要改第二个参数得重新点开（同「LVSORT 必须是模块级」那条）。
-   ★ 但**不持久化到 localStorage**：下次打开该回到收起态
-     （同「待办折叠状态不持久化」）。 */
-let KPOPEN = false;
 /* 对数坐标：线性轴上「涨 1 块」在 10 元和 100 元处占同样高度，于是长
    区间里低价那一段的波动被压平 —— 翻倍的行情看着像条平线。默认关
    （对着券商软件看的是线性），存进 URL 所以能加书签。 */
@@ -54,9 +59,7 @@ let KLOG = qs('log') === '1';
      "5 日线看着有两条、两条都不对"。
    ★ 老链接 `boll=1` 照旧认（它曾经是工具条上一个独立开关）。 */
 let KMAIN = mainFromUrl();
-/* 成交量：**它也是一个副图指标**（用户原话），只是有自己的固定位置、
-   不占那 4 个名额。默认开 —— 量在价先，这块几乎所有人都要看。 */
-let KVOL = qs('vol') !== '0';
+
 let BARS = null, IND = null, EVS = null, HOVER = null, SHOWEV = true;
 /* K 线左右移动：往回翻几根（0 = 最新）。**按根数不按日期** ——
    按日期翻要前端自己算交易日，而前端没有交易日历（本项目为此栽过：
@@ -215,7 +218,7 @@ function chartBox(k, ind) {
       <a href="#" class="lvtag fq${FQ === 'hfq' ? ' on' : ''}" data-f="hfq"
         title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
       <span class="lvwhy">|</span>
-      <span id="kpickbox">${kPickHtml()}</span>
+      <span id="kpickbox">${kPickHtml() + kMainHtml()}</span>
       <span class="lvwhy">|</span>
       <a href="#" class="lvtag${KLOG ? ' on' : ''}" id="klogt"
         title="对数坐标：等百分比涨幅 = 等高度。&#10;看几年的走势用它才可比 —— 线性轴会把低价那一段的波动压平">对数</a>
@@ -227,7 +230,11 @@ function chartBox(k, ind) {
       <canvas id="kcv" style="width:100%;height:${KINDS.length ? 390 + 110 * KINDS.length : 420}px;display:block;cursor:crosshair"></canvas>
       <div class="cvtip" id="ktip"></div>
       <div class="selpop" id="kselpop"></div>
+      <!-- 每个副图左上角那组控件（下拉框 + ⚙ + ×），位置按 KGEO 摆 -->
+      <div id="kslots">${kSlotHtml()}</div>
     </div>
+    <!-- 参数弹窗的容器：**平时是空的**（见 kModal） -->
+    <div id="kmodal"></div>
     <!-- ★ 常驻一行提示（没选时说怎么用）而不是选了才出现：
          **看不出能用的功能 = 没有这个功能**（同"看不出能点的入口"那条）。
          🔴 但**读数不在这儿**（2026-09-15 用户："框选一段范围，展示范围内
@@ -410,7 +417,7 @@ function mainFromUrl() {
 }
 function kindsFromUrl() {
   const raw = qs('sub');
-  if (raw === null) return ['macd'];      /* 没写 = 老样子，只看 MACD */
+  if (raw === null) return KDEFAULT.slice();   /* 没写 = 成交量 + MACD */
   if (raw === '0') return [];             /* 显式的"一个都不要" */
   return raw.split(',').map(x => x.trim()).filter(Boolean).slice(0, KMAX);
 }
@@ -428,7 +435,10 @@ function kDef(id) { return ((KDEFS || {}).inds || []).find(x => x.id === id) || 
 /* ★ 成交量**不进这个清单**：那一块画的是 bars 自带的 volume，
    不用服务端再算一遍（同一份数据取两遍）。 */
 function kWant() {
-  return KINDS.concat(KMAIN.filter(x => x !== 'ma'));
+  /* ★ 同一个指标放进两个槽位是合法的（比如两个不同参数的 MACD 暂时还
+     不支持，但重复选不该把请求打两遍）—— 去重。 */
+  return KINDS.concat(KMAIN.filter(x => x !== 'ma'))
+    .filter((x, i, a) => a.indexOf(x) === i);
 }
 function kIndsParam() {
   const ids = kWant();
@@ -439,11 +449,17 @@ function kIndsParam() {
 }
 /* 给 drawKChart 的副图数组。**画什么由服务端那份 panels 决定**，
    页面只负责把同一份 rows 递进去（它们是同一条时间轴）。 */
+/* 给 drawKChart 的副图数组：**按槽位顺序**（KINDS），不是按服务端返回的
+   顺序 —— 人把第 2 个副图换成 KDJ，它就该出现在第 2 个位置。
+   ★ `reserve` 是左上角留给下拉框的宽度（下拉框浮在画布上）。 */
+const KSEL_W = 96;
 function kSubs() {
   if (!IND || !KPANELS.length) return [];
-  return KPANELS.filter(x => x.panel === 'sub').map(x => ({
+  const by = {};
+  KPANELS.forEach(x => { if (x.panel === 'sub') by[x.id] = x; });
+  return KINDS.map(id => by[id]).filter(Boolean).map(x => ({
     id: x.id, label: x.short || x.label, unit: x.unit,
-    rows: IND, series: x.series}));
+    reserve: KSEL_W + 30, rows: IND, series: x.series}));
 }
 function nav(over) {
   const u = new URL(location.href);
@@ -468,52 +484,92 @@ function wire() {
   /* 🔴 **事件委托绑在容器上**：选择器那一截会被 `reloadInd()` 用 innerHTML
      整块换掉，逐个绑的话换完那些元素永远没有 handler ——
      点了没反应且不报错（对比页「移除」栽过）。 */
+  /* 🔴 **事件委托绑在容器上**：这几处的内容都会被 `reloadInd()` 用
+     innerHTML 整块换掉，逐个绑的话换完那些元素永远没有 handler ——
+     点了没反应且不报错（对比页「移除」栽过）。 */
   const pbox = $('#kpickbox');
-  if (pbox) {
-    pbox.onclick = async ev => {
-      const a = ev.target.closest('a');
-      if (!a) return;
-      if (a.id === 'kmore') return;          /* 去指标广场：真跳走 */
-      ev.preventDefault();
-      if (a.id === 'kpick' || a.id === 'kpclose') {
-        KPOPEN = a.id === 'kpick' ? !KPOPEN : false;
-        const b = $('#kpbox');
-        if (b) b.style.display = KPOPEN ? 'block' : 'none';
+  if (pbox) pbox.onclick = async ev => {
+    const a = ev.target.closest('a');
+    if (!a) return;
+    ev.preventDefault();
+    if (a.id === 'kadd') {
+      if (!kSlotAdd()) {
+        /* 🔴 到上限时**说出来**，不要静默不动 —— 点了没反应是最难查的
+           那种坏（同 backLink 那条）。 */
+        const m = $('#kimsg');
+        if (m) m.innerHTML = `　最多 <b>${KMAX}</b> 个副图 —— 先去掉一个`;
         return;
       }
-      if (a.id === 'kprst') {
-        KINDS.forEach(id => delete KP[id]);
+      await reloadInd();
+      return;
+    }
+    if (a.id === 'kparam') { kModal(true); return; }
+    if (a.classList.contains('kmain')) {
+      kToggleMain(a.dataset.i);
+      await reloadInd();
+    }
+  };
+  /* 副图左上角那组控件（下拉框 + ⚙ + ×）—— 它们浮在画布上。 */
+  const sbox = $('#kslots');
+  if (sbox) {
+    sbox.onchange = async ev => {
+      const e = ev.target;
+      if (!e.classList || !e.classList.contains('kssel')) return;
+      kSlotSet(+e.dataset.j, e.value);
+      await reloadInd();
+    };
+    sbox.onclick = async ev => {
+      const a = ev.target.closest('a');
+      if (!a) return;
+      ev.preventDefault();
+      if (a.classList.contains('ksdel')) {
+        kSlotDel(+a.dataset.j);
+        await reloadInd();
+        return;
+      }
+      if (a.classList.contains('ksgear')) kModal(true);
+    };
+  }
+  /* 参数弹窗。★ 它是 **fixed 浮层**：开关它一个像素的布局都不动
+     （用户原话："每次点击导致页面高度、宽度变化，会影响整个页面的布局"）。 */
+  /* Esc 关掉 —— 项目里所有浮层都是这个约定 */
+  if (!wire._esc) {
+    wire._esc = true;
+    document.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape' && KMODAL) kModal(false);
+    });
+  }
+  const mbox = $('#kmodal');
+  if (mbox) {
+    mbox.onclick = async ev => {
+      const a = ev.target.closest('a');
+      if (a && a.id === 'kmore') return;      /* 去指标广场：真跳走 */
+      if (a) ev.preventDefault();
+      if (a && a.id === 'kmclose') { kModal(false); return; }
+      if (a && a.id === 'kprst') {
+        KMAIN.concat(KINDS).forEach(id => delete KP[id]);
         kpSave(); await reloadInd();
         return;
       }
-      if (a.classList.contains('ind') || a.classList.contains('kchip')) {
-        if (!kToggle(a.dataset.i)) {
-          /* 🔴 到上限时**说出来**，不要静默不动 —— 点了没反应是最难查的
-             那种坏（同 backLink 那条）。 */
-          const m = $('#kimsg');
-          if (m) m.innerHTML = `　副图最多同时看 <b>${KMAX}</b> 个 —— 先取消一个`;
-          return;
-        }
-        await reloadInd();
-      }
+      /* 点遮罩关掉（点框里不关）—— 同浮层那套 */
+      if (ev.target.id === 'kmwrap') kModal(false);
     };
-    pbox.onchange = async ev => {
+    mbox.onchange = async ev => {
       const e = ev.target;
       if (!e.classList || !e.classList.contains('kpi')) return;
       const id = e.dataset.id, k = e.dataset.k, v = parseInt(e.value, 10);
       const d = kDef(id), a2 = d && d.params.find(x => x.key === k);
-      const m = $('#kimsg');
       /* 🔴 越界**当场拒**并说清范围 —— 让它发到服务端只会换来一句报错，
          而输入框里还留着那个非法值。 */
       if (!a2 || !(v >= a2.min && v <= a2.max)) {
+        const m = $('#kimsg');
         if (m) m.innerHTML = `　${esc(a2 ? a2.label : k)} 要在 `
           + `${a2 ? a2.min : '?'}~${a2 ? a2.max : '?'} 之间`;
         e.value = (KP[id] || {})[k] != null ? KP[id][k] : (a2 ? a2.default : '');
         return;
       }
       KP[id] = Object.assign({}, KP[id]); KP[id][k] = v;
-      /* 与默认值相同就不存 —— 存了的话 chip 上会一直挂着"(9,3,3)"这种
-         等于没改的括号。 */
+      /* 与默认值相同就不存 —— 存了的话弹窗里会一直挂着等于没改的值。 */
       if (v === a2.default) {
         delete KP[id][k];
         if (!Object.keys(KP[id]).length) delete KP[id];
@@ -648,8 +704,14 @@ function wire() {
   const oldMove = cv.onmousemove;
   cv.onmousemove = ev => { if (onDrag(ev)) return; oldMove(ev); };
   cv.onmouseleave = () => { HOVER = null; tip.style.display = 'none'; geo = redraw(); };
-  if (!wire._rs) { wire._rs = true; window.addEventListener('resize', () => redraw()); }
-  geo = redraw();
+  /* 🔴 resize 之后也要重摆：副图的 y 坐标跟画布高度走，只重画不重摆的话
+     下拉框会**留在原来的位置**（浮在别的副图上），而它不报错。 */
+  if (!wire._rs) {
+    wire._rs = true;
+    window.addEventListener('resize', () => { redraw(); kSlotPos(); });
+  }
+  geo = KGEO = redraw();
+  kSlotPos();
 }
 /* 框选区间的读数。
    🔴 **区间涨跌幅的基点取第一根的【前收】，不是它自己的收盘** ——
@@ -721,111 +783,134 @@ function renderSel() {
 }
 
 /* ---- 指标选择器 ----
-   🔴 原来是**工具条上平铺一排标签**（一个指标一个），两个毛病都是用户
-     当场指出来的：
-       ① 指标一多就放不下 —— 现在 9 个副图指标就已经占满一行了
-       ② 点一下要走整页 `load()`：十个接口重打一遍、整块 `#body` 重渲染，
-          **页面会跳一下**（同实盘页那条「刷新只换数字，不许重建 DOM」）
-     现在工具条上只有一个按钮 + 已选的几个 chip，点开是一个**竖排分组面板**
-     （再多也放得下、能滚）；选中/改参数只重取**指标那一个接口**并重画。 */
+   🔴 走到今天的形态是**两轮用户反馈**换来的：
+     一开始：工具条上平铺一排标签（一个指标一个）
+       -> "指标数量上去后一横排也放不下"
+     第二版：一个按钮 + 竖排勾选面板（参数也在里面）
+       -> "点一下就整页刷新"（已改成只重取指标那一个接口）
+       -> "改参数会让页面高度、宽度变化，影响整个页面的布局"
+     现在：**副图 = 槽位**，每个槽位左上角一个 <select> 浮在画布上；
+       工具条上只剩「+ 副图」与「⚙ 参数」，而参数在**弹窗**里改。
+   ★ 下拉框浮在画布上（不是画在画布里）：canvas 里画不出可点的控件，
+     而"每个副图自己选"要求它就在那个副图的左上角。 */
 function kPickHtml() {
-  return kPickInner() + kPanelHtml();
+  const n = KINDS.length;
+  return `<a href="#" class="lvtag${n >= KMAX ? ' off' : ''}" id="kadd"
+      title="${n >= KMAX ? '最多 ' + KMAX + ' 个副图' : '加一个副图'}"
+      >+ 副图</a>
+    <a href="#" class="lvtag" id="kparam" title="改指标参数（弹窗，不动布局）"
+      >⚙ 参数</a>
+    <span class="lvwhy" id="kimsg"></span>`;
 }
 
-/* 工具条上那一截：按钮 +（已选的 chip，点 × 去掉）。 */
-function kPickInner() {
-  /* chip 把**当前开着的都列出来**（主图在前、副图在后、成交量也算一个）——
-     只列副图的话，"BOLL 到底开着没"在工具条上看不见，而它原来是个
-     独立开关，人会以为功能没了。 */
-  const chips = KMAIN.concat(KVOL ? ['vol'] : []).concat(KINDS).map(id => {
+/* 主图那两个（均线 / 布林带）：它们**不是槽位** —— 直接叠在 K 线上，
+   而且就这么两个，做成下拉反而绕。 */
+function kMainHtml() {
+  const mains = ((KDEFS || {}).inds || []).filter(x => x.panel === 'main');
+  if (!mains.length) return '';
+  return '<span class="lvwhy">主图</span>' + mains.map(d =>
+    `<a href="#" class="lvtag kmain${KMAIN.indexOf(d.id) >= 0 ? ' on' : ''}"
+       data-i="${d.id}" title="${esc(d.desc)}">${esc(d.short)}</a>`).join('');
+}
+
+/* 浮在画布上的那一排控件：**一个副图一组**（下拉框 + ⚙ + ×）。
+   位置由 `drawKChart` 返回的几何决定（`subY(j)`）—— 画布高度、
+   副图个数变了它们自己跟上，不用第二处算一遍。 */
+function kSlotHtml() {
+  const subs = ((KDEFS || {}).inds || []).filter(x => x.panel === 'sub');
+  if (!subs.length) return '';
+  return KINDS.map((id, j) => `<div class="kslot" data-j="${j}"
+      style="position:absolute;left:0;top:0;display:none;z-index:3">
+      <select class="kssel" data-j="${j}" title="这个副图显示什么">
+        ${subs.map(d => `<option value="${d.id}"${d.id === id ? ' selected' : ''}
+          >${esc(d.short)}</option>`).join('')}
+      </select>
+      <a href="#" class="ksgear" data-i="${id}" title="改它的参数">⚙</a>
+      <a href="#" class="ksdel" data-j="${j}" title="去掉这个副图">×</a>
+    </div>`).join('');
+}
+
+/* 把那几组控件摆到各自副图的左上角。**按 `KGEO` 摆**，不自己算坐标 ——
+   两处算的话，改一次画布高度就会错位，而那不报错。 */
+function kSlotPos() {
+  if (!KGEO || !KGEO.subY) return;
+  $$('#cbox .kslot').forEach(el => {
+    const j = +el.dataset.j;
+    if (j >= (KGEO.nSub || 0)) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.style.left = (KGEO.PADL + 2) + 'px';
+    el.style.top = (KGEO.subY(j) + 1) + 'px';
+  });
+}
+
+/* 主图那两个是**开关**（叠上去 / 不叠）。 */
+function kToggleMain(id) {
+  const at = KMAIN.indexOf(id);
+  if (at >= 0) KMAIN.splice(at, 1); else KMAIN.push(id);
+  /* 🔴 `main=` 空值会被 nav() 删掉参数、下次打开又回到默认，
+     所以"一个都不要"写成 '0'（同 sub 那条）。 */
+  nav({main: KMAIN.join(',') || '0', boll: ''});
+}
+
+/* 副图是**槽位**：加一个 / 去掉第 j 个 / 把第 j 个换成别的指标。 */
+function kSlotAdd() {
+  if (KINDS.length >= KMAX) return false;
+  const subs = ((KDEFS || {}).inds || []).filter(x => x.panel === 'sub');
+  /* ★ 新槽位默认放**还没用上的**第一个 —— 再来一个一模一样的没有意义。 */
+  const pick = (subs.find(d => KINDS.indexOf(d.id) < 0) || subs[0] || {}).id;
+  if (!pick) return false;
+  KINDS.push(pick);
+  nav({sub: KINDS.join(',')});
+  return true;
+}
+function kSlotDel(j) {
+  KINDS.splice(j, 1);
+  nav({sub: KINDS.join(',') || '0'});
+}
+function kSlotSet(j, id) {
+  KINDS[j] = id;
+  nav({sub: KINDS.join(',')});
+}
+
+/* 参数弹窗：**fixed 浮层**，开关它一个像素的布局都不动。
+   ★ 只列**当前用着的**指标（主图那两个 + 各槽位）——把 12 个指标的参数
+     全摆出来，要改的那个反而找不着。 */
+function kModalHtml() {
+  const used = KMAIN.concat(KINDS).filter((x, i, a) => a.indexOf(x) === i);
+  const rows = used.map(id => {
     const d = kDef(id);
     if (!d) return '';
     const p = KP[id] || {};
-    const ps = Object.keys(p).length
-      ? '(' + d.params.map(a => (p[a.key] != null ? p[a.key] : a.default)).join(',') + ')'
-      : '';
-    return `<a href="#" class="lvtag on kchip" data-i="${id}"
-      title="${esc(d.label)} —— 点一下去掉">${esc(d.short)}${ps} ×</a>`;
-  }).join('');
-  return `<a href="#" class="lvtag${KINDS.length ? ' on' : ''}" id="kpick"
-      title="挑副图指标（最多 ${KMAX} 个）、改参数">📊 指标 ${KINDS.length}/${KMAX} ›</a>`
-    + chips + '<span class="lvwhy" id="kimsg"></span>';
-}
-
-/* 展开的面板：**按主图 / 副图分组**，一行一个指标（勾选 + 说明 + 参数）。
-   🔴 用户 2026-09-15："指标也要分类，主图指标、副图指标，比如均线、BOLL
-     就是主图指标，成交量、MACD 就是副图指标。" —— 它们本来就是两回事：
-     主图那几条与 K 线**共用一套价格坐标**（所以能叠上去），副图各自一套。
-   ★ 分组名与归属都来自服务端那份 `panel` 字段，页面不认识任何指标名。 */
-function kPanelHtml() {
-  const all = (KDEFS || {}).inds || [];
-  if (!all.length) return '';
-  const grp = [
-    ['main', '主图指标', '与 K 线共用价格坐标，直接叠在上面'],
-    ['sub', '副图指标', `各自一套坐标，画在下方 —— 最多同时 ${KMAX} 个`],
-  ];
-  return `<div id="kpbox" style="display:${KPOPEN ? 'block' : 'none'};
-       margin-top:6px;padding:8px;border:1px solid var(--line);border-radius:6px;
-       max-height:340px;overflow-y:auto">
-    ${grp.map(([g, t, why]) => {
-      const items = all.filter(x => x.panel === g);
-      if (!items.length) return '';
-      return `<div class="lvwhy" style="margin:2px 0 3px"><b>${t}</b>　${why}</div>`
-        + items.map(d => kPanelRow(d, g)).join('');
-    }).join('')}
-    <div class="lvform" style="margin-top:8px;gap:6px">
-      <a href="#" class="lvtag" id="kprst">恢复默认参数</a>
-      <a class="lvtag" id="kmore" href="/indicators.html?code=${encodeURIComponent(CODE)}"
-         title="指标广场：都支持什么、怎么算的、能用在哪">📊 全部指标说明 ↗</a>
-      <span style="flex:1"></span>
-      <a href="#" class="lvtag" id="kpclose">收起</a>
-    </div>
-  </div>`;
-}
-
-function kPanelRow(d, g) {
-  const on = kOn(d.id), p = KP[d.id] || {};
-  return `<div class="kprow" style="display:flex;gap:8px;align-items:center;
-       flex-wrap:wrap;padding:3px 2px;border-top:1px solid var(--line)">
-    <a href="#" class="lvtag ind${on ? ' on' : ''}" data-i="${d.id}"
-       style="min-width:74px;text-align:center">${on ? '✓ ' : ''}${esc(d.short)}</a>
-    <span class="lvwhy" style="flex:1;min-width:170px">${esc(d.desc)}</span>
-    ${d.builtin ? '<span class="lvwhy">常驻位 · 不占名额</span>' : ''}
-    ${on && d.params.length
-      ? d.params.map(a => `<label class="lvwhy">${esc(a.label)}
-          <input class="kpi" data-id="${d.id}" data-k="${a.key}" type="number"
-            min="${a.min}" max="${a.max}" style="width:54px"
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+         padding:6px 0;border-top:1px solid var(--line)">
+      <b style="min-width:70px">${esc(d.short)}</b>
+      <span class="lvwhy" style="flex:1;min-width:200px">${esc(d.desc)}</span>
+      ${d.params.length ? d.params.map(a => `<label class="lvwhy">${esc(a.label)}
+          <input class="kpi" data-id="${id}" data-k="${a.key}" type="number"
+            min="${a.min}" max="${a.max}" style="width:56px"
             value="${p[a.key] != null ? p[a.key] : a.default}"></label>`).join('')
-      : (d.params.length ? '<span class="lvwhy" style="opacity:.6">（选中后可改参数）</span>'
-                         : '')}
-  </div>`;
-}
-
-/* 这个指标现在开着没开着 —— 三种归属各存各的状态，但**判据只有这一处**。 */
-function kOn(id) {
-  if (id === 'vol') return KVOL;
-  const d = kDef(id);
-  return d && d.panel === 'main' ? KMAIN.indexOf(id) >= 0 : KINDS.indexOf(id) >= 0;
-}
-
-/* 点一下开关某个指标。返回 false = 没动（到上限了，调用方要说一句）。 */
-function kToggle(id) {
-  if (id === 'vol') { KVOL = !KVOL; nav({vol: KVOL ? '' : '0'}); return true; }
-  const d = kDef(id);
-  if (d && d.panel === 'main') {
-    const at = KMAIN.indexOf(id);
-    if (at >= 0) KMAIN.splice(at, 1); else KMAIN.push(id);
-    /* 🔴 `main=` 空值会被 nav() 删掉参数、下次打开又回到默认，
-       所以"一个都不要"写成 '0'（同 sub 那条）。 */
-    nav({main: KMAIN.join(',') || '0', boll: ''});
-    return true;
-  }
-  const at = KINDS.indexOf(id);
-  if (at >= 0) KINDS.splice(at, 1);
-  else if (KINDS.length >= KMAX) return false;
-  else KINDS.push(id);
-  nav({sub: KINDS.join(',') || '0'});
-  return true;
+        : '<span class="lvwhy">（没有可配的参数）</span>'}
+    </div>`;
+  }).join('');
+  /* 🔴 `.stmodal` **没有 `display:none` 这条规则** —— 项目里的约定是
+     "开着时才给它这个类、关掉就把内容清空"（见 views/app.js 的 modal()）。
+     照搬 `.on` 那套的话，遮罩会**常驻在页面上**：整页发暗且点不动，
+     而它不报错（第一版就是这么挂的，截图上一眼看出来）。 */
+  return `<div id="kmwrap" class="stmodal">
+    <div class="stbox" style="max-width:720px">
+      <h3>⚙ 指标参数
+        <span class="lvwhy">改完立刻生效 · 存在本机、不进 URL</span>
+        <span style="flex:1"></span>
+        <a href="#" class="lvtag" id="kmclose">关闭</a></h3>
+      <div class="lvwhy">这里只列<b>当前用着的</b>指标。参数是"我习惯看几日"
+        的个人设置，所以存 localStorage 而不进 URL（URL 是拿去分享的）。</div>
+      ${rows || '<div class="none">当前没有用到带参数的指标</div>'}
+      <div class="lvform" style="margin-top:8px;gap:6px">
+        <a href="#" class="lvtag" id="kprst">恢复默认参数</a>
+        <a class="lvtag" id="kmore" href="/indicators.html?code=${encodeURIComponent(CODE)}"
+           title="指标广场：都支持什么、怎么算的、能用在哪">📊 全部指标说明 ↗</a>
+      </div>
+    </div></div>`;
 }
 
 /* 🔴 只重取【指标那一个接口】并重画 —— 不走整页 `load()`。
@@ -852,8 +937,26 @@ async function reloadInd() {
   const cv = $('#kcv');
   if (cv) cv.style.height = (KINDS.length ? 390 + 110 * KINDS.length : 420) + 'px';
   const box = $('#kpickbox');
-  if (box) box.innerHTML = kPickHtml();
+  if (box) box.innerHTML = kPickHtml() + kMainHtml();
+  const sl = $('#kslots');
+  if (sl) sl.innerHTML = kSlotHtml();
+  /* 弹窗**开着才重渲染**：关着时它是空的，渲染进去等于把它打开 */
+  if (KMODAL) kModal(true);
   KGEO = redraw();
+  kSlotPos();
+}
+
+/* 开/关参数弹窗。🔴 用 class 而不是 style.display —— `.stmodal` 的
+   `display:none` 写在**样式表**里，`style.display=''` 只是删掉内联样式、
+   规则照旧生效，表现是"点了没反应"且不报错（CLAUDE.md 记过这条）。 */
+function kModal(on) {
+  KMODAL = !!on;
+  const m = $('#kmodal');
+  if (!m) return;
+  /* 关掉就**清空内容**（不是留着藏起来）：留着的话 `.stbox` 会掉进
+     正常文档流里，把页面顶下去一大截 —— 而这正是用户要避免的
+     "改参数导致页面高度变化"。 */
+  m.innerHTML = KMODAL ? kModalHtml() : '';
 }
 
 function redraw() {
@@ -873,7 +976,7 @@ function redraw() {
     return o;
   });
   return (KGEO = drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
-    subs: kSubs(), hover: HOVER, sel: KSEL, vol: KVOL,
+    subs: kSubs(), hover: HOVER, sel: KSEL,
     /* 🔴 **不复权时才画买卖点**：成交价是不复权实际价，切到后复权之后
        标记会整体飘走（同浮层 `spFq` 那条纪律，只是这一页可以切）。 */
     trades: FQ === 'bfq' ? TRADES : []}));
