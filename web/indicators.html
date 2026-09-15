@@ -1,0 +1,211 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>指标广场 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/shared/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/shared/common.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
+<script>
+/* ============ 指标广场 ============
+   回答三件事：**支持哪些指标、每个是怎么算的、我能在哪儿用它**。
+
+   🔴 整页**照服务端那份清单渲染**（/api/indicators/defs，正本在
+     assay/indicators.py）—— 页面里没有任何一个指标名。写死一份的话，
+     加一个指标它在这儿根本不出现，而那不报错：只是没人知道它存在
+     （同「可选基准由服务端给」那条）。
+
+   ★ 每张卡都配**一张真实的小图**（拿一只真票画出来）。只列公式的话，
+     "它长什么样"还是得去个股页一个个点开试 —— 而这正是广场存在的理由。
+   ★ 它是【个股的子页】：顶栏点亮「📈 个股」，不单占一个入口 ——
+     指标是看盘时用的东西，而这一页是低频的参考（同板块之于盘面）。 */
+let CODE = qs('code') || localStorage.getItem('skcode') || '601857.XSHG';
+let N = +(qs('n') || 120);
+let D = null, BARS = null, ROWS = null, PANELS = [];
+
+pageHead('stock', '📊 指标广场');
+load();
+
+function nav() {
+  const u = new URL(location.href);
+  u.searchParams.set('code', CODE);
+  u.searchParams.set('n', N);
+  history.replaceState(null, '', u);
+}
+
+async function load() {
+  const pg = $('#pg');
+  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  const one = u => j(u).catch(e => ({error: String(e)}));
+  D = await one('/api/indicators/defs');
+  if (D.error) {
+    pg.innerHTML = '<div class="lvmsg bad">' + esc(D.error) + '</div>';
+    return;
+  }
+  const ids = (D.inds || []).map(x => x.id).join(',');
+  /* ★ 一次把全部指标算出来（一个请求），不是一个指标一个请求 ——
+     11 个指标就是 11 次往返，而它们用的是同一段 K 线。 */
+  const [k, ind] = await Promise.all([
+    one('/api/stock/kline?fq=bfq&n=' + N + '&code=' + encodeURIComponent(CODE)),
+    one('/api/stock/indicators?fq=bfq&n=' + N + '&inds=' + ids
+        + '&code=' + encodeURIComponent(CODE)),
+  ]);
+  BARS = k.error ? null : k.bars;
+  ROWS = ind.error ? null : ind.rows;
+  PANELS = ind.error ? [] : (ind.panels || []);
+  pg.innerHTML = head(k, ind) + ipCards() + sigTable() + foot();
+  wire();
+  draw();
+}
+
+function head(k, ind) {
+  const err = k.error || ind.error;
+  return '<div class="lvhead"><h2>📊 指标广场</h2>'
+    + '<span class="lvtags"><span class="lvtag">共 ' + (D.inds || []).length
+    + ' 个指标</span><span class="lvtag">' + (D.signals || []).length
+    + ' 条买点条件</span></span>'
+    + '<span style="flex:1"></span>'
+    + '<label class="lvwhy">示例用哪只票'
+    + '<input id="icode" value="' + esc(CODE) + '" style="width:130px">'
+    + '</label><a href="#" class="lvtag" id="igo">换</a>'
+    + '</div>'
+    + (err ? '<div class="lvmsg bad">示例图取不到：' + esc(err)
+             + '（指标定义仍然照常列出）</div>' : '')
+    + '<div class="lvwhy" style="margin:2px 0 10px">'
+    + '定义、参数、画哪几条线、预热多少根 —— <b>全在服务端一处</b>'
+    + '（<code>assay/indicators.py</code>），这一页只是把它显示出来；'
+    + '所以加一个指标，这里自动就有。'
+    + '<br>指标一律在<b>服务端</b>算并预热（少取预热会让头部的值悄悄错掉，'
+    + '而那不报错）。示例图用<b>不复权</b>近 ' + N + ' 根。</div>';
+}
+
+function ipCards() {
+  return '<div class="igrid">'
+    + (D.inds || []).map((d, i) => ipCard(d, i)).join('') + '</div>';
+}
+
+function ipCard(d, i) {
+  const sigs = (D.signals || []).filter(s => s.ind === d.id);
+  const pan = d.panel === 'main' ? '叠在主图' : '独立副图';
+  return '<div class="icard" data-i="' + d.id + '">'
+    + '<h4><span style="font-size:15px">' + esc(d.short) + '</span>'
+    + '<span class="lvwhy">' + esc(d.label) + '</span>'
+    + '<span class="lvtag off" style="cursor:default">' + pan + '</span>'
+    + (d.unit ? '<span class="lvwhy">单位 ' + esc(d.unit) + '</span>' : '')
+    + '<span style="flex:1"></span>'
+    /* ★ 走 `stockHref`（common.js 里那个唯一定义点）再补参数 ——
+       页面里各拼各的话，个股页的地址变一次就要翻 N 个文件。
+       ☞ 这**不是**"点股票代码跳走"的那种链接（那种一律走 spLink 开浮层），
+         它是"带着这个指标去个股页看"的功能入口，跳走正是它要做的事。 */
+    + '<a class="lvtag ilink" href="' + stockHref(CODE)
+    + (d.panel === 'main' ? (d.id === 'boll' ? '&boll=1' : '')
+                          : '&sub=' + encodeURIComponent(d.id))
+    + '" data-i="' + d.id + '">在个股页看 ›</a></h4>'
+    + '<div class="lvwhy">' + esc(d.desc) + '</div>'
+    + '<div class="ifml">' + esc(d.formula || '（略）') + '</div>'
+    + '<div class="ipar">参数：' + (d.params || []).map(p =>
+        esc(p.label) + ' <b>' + p.default + '</b>'
+        + '<span class="lvwhy">(' + p.min + '~' + p.max + ')</span>').join('　')
+      + '　│　画：' + (d.series || []).filter(x => x.style !== 'zero').map(x =>
+        '<span class="idot" style="background:' + esc(x.color) + '"></span>'
+        + esc(x.label) + (x.style === 'bar' ? '<span class="lvwhy">柱</span>' : ''))
+        .join('　') + '</div>'
+    + '<div class="cvbox" style="margin-top:6px">'
+    + '<canvas class="icv" data-i="' + d.id
+    + '" style="width:100%;height:190px;display:block"></canvas></div>'
+    + (sigs.length
+       ? '<div class="lvwhy" style="margin-top:6px">🎯 可用作买点条件：'
+         + sigs.map(s => '<b>' + esc(s.label) + '</b>（' + esc(s.sample) + '）')
+           .join('、')
+         + '　<a class="lvtag" href="/alerts.html">去买点页 ›</a></div>'
+       : '<div class="lvwhy" style="margin-top:6px">'
+         + '（还没有基于它的买点条件）</div>')
+    + '</div>';
+}
+
+function sigTable() {
+  const rows = D.signals || [];
+  if (!rows.length) return '';
+  return '<div class="lvsec" style="margin-top:14px"><h3>买点条件'
+    + '<span class="lvwhy">每条 = 一个指标 + 一个阈值。'
+    + '买点页会把它<b>反解成一个触发价</b>（"今天收在那个价位，'
+    + '这条件刚好成立"）—— 所以它和价格档是同一个口径</span></h3>'
+    + '<div class="pw"><table class="lvt">'
+    + '<tr><th class="tx">条件</th><th class="tx">基于</th>'
+    + '<th class="tx">方向</th><th class="tx">默认</th>'
+    + '<th class="tx">参数</th><th class="tx">怎么用</th></tr>'
+    + rows.map(s => '<tr><td class="tx"><b>' + esc(s.label) + '</b></td>'
+        + '<td class="tx">' + esc(s.ind_label) + '</td>'
+        + '<td class="tx">' + (s.dir === 'up'
+            ? '<span style="color:var(--up)">涨到才成立</span>'
+            : '<span style="color:var(--down)">跌到才成立</span>') + '</td>'
+        + '<td class="tx">' + esc(s.sample) + '</td>'
+        + '<td class="tx lvwhy">' + (s.args || []).map(a =>
+            esc(a.label) + ' ' + a.default).join('　') + '</td>'
+        + '<td class="tx lvwhy">' + esc(s.tip) + '</td></tr>').join('')
+    + '</table></div></div>';
+}
+
+function foot() {
+  return '<div class="lvsec" style="margin-top:14px"><h3>口径（踩过才定下来的）</h3>'
+    + '<div class="lvwhy">'
+    + '🔴 <b>口径跟行情软件走，不跟教科书走</b> —— 对不上券商软件时，'
+    + '人会以为是<b>数据错了</b>，而不会想到是口径不同。'
+    + '<br>· KDJ 用<b>通用平滑</b>（K = 2/3·前K + 1/3·RSV），不是 SMA(3)'
+    + '<br>· BOLL 的 σ 用<b>总体</b>标准差（除 N），不是样本（除 N−1）'
+    + '<br>· ATR / RSI 用 <b>Wilder</b> 递推（1/N），不是简单均值'
+    + '<br>🔴 <b>预热有下限</b>：RSI/ATR 这类 Wilder 递推永远记着起点，'
+    + '多喂 24 根末尾的值就会差几厘 —— 所以服务端固定多取一截再切掉，'
+    + '前端自己算的话"少取了导致头部是错的"<b>不报错</b>，只是曲线不对。'
+    + '<br>🔴 <b>WR 数值越小越强</b>（与 KDJ 方向相反）—— 它是"离最高点多远"。'
+    + '</div></div>';
+}
+
+/* 每张卡画一张小图。**复用 drawKChart** —— 另写一个"迷你画法"的话，
+   广场上看到的形状会和个股页上的慢慢不一样，而那不报错。 */
+function draw() {
+  if (!BARS || !ROWS) return;
+  const by = {};
+  PANELS.forEach(p => by[p.id] = p);
+  $$('.icv').forEach(cv => {
+    const id = cv.dataset.i, p = by[id];
+    if (!p) return;
+    if (p.panel === 'main') {
+      /* 主图叠加型（MA / BOLL）：把它那几条线并进 bars —— 同一条时间轴。 */
+      const keys = (p.series || []).map(x => x.key);
+      const bars = BARS.map((b, i) => {
+        const r = ROWS[i];
+        if (!r) return b;
+        const o = Object.assign({}, b);
+        keys.forEach(k => o[k] = r[k]);
+        return o;
+      });
+      drawKChart(cv, {bars: bars, hover: null});
+      return;
+    }
+    drawKChart(cv, {bars: BARS, hover: null,
+      subs: [{id: p.id, label: p.short || p.label, unit: p.unit,
+              rows: ROWS, series: p.series}]});
+  });
+}
+
+function wire() {
+  wireStarsAll();
+  const go = () => {
+    const v = ($('#icode').value || '').trim();
+    if (!v) return;
+    CODE = v; nav(); load();
+  };
+  if ($('#igo')) $('#igo').onclick = ev => { ev.preventDefault(); go(); };
+  if ($('#icode')) $('#icode').onkeydown = ev => {
+    if (ev.key === 'Enter') go();
+  };
+}
+window.addEventListener('resize', () => { if (BARS) draw(); });
+</script>

@@ -167,7 +167,9 @@ function indCell(t, i) {
     <label style="margin-left:6px">${d.dir === 'up' ? '涨到' : '跌到'}
       <input class="av" data-i="${i}" value="${t.v == null ? '' : t.v}"
         style="width:70px;text-align:right"></label>${esc(d.unit || '')}
-    <div class="lvwhy">${esc(d.tip || '')}</div>`;
+    <div class="lvwhy">${esc(d.tip || '')}
+      <a class="lvtag" href="/indicators.html" target="_blank" rel="noopener"
+         title="指标广场：这些条件基于哪些指标、怎么算的">指标说明 ↗</a></div>`;
 }
 
 function editor() {

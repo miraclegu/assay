@@ -304,7 +304,11 @@ function drawKChart(cv, opts) {
     const sr = rows[(opts.hover != null && rows[opts.hover]) ? opts.hover
                     : rows.length - 1] || {};
     let lx = PADL + 2;
-    if (pane.label) {
+    /* ★ 指标名与曲线名**重复时不印两遍**：单序列的副图（ATR/CCI）图例会写成
+       "ATR ATR 0.29"，两个 ATR 之间那个空格看着像出了什么错。 */
+    const dupe = (pane.series || []).some(
+      x => x.style !== 'zero' && x.label === pane.label);
+    if (pane.label && !dupe) {
       g.fillStyle = DIM;
       g.fillText(pane.label, lx, top + 10);
       lx += g.measureText(pane.label).width + 8;

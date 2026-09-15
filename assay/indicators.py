@@ -123,7 +123,7 @@ class Spec(object):
     """
 
     def __init__(self, id, label, panel, params, series, calc, warm,
-                 unit='', desc='', short=None):
+                 unit='', desc='', short=None, formula=''):
         self.id, self.label, self.panel = id, label, panel
         # ★ 短名给按钮用。**服务端给**而不是让页面去 split 标签 ——
         #   "均线差（金叉）"按空格切出来是整串，而 "ATR 真实波幅" 切出来是
@@ -131,6 +131,10 @@ class Spec(object):
         self.short = short or label.split(' ')[0]
         self.params, self._series, self._calc, self._warm = params, series, calc, warm
         self.unit, self.desc = unit, desc
+        # ★ `formula`（怎么算的）与 `desc`（干什么用的）**分开两个字段**：
+        #   指标广场要同时回答这两个问题，揉成一段话的话，要么公式被埋在
+        #   叙述里、要么叙述被公式挤没。
+        self.formula = formula
 
     def merge(self, p):
         """把用户给的参数并进默认值，并做范围校验。
@@ -389,65 +393,76 @@ REG = [
          [_P('n1', '周期1', 5), _P('n2', '周期2', 10),
           _P('n3', '周期3', 20), _P('n4', '周期4', 60)],
          _ma_series, _ma_calc, lambda p: max(p['n1'], p['n2'], p['n3'], p['n4']),
-         desc='收盘价的简单移动平均，叠在主图上'),
+         formula='MA(N) = 最近 N 天收盘价的算术平均',
+         desc='最常用的趋势线。几条均线的相对位置（多头/空头排列）说明趋势的方向与强弱'),
     Spec('boll', '布林带 BOLL', 'main',
          [_P('n', '周期', 20), _P('k', '倍数σ', 2, 1, 5)],
          lambda p: [_S('ub', '上轨', 'line', '#7b8794'),
                     _S('lb', '下轨', 'line', '#7b8794')],
          _boll_calc, lambda p: p['n'],
-         desc='中轨=MA(N)，上下轨=中轨±k倍总体标准差。中轨与 MA20 是同一条线，所以不画'),
+         formula='中轨 = MA(N)；上/下轨 = 中轨 ± k×σ\nσ 取最近 N 天收盘的【总体】标准差（除 N，不是 N−1）',
+         desc='用波动率画出的通道。价格贴上轨常被读作强势、贴下轨常被读作超跌；通道收窄意味着波动在变小。中轨就是 MA(N)，所以图上只画上下轨'),
     Spec('macd', 'MACD', 'sub',
          [_P('fast', '快线', 12), _P('slow', '慢线', 26), _P('signal', '信号', 9)],
          lambda p: [_S('dif', 'DIF', 'line', None, 0), _S('dea', 'DEA', 'line', None, 1),
                     _S('macd', 'MACD', 'bar')],
          _macd_calc, lambda p: p['slow'] * 3 + p['signal'],
-         desc='DIF=EMA快−EMA慢，DEA=DIF的EMA，柱=（DIF−DEA）×2'),
+         formula='DIF = EMA(收, 快) − EMA(收, 慢)\nDEA = EMA(DIF, 信号)\n柱 = (DIF − DEA) × 2\nEMA 的首值用 SMA 起步（少一点起步偏差）',
+         desc='看趋势的转折与力度：DIF 上穿 DEA 叫金叉、下穿叫死叉，柱子是两者的差'),
     Spec('kdj', 'KDJ', 'sub',
          [_P('n', '周期', 9), _P('k', 'K平滑', 3, 1, 20), _P('d', 'D平滑', 3, 1, 20)],
          lambda p: [_S('k', 'K', 'line', None, 0), _S('d', 'D', 'line', None, 1),
                     _S('jj', 'J', 'line', None, 2)],
          _kdj_calc, lambda p: p['n'] + 30,
-         desc='随机指标。K/D 用通用平滑（与通达信一致），J=3K−2D'),
+         formula='RSV = (收 − N日最低) / (N日最高 − N日最低) × 100\nK = ((k−1)·前K + RSV) / k\u3000\u3000D = ((d−1)·前D + K) / d\nJ = 3K − 2D\u3000\u3000K/D 起步值取 50',
+         desc='看超买超卖与短线拐点，0~100。常用 20 以下超卖、80 以上超买'),
     Spec('rsi', 'RSI', 'sub',
          [_P('n1', '周期1', 6), _P('n2', '周期2', 12), _P('n3', '周期3', 24)],
          lambda p: [_S('rsi%d' % p[k], 'RSI%d' % p[k], 'line', None, i)
                     for i, k in enumerate(('n1', 'n2', 'n3')) if p[k]],
          _rsi_calc, lambda p: max(p['n1'], p['n2'], p['n3']) * 4,
-         desc='相对强弱。Wilder 平滑，0~100'),
+         formula='U = max(收−昨收, 0)\u3000D = max(昨收−收, 0)\nRSI(N) = 100 × Wilder(U,N) / (Wilder(U,N) + Wilder(D,N))',
+         desc='看涨跌力量的对比，0~100。数值越低说明近期跌得越多'),
     Spec('atr', 'ATR 真实波幅', 'sub',
          [_P('n', '周期', 14)],
          lambda p: [_S('atr', 'ATR', 'line', None, 0)],
          _atr_calc, lambda p: p['n'] * 4, unit='元',
-         desc='TR=max(高−低, |高−昨收|, |低−昨收|) 的 Wilder 均值。衡量波动幅度，不指示方向'),
+         formula='TR = max(高−低, |高−昨收|, |低−昨收|)\nATR(N) = Wilder(TR, N)\u3000（首值取前 N 个 TR 的均值）',
+         desc='衡量波动【幅度】，不指示方向。常用来定止损距离或调仓位大小'),
     Spec('cci', 'CCI 顺势指标', 'sub',
          [_P('n', '周期', 14)],
          lambda p: [_S('cci', 'CCI', 'line', None, 0), _S('_zero', '', 'zero')],
          _cci_calc, lambda p: p['n'] + 5,
-         desc='(典型价−均值)/(0.015×平均绝对偏差)。常用 ±100 当超买超卖线'),
+         formula='TP = (高 + 低 + 收) / 3\nCCI = (TP − MA(TP,N)) / (0.015 × N日平均绝对偏差)',
+         desc='看价格偏离自身均值的程度。常用 ±100 当超买超卖线'),
     Spec('wr', 'WR 威廉指标', 'sub',
          [_P('n1', '周期1', 6), _P('n2', '周期2', 10)],
          lambda p: [_S('wr%d' % p[k], 'WR%d' % p[k], 'line', None, i)
                     for i, k in enumerate(('n1', 'n2')) if p[k]],
          _wr_calc, lambda p: max(p['n1'], p['n2']) + 5,
-         desc='(N日最高−收盘)/(N日最高−N日最低)×100。**数值越小越强**（与 KDJ 方向相反）'),
+         formula='WR(N) = (N日最高 − 收) / (N日最高 − N日最低) × 100',
+         desc='看现价离近期最高点多远。注意它数值越小越强，与 KDJ 方向相反'),
     Spec('obv', 'OBV 能量潮', 'sub',
          [_P('n', '均线', 30)],
          lambda p: [_S('obv', 'OBV', 'line', None, 0),
                     _S('obvma', 'MA', 'line', None, 1)],
          _obv_calc, lambda p: p['n'], unit='万手',
-         desc='涨日加量、跌日减量的累计值。看量价是否同向'),
+         formula='涨日 +成交量、跌日 −成交量，逐日累计（这里换算成万手）\nMA 那条是 OBV 自己的移动平均',
+         desc='把成交量按涨跌方向累计起来，看量价是否同向（价涨量增才算有力）'),
     Spec('bias', 'BIAS 乖离率', 'sub',
          [_P('n1', '周期1', 6), _P('n2', '周期2', 12), _P('n3', '周期3', 24)],
          _bias_series, _bias_calc,
          lambda p: max(p['n1'], p['n2'], p['n3']), unit='%',
-         desc='(收盘/MA(N)−1)×100。现价离均线多远'),
+         formula='BIAS(N) = (收 / MA(N) − 1) × 100',
+         desc='现价离均线多远（百分比）。离得太远往往意味着短期偏离过头'),
     Spec('spread', '均线差（金叉）', 'sub',
          [_P('fast', '快线', 5), _P('slow', '慢线', 20)],
          lambda p: [_S('spread', 'MA%d−MA%d' % (p['fast'], p['slow']),
                        'line', None, 0), _S('_zero', '', 'zero')],
          _spread_calc, lambda p: max(p['fast'], p['slow']), unit='%',
          short='均线差',
-         desc='(MA快/MA慢−1)×100。**过零点就是金叉/死叉**'),
+         formula='(MA快 / MA慢 − 1) × 100\u3000\u3000过零点就是金叉 / 死叉',
+         desc='快慢两条均线的距离。过零点就是金叉/死叉，所以它能直接看出离交叉还有多远'),
 ]
 BY_ID = dict((s.id, s) for s in REG)
 
@@ -467,7 +482,8 @@ def defs():
         p = s.merge(None)
         out.append({'id': s.id, 'label': s.label, 'short': s.short,
                     'panel': s.panel,
-                    'unit': s.unit, 'desc': s.desc, 'params': s.params,
+                    'unit': s.unit, 'desc': s.desc, 'formula': s.formula,
+                    'params': s.params,
                     'series': s.series(None), 'warm': s.warm(None),
                     'defaults': p})
     return out

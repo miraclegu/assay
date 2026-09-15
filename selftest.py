@@ -41,6 +41,27 @@ def _web_files(web, ext):
     return sorted(out)
 
 
+def _pages(web='web'):
+    """所有独立 .html 页面的可访问 URL（带够用的查询参数）。
+
+    🔴 **扫目录得出，不照清单拼** —— 照清单拼会漏掉新加的页面，
+      而漏了**不报错**，只是保护范围悄悄缩小（同 `_web_files` 那条）。
+      2026-09-15 加指标广场时就验证了这一点：两处页面清单都是手写的，
+      新页面自动不在保护里。
+    ★ 有几页没参数就看不到东西（个股要 code、对比要 codes），
+      所以这里只维护**参数**，页面本身仍然来自目录扫描。
+    """
+    args = {'stock.html': '?code=601857.XSHG',
+            'compare.html': '?codes=601857.XSHG,601088.XSHG',
+            'sector.html': '?kind=concept'}
+    out = []
+    for f in sorted(os.listdir(web)):
+        if not f.endswith('.html') or f == 'index.html':
+            continue
+        out.append('/' + f + args.get(f, ''))
+    return out
+
+
 def case(name, tag='fast'):
     """tag 决定用例进哪一层，依据是【实测耗时】不是感觉：
 
@@ -6744,8 +6765,7 @@ def t_kchart_pan_select():
             #   靠先后决胜负 —— `.lvtag.on` 把 `.rg.on` 的深色字覆盖成 accent，
             #   而背景还是 accent：那个按钮整个看不见（实测个股页「1年」、
             #   对比页同样）。判据扫全站，不是只看这一处。
-            for u in ('/stock.html?code=601857.XSHG', '/compare.html?codes=601857.XSHG,601088.XSHG',
-                      '/market.html', '/sector.html', '/watchlist.html', '/alerts.html'):
+            for u in _pages():
                 pg.goto('http://127.0.0.1:%d%s' % (port, u), wait_until='networkidle')
                 pg.wait_for_timeout(1800)
                 same = pg.evaluate("""() => [...document.querySelectorAll(
@@ -8907,9 +8927,7 @@ def t_new_pages_ui():
             #      .pw 的 overflow 只在 #pk 作用域下定义过（别处形同虚设）。
             narrow = br.new_page(viewport={'width': 1024, 'height': 1000})
             over = []
-            for path in ('/', '/market.html', '/stock.html?code=601857.XSHG',
-                         '/sector.html?kind=concept', '/watchlist.html',
-                         '/compare.html?codes=601857.XSHG,601088.XSHG'):
+            for path in ['/'] + _pages():
                 narrow.goto(base + path, wait_until='networkidle')
                 narrow.wait_for_timeout(2200)
                 ov = narrow.evaluate('() => document.documentElement.scrollWidth'
@@ -13983,15 +14001,25 @@ def t_stock_multi_sub():
             for t, y in drew:
                 ys.setdefault(round(y), []).append(t)
             # 每个副图的图例各在一行（y 不同），且那一行里要有数字
-            panes = pg.evaluate("() => kSubs().map(x => x.label)")
-            for lab in panes:
-                rows = [r for r in ys.values() if any(t == lab for t in r)]
-                assert rows, '副图「%s」左上角没有图例' % lab
+            # 🔴 按**序列名**找那一行，不按面板名：面板名与某条线重名时
+            #   （ATR/CCI 这种单序列的）**刻意不印两遍** —— 印了就是
+            #   "ATR ATR 0.29"。只认面板名的话，这条断言会把那个刻意的
+            #   去重当成"图例没了"（实测当场误报 MACD）。
+            panes = pg.evaluate(
+                "() => kSubs().map(x => ({lab: x.label,"
+                " keys: x.series.filter(s => s.style !== 'zero')"
+                "        .map(s => s.label)}))")
+            for pn in panes:
+                rows = [r for r in ys.values()
+                        if any(t.split(' ')[0] in pn['keys'] for t in r)]
+                assert rows, \
+                    '副图「%s」左上角没有图例（要画的线：%r）' % (pn['lab'], pn['keys'])
                 vals = [t for t in rows[0] if any(c.isdigit() for c in t)]
                 assert vals, \
                     ('副图「%s」的图例只有名字没有值：%r —— 用户要的是'
-                     '"数字跟随变化"' % (lab, rows[0]))
-            notes.append('4 个副图各带一行有值的图例（%s）' % ' / '.join(panes))
+                     '"数字跟随变化"' % (pn['lab'], rows[0]))
+            notes.append('4 个副图各带一行有值的图例（%s）'
+                         % ' / '.join(x['lab'] for x in panes))
             h4 = pg.evaluate(
                 "() => document.querySelector('#kcv').getBoundingClientRect().height")
             assert h4 > h0 + 200, \
@@ -14288,6 +14316,163 @@ def t_alerts_by_indicator():
         al.LIVE, sv.ALLOW_LIVE = old_live, old_allow
         al._ext_fetch, al.ext_path = _o_fetch, _o_extpath
         shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('指标广场：照服务端清单渲染 / 每张卡有真图 / 两处进得来（playwright）',
+      tag='web')
+def t_indicator_plaza():
+    """🔴 2026-09-15 用户："查看全部指标的地方在哪里？应该有指标广场。"
+
+    在此之前，指标只能在个股页工具条上看到一排**短名 + tooltip** ——
+    "CCI 到底是什么、怎么算的、能不能拿来当买点"哪儿都答不了。
+
+    这一页的判据：
+      ① **照服务端那份清单渲染**（页面里没有任何指标名）—— 写死一份的话，
+         加一个指标它在这儿根本不出现，而那不报错
+      ② 每张卡有**真图**：只列公式的话"它长什么样"还得回个股页一个个试，
+         而那正是广场存在的理由
+      ③ 「在个股页看」要**真的选中那个指标**（不是链过去就算）
+      ④ 两个入口都通（独立页面最大的风险是页面之间断链）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import indicators as I
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    notes = []
+    defs, sigs = I.defs(), I.signal_defs()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1200})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto(base + '/indicators.html', wait_until='networkidle')
+            pg.wait_for_selector('.icard', timeout=40000)
+            pg.wait_for_timeout(1500)
+
+            # ---- ① 一张卡一个指标，顺序与服务端一致 ----
+            ids = pg.evaluate(
+                "() => [...document.querySelectorAll('.icard')]"
+                ".map(e => e.dataset.i)")
+            assert ids == [d['id'] for d in defs], \
+                ('广场上的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
+                 '页面写死一份的话，加一个指标它根本不出现'
+                 % (ids, [d['id'] for d in defs]))
+            # 顶栏点亮的是**父级**（个股），不是它自己：NAV 里没有这一项，
+            # 传一个不存在的 key 会让整条顶栏一个都不亮
+            assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
+                '子页没点亮父级「个股」：%s' % pg.locator('#top .btn.nav.on').inner_text()
+
+            # ---- ② 每张卡：公式 / 参数 / 色块 / 真图 ----
+            for d in defs:
+                card = pg.locator('.icard[data-i="%s"]' % d['id'])
+                t = card.inner_text()
+                assert d['short'] in t and d['desc'][:8] in t, \
+                    '%s 这张卡缺短名或说明' % d['id']
+                fml = card.locator('.ifml').inner_text().strip()
+                assert fml and fml != '（略）' \
+                    and d['formula'].split('\n')[0][:10] in fml, \
+                    ('%s 没写出公式（广场要回答"怎么算的"）：%r'
+                     % (d['id'], fml))
+                for a in d['params']:
+                    assert a['label'] in t, \
+                        '%s 少了参数「%s」' % (d['id'], a['label'])
+                dots = card.locator('.idot').count()
+                n_line = len([x for x in d['series'] if x['style'] != 'zero'])
+                assert dots == n_line, \
+                    ('%s 的色块 %d 个、实际要画 %d 条线 —— 对不上的话，'
+                     '"图上哪条线是哪个"就只能靠猜' % (d['id'], dots, n_line))
+            # 🔴 图**必须真的画了**：判据是画布上的非透明像素。
+            #   只查 <canvas> 在不在的话，画崩了（尺寸算错/坐标 NaN）
+            #   表现就是一张空白画布，而它不报错。
+            px = pg.evaluate("""() => [...document.querySelectorAll('.icv')]
+                .map(cv => {const g = cv.getContext('2d');
+                  const d = g.getImageData(0, 0, cv.width, cv.height).data;
+                  let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+                  return [cv.dataset.i, n];})""")
+            blank = [x for x in px if x[1] < 3000]
+            assert len(px) == len(defs) and not blank, \
+                '这几张卡是空白的：%r（共 %d 张）' % (blank, len(px))
+            notes.append('%d 张卡：公式/参数/色块齐，图都真画了（最少 %d 像素）'
+                         % (len(defs), min(x[1] for x in px)))
+
+            # ---- ③ 「在个股页看」要真的选中那个指标 ----
+            href = pg.locator('.icard[data-i="kdj"] a.ilink').get_attribute('href')
+            assert 'sub=kdj' in href, \
+                ('「在个股页看」没带上这个指标：%r —— 点过去还是默认那张图，'
+                 '等于这个入口是摆设' % href)
+            pg.goto(base + href, wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(1200)
+            assert pg.evaluate('() => KINDS') == ['kdj'], \
+                '点「在个股页看」过去之后没选中 KDJ：%r' % pg.evaluate('() => KINDS')
+            notes.append('「在个股页看」真的把那个指标选上了')
+
+            # ---- ④ 两个入口都通（断链是独立页面最大的风险）----
+            pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(800)
+            assert pg.locator('#kmore').count() == 1, \
+                '个股页上没有去指标广场的入口 —— 那一排只有短名，'\
+                '"这是什么"哪儿都答不了'
+            pg.locator('#kmore').click()
+            pg.wait_for_selector('.icard', timeout=40000)
+            assert '/indicators.html' in pg.url, \
+                '个股页那个入口点了没去成广场：%s' % pg.url
+            pg.goto(base + '/alerts.html', wait_until='networkidle')
+            pg.wait_for_timeout(1200)
+            n_entry = pg.evaluate(
+                "() => [...document.querySelectorAll('a')]"
+                ".filter(a => (a.getAttribute('href') || '')"
+                ".indexOf('/indicators.html') >= 0).length")
+            # 买点页的入口在编辑器里（挑条件那一格）——先打开编辑器
+            if not n_entry and pg.locator('a.aed').count():
+                pg.locator('a.aed').first.click()
+                pg.wait_for_timeout(600)
+                n_add = pg.locator('#atadd')
+                if n_add.count():
+                    n_add.click()
+                    pg.wait_for_timeout(300)
+                    aby = pg.locator('.aby')
+                    aby.nth(aby.count() - 1).select_option('ind')
+                    pg.wait_for_timeout(400)
+                n_entry = pg.evaluate(
+                    "() => [...document.querySelectorAll('a')]"
+                    ".filter(a => (a.getAttribute('href') || '')"
+                    ".indexOf('/indicators.html') >= 0).length")
+            assert n_entry >= 1, \
+                '买点页挑指标条件的地方没有「指标说明」入口 —— '\
+                '"CCI 超卖是什么"在那儿没法回答'
+            notes.append('个股页与买点页两处入口都通')
+
+            # ---- ⑤ 买点条件表：与服务端逐条对上，且方向写出来了 ----
+            pg.goto(base + '/indicators.html', wait_until='networkidle')
+            pg.wait_for_selector('table.lvt', timeout=40000)
+            tb = pg.locator('table.lvt').inner_text()
+            for sg in sigs:
+                assert sg['label'] in tb and sg['sample'] in tb, \
+                    '买点条件表里少了「%s」' % sg['label']
+            assert '涨到才成立' in tb and '跌到才成立' in tb, \
+                ('买点条件表没写方向 —— 金叉是涨上去才成立，'
+                 '不写的话会被当成"跌到就买"')
+            notes.append('%d 条买点条件逐条对上且标了方向' % len(sigs))
+            assert not errs, 'JS 报错：%r' % errs[:3]
+            br.close()
+    finally:
+        httpd.shutdown()
     return '；'.join(notes)
 
 

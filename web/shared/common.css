@@ -792,3 +792,24 @@ a.spl.accent{color:var(--accent)}
 #main th.lvsth{cursor:pointer;user-select:none}
 #main th.lvsth:hover{color:var(--fg)}
 #main th.lvsth.on{color:var(--accent)}
+
+/* ---- 指标广场（/indicators.html）----
+   一张卡 = 一个指标：说明 / 公式 / 参数 / 色块 / 一张真图。
+   ★ 样式放这儿而不是页面里内联：独立页面各带一份样式的话，
+     改一次配色要翻 N 个文件（selftest 里钉着"页面不许有内联 <style>"）。 */
+.igrid{display:grid;gap:12px;
+       grid-template-columns:repeat(auto-fill,minmax(430px,1fr))}
+/* 🔴 grid 子项默认 min-width:auto —— 里面有宽表/画布时子项不收缩，
+   窄屏会把整个 body 撑出横滚（本项目为此栽过三次）。 */
+.igrid>*{min-width:0}
+.icard{border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+       background:var(--panel)}
+.icard h4{margin:0 0 4px;font-size:14px;display:flex;align-items:center;
+          gap:6px;flex-wrap:wrap}
+.ifml{font-family:"SF Mono",Menlo,monospace;font-size:11px;
+      white-space:pre-wrap;color:var(--dim);background:var(--panel2);
+      border-radius:5px;padding:6px 8px;margin:6px 0;line-height:1.6}
+.idot{display:inline-block;width:9px;height:3px;border-radius:2px;
+      vertical-align:middle;margin-right:4px}
+.ipar{font-size:11px;color:var(--dim)}
+.ipar b{color:var(--fg)}

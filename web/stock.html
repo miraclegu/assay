@@ -722,8 +722,14 @@ function kTagsHtml() {
     return `<a href="#" class="lvtag ind${on ? ' on' : ''}" data-i="${d.id}"
       title="${esc(d.label + '：' + d.desc)}">${esc(d.short)}${ps}</a>`;
   }).join('');
+  /* ★ 「全部指标 ↗」：这一排只有短名，"CCI 到底是什么、怎么算的"在
+     指标广场（/indicators.html）。不给入口的话那一页等于不存在 ——
+     独立页面最大的风险不是单页坏，是页面之间断链。 */
   return tags + `<a href="#" class="lvtag${KINDS.length ? '' : ' off'}" id="kpset"
       title="${KINDS.length ? '改这几个指标的参数（周期之类）' : '先选一个指标'}">⚙</a>`
+    + `<a class="lvtag" id="kmore" href="/indicators.html?code=${
+        encodeURIComponent(CODE)}" title="指标广场：都支持什么、怎么算的、能用在哪"
+      >全部指标 ↗</a>`
     + '<span class="lvwhy" id="kimsg"></span>';
 }
 /* 参数面板：默认收起 —— 它是十来个输入框，常驻会把工具条撑成两行，

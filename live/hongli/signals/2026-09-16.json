@@ -1,6 +1,6 @@
 {
  "account": "hongli",
- "built_at": "2026-09-15T16:18:58",
+ "built_at": "2026-09-15T17:00:10",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 61569.55,
@@ -215,6 +215,10 @@
   "div_method": "fiscal_year"
  },
  "recomputed": false,
+ "recomputed_at": [
+  "2026-09-15T17:00:10"
+ ],
+ "revisions": [],
  "sell": [],
  "upcoming": [
   {
