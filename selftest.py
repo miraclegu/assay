@@ -11173,6 +11173,152 @@ def t_serve_ctl():
             '空端口上 --status=1 / --stop=0')
 
 
+@case('清实验归档：结论要留下来，而且不许误删在用的', tag='fast')
+def t_prune_experiments():
+    """2026-09-15 用户："现在又有大量试验性质的回测记录，清理掉一批，
+    保留结论即可。"
+
+    🔴 现成的 `prune_runs.py` **一个都删不掉** —— 它的时间分界是
+      「实盘上线日之后全部保留」（本机 2026-09-01），理由是"那天之后的回测
+      是在用的"。而这批实验恰恰跑在那之后。
+      ★ **那条判据不该改**（它保护的是真在用的），要加的是一条新判据：
+        `_` 开头的分组 = 作者自己标出来的"这是试验"
+        （项目里跑对照实验一律 `--group _xxx`，正式结论进业务域分组）。
+
+    🔴 另一条更隐蔽：「账户绑定过这个版本」原来把 **304 次**回测全保下来了
+      （`ca52ae82` 一个版本就占这么多）。而它回答的只是"这个版本回测过
+      没有" —— **每个版本留一次就够**。不收敛的话这条保护把仓库钉死。
+
+    ★ 删之前把 meta+stats 抽进 `runs/_pruned_conclusions.jsonl`：
+      tar 备份是**回滚凭据**（要解包才能看），而结论是要**随时查**的
+      （"那轮 dev_pct=0.13 到底多少"）。两者用途不同，不能互相替代。
+    """
+    import io as _io
+    import json as _json
+    import sys as _sys
+    if '.' not in _sys.path:
+        _sys.path.insert(0, '.')
+    import prune_runs as P
+
+    # ---- ① 判据本身 ----
+    assert P._is_exp({'group': '_tm2016'}), '`_` 开头该判为实验组'
+    assert not P._is_exp({'group': '小市值'}), '业务域分组不该判为实验组'
+    assert not P._is_exp({}), '没有 group 的不该判为实验组'
+    # 区间长度：留哪一次靠它
+    assert P._span({'start': '2016-01-01', 'end': '2026-01-01'}) > \
+        P._span({'start': '2024-01-01', 'end': '2024-12-31'}), \
+        '`_span` 没按区间长度比'
+    assert P._span({'start': 'x', 'end': 'y'}) == 0, '取不到区间该返回 0 不是抛错'
+
+    # ---- ② 保护判据：在用的一个都不许删 ----
+    rows = P.scan()
+    keep = P.protected(rows)
+    marks = {}
+    if os.path.isfile('picks.json'):
+        marks = _json.load(_io.open('picks.json', encoding='utf-8'))
+    for rid in (marks.keys() if isinstance(marks, dict) else marks):
+        assert rid in keep, \
+            ('picks.json 标记的 %s 不在保护集里 —— 「★ 选中的规则」那页'
+             '读的就是它，删了就查不到了' % rid)
+    # 🔴 每个被账户绑定的版本，**至少还留着一次**回测 ——
+    #   那是"这个版本回测过没有"的唯一依据。
+    binds = set()
+    for aid in os.listdir('live'):
+        p = os.path.join('live', aid, 'versions.jsonl')
+        if not os.path.isfile(p):
+            continue
+        for ln in _io.open(p, encoding='utf-8'):
+            try:
+                v = _json.loads(ln)
+            except Exception:                                   # noqa: BLE001
+                continue
+            for k in ('main_sha256', 'code_sha256'):
+                if v.get(k):
+                    binds.add(v[k][:12])
+    have = {}
+    for x in rows:
+        sha = (x['meta'].get('code_sha256') or '')[:12]
+        have.setdefault(sha, []).append(x['rid'])
+    _r, _k, drop, _pf = P.plan()
+    dropped = {x['rid'] for x in drop}
+    for sha in binds:
+        if sha not in have:
+            continue                    # 这个版本本来就没跑过回测
+        left = [r for r in have[sha] if r not in dropped]
+        assert left, \
+            ('版本 %s 的回测会被删光 —— 实盘页就再也查不到"这个版本回测过"'
+             % sha)
+    # ★ 但也**不许留太多**：一个版本留一次就够（这正是这次要收敛的）
+    for sha in binds:
+        if sha not in have:
+            continue
+        n_keep = sum(1 for r in have[sha]
+                     if '账户绑定过这个版本' in keep.get(r, []))
+        assert n_keep <= 1, \
+            ('版本 %s 有 %d 次回测挂着"账户绑定"这条保护 —— 它只需要留一次，'
+             '不收敛的话这条保护会把仓库钉死（实测 ca52ae82 占 304 次）'
+             % (sha, n_keep))
+
+    # ---- ③ **真跑一次写入** ----
+    # 🔴 只读"已经写好的"结论文件，测不到写入逻辑：`stats` 不存、
+    #   去重失效这两种改动照样全绿（变异实测漏过）。所以造一个临时 RUNS
+    #   真调一次 `save_conclusions`。
+    import shutil as _sh
+    import tempfile as _tf
+    _tmp = _tf.mkdtemp(prefix='selftest_prune_')
+    _old_runs = P.RUNS
+    P.RUNS = _tmp
+    try:
+        sample = [x for x in rows if (x['files'] or {}).get('stats.json')
+                  or os.path.isfile(os.path.join(x['dir'], 'stats.json'))][:3]
+        assert sample, '没有带 stats.json 的归档可抽'
+        cp, n1 = P.save_conclusions(sample)
+        assert n1 == len(sample), '抽了 %d 条，样本 %d 个' % (n1, len(sample))
+        got = [_json.loads(ln) for ln in _io.open(cp, encoding='utf-8')]
+        assert got and got[0].get('stats'), \
+            ('结论里没有 stats —— 只存 meta 的话翻出来只知道"跑过"，'
+             '不知道结果，等于没留')
+        assert any(k in got[0]['stats']
+                   for k in ('annual_return', 'total_return')), \
+            '结论的 stats 里没有收益率：%s' % list(got[0]['stats'])[:6]
+        # 🔴 **幂等**：再抽一次不该重复（重复跑清理会把文件撑大）
+        _cp2, n2 = P.save_conclusions(sample)
+        assert n2 == 0, '再抽一次又写了 %d 条 —— 不幂等' % n2
+        assert len(list(_io.open(cp, encoding='utf-8'))) == len(sample), \
+            '结论文件行数变了 —— 去重没生效'
+    finally:
+        P.RUNS = _old_runs
+        _sh.rmtree(_tmp, ignore_errors=True)
+
+    # ---- ④ 结论文件：删过的那些要查得到 ----
+    cpath = os.path.join(P.RUNS, os.path.basename(P.CONCLUSIONS))
+    if os.path.isfile(cpath):
+        ids, bad = set(), []
+        for ln in _io.open(cpath, encoding='utf-8'):
+            d = _json.loads(ln)
+            assert d.get('run_id') and d.get('meta'), '结论行缺 run_id/meta'
+            if d['run_id'] in ids:
+                bad.append(d['run_id'])
+            ids.add(d['run_id'])
+            # 🔴 **结论要能回答"那次跑出了什么"** —— 只存 meta 不存 stats
+            #   的话，翻出来只知道"跑过"，不知道结果，等于没留
+            st = d.get('stats') or {}
+            if st:
+                assert 'annual_return' in st or 'total_return' in st, \
+                    '结论里没有收益率：%s' % d['run_id']
+        assert not bad, '结论文件里有重复的 run_id（不幂等）：%s' % bad[:3]
+        # 删掉的那些必须都在里面
+        live_ids = {os.path.basename(os.path.dirname(m))
+                    for m in __import__('glob').glob('runs/*/*/*/meta.json')}
+        assert ids, '结论文件是空的'
+        assert not (ids & live_ids), \
+            ('结论文件里有**还活着**的归档（%s）—— 那说明抽的时机不对，'
+             '应该只抽将要删的那些' % list(ids & live_ids)[:3])
+        return ('判据齐（_ 开头=实验组、每版本留一次）；'
+                'picks/账户绑定都没被删；结论 %d 条可查' % len(ids))
+    return '判据齐；picks/账户绑定都没被删（还没清理过，无结论文件）'
+
+
 @case('归档清理：明细删了必须【明说】，不能显示成空', tag='fast')
 def t_pruned():
     """`prune_runs.py` 把旧回测的 holdings.parquet 清掉了（900M -> 153M）。
