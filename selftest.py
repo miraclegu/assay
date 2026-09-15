@@ -1065,6 +1065,7 @@ def t_version_page():
         return '跳过（无 playwright）'
     import threading
     from http.server import ThreadingHTTPServer
+    from assay import registry as reg
     from assay import server as sv
     sv._scan()
     # ★ 服务默认只读，网页触发回测是关的。本用例要测的就是「触发回测」
@@ -1073,6 +1074,45 @@ def t_version_page():
     #   【因为错误的原因通过】，比失败更危险。
     _prev_ab = sv.ALLOW_BACKTEST
     sv.ALLOW_BACKTEST = True
+    # 🔴🔴 **归档重定向到临时目录 —— 这条用例会【真的跑一次回测】。**
+    #   它点的就是页面上那个「用这个版本跑一次」，而那条链路（`_run_job`）
+    #   起的是 `python3 run.py` 子进程、**照常归档**。于是每跑一次 selftest
+    #   就往 `runs/` 里塞一条，而且参数区间完全相同 ——
+    #   实测积了 **105 次** `2026-06-01~06-30` 的重复归档（用户问"这是什么"
+    #   才发现），每天都在涨。
+    #   ★ 同 `lv.LIVE` 重定向那条纪律：**selftest 不许写生产数据**。
+    #     `registry` 读 `ASSAY_RUNS`，而子进程继承环境变量，所以设它就够。
+    #   ★ **不改产品行为**：人在页面上点"跑一次"就是要归档的，
+    #     给接口加 `--no-archive` 是修错了地方。
+    import glob as _g0
+    import shutil as _sh0
+    import tempfile as _tf
+    _runs_tmp = _tf.mkdtemp(prefix='selftest_runs_')
+    #   ★ 临时归档不能是空的 —— 这一页要在目录树里找到版本行。
+    #     **只复制结论那几个小文件**（meta/stats/strategy.py/run.log），
+    #     不复制 holdings/equity（几十 MB，而这条用例根本不读）。
+    #     每个 (分组,策略) 取最近 2 次就够。
+    _seed_by = {}
+    for _m in sorted(_g0.glob(os.path.join(reg.RUNS, '*/*/*/meta.json'))):
+        _pp = _m.split(os.sep)
+        _seed_by.setdefault((_pp[-4], _pp[-3]), []).append(_m)
+    _n_seed = 0
+    for (_grp, _st), _ms in _seed_by.items():
+        for _m in _ms[-2:]:
+            _src = os.path.dirname(_m)
+            _dst = os.path.join(_runs_tmp, _grp, _st, os.path.basename(_src))
+            os.makedirs(_dst, exist_ok=True)
+            for _f in ('meta.json', 'stats.json', 'strategy.py', 'run.log'):
+                _sp = os.path.join(_src, _f)
+                if os.path.isfile(_sp):
+                    _sh0.copy2(_sp, os.path.join(_dst, _f))
+            _n_seed += 1
+    assert _n_seed > 0, '没有可复制的归档样本 —— 这条用例需要归档里有数据'
+    _prev_runs_env = os.environ.get('ASSAY_RUNS')
+    os.environ['ASSAY_RUNS'] = _runs_tmp
+    _prev_runs = reg.RUNS
+    reg.set_runs(_runs_tmp)
+    sv._scan()                       # 🔴 重扫 —— 索引是启动时建的，不重扫读到的还是真实归档
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -1092,9 +1132,16 @@ def t_version_page():
             pg.wait_for_timeout(800)
             # 过滤会自动展开，直接抵达版本层
             pg.fill('#filter', '红利'); pg.wait_for_timeout(800)
-
+            # ★ 等版本行真的出现再断言 —— 归档现在是**临时目录**（本用例
+            #   会真跑一次回测，不重定向就会污染 runs/），条数比真实归档少，
+            #   渲染快但仍是异步的；固定 800ms 在机器忙时不够。
+            try:
+                pg.wait_for_selector('.vnote', timeout=15000)
+            except Exception:                                   # noqa: BLE001
+                pass
             n_note = pg.locator('.vnote').count()
-            assert n_note > 0, '版本行没有一句话简介'
+            assert n_note > 0, ('版本行没有一句话简介（归档 %d 条）'
+                                % len(pg.evaluate('() => RUNS || []')))
             note0 = pg.locator('.vnote').first.inner_text().strip()
             assert note0 and note0 != '（未填简介）', '简介为空: %r' % note0
 
@@ -1151,6 +1198,15 @@ def t_version_page():
     finally:
         httpd.shutdown()
         sv.ALLOW_BACKTEST = _prev_ab
+        # 归档目录还原 + 清掉临时的。★ 顺序：先还原再删，
+        #   删失败也不该让后面的用例跑在临时目录上。
+        if _prev_runs_env is None:
+            os.environ.pop('ASSAY_RUNS', None)
+        else:
+            os.environ['ASSAY_RUNS'] = _prev_runs_env
+        reg.set_runs(_prev_runs)
+        import shutil as _sh
+        _sh.rmtree(_runs_tmp, ignore_errors=True)
     return ('简介 %d 条/旧统计已移除/源码 %d 字符/参数 %d 个与引擎一致/'
             '非法参数名与危险值均被拦/只读模式拦住触发回测'
             % (n_note, min(lens), n_param))
@@ -2949,6 +3005,20 @@ def t_live_ui():
     old_live, old_allow = lv.LIVE, sv.ALLOW_LIVE
     lv.LIVE = tmp
     sv.ALLOW_LIVE = True
+    # 🔴🔴 **归档也要重定向 —— 这条用例会【真的跑一次回测】**（策略浮层里
+    #   那个「用这个版本跑一次」）。`_run_job` 起 `python3 run.py` 子进程、
+    #   照常归档，于是每跑一次 selftest 就往 `runs/` 里塞一条同参数的
+    #   `2026-06-01~06-30`，积了 **105 次**（2026-09-15 用户问"这是什么"
+    #   才发现）。★ 同 `lv.LIVE` 那条：**selftest 不许写生产数据**。
+    #   ★ `registry` 读 `ASSAY_RUNS`，子进程继承环境变量，设它就够；
+    #     本进程的 `registry.RUNS` 也要跟着改（页面要读得到归档树）。
+    from assay import registry as _reg
+    _runs_tmp = tempfile.mkdtemp(prefix='selftest_runs_')
+    _prev_runs_env = os.environ.get('ASSAY_RUNS')
+    _prev_runs = _reg.RUNS
+    os.environ['ASSAY_RUNS'] = _runs_tmp
+    _reg.set_runs(_runs_tmp)
+    sv._scan()
     shutil.copy(cal, os.path.join(tmp, 'trade_calendar.json'))
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
@@ -3849,6 +3919,15 @@ def t_live_ui():
     finally:
         httpd.shutdown()
         lv.LIVE, sv.ALLOW_LIVE = old_live, old_allow
+        # 归档目录还原（在 finally 里 —— 用例中途失败也不能把后面的
+        # 用例留在临时目录上）
+        if _prev_runs_env is None:
+            os.environ.pop('ASSAY_RUNS', None)
+        else:
+            os.environ['ASSAY_RUNS'] = _prev_runs_env
+        _reg.set_runs(_prev_runs)
+        sv._scan()
+        shutil.rmtree(_runs_tmp, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -11171,6 +11250,77 @@ def t_serve_ctl():
             'stop 先 TERM 后 KILL 且轮询确认 + 收尾查端口；'
             'restart 没停干净不启动；--status 从 code 子对象取；'
             '空端口上 --status=1 / --stop=0')
+
+
+@case('selftest 不许写进生产归档（同 live/ 那条纪律）', tag='fast')
+def t_no_runs_pollution():
+    """2026-09-15 用户："当前在用的 froec_traded 策略里，有大量的
+    20260601-20260630 的回测记录，不知道是什么作用。"
+
+    查出来是**测试污染**：「版本页触发回测」那条用例点的就是页面上那个
+    「用这个版本跑一次」，而那条链路（`_run_job`）起 `python3 run.py`
+    子进程、**照常归档** —— 于是每跑一次 selftest 就往 `runs/` 里塞一条，
+    区间参数完全相同，积了 **105 次**，每天都在涨。
+
+    🔴 **不改产品行为**：人在页面上点"跑一次"就是要归档的，给接口加
+      `--no-archive` 是修错了地方。要改的是**测试**：`registry` 读
+      `ASSAY_RUNS`，而子进程继承环境变量，重定向它就够
+      （同 `lv.LIVE` 那条：**selftest 不许写生产数据**）。
+
+    ★ 这条用例钉的是"守卫还在"，真正的证据是跑完之后
+      `find runs -name meta.json | wc -l` 不变 —— 那个由 CI/人工核对。
+    """
+    import io as _io
+    import re as _re
+    src = _io.open('selftest.py', encoding='utf-8').read()
+    cases = [(m.start(), m.group(1)) for m in _re.finditer(r"@case\('([^']+)'", src)]
+    cases.append((len(src), None))
+
+    def _owner(pos):
+        """这个位置属于哪条用例。"""
+        for k in range(len(cases) - 1):
+            if cases[k][0] <= pos < cases[k + 1][0]:
+                return cases[k][1], cases[k][0], cases[k + 1][0]
+        return None, 0, len(src)
+
+    # 🔴 **扫【所有】会触发回测的地方，不是只钉某一条用例。**
+    #   我第一版只钉了「版本页」，而真正在归档的是「实盘页面真实渲染」——
+    #   两条都点了那个「跑一次」按钮。照清单钉就会这样漏
+    #   （同「断言直接扫目录而不是照清单拼」那条）。
+    bad = []
+    for m in _re.finditer(r"#stbt'\)\.click\(\)", src):
+        name, a, b = _owner(m.start())
+        seg = src[a:b]
+        # 只读模式下点它不会真跑（那是在验"给不给出原因"），跳过
+        if 'ALLOW_BACKTEST = True' not in seg and 'sv.ALLOW_BACKTEST' not in seg \
+                and 'ALLOW_LIVE = True' not in seg:
+            continue
+        # 🔴 判据要认准**赋值**那一处，不是"提到过这个名字" ——
+        #   `_prev_runs_env = os.environ.get('ASSAY_RUNS')` 也含这个字符串，
+        #   于是删掉真正的赋值照样绿（变异实测漏过）。
+        if "os.environ['ASSAY_RUNS'] = _runs_tmp" not in seg:
+            bad.append(name)
+    assert not bad, \
+        ('这些用例会**真跑一次回测并归档**，却没把 ASSAY_RUNS 重定向到'
+         '临时目录：%s —— 每跑一次 selftest 就污染一条生产归档'
+         '（实测积了 105 次同参数的 2026-06-01~06-30）' % sorted(set(bad)))
+    # 每一处重定向都要在 finally 里还原
+    SELF = 'selftest 不许写进生产归档'
+    for m in _re.finditer(r"os\.environ\['ASSAY_RUNS'\] = _runs_tmp", src):
+        name, a, b = _owner(m.start())
+        # ★ 跳过**这条用例自己** —— 它的源码里也含那些字符串（就是上面
+        #   那几行判据），扫到自己头上会报"还原不在 finally"这种假失败。
+        if name and name.startswith(SELF):
+            continue
+        seg = src[a:b]
+        assert 'finally:' in seg and 'set_runs(_prev_runs)' in \
+            seg[seg.rindex('finally:'):], \
+            ('%s 里归档目录的还原不在 finally —— 用例失败时会漏还原，'
+             '后面一串用例都会跑在临时目录上' % name)
+        assert 'rmtree(_runs_tmp' in seg, '%s 没清理临时归档' % name
+    n = sum(1 for m in _re.finditer(r"os\.environ\['ASSAY_RUNS'\] = _runs_tmp", src)
+            if not (_owner(m.start())[0] or '').startswith(SELF))
+    return '%d 条会触发回测的用例都把归档重定向到临时目录且在 finally 还原' % n
 
 
 @case('清实验归档：结论要留下来，而且不许误删在用的', tag='fast')

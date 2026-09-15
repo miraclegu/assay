@@ -213,8 +213,21 @@ def plan():
     for k, v in by.items():
         if len(v) > 1:
             v = sorted(v, key=lambda z: z['ran'])
-            # 组里被保护的一律留；其余只留最新那次
-            surv = [x for x in v if x['rid'] in keep] or [v[-1]]
+            # 🔴 **同参数重复跑，只留一次就够** —— 结果必然逐位一致
+            #   （键里含 code_sha256 + 区间 + cash + cost + params +
+            #   data_fingerprint，见文件头）。
+            #   ★ 原来"组里被保护的一律留"，而「实盘上线之后」几乎保护了
+            #     所有近期归档 —— 于是重复跑一次也删不掉。实测 selftest 的
+            #     「版本页触发回测」用例每跑一次就归档一次，积了 **105 次**
+            #     同参数的 `2026-06-01~06-30`（2026-09-15 用户问"这是什么"
+            #     才发现），而 prune 报的是"0 次可删"。
+            #   ★ 现在：**picks 标记与账户绑定仍然一律留**（那是决策证据与
+            #     查证依据），而"只是跑在实盘上线之后"不再成为留下重复的理由
+            #     —— 留最新那一次，结论一模一样。
+            hard = [x for x in v
+                    if any(w in ('picks.json 标记', '账户绑定过这个版本')
+                           for w in keep.get(x['rid'], []))]
+            surv = hard or [v[-1]]
             for x in v:
                 if x not in surv:
                     drop_dirs.append(x)
