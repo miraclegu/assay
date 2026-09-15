@@ -7021,25 +7021,36 @@ def t_stock_ui():
             #   🔴 原来只要选了副图就无条件叠 BOLL，主图上 7 条线；
             #     而 BOLL 中轨就是 MA20（同一条线画两遍、两个颜色），
             #     上下轨的橙色又与 MA5 撞色 —— 表现就是"5 日线看着有两条"。
-            assert 'on' not in (pg.locator('#bollt').get_attribute('class')
-                                or ''), 'BOLL 默认应该是关的'
-            assert pg.evaluate('() => BOLL') is False, 'BOLL 状态位不对'
+            # ★ **入口变了，判据没变**（2026-09-15 改版）：BOLL 从工具条上一个
+            #   独立开关搬进了「📊 指标」面板的**主图指标**那一组 ——
+            #   同一个开关不该在两处出现。要证的仍是那三件事：
+            #   默认关 / 开了画布真的变 / 状态进 URL（刷新不丢）。
+            pg.click('#kpick')
+            pg.wait_for_timeout(300)
+            _bt = pg.locator('#kpbox .ind[data-i="boll"]')
+            assert _bt.count() == 1, 'BOLL 不在指标面板里'
+            assert 'on' not in (_bt.get_attribute('class') or ''), \
+                'BOLL 默认应该是关的'
+            assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
+                'BOLL 状态位不对'
             # ★ 先把光标移开画布再量基线 —— 十字光标本身就画了几百个像素
             #   （实测 417），拿"悬停时"的数当基线会让"关掉后回不到原样"
             #   假失败一次。
             pg.mouse.move(bb['x'] + bb['width'] / 2, bb['y'] - 40)
             pg.wait_for_timeout(400)
             _no = pg.evaluate(NZ)
-            pg.click('#bollt')
-            pg.wait_for_timeout(900)
+            pg.locator('#kpbox .ind[data-i="boll"]').click()
+            pg.wait_for_timeout(1200)
             _yes = pg.evaluate(NZ)
             assert _yes > _no, \
                 '开了 BOLL 画布像素没变多（%d -> %d）' % (_no, _yes)
-            assert 'on' in (pg.locator('#bollt').get_attribute('class') or ''), \
-                'BOLL 开了但标签没点亮'
-            assert 'boll=1' in pg.url, 'BOLL 状态没进 URL（刷新就丢）'
-            pg.click('#bollt')
-            pg.wait_for_timeout(900)
+            assert 'on' in (pg.locator('#kpbox .ind[data-i="boll"]')
+                            .get_attribute('class') or ''), \
+                'BOLL 开了但那一行没点亮'
+            assert 'main=ma%2Cboll' in pg.url or 'main=ma,boll' in pg.url, \
+                'BOLL 状态没进 URL（刷新就丢）：%s' % pg.url
+            pg.locator('#kpbox .ind[data-i="boll"]').click()
+            pg.wait_for_timeout(1200)
             assert abs(pg.evaluate(NZ) - _no) < 300, \
                 '关掉 BOLL 后画布没回到原样'
 
@@ -13965,22 +13976,39 @@ def t_stock_multi_sub():
             pg.wait_for_selector('#kcv', timeout=40000)
             pg.wait_for_timeout(800)
 
-            # ---- 指标按钮是【照服务端清单】渲染的，不是页面写死的 ----
-            want = [d['id'] for d in pg.evaluate('() => KDEFS.inds')
-                    if d['panel'] == 'sub']
+            # ---- 面板【照服务端清单】渲染，且**分组**（主图 / 副图）----
+            # 🔴 2026-09-15 改版：原来是工具条上平铺一排标签 —— 指标一多
+            #   就放不下，而且点一下要走整页 `load()`（页面会跳一下）。
+            #   现在是一个按钮 + 已选 chip，点开是竖排分组面板。
+            pg.click('#kpick')
+            pg.wait_for_timeout(400)
+            assert pg.locator('#kpbox').is_visible(), '指标面板打不开'
+            want = [d['id'] for d in pg.evaluate('() => KDEFS.inds')]
             got = pg.evaluate(
-                "() => [...document.querySelectorAll('#body .ind')]"
+                "() => [...document.querySelectorAll('#kpbox .ind')]"
                 ".map(e => e.dataset.i)")
-            assert got == want, \
-                ('工具条上的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
+            assert sorted(got) == sorted(want), \
+                ('面板里的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
                  '页面写死一份的话，加一个指标它根本不出现，而那不报错'
                  % (got, want))
+            # 分组要真的分开：主图那几个必须排在副图前面（它们是两回事）
+            _pan = {d['id']: d['panel'] for d in pg.evaluate('() => KDEFS.inds')}
+            _seq = [_pan[i] for i in got]
+            assert _seq == sorted(_seq, key=lambda x: 0 if x == 'main' else 1), \
+                ('面板没按主图/副图分组：%r —— 用户要的是"指标也要分类"'
+                 % list(zip(got, _seq)))
+            _txt = pg.locator('#kpbox').inner_text()
+            assert '主图指标' in _txt and '副图指标' in _txt, \
+                '面板里没写出两个分组名：%s' % _txt[:120]
+            # 成交量：也是副图指标，但**不占那 4 个名额**，要说出来
+            assert '常驻' in _txt, \
+                '成交量那行没说明它不占名额 —— 否则"选了 5 个"看着像 bug'
             h0 = pg.evaluate(
                 "() => document.querySelector('#kcv').getBoundingClientRect().height")
 
             # ---- ① 选到 4 个：每个副图都要有**带值**的图例 ----
             for iid in ('kdj', 'atr', 'spread'):
-                pg.locator('#body .ind[data-i="%s"]' % iid).click()
+                pg.locator('#kpbox .ind[data-i="%s"]' % iid).click()
                 pg.wait_for_timeout(1300)
             st = pg.evaluate("() => ({k: KINDS, n: kSubs().length})")
             assert st['k'] == ['macd', 'kdj', 'atr', 'spread'] and st['n'] == 4, \
@@ -14027,8 +14055,56 @@ def t_stock_multi_sub():
                  '每个只剩 50px，那种图看不出形态' % (h0, h4))
             notes.append('画布 %d -> %dpx' % (h0, h4))
 
+            # ---- 🔴 点指标【不许走整页 load()】----
+            # 用户 2026-09-15："点击指标会导致整个页面重新刷新，这个需要调整。"
+            #   原来每点一下都走 `load()`：十个接口重打一遍、整块 #body
+            #   重渲染 —— **页面会跳一下**（同实盘页那条「刷新只换数字，
+            #   不许重建 DOM」）。现在只重取**指标那一个接口**并重画。
+            # ★ 判据要两头都钉：接口没多打（不然只是"看着快"）+ DOM 没重建
+            #   （只比接口数的话，重建出一模一样的 DOM 也算通过，
+            #   而 hover/选中的文字/滚动位置已经断了）。
+            _api = []
+            pg.on('request', lambda r: _api.append(r.url))
+            pg.evaluate("() => { document.querySelector('#kcv')"
+                        ".dataset.mark = 'keep'; }")
+            pg.locator('#kpbox .ind[data-i="spread"]').click()
+            pg.wait_for_timeout(1400)
+            _heavy = [u for u in _api if '/api/stock/profile' in u
+                      or '/api/stock/finance' in u or '/api/stock/peers' in u]
+            assert not _heavy, \
+                ('点一下指标把整页那十个接口又打了一遍：%r —— '
+                 '选指标是随手点的动作，不该重来一整页' % _heavy[:3])
+            assert pg.evaluate(
+                "() => document.querySelector('#kcv').dataset.mark") == 'keep', \
+                '点指标把 #body 整块重建了（画布都换了新的）—— 页面会跳一下'
+            _ind_req = [u for u in _api if '/api/stock/indicators' in u]
+            assert len(_ind_req) == 1, \
+                '应该只重取【指标那一个】接口，实得 %d 次' % len(_ind_req)
+            assert pg.evaluate('() => KINDS.length') == 3, '那一下没取消掉'
+            pg.locator('#kpbox .ind[data-i="spread"]').click()
+            pg.wait_for_timeout(1300)
+            notes.append('点指标只重取指标那一个接口、DOM 不重建')
+
+            # ---- 成交量也是【副图指标】，但不占那 4 个名额 ----
+            # 用户："成交量、MACD 就是副图指标"。它有自己的固定位置，
+            # 所以开关它不该挤掉别的指标。
+            assert pg.evaluate('() => KVOL') is True, '成交量默认该是开的'
+            pg.locator('#kpbox .ind[data-i="vol"]').click()
+            pg.wait_for_timeout(1200)
+            assert pg.evaluate('() => KVOL') is False and 'vol=0' in pg.url, \
+                '成交量关不掉或状态没进 URL：%s' % pg.url
+            assert pg.evaluate('() => KINDS.length') == 4, \
+                '关成交量把副图名额也动了 —— 它是常驻位，不占名额'
+            assert pg.evaluate('() => KGEO.volH') == 0, \
+                ('关了成交量，画布上那一块还占着高度（volH=%r）—— '
+                 '那就是留了一条空带子' % pg.evaluate('() => KGEO.volH'))
+            pg.locator('#kpbox .ind[data-i="vol"]').click()
+            pg.wait_for_timeout(1200)
+            assert pg.evaluate('() => KGEO.volH') > 0, '成交量开不回来'
+            notes.append('成交量可开关（常驻位、不占名额）')
+
             # ---- ② 第 5 个要【说一句话】，不许静默 ----
-            pg.locator('#body .ind[data-i="rsi"]').click()
+            pg.locator('#kpbox .ind[data-i="rsi"]').click()
             pg.wait_for_timeout(500)
             m = pg.locator('#kimsg').inner_text()
             assert '4' in m and pg.evaluate('() => KINDS.length') == 4, \
@@ -14038,9 +14114,6 @@ def t_stock_multi_sub():
 
             # ---- ③ 改参数：服务端真的按新参数算 ----
             k_before = pg.evaluate("() => IND[IND.length - 1].k")
-            pg.click('#kpset')
-            pg.wait_for_timeout(200)
-            assert pg.locator('#kpbox').is_visible(), '参数面板打不开'
             box = pg.locator('#kpbox .kpi[data-id="kdj"][data-k="n"]').first
             box.fill('19')
             box.dispatch_event('change')
@@ -14053,8 +14126,8 @@ def t_stock_multi_sub():
             #   存在局部里的话面板立刻合上，要改第二个得重新点开。
             assert pg.locator('#kpbox').is_visible(), \
                 '改完一个参数面板就自己合上了（KPOPEN 必须是模块级）'
-            assert '19' in pg.locator('#body .ind[data-i="kdj"]').inner_text(), \
-                '改过参数的指标按钮上没写出参数 —— 那个数直接决定图形'
+            assert '19' in pg.locator('#kpickbox').inner_text(), \
+                '改过参数的 chip 上没写出参数 —— 那个数直接决定图形'
             # 越界当场拒，不发到服务端
             box.fill('9999')
             box.dispatch_event('change')
@@ -14319,7 +14392,7 @@ def t_alerts_by_indicator():
     return '；'.join(notes)
 
 
-@case('指标广场：照服务端清单渲染 / 每张卡有真图 / 两处进得来（playwright）',
+@case('指标广场：照服务端清单渲染 / 每张卡有真图 / 四处进得来（playwright）',
       tag='web')
 def t_indicator_plaza():
     """🔴 2026-09-15 用户："查看全部指标的地方在哪里？应该有指标广场。"
@@ -14425,9 +14498,12 @@ def t_indicator_plaza():
             pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
             pg.wait_for_timeout(800)
+            # ★ 入口在「📊 指标」面板里（挑指标的地方），先点开
+            pg.click('#kpick')
+            pg.wait_for_timeout(400)
             assert pg.locator('#kmore').count() == 1, \
-                '个股页上没有去指标广场的入口 —— 那一排只有短名，'\
-                '"这是什么"哪儿都答不了'
+                '挑指标的面板里没有去指标广场的入口 —— '\
+                '那里只有短名与一句话，"怎么算的"答不了'
             pg.locator('#kmore').click()
             pg.wait_for_selector('.icard', timeout=40000)
             assert '/indicators.html' in pg.url, \
@@ -14456,7 +14532,25 @@ def t_indicator_plaza():
             assert n_entry >= 1, \
                 '买点页挑指标条件的地方没有「指标说明」入口 —— '\
                 '"CCI 超卖是什么"在那儿没法回答'
-            notes.append('个股页与买点页两处入口都通')
+            # ---- 首页与口径字典页也要能进（用户问的就是"首页没有入口吗"）----
+            pg.goto(base + '/', wait_until='networkidle')
+            pg.wait_for_timeout(2500)
+            _h = pg.evaluate(
+                "() => [...document.querySelectorAll('#main a')]"
+                ".filter(a => (a.getAttribute('href') || '')"
+                ".indexOf('/indicators.html') >= 0).length")
+            assert _h >= 1, \
+                ('首页上没有去指标广场的入口 —— 一个只能从个股页工具条里'
+                 '摸到的入口等于没有入口（用户原话："首页没有地方进入吗"）')
+            pg.goto(base + '/#/docs', wait_until='networkidle')
+            pg.wait_for_timeout(2000)
+            _d = pg.evaluate(
+                "() => [...document.querySelectorAll('#main a')]"
+                ".filter(a => (a.getAttribute('href') || '')"
+                ".indexOf('/indicators.html') >= 0).length")
+            assert _d >= 1, \
+                '口径字典页没有指向指标广场的交叉引用 —— 找"口径"的人会先去那儿'
+            notes.append('四处入口都通：个股页 / 买点页 / 首页 / 口径字典')
 
             # ---- ⑤ 买点条件表：与服务端逐条对上，且方向写出来了 ----
             pg.goto(base + '/indicators.html', wait_until='networkidle')

@@ -46,8 +46,12 @@ function drawKChart(cv, opts) {
                                 .slice(0, 4);
   const nSub = subs.length;
   const GAP = 8;
-  const volH = Math.round(H * (nSub ? 0.15 : 0.22));
-  const avail = H - PADT - PADB - volH - GAP * (nSub + 1);
+  /* ★ 成交量那块也能关（`vol:false`）—— 对着屏幕看的人就是把它当一个
+     副图指标挑的。它有**自己的固定位置**（紧贴主图下方），所以不占
+     "最多 4 个副图"的名额。 */
+  const showVol = opts.vol !== false;
+  const volH = showVol ? Math.round(H * (nSub ? 0.15 : 0.22)) : 0;
+  const avail = H - PADT - PADB - volH - GAP * (nSub + (showVol ? 1 : 0));
   /* ★ 单个副图时**刻意与改造前同高**（H×0.20）—— 那是现在页面的样子，
        没有理由因为"支持多个"就把它改掉。多个时按可用高度分，
        并给主图留住 38%：主图才是主角，副图是注解。 */
@@ -55,9 +59,10 @@ function drawKChart(cv, opts) {
                                             Math.floor(avail * 0.62 / nSub))) : 0;
   const mainH = avail - subH * nSub;
   const volTop = PADT + mainH + GAP;
-  const subTop = volTop + volH + GAP;          /* 第一个副图的顶 */
+  const subTop = showVol ? volTop + volH + GAP : volTop;   /* 第一个副图的顶 */
   const subY = j => subTop + j * (subH + GAP); /* 第 j 个副图的顶 */
-  const subBot = nSub ? subY(nSub - 1) + subH : volTop + volH;
+  const subBot = nSub ? subY(nSub - 1) + subH
+                      : (showVol ? volTop + volH : PADT + mainH);
   const w = W - PADL - PADR;
   let lo = Infinity, hi = -Infinity, vmax = 0;
   bars.forEach(b => {
@@ -159,12 +164,16 @@ function drawKChart(cv, opts) {
     const y1 = Y(Math.max(o0, b.close)), y2 = Y(Math.min(o0, b.close));
     const hh = Math.max(1, y2 - y1);
     g.fillRect(x - bw / 2, y1, bw, hh);
-    g.fillStyle = c; g.globalAlpha = .55;
-    g.fillRect(x - bw / 2, VY(b.volume || 0), bw, volTop + volH - VY(b.volume || 0));
-    g.globalAlpha = 1;
-    if (b.limit_up || b.limit_down) {
-      g.fillStyle = b.limit_up ? UP : DN;
-      g.beginPath(); g.arc(x, volTop + volH + 4, 1.6, 0, 6.284); g.fill();
+    if (showVol) {
+      g.fillStyle = c; g.globalAlpha = .55;
+      g.fillRect(x - bw / 2, VY(b.volume || 0), bw,
+                 volTop + volH - VY(b.volume || 0));
+      g.globalAlpha = 1;
+      /* 涨跌停那个点钉在量能块下沿 —— 量能关掉了它也就没有落脚处 */
+      if (b.limit_up || b.limit_down) {
+        g.fillStyle = b.limit_up ? UP : DN;
+        g.beginPath(); g.arc(x, volTop + volH + 4, 1.6, 0, 6.284); g.fill();
+      }
     }
   });
   /* 均线：由长到短画 —— 短均线最活跃、要压在上层不被遮住。 */

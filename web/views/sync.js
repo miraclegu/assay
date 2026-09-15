@@ -368,7 +368,11 @@ function dataTabs(cur){
   return `<div class="lvform" style="gap:6px;margin-bottom:10px">
     ${T.map(([k,h,t])=>`<a class="btn${k===cur?' on':''}" href="${h}">${t}</a>`).join('')}
     <span class="lvwhy">两件事都是【数据的元信息】：一个管"新不新"，
-      一个管"口径是什么"。都是低频，所以并成一个入口。</span>
+      一个管"口径是什么"。都是低频，所以并成一个入口。
+      <!-- ★ 交叉引用而不是第三个页签：指标广场是**个股的子页**
+           （顶栏点亮个股），做成这里的页签会出现"从数据页签点进去、
+           顶栏却亮个股"的自相矛盾。 -->
+      指标的口径在 <a href="/indicators.html">📊 指标广场</a>。</span>
   </div>`;
 }
 

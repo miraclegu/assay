@@ -41,10 +41,23 @@ async function showHome(){
     <div class="pgrid c2" style="margin-top:14px">
       ${homeData(sync)}
     </div>
-    ${homeMarks(marks)}`;
+    ${homeMarks(marks)}
+    ${homeRef()}`;
   document.querySelectorAll('#main [data-star]').forEach(e=>e.onclick=ev=>{
     ev.preventDefault(); ev.stopPropagation();
     toggleStar(e, e.dataset.star, !!e.dataset.on); });
+}
+
+/* 底部一行【参考】。★ 刻意**不做成一块** —— 首页回答的是"今天什么状态、
+   要做什么"，而口径字典与指标广场都是低频的参考：做成块会占掉一屏、
+   与那六块抢注意力（同「首页每块只给摘要 + 一个入口」那条）。
+   ★ 但也不能没有：用户 2026-09-15 问"指标广场从哪里进入？首页没有地方
+     进入吗" —— 一个只能从个股页工具条里摸到的入口，等于没有入口。 */
+function homeRef(){
+  return `<div class="lvwhy" style="margin-top:14px;text-align:center">
+    参考 · <a href="#/docs">📖 口径字典</a>（数据字段怎么算的）
+    · <a href="/indicators.html">📊 指标广场</a>（有哪些指标、怎么算、能用在哪）
+    · <a href="#/runs">📚 回测归档</a></div>`;
 }
 
 /* 顶部横条：只在【真的要做什么】时出现。
