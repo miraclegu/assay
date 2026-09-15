@@ -1,6 +1,6 @@
 {
  "account": "froec",
- "built_at": "2026-09-14T20:46:09",
+ "built_at": "2026-09-14T23:14:09",
  "buy": [
   {
    "amount": 60658.0,
@@ -842,6 +842,11 @@
   "weekday": 2
  },
  "recomputed": false,
+ "recomputed_at": [
+  "2026-09-14T21:47:47",
+  "2026-09-14T22:34:34",
+  "2026-09-14T23:14:09"
+ ],
  "revisions": [
   {
    "archived": "signals/_rev/2026-09-15.rev1.json",

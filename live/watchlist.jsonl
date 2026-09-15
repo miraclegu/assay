@@ -30,3 +30,5 @@
 {"uid": "cd5df4cc68d3", "ts": "2026-09-11T18:07:44", "act": "order", "groups": ["主观持仓", "实盘·FROEC-TRADE账户", "实盘·红利混合-M"]}
 {"uid": "1811c8acd7a4", "ts": "2026-09-11T18:08:00", "act": "order", "groups": ["实盘·FROEC-TRADE账户", "实盘·红利混合-M", "主观持仓"]}
 {"uid": "53a14d8e87b6", "ts": "2026-09-11T18:47:32", "act": "order", "groups": ["主观持仓", "实盘·FROEC-TRADE账户", "实盘·红利混合-M"]}
+{"uid": "1b0fe92dd7d5", "ts": "2026-09-15T09:34:03", "act": "note", "code": "600774.XSHG", "note": "已清仓（曾在实盘·FROEC-TRADE账户）"}
+{"uid": "c829efcf6036", "ts": "2026-09-15T09:35:04", "act": "add", "code": "300980.XSHE", "group": "实盘·FROEC-TRADE账户", "note": "持仓自动加入"}

@@ -9,3 +9,5 @@
 {"code": "603168.XSHG", "fee": 5.38, "name": "", "note": "", "price": 5.91, "shares": 6400, "side": "buy", "source": "bulk", "trade_date": "2026-09-01", "ts": "2026-09-02T16:39:39", "uid": "ac6fc5e8c7f4"}
 {"code": "600774.XSHG", "fee": 5.39, "name": "", "note": "", "price": 7.64, "shares": 5000, "side": "buy", "source": "bulk", "trade_date": "2026-09-01", "ts": "2026-09-02T16:39:39", "uid": "b392a55afb47"}
 {"code": "300375.XSHE", "fee": 5.0, "name": "", "note": "", "price": 4.22, "shares": 9100, "side": "buy", "source": "bulk", "trade_date": "2026-09-01", "ts": "2026-09-02T16:39:39", "uid": "d19e04cbfa28"}
+{"code": "600774.XSHG", "fee": 24.45, "fee_estimated": true, "name": "", "note": "", "price": 7.63, "shares": 5000, "side": "sell", "source": "manual", "trade_date": "2026-09-15", "ts": "2026-09-15T09:33:30", "uid": "a58db7e2e72d"}
+{"code": "300980.XSHE", "fee": 5.0, "fee_estimated": true, "name": "", "note": "", "price": 22.23, "shares": 2300, "side": "buy", "source": "manual", "trade_date": "2026-09-15", "ts": "2026-09-15T09:34:14", "uid": "627f1a82c45c"}
