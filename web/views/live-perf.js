@@ -144,20 +144,41 @@ function renderPerf(aid){
        ★ 两张图都走 `lineChart`，而它的 W/L/R 是固定的（1160/54/16）、
          SVG 又是 `width:100%` 等比缩放 —— 所以**同宽即同刻度**，
          x 轴天然对齐，不需要额外对位代码。 */
-    + '<div id="lp_rgwrap"></div>'
-    + '<div class="lpbar" id="lp_tab"></div>'
-    + '<div id="lp_chart" class="lpbox"></div>'
-    + '<div id="lp_dd" class="lpbox lpsub"></div>'
-    + '<div id="lp_tbl" class="lpbox"></div>'
-    /* ★ 执行差异放在收益表之后：它是复盘时才看的，而「我涨了多少」是第一眼要看的。 */
-    + '<div id="lp_exec" class="lpbox"></div>'
-    /* 每日持仓 / 交易记录：排在执行差异之后 —— 前面那几块回答"我赚了多少"，
-       这两块是**明细**，翻到下面才看（同「能进 tooltip 的就别占列」的取舍）。 */
-    + '<div id="lp_hold" class="lpbox"></div>'
-    + '<div id="lp_trip" class="lpbox"></div>';
+    /* 🔴 **分页签，不要都堆在一页**（2026-09-15 用户要求）。
+         原来曲线 + 收益明细 + 执行差异 + 每日持仓 + 交易记录全竖着排，
+         要看最后一块得滚过四屏 —— 而它们回答的是**不同的问题**，
+         本来就不该同屏。判据与回测详情页一致：`#tabs` + `.pane`
+         （`.pane` 的 display:none/`.on` 是样式表里现成的，不另写）。
+       ★ 页签顺序 = 看的顺序：先"我赚了多少"（曲线 / 收益明细），
+         再"每天拿着什么"（持仓），再"做过什么"（交易记录 / 清仓记录），
+         最后"照做了没有"（执行差异，复盘才看）。 */
+    + `<div id="lptabs">${LP_TABS.map((t, i) =>
+        `<div data-i="${i}" class="${i === LPTAB ? 'on' : ''}">${t[1]}</div>`
+      ).join('')}</div>`
+    + LP_TABS.map((t, i) =>
+        `<div class="pane ${i === LPTAB ? 'on' : ''}" id="lpp${i}"></div>`).join('');
   /* 🔴 曲线与收益明细都用**裁剪后**的数据（LPS），KPI 板用**全程**
      （上面那四格标着 TWR/最大回撤，是开户至今的口径）——
      两者混着看会以为对不上，所以区间条下面单独给这一段的收益。 */
+  /* 各块的容器放进各自的 pane —— 原来是平铺在 body 上的 6 个 div。
+     ★ 区间条只在【曲线】那一页有意义（收益明细自己有粒度切换、
+       持仓与交易记录是全量分页），所以它跟着曲线走。 */
+  /* 🔴 **按 `LP_TABS` 的 id 找容器，不按下标写死** —— 下标写死的话
+       调一次顺序就要改这六行，而漏改一行的表现是"点某个页签是空的"
+       （同「列定义写一处」那条）。 */
+  const _PANE = {chart: '<div id="lp_rgwrap"></div>'
+      + '<div class="lpbar" id="lp_tab"></div>'
+      + '<div id="lp_chart" class="lpbox"></div>'
+      + '<div id="lp_dd" class="lpbox lpsub"></div>',
+    detail: '<div id="lp_tbl" class="lpbox"></div>',
+    exec: '<div id="lp_exec" class="lpbox"></div>',
+    hold: '<div id="lp_hold" class="lpbox"></div>',
+    fills: '<div id="lp_fill" class="lpbox"></div>',
+    trips: '<div id="lp_trip" class="lpbox"></div>'};
+  LP_TABS.forEach(([k], i) => { const e = $('#lpp' + i);
+    if (e) e.innerHTML = _PANE[k] || ''; });
+  document.querySelectorAll('#lptabs div').forEach(
+    e => e.onclick = () => lpTab(+e.dataset.i));
   if(o.nav && o.day_pnls){
     LPS = lprSlice(o);
     const rw = $('#lp_rgwrap');
@@ -175,9 +196,14 @@ function renderPerf(aid){
        而让整页等它们会把"我赚了多少"这个第一眼要看的东西也推后。
      ★ 翻页时只重画自己那一块（`renderHoldings/renderTrips` 自己重取），
        不碰曲线 —— 曲线要重放整条权益，白重放一次是纯浪费。 */
-  LPH.off = 0; LPT.off = 0;
-  renderHoldings(aid);
-  renderTrips(aid);
+  LPH.off = 0; LPT.off = 0; LPF.off = 0;
+  LPDONE = {chart: 1, detail: 1, exec: 1};
+  LPAID = aid;
+  /* 当前页签如果是明细那几块，进来就渲染它（刷新/深链接会落在这儿） */
+  const key = LP_TABS[LPTAB] && LP_TABS[LPTAB][0];
+  if (key === 'hold') { LPDONE.hold = 1; renderHoldings(aid); }
+  else if (key === 'fills') { LPDONE.fills = 1; renderFills(aid); }
+  else if (key === 'trips') { LPDONE.trips = 1; renderTrips(aid); }
 }
 
 /* ============ 时间区间 ============
@@ -724,6 +750,38 @@ function xdSection(it){
      数字格式、列宽会慢慢分叉，而那不报错，只是"同一个东西两页长得不一样"。
    ★ 放在业绩页而不是另开一页：这一页本来就是"复盘时看的"，
      而这两块正是复盘要看的东西（同「主视图只放天天要看的」那条）。 */
+/* 页签：`[id, 标题]`。**顺序与命名照用户 2026-09-15 给的那句**：
+     "业绩一直置顶，然后业绩曲线、收益明细、执行差异、每日持仓、
+      交易记录、清仓记录各自一个页签"
+   ★ 我原来把「执行差异」排在最后（理由是"复盘才看"）—— 用户把它放第三，
+     那是他的使用顺序，照做。**这种事不替用户判断**。 */
+const LP_TABS = [['chart', '业绩曲线'], ['detail', '收益明细'],
+                 ['exec', '执行差异'], ['hold', '每日持仓'],
+                 ['fills', '交易记录'], ['trips', '清仓记录']];
+let LPTAB = 0;
+
+/* 🔴 **切页签时才渲染那一块**（懒渲染）：每日持仓/交易记录/清仓记录各要打一次
+   接口，进页面就全打的话第一眼要看的曲线被拖慢，而那三块多半没人翻到。
+   ★ 已经渲染过的不重复打 —— `LPDONE` 记住谁渲染过（换账户时整页重建，
+     它跟着一起没了，所以不会串账户）。 */
+let LPDONE = {};
+
+function lpTab(i) {
+  LPTAB = i;
+  document.querySelectorAll('#lptabs div')
+    .forEach((e, k) => e.classList.toggle('on', k === i));
+  document.querySelectorAll('[id^="lpp"]')
+    .forEach((e, k) => e.classList.toggle('on', k === i));
+  const aid = LPAID;
+  const key = LP_TABS[i][0];
+  if (LPDONE[key]) return;
+  LPDONE[key] = 1;
+  if (key === 'hold') renderHoldings(aid);
+  else if (key === 'fills') renderFills(aid);
+  else if (key === 'trips') renderTrips(aid);
+}
+
+let LPAID = null;                  // 当前账户（页签懒渲染要用）
 let LPH = {off: 0, lim: 100};      // 每日持仓分页
 let LPT = {off: 0, lim: 100};      // 交易记录分页
 
@@ -805,6 +863,49 @@ async function renderHoldings(aid) {
   lpBind('#lp_hold', 'h', LPH, np, () => renderHoldings(aid));
 }
 
+let LPF = {off: 0, lim: 100};      // 交易记录（逐笔）分页
+
+/* 交易记录 = **逐笔买卖操作**（用户 2026-09-15：「买入卖出都算一笔单独的
+   操作，需要记录下来，这才是真正的交易记录」）。
+
+   🔴 **表格复用 `fillsTableHtml`**（live-trade.js 里抽出来的）——
+     流水独立页与这里是同一份渲染，不许各写一套：列序、冲正标记、
+     估算标记会慢慢分叉，而那不报错。
+   ★ 这里**不给冲正按钮**：冲正是"更正录入"，属于流水页那条链
+     （那边有「✎ 记一笔」配套）。但不是藏起来 —— 给一条链过去。 */
+async function renderFills(aid) {
+  const el = $('#lp_fill');
+  if (!el) return;
+  let o;
+  try { o = await j(`/api/live/fills?id=${encodeURIComponent(aid)}`
+      + `&offset=${LPF.off}&limit=${LPF.lim}`); }
+  catch (e) { el.innerHTML = `<div class="lvmsg bad">${esc(String(e))}</div>`; return; }
+  if (!$('#lp_fill')) return;          /* 人已经走开 */
+  if (!o.total) {
+    el.innerHTML = '<div class="ttl">交易记录</div>'
+      + '<div class="none">还没录过成交 —— 去「✎ 记一笔」录，'
+      + '或者让模拟盘自己跑。</div>';
+    return;
+  }
+  const p = Math.floor(o.offset / o.limit) + 1;
+  const np = Math.max(1, Math.ceil(o.total / o.limit));
+  const nav = lpNav(p, np, 'f');
+  el.innerHTML = `<div class="ttl">交易记录
+      <span class="lvwhy">${o.total.toLocaleString()} 笔操作 ·
+      费用合计 ${num(o.fee_total, 2)}${
+        o.fee_estimated_n ? '（' + o.fee_estimated_n + ' 笔估算）' : ''}</span>
+      <span style="flex:1"></span>
+      <a class="lvtag" href="#/live/${esc(aid)}/fills"
+         title="那边可以冲正（更正录入），还有「✎ 记一笔」">去流水页更正 ›</a></div>
+    <div class="note"><b>买入、卖出各算一笔独立的操作</b> —— 这是账本里真实记下的
+      东西（append-only）。想看"一买一卖配成一笔赚了多少"，去
+      <b>「清仓记录」</b>那一页。
+      划掉的行是已冲正的（原记录保留，净影响 0）。</div>
+    ${nav}<div class="lvsec" style="padding:0">${
+      fillsTableHtml(o.rows, {showRev: false})}</div>${nav}`;
+  lpBind('#lp_fill', 'f', LPF, np, () => renderFills(aid));
+}
+
 async function renderTrips(aid) {
   const el = $('#lp_trip');
   if (!el) return;
@@ -819,17 +920,19 @@ async function renderTrips(aid) {
     ? `<span class="lvwhy">另有 <b>${t.n_open}</b> 批未平仓（在「每日持仓」里看）</span>`
     : '';
   if (!t.total) {
-    el.innerHTML = '<div class="ttl">交易记录 ' + openNote + '</div>'
-      + '<div class="none">还没有<b>平仓</b>记录 —— 买入之后卖出才会配成一笔往返。</div>';
+    el.innerHTML = '<div class="ttl">清仓记录 ' + openNote + '</div>'
+      + '<div class="none">还没有<b>平仓</b>记录 —— 买入之后卖出才会配成一笔往返。'
+      + '逐笔的买卖操作在「交易记录」那一页。</div>';
     return;
   }
   const p = Math.floor(t.offset / t.limit) + 1;
   const np = Math.max(1, Math.ceil(t.total / t.limit));
   const nav = lpNav(p, np, 't');
-  el.innerHTML = `<div class="ttl">交易记录
+  el.innerHTML = `<div class="ttl">清仓记录
       <span class="lvwhy">${t.total.toLocaleString()} 笔往返</span> ${openNote}</div>
     <div class="note">按 <b>FIFO 把买入与卖出配成一笔往返</b>，回答"这一笔赚了多少"
-      —— 与「流水」那页是两件事（那里是<b>录入视角</b>：那天买了/卖了什么）。
+      —— 与「交易记录」那一页是两件事（那里是<b>逐笔操作</b>：
+      买入、卖出各算一笔）。
       🔴 <b>收益率与盈亏都【含费】</b>：买入费摊进成本、卖出费从收入里扣。
       回测那边的收益率只含滑点不含佣金（与引擎 entry_price 同口径），
       所以两边的数<b>本来就不一样</b>，不该硬凑成一致。

@@ -4233,6 +4233,195 @@ _DDJS = r"""() => {
 }"""
 
 
+@case('业绩页分页签：交易记录=逐笔操作，已清仓=FIFO 往返（playwright）',
+       tag='web')
+def t_live_perf_tabs():
+    """2026-09-15 用户三句话：
+      ① "都放在同一个页面太拥挤了，应该也和回测的结果一样的做成页签"
+      ② "买入卖出都算一笔单独的操作，需要记录下来，这才是真正的交易记录"
+      ③ "已清仓的单独放一个（就是现在的交易记录）"
+
+    🔴 ② 与 ③ 是**两个不同的东西**，不是换个样子：
+
+        交易记录  逐笔操作视角：买入、卖出各算一笔（账本里真实记下的）
+        已清仓    FIFO 往返视角：一买一卖配成一笔，回答"这笔赚了多少"
+
+      所以判据不能只查"有这两个页签"，要查**它们的行数关系**：
+      逐笔 >= 往返 × 2（一笔往返至少对应一买一卖），而且逐笔那张表里
+      **买卖两种方向都有**。
+
+    ★ 逐笔那张表与流水独立页**共用 `fillsTableHtml`** —— 同一份数据两处
+      渲染迟早不一致，判据钉在源码里（两处都得调它）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import threading
+    from assay import live as lv
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+
+    # ---- ① 静态：逐笔表只能有一处定义 ----
+    src = _io.open('web/views/live-trade.js', encoding='utf-8').read()
+    assert 'function fillsTableHtml' in src, \
+        '逐笔成交表没有抽成共用函数'
+    perf = _io.open('web/views/live-perf.js', encoding='utf-8').read()
+    assert 'fillsTableHtml(' in perf, \
+        ('业绩页没有复用 `fillsTableHtml` —— 自己抄一份的话列序、冲正标记、'
+         '估算标记会慢慢分叉，而那不报错')
+    assert src.count('<th class="rt">费用</th>') == 1, \
+        '「费用」表头出现 %d 次 —— 逐笔表被抄了第二份' \
+        % src.count('<th class="rt">费用</th>')
+
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        # 🔴 要挑**买卖都有**的账户 —— 只挑"有成交"的话可能全是买入，
+        #   "两种方向都该在"那条就没法验（第一版挑到了只有买入的账户）。
+        #   有卖出的优先，没有再退回任意有成交的。
+        def _both(a):
+            sides = {f['side'] for f in lv.fills(a)}
+            return 'buy' in sides and 'sell' in sides
+        _cands = [a['id'] for a in lv.load_accounts()
+                  if not a.get('archived') and lv.fills(a['id'])]
+        aid = next((c for c in _cands if _both(c)), None) \
+            or (_cands[0] if _cands else None)
+        if not aid:
+            return '跳过（没有有成交的账户）'
+        both = _both(aid)
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid),
+                    wait_until='networkidle')
+            pg.wait_for_selector('#lptabs', timeout=90000)
+            pg.wait_for_timeout(2000)
+
+            # ---- ② 页签存在且只显示一个 pane ----
+            tabs = [t.strip() for t in
+                    pg.locator('#lptabs div').all_inner_texts()]
+            # 🔴 **顺序也要钉**，不只是"存在" —— 用户 2026-09-15 明确给了
+            #   顺序："业绩曲线、收益明细、执行差异、每日持仓、交易记录、
+            #   清仓记录"。只查"在不在"的话，顺序被改了不会有人发现。
+            WANT = ['业绩曲线', '收益明细', '执行差异', '每日持仓',
+                    '交易记录', '清仓记录']
+            assert tabs == WANT, '页签顺序/命名不对：%s（要 %s）' % (tabs, WANT)
+            # 「业绩」（KPI 板）**一直置顶**，不进页签
+            g = pg.evaluate("""() => {
+                const k = document.querySelector('.kpi');
+                const t = document.querySelector('#lptabs');
+                if (!k || !t) return null;
+                return {kb: k.getBoundingClientRect().bottom,
+                        tt: t.getBoundingClientRect().top};}""")
+            assert g and g['kb'] <= g['tt'] + 1, \
+                ('KPI 板没有置顶（底 %.0f > 页签顶 %.0f）—— 用户要的是'
+                 '"业绩一直置顶"，切页签时它不该跟着换掉'
+                 % (g['kb'] if g else -1, g['tt'] if g else -1))
+            vis = pg.evaluate("""() => [...document.querySelectorAll('[id^=lpp]')]
+                .filter(e => getComputedStyle(e).display !== 'none').length""")
+            assert vis == 1, \
+                ('同时显示了 %d 个 pane —— 分页签的全部意义就是一次只看一块'
+                 '（`.pane` 的 display:none/.on 是样式表里现成的）' % vis)
+            notes.append('%d 个页签，一次只显示一块' % len(tabs))
+
+            _VISJS = ("() => [...document.querySelectorAll('[id^=lpp]')]"
+                      ".filter(e => getComputedStyle(e).display !== 'none')"
+                      ".length")
+
+            def open_tab(name):
+                pg.locator('#lptabs div', has_text=name).first.click()
+                pg.wait_for_timeout(2500)
+                # 🔴 每次切完都复查 —— 不查的话"所有 pane 同时显示"这种坏
+                #   会让后面的取值**跨 pane**（选择器 `[id^=lpp].on` 命中多块），
+                #   报出来的却是"数据源接反了"，把人引到错的方向去查
+                #   （变异实测：报错信息指错了地方）。
+                n = pg.evaluate(_VISJS)
+                assert n == 1, \
+                    ('切到「%s」之后有 %d 个 pane 同时显示 —— 分页签就是为了'
+                     '一次只看一块' % (name, n))
+
+            # ---- ③ 交易记录 = 逐笔操作（买卖各一笔）----
+            open_tab('交易记录')
+            sides = pg.evaluate("""() => [...document.querySelectorAll(
+                '[id^=lpp].on table.lvt tr')].slice(1)
+                .map(tr => (tr.children[1] || {}).textContent.trim())""")
+            assert sides, '交易记录页签没渲染出行'
+            if both:
+                assert '买' in sides and '卖' in sides, \
+                    ('逐笔表里只有 %s —— "买入卖出都算一笔单独的操作"，'
+                     '两种方向都该在' % set(sides))
+            else:
+                notes.append('⚠ 这个账户只有买入，"两种方向"那条没验到')
+            n_fill = len(sides)
+            # 🔴 表头必须是**逐笔**那套，不是往返那套
+            th = pg.evaluate("""() => [...document.querySelectorAll(
+                '[id^=lpp].on table.lvt th')].map(e => e.textContent.trim())""")
+            assert '方向' in th and '成交日' in th, '不是逐笔表的表头：%s' % th
+            assert '持有天' not in th and '收益率' not in th, \
+                '交易记录页签里混进了往返表的列（%s）—— 那是「清仓记录」的事' % th
+            notes.append('交易记录 %d 笔逐笔操作（买卖都有）' % n_fill)
+
+            # ---- ④ 已清仓 = FIFO 往返 ----
+            open_tab('清仓记录')
+            th2 = pg.evaluate("""() => [...document.querySelectorAll(
+                '[id^=lpp].on table th')].map(e => e.textContent.trim())""")
+            body = pg.inner_text('[id^=lpp].on')
+            if '还没有' in body:
+                notes.append('⚠ 这个账户还没有平仓往返')
+                n_trip = 0
+            else:
+                for want in ('持有天', '收益率', '盈亏'):
+                    assert any(want in x for x in th2), \
+                        '清仓记录页签缺「%s」列：%s' % (want, th2)
+                n_trip = pg.evaluate("""() => [...document.querySelectorAll(
+                    '[id^=lpp].on table tbody tr')].filter(
+                    tr => !tr.classList.contains('grp')).length""")
+                # 🔴 **两者的行数关系**：一笔往返至少对应一买一卖。
+                #   只查"有这两个页签"的话，把两边接口对调也全绿。
+                assert n_fill >= n_trip * 2, \
+                    ('逐笔 %d 笔 < 往返 %d 笔 × 2 —— 两个页签的数据源接反了？'
+                     '一笔往返至少要有一买一卖' % (n_fill, n_trip))
+                notes.append('清仓记录 %d 笔往返（逐笔 %d >= 往返×2）'
+                             % (n_trip, n_fill))
+
+            # ---- ⑤ 冲正按钮只在流水页 ----
+            open_tab('交易记录')
+            assert pg.locator('[id^=lpp].on a.lvrv').count() == 0, \
+                ('业绩页的交易记录里有「冲正」按钮 —— 那是"更正录入"，'
+                 '属于流水页那条链（这里是复盘视角）')
+            assert pg.locator('[id^=lpp].on a[href*="/fills"]').count() >= 1, \
+                ('没给去流水页的入口 —— 不给冲正可以，但不能把它**藏起来**'
+                 '（同「看不出能点的入口 = 没有入口」那条）')
+            notes.append('冲正留在流水页，但给了入口')
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
+def _lp_tab(pg, name, timeout=90000):
+    """业绩页：切到某个页签并等它可见。
+
+    🔴 业绩页 2026-09-15 改成了页签（用户要求），于是「收益明细」「每日持仓」
+      这些块默认在**未激活的 pane** 里（`.pane` 的 display:none）——
+      `wait_for_selector` 默认要求**可见**，所以直接等里面的元素会超时 90 秒，
+      看着像页面坏了。★ 判据一点没变，只是入口多了一步。
+    """
+    pg.wait_for_selector('#lptabs div', timeout=timeout)
+    pg.locator('#lptabs div', has_text=name).first.click()
+    pg.wait_for_timeout(300)
+
+
 @case('实盘不许比回测少：每日持仓 + 交易记录（FIFO 往返）（playwright）',
        tag='web')
 def t_live_hist():
@@ -4379,6 +4568,7 @@ def t_live_hist():
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid),
                     wait_until='networkidle')
+            _lp_tab(pg, '每日持仓')
             pg.wait_for_selector('#lp_hdt table', timeout=90000)
             pg.wait_for_timeout(1500)
             assert pg.locator('#lp_hdt table tbody tr').count() > 0, \
@@ -4390,7 +4580,9 @@ def t_live_hist():
             assert 'NaN' not in txt, \
                 '每日持仓的分页条出现 NaN（字段名写错了？）：%s' \
                 % [x for x in txt.split('\\n') if 'NaN' in x][:2]
-            assert 'NaN' not in pg.inner_text('#lp_trip'), '交易记录出现 NaN'
+            _lp_tab(pg, '清仓记录')
+            assert 'NaN' not in pg.inner_text('#lp_trip'), '清仓记录出现 NaN'
+            _lp_tab(pg, '每日持仓')
             # 翻页真的生效
             first = pg.evaluate(
                 "() => document.querySelector('#lp_hdt table tbody tr').textContent")
@@ -4681,18 +4873,41 @@ def t_live_perf_ui():
                 ('入口要带 › —— **看不出能点的入口 = 没有入口**'
                  '（选股理由那次实测人找不到）')
             lnk.click()
+            _lp_tab(pg, '收益明细')
             pg.wait_for_selector('#lp_tbl .lpbar', timeout=90000)
             pg.wait_for_timeout(500)
             assert pg.evaluate('()=>location.hash').endswith('/perf'), \
                 '点了没跳到业绩页'
+            #   ★ 这条断言经历了三次改写，每次都是**被改动作废**而不是打挂：
+            #     原版  查 `#main` 全文有没有「资金曲线/收益曲线/回撤曲线/收益明细」
+            #           —— 当时四块平铺在一页上
+            #     09-14 回撤降为副图 -> 去掉「回撤曲线」那一项
+            #     09-15 整页改成页签（用户要求）-> **未激活的 pane 读不到
+            #           `inner_text`**，全文查必然失败
+            #   🔴 它当初要防的坑是"套进 `.pane` 导致屏幕上什么都没有"，
+            #     而现在 `.pane` 正是主动采用的结构 —— 所以判据改成
+            #     **切到那一页之后，那一块真的可见且有内容**。
+            #     光查"文字在不在 DOM 里"挡不住那个坑（DOM 里一直都在）。
+            def _pane_has(tab, *words):
+                _lp_tab(pg, tab)
+                pane = pg.locator('[id^=lpp].on')
+                assert pane.count() == 1, \
+                    '切到「%s」后可见 pane 有 %d 个' % (tab, pane.count())
+                t = pane.inner_text()
+                for w in words:
+                    assert w in t, '「%s」那一页里没有「%s」：%s' % (tab, w, t[:80])
+                # 🔴 **可见**才算数：`.pane` 不加 `.on` 时 display:none，
+                #   那正是原版要防的"画出来了但屏幕上什么都没有"。
+                assert pane.first.is_visible(), '「%s」那一页不可见' % tab
+                return t
+
+            _pane_has('业绩曲线', '资金曲线', '收益曲线')
+            _pane_has('收益明细', '收益明细')
+            # ★ 验完切回「业绩曲线」—— 下面那一大段都在这一页里操作
+            #   （切曲线、勾基准、读 y 轴刻度）。不切回去的话它们全在
+            #   隐藏的 pane 上点，超时 30 秒而看着像页面坏了。
+            _lp_tab(pg, '业绩曲线')
             txt = pg.inner_text('#main')
-            #   ★ 「回撤曲线」不再是页签（2026-09-14 改成副图），所以这里
-            #     只查仍然成块存在的那几个标题；回撤单独在下面按副图验。
-            for k in ('资金曲线', '收益曲线', '收益明细'):
-                assert k in txt, \
-                    ('业绩页缺「%s」—— 🔴 第一版把这几块套在 `.pane` 里，'
-                     '而它在样式表里是 display:none，于是 SVG 画出来了、'
-                     'DOM 里也在，屏幕上什么都没有且**不报错**' % k)
             # ---- 三条曲线在【一个框】里，上方切换 ----
             #   🔴 三张图竖着排的话要上下滚动才能对比同一天；
             #     同一个位置切换才看得出差别。
@@ -4904,6 +5119,7 @@ def t_live_perf_ui():
                 ('选中的基准要存进 localStorage —— 刷新一次就没了的话'
                  '每次进来都要重选，而这是"每天看同一个对比"的场景')
             pg.reload(wait_until='networkidle')
+            _lp_tab(pg, '业绩曲线')
             pg.wait_for_selector('#lp_tab a.lpc', timeout=90000)
             pg.wait_for_timeout(900)
             pg.locator('#lp_tab a.lpc[data-c="nav"]').click()
@@ -4970,6 +5186,9 @@ def t_live_perf_ui():
             # ---- 收益明细是**方格热力图**，不是列表 ----
             #   🔴 一屏几十行数字没法"一眼看出哪天崩的"；方格图的底色是
             #     强度、位置是日期 —— 这一页存在的理由就是快速看形态。
+            #   ★ 2026-09-15 起它在**自己的页签**里，先切过去再操作 ——
+            #     不切的话是在隐藏的 pane 上点，超时 30 秒而看着像页面坏了。
+            _lp_tab(pg, '收益明细')
             assert pg.locator('#lp_tbl a.lpg.on').inner_text() == '日', \
                 '默认粒度该是「日」（打开就看到这个月每天怎么样）'
             assert pg.locator('#lp_tbl a.lps.on').inner_text() == '两者', \
@@ -5052,6 +5271,8 @@ def t_live_perf_ui():
             #   ★ mouse.move 用的是**视口坐标** —— 前面点了几轮粒度按钮，
             #     页面重排后这张图可能已经滚出视口，不先滚进来的话
             #     鼠标落不到图上（表现是"hover 没反应"，很像功能坏了）。
+            #   ★ 曲线在「业绩曲线」页签里，先切回去（上面刚去过收益明细）。
+            _lp_tab(pg, '业绩曲线')
             pg.locator('#lp_chart svg').scroll_into_view_if_needed()
             pg.wait_for_timeout(200)
             box = pg.locator('#lp_chart svg').bounding_box()
@@ -12439,51 +12660,81 @@ def t_pos_sort():
                 .map(tr => (tr.children[0]||{}).textContent || '')""")
             o1 = pg.evaluate(ORDER)
             assert len(o1) >= 3, '持仓行太少（%d），测不出行序' % len(o1)
-            # 🔴 **判据是「排序规则仍然成立」，不是「行序一字不差」。**
-            #   盘中实时价每分钟都在动，而相邻两行的浮盈可能只差几块钱
-            #   （实测 2026-09-15 10:13：−1749.00 与 −1754.37 只差 5.37），
-            #   刷新之后它们**真的会换位** —— 那不是"排序丢了"，是数据变了。
-            #   拿"行序完全相同"当判据，在交易时段必然偶发失败
-            #   （实测 3 次挂 1 次），而**偶发绿的用例比红的更危险**。
-            #   ★ 真正要保的是：刷新之后**仍然按那一列有序**，
-            #     外加**行集合不变**（真丢了东西要抓到）。
-            def _desc(vs):
-                return bool(vs) and all(vs[i] >= vs[i + 1]
-                                        for i in range(len(vs) - 1))
-            # ★ 复用上面那个 `vals(name)`（按 th 精确匹配取列）——
-            #   我一度自写了第二套"按第一行 children 正则找列"的取法，
-            #   而 `#lvbody` 里不止一张表时它会取错表 -> 值对不上 ->
-            #   报"排序丢了"。**同一件事两处写**，又一次。
-            v1 = [x for x in (vals('浮盈') or []) if x is not None]
-            assert v1 and len(v1) >= 3, '取不到浮盈那一列：%r' % v1
-            assert _desc(v1), '点完表头本身就没排好序：%r' % v1[:5]
-            # 🔴 **等"渲染完了"，不等固定时间。** `loadLive` 是异步的，
-            #   `wait_for_timeout(1200)` 在机器忙时不够 —— 实测读到过
-            #   只有 5 行的**半截表**，于是"后面还有行、顺序不对"，
-            #   报成"排序丢了"（偶发 5 次挂 1 次）。
-            #   判据：行数回到刷新前那么多，再读值。
+            # 🔴🔴 **判据要拿"渲染那一刻的数据"比，不能重新读实时价。**
+            #   盘中每分钟刷新一次，而相邻两行的浮盈可能只差几块钱
+            #   （实测 −1,145.46 与 −1,136.84 只差 8.6）——
+            #   DOM 是按**刷新那一刻**的值排的，断言读到的却是**之后**的值，
+            #   于是"表里的顺序"与"现在的数值"天然可能对不上。
+            #   那不是"排序丢了"，是数据变了；拿它当判据**必然偶发**
+            #   （实测 13 次挂 1 次，而偶发绿的用例比红的更危险）。
+            #
+            #   ★ 正确判据：**表里的行序 == 用 `LVO` 里那份数据自己排一遍**。
+            #     `LVO` 就是渲染时用的那份（模块级），两者同源，不受刷新影响。
+            CHECK = ("""(k) => {
+                const rows = [...document.querySelectorAll(
+                    '#lvbody table.lvpos tr')].slice(1)
+                  .map(tr => (tr.children[0] || {}).textContent.trim());
+                const items = ((LVO || {}).pos || {}).items || [];
+                const want = lvSortRows(items).map(x => x.code);
+                return {dom: rows, want: want,
+                        sort: JSON.parse(JSON.stringify(LVSORT))};
+              }""")
+
+            def _check(stage):
+                r = pg.evaluate(CHECK, '浮盈')
+                assert r['sort'] and r['sort']['k'], \
+                    '%s：LVSORT 是空的 —— 排序状态丢了（它必须是模块级）' % stage
+                assert r['dom'] == r['want'], \
+                    ('%s：表里的行序与 `lvSortRows(LVO)` 算出来的不一致\n'
+                     '  表里 %s\n  应为 %s\n  排序状态 %s'
+                     % (stage, r['dom'][:6], r['want'][:6], r['sort']))
+                return r
+
+            _check('点完表头')
+            # 🔴 上面那条 `_check` 拿 `lvSortRows` 的输出当期望，所以它对
+            #   **`lvSortRows` 内部**的改动免疫（变异实测：在里面加一个
+            #   `reverse()` 照样全绿）。所以再钉一条**不依赖那个函数**的：
+            #   表里那一列的数值必须自己有序，判据用**渲染时的那份数据**
+            #   （`LVO`）而不是重新读 DOM 文本 —— 后者会被刷新抖动。
+            ind = pg.evaluate("""() => {
+                const items = ((LVO || {}).pos || {}).items || [];
+                const by = {}; items.forEach(x => by[x.code] = x);
+                const dom = [...document.querySelectorAll(
+                    '#lvbody table.lvpos tr')].slice(1)
+                  .map(tr => (tr.children[0] || {}).textContent.trim());
+                return {vals: dom.map(c => (by[c] || {})[LVSORT.k]),
+                        desc: LVSORT.desc};}""")
+            vv = [x for x in ind['vals'] if x is not None]
+            assert len(vv) >= 3, '取不到足够的数值：%r' % ind['vals']
+            ok = (all(vv[i] >= vv[i + 1] for i in range(len(vv) - 1))
+                  if ind['desc'] else
+                  all(vv[i] <= vv[i + 1] for i in range(len(vv) - 1)))
+            assert ok, \
+                ('表里的行序与那一列的数值不一致（desc=%s）：%r —— '
+                 '这条不依赖 `lvSortRows`，专抓它内部被改坏'
+                 % (ind['desc'], vv[:6]))
+            # null 必须在最后（不管升降序）
+            first_null = next((i for i, x in enumerate(ind['vals'])
+                               if x is None), None)
+            if first_null is not None:
+                assert all(x is None for x in ind['vals'][first_null:]), \
+                    'null 没有一律排最后：%r' % ind['vals']
             n_rows = len(o1)
             pg.evaluate("async () => { await loadLive(LVSEL, true); }")
             pg.wait_for_function(
                 "(n) => document.querySelectorAll("
                 "'#lvbody table.lvpos tr').length - 1 >= n", arg=n_rows,
                 timeout=30000)
-            v2 = [x for x in (vals('浮盈') or []) if x is not None]
-            assert _desc(v2), \
-                ('quiet 刷新（每分钟那次）之后不再按浮盈有序：%r —— '
-                 'LVSORT 必须是模块级，存局部里会被每分钟的重渲染冲掉' % v2[:5])
-            assert sorted(pg.evaluate(ORDER)) == sorted(o1), \
-                'quiet 刷新之后持仓的行集合变了'
+            _check('quiet 刷新（每分钟那次）后')
             # 全量重渲染也要保持
             pg.evaluate("async () => { await loadLive(LVSEL); }")
             pg.wait_for_function(
                 "(n) => document.querySelectorAll("
                 "'#lvbody table.lvpos tr').length - 1 >= n", arg=n_rows,
                 timeout=30000)
-            v3 = [x for x in (vals('浮盈') or []) if x is not None]
-            assert _desc(v3), '全量重渲染之后不再按浮盈有序：%r' % v3[:5]
+            _check('全量重渲染后')
             assert sorted(pg.evaluate(ORDER)) == sorted(o1), \
-                '全量重渲染之后持仓的行集合变了'
+                '刷新之后持仓的行集合变了'
 
             on = pg.evaluate("""() => { const t=document.querySelector(
                 '#lvbody th.lvsth.on'); return t ? t.textContent.trim() : null; }""")

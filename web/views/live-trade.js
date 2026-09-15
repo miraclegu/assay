@@ -158,6 +158,72 @@ function openRecord(aid, sig, ro, tab){
 }
 
 /* ---- 成交流水：独立页面 + 服务端分页 ---- */
+/* ============ 逐笔成交表：**一处定义，两处用** ============
+   用户 2026-09-15："买入卖出都算一笔单独的操作，需要记录下来，
+   这才是真正的交易记录。" —— 对。这张表就是它。
+
+   🔴 **不许在业绩页再抄一份**：同一份数据两处渲染迟早不一致
+     （列序、冲正按钮、估算标记会慢慢分叉），而那不报错。
+     所以流水独立页（`#/live/<id>/fills`，带录入与冲正）与业绩页的
+     「交易记录」页签共用这一个函数。
+   ★ `ro`（只读）与 `showRev`（显不显示冲正按钮）分开传：业绩页是**复盘**
+     视角，冲正属于"更正录入"，该留在流水页 —— 但**不是藏起来**，
+     业绩页那边给一条链过去。 */
+function fillsTableHtml(rows, opt) {
+  opt = opt || {};
+  const ro = opt.ro, showRev = opt.showRev !== false;
+  if (!rows || !rows.length) return '';
+  return `<table class="lvt">
+    <!-- 列序按【看的顺序】排：哪天、买还是卖、哪只票、什么价、多少股、
+         多少钱。录入时间与来源是审计信息，平时不看，挪到最后并压暗。
+         数字列右对齐 + tabular-nums，位数才对得齐（.rt / .lvt td.rt）。 -->
+    <tr><th>成交日</th><th class="tx">方向</th><th class="tx">代码</th><th class="tx">名称</th>
+        <th class="rt">价格</th><th class="rt">股数</th><th class="rt">金额</th>
+        <th class="rt">费用</th>${showRev ? '<th></th>' : ''}
+        <th class="lvwhy tx">录入时间</th><th class="lvwhy tx">来源</th></tr>
+    ${rows.map(f => {
+      const rev = !!f.reverse_of, dead = !!f._dead, fid = f.uid || f.ts;
+      return `<tr class="${rev || dead ? 'lvrev' : ''}">
+      <td>${esc(f.trade_date)}</td>
+      <td class="tx" style="color:${f.side === 'buy' ? 'var(--up)' : 'var(--down)'}">${f.side === 'buy' ? '买' : '卖'}</td>
+      <td class="tx">${skLink(f.code, f.code)}</td>
+      <td class="tx">${skLink(f.code, f.name || '')}</td>
+      <td class="rt" title="${f.price_from ? '取的成交日' + (f.price_from === 'open' ? '开盘价' : '收盘价') + '，不是券商回报' : ''}">${num(f.price, 3)}${
+        f.price_from ? '<span class="lvwhy">' + (f.price_from === 'open' ? '开' : '收') + '</span>' : ''}</td>
+      <td class="rt">${num(f.shares)}</td>
+      <td class="rt">${num(f.shares * f.price, 2)}</td>
+      <td class="rt" title="${f.fee_estimated ? '估算值，对完账单请冲正改成实际' : ''}">${num(f.fee, 2)}${
+        f.fee_estimated ? '<span class="lvwhy">估</span>' : ''}</td>
+      ${showRev ? `<td>${(rev || dead || ro) ? '' : `<a href="#" class="lvrv" data-ts="${esc(fid)}"
+        data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
+        data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name || '')}"
+        data-f="${f.fee || 0}">冲正</a>`}</td>` : ''}
+      <td class="lvwhy tx">${esc(f.ts.slice(5, 16).replace('T', ' '))}</td>
+      <td class="lvwhy tx">${rev ? '冲正' : esc(f.source || '')}</td></tr>`;
+    }).join('')}
+    </table>`;
+}
+
+/* 冲正按钮的事件。★ innerHTML 之后才存在的元素要在这里绑 ——
+   只在渲染开头绑的话点了没反应且不报错（对比页「移除」栽过）。 */
+function bindFillRevert(root, aid, reload) {
+  (root || document).querySelectorAll('a.lvrv').forEach(e => e.onclick = async ev => {
+    ev.preventDefault();
+    const d = e.dataset;
+    const of = parseFloat(d.f || '0') || 0;
+    if (!confirm(`冲正：${d.d} ${d.c} ${d.s === 'buy' ? '买' : '卖'} ${d.q} @${d.p}（费用 ${of.toFixed(2)}）\n`
+      + `会追加一条反方向记录（${d.s === 'buy' ? '卖' : '买'} ${d.q}，费用 ${(-of).toFixed(2)}），\n`
+      + `原记录保留并划掉。净现金影响为 0。`)) return;
+    try {
+      await post('/api/live/fill', {id: aid, rows: [{trade_date: d.d, code: d.c,
+        side: d.s === 'buy' ? 'sell' : 'buy', shares: parseInt(d.q, 10),
+        price: parseFloat(d.p), fee: -of, name: d.n, source: 'reverse',
+        reverse_of: d.ts, note: '冲正'}]});
+      reload();
+    } catch (e) { alert(String(e)); }
+  });
+}
+
 async function showFills(aid, off){
   stopPoll();
   enterView();
@@ -175,34 +241,7 @@ async function showFills(aid, off){
     <span class="lvtag">费用合计 ${num(o.fee_total,2)}${
       o.fee_estimated_n?'（'+o.fee_estimated_n+' 笔估算）':''}</span>
   </div>
-  ${n?`<div class="lvsec"><table class="lvt">
-    <!-- 列序按【看的顺序】排：哪天、买还是卖、哪只票、什么价、多少股、
-         多少钱。录入时间与来源是审计信息，平时不看，挪到最后并压暗。
-         数字列右对齐 + tabular-nums，位数才对得齐（.rt / .lvt td.rt）。 -->
-    <tr><th>成交日</th><th class="tx">方向</th><th class="tx">代码</th><th class="tx">名称</th>
-        <th class="rt">价格</th><th class="rt">股数</th><th class="rt">金额</th>
-        <th class="rt">费用</th><th></th>
-        <th class="lvwhy tx">录入时间</th><th class="lvwhy tx">来源</th></tr>
-    ${o.rows.map(f=>{
-      const rev=!!f.reverse_of, dead=!!f._dead, fid=f.uid||f.ts;
-      return `<tr class="${rev||dead?'lvrev':''}">
-      <td>${esc(f.trade_date)}</td>
-      <td class="tx" style="color:${f.side==='buy'?'var(--up)':'var(--down)'}">${f.side==='buy'?'买':'卖'}</td>
-      <td class="tx">${skLink(f.code, f.code)}</td>
-      <td class="tx">${skLink(f.code, f.name||'')}</td>
-      <td class="rt" title="${f.price_from?'取的成交日'+(f.price_from==='open'?'开盘价':'收盘价')+'，不是券商回报':''}">${num(f.price,3)}${
-        f.price_from?'<span class="lvwhy">'+(f.price_from==='open'?'开':'收')+'</span>':''}</td>
-      <td class="rt">${num(f.shares)}</td>
-      <td class="rt">${num(f.shares*f.price,2)}</td>
-      <td class="rt" title="${f.fee_estimated?'估算值，对完账单请冲正改成实际':''}">${num(f.fee,2)}${
-        f.fee_estimated?'<span class="lvwhy">估</span>':''}</td>
-      <td>${(rev||dead||ro)?'':`<a href="#" class="lvrv" data-ts="${esc(fid)}"
-        data-d="${esc(f.trade_date)}" data-c="${esc(f.code)}" data-s="${f.side}"
-        data-q="${f.shares}" data-p="${f.price}" data-n="${esc(f.name||'')}"
-        data-f="${f.fee||0}">冲正</a>`}</td>
-      <td class="lvwhy tx">${esc(f.ts.slice(5,16).replace('T',' '))}</td>
-      <td class="lvwhy tx">${rev?'冲正':esc(f.source||'')}</td></tr>`;}).join('')}
-    </table>
+  ${n?`<div class="lvsec">${fillsTableHtml(o.rows, {ro: ro})}
     <div class="lvform" style="margin-top:10px;align-items:baseline">
       <button class="btn" id="pprev" ${o.offset<=0?'disabled':''}>‹ 上一页</button>
       <span class="lvwhy">第 ${cur}/${pages} 页 · 第 ${from}–${to} 笔（倒序）</span>
@@ -216,19 +255,7 @@ async function showFills(aid, off){
   const go=x=>{ location.hash='#/live/'+aid+'/fills'+(x?'/'+x:''); };
   if($('#pprev')) $('#pprev').onclick=()=>go(Math.max(0,o.offset-o.limit));
   if($('#pnext')) $('#pnext').onclick=()=>go(o.offset+o.limit);
-  document.querySelectorAll('a.lvrv').forEach(e=>e.onclick=async ev=>{
-    ev.preventDefault(); const d=e.dataset;
-    const of=parseFloat(d.f||'0')||0;
-    if(!confirm(`冲正：${d.d} ${d.c} ${d.s==='buy'?'买':'卖'} ${d.q} @${d.p}（费用 ${of.toFixed(2)}）\n`
-      +`会追加一条反方向记录（${d.s==='buy'?'卖':'买'} ${d.q}，费用 ${(-of).toFixed(2)}），\n`
-      +`原记录保留并划掉。净现金影响为 0。`)) return;
-    try{
-      await post('/api/live/fill',{id:aid, rows:[{trade_date:d.d, code:d.c,
-        side:d.s==='buy'?'sell':'buy', shares:parseInt(d.q,10), price:parseFloat(d.p),
-        fee:-of, name:d.n, source:'reverse', reverse_of:d.ts, note:'冲正'}]});
-      showFills(aid, o.offset);
-    }catch(e){ alert(String(e)); }
-  });
+  bindFillRevert(document, aid, () => showFills(aid, o.offset));
 }
 
 /* 策略详情：源码快照 + 参数表 + 【用这个版本跑过的回测】。

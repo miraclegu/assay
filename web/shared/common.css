@@ -91,11 +91,13 @@ a{color:var(--accent);text-decoration:none}
 #hd .row1{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 #hd h2{margin:0;font-size:17px}
 #hd .meta{color:var(--dim);font-size:12px}
-#tabs{display:flex;gap:2px;margin-top:11px;flex-wrap:wrap}
-#tabs div{padding:6px 13px;cursor:pointer;color:var(--dim);border-radius:5px 5px 0 0;
+/* 页签：回测详情页（#tabs）与实盘业绩页（#lptabs）**共用同一套样式** ——
+   复制一份的话两页的页签会慢慢长得不一样，而那不报错。 */
+#tabs,#lptabs{display:flex;gap:2px;margin-top:11px;flex-wrap:wrap}
+#tabs div,#lptabs div{padding:6px 13px;cursor:pointer;color:var(--dim);border-radius:5px 5px 0 0;
   font-size:12px}
-#tabs div:hover{color:var(--fg)}
-#tabs div.on{background:var(--panel);color:var(--fg);box-shadow:inset 0 -2px 0 var(--accent)}
+#tabs div:hover,#lptabs div:hover{color:var(--fg)}
+#tabs div.on,#lptabs div.on{background:var(--panel);color:var(--fg);box-shadow:inset 0 -2px 0 var(--accent)}
 .pane{display:none;padding-top:16px}
 .pane.on{display:block}
 /* ---- 统计卡 ---- */
