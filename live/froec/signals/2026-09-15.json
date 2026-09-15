@@ -1,42 +1,32 @@
 {
  "account": "froec",
- "built_at": "2026-09-14T23:14:09",
- "buy": [
-  {
-   "amount": 60658.0,
-   "code": "300980.XSHE",
-   "limit": 23.33,
-   "name": "祥源新材",
-   "ref_price": 22.22,
-   "shares": 2600,
-   "why": "候选池第 10/20 名 · 可买"
-  }
- ],
+ "built_at": "2026-09-15T16:03:55",
+ "buy": [],
  "calendar_source": "tdx.raw_holidays",
- "cash": 22413.49,
+ "cash": 9405.04,
  "code_sha": "c3118f7d",
  "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
  "data_asof": "2026-09-14",
  "data_fingerprint": {
-  "overall": "46b550296764",
+  "overall": "a8e99aaf7cc3",
   "parts": {
    "index": {
-    "hash": "10b529a3e3f8",
+    "hash": "1b7ca7248109",
     "n_files": 24,
-    "newest_mtime": "2026-09-14T16:22:58",
+    "newest_mtime": "2026-09-15T16:02:34",
     "total_bytes": 64694964
    },
    "panel": {
-    "hash": "4a98889d222c",
+    "hash": "2a599587c7a4",
     "n_files": 24,
-    "newest_mtime": "2026-09-14T16:23:43",
-    "total_bytes": 1339500308
+    "newest_mtime": "2026-09-15T16:03:11",
+    "total_bytes": 1339500306
    },
    "std": {
-    "hash": "a6c09a8dfc12",
+    "hash": "d8e30436d2fb",
     "n_files": 18,
-    "newest_mtime": "2026-09-14T16:23:58",
-    "total_bytes": 375754517
+    "newest_mtime": "2026-09-15T16:03:32",
+    "total_bytes": 375543267
    }
   }
  },
@@ -50,9 +40,9 @@
     "300375.XSHE",
     "300500.XSHE",
     "300575.XSHE",
+    "300980.XSHE",
     "301126.XSHE",
     "301152.XSHE",
-    "600774.XSHG",
     "603168.XSHG",
     "603506.XSHG",
     "605122.XSHG"
@@ -388,7 +378,9 @@
       "code": "300980.XSHE",
       "dropped_by": null,
       "facts": [],
-      "in_sets": [],
+      "in_sets": [
+       "pos_state"
+      ],
       "metrics": {
        "eps": 0.3397,
        "floatmv": 2222193269.56,
@@ -406,7 +398,7 @@
        "可买"
       ],
       "rank": 10,
-      "status": "buy",
+      "status": "hold",
       "step": 1
      },
      {
@@ -438,9 +430,7 @@
       "code": "600774.XSHG",
       "dropped_by": null,
       "facts": [],
-      "in_sets": [
-       "pos_state"
-      ],
+      "in_sets": [],
       "metrics": {
        "eps": 0.0324,
        "floatmv": 2270577362.9,
@@ -456,7 +446,7 @@
       "of": 20,
       "passed": [],
       "rank": 12,
-      "status": "sell",
+      "status": "not_taken",
       "step": 1
      },
      {
@@ -762,12 +752,13 @@
   ]
  },
  "for_date": "2026-09-15",
- "freed_est": 38500.0,
+ "freed_est": 0,
  "held_codes": [
   "002910.XSHE",
   "300375.XSHE",
   "300500.XSHE",
   "300575.XSHE",
+  "300980.XSHE",
   "301126.XSHE",
   "301152.XSHE",
   "603168.XSHG",
@@ -798,6 +789,12 @@
    "name": "中旗股份",
    "shares": 6000,
    "why": "候选池第 7/20 名 · 可买"
+  },
+  {
+   "code": "300980.XSHE",
+   "name": "祥源新材",
+   "shares": 2300,
+   "why": "候选池第 10/20 名 · 可买"
   },
   {
    "code": "301126.XSHE",
@@ -831,7 +828,7 @@
   }
  ],
  "is_rebalance_day": true,
- "left_est": 255.49,
+ "left_est": 9405.04,
  "next_rebalance": "2026-09-15",
  "no_price": [],
  "params": {
@@ -842,11 +839,6 @@
   "weekday": 2
  },
  "recomputed": false,
- "recomputed_at": [
-  "2026-09-14T21:47:47",
-  "2026-09-14T22:34:34",
-  "2026-09-14T23:14:09"
- ],
  "revisions": [
   {
    "archived": "signals/_rev/2026-09-15.rev1.json",
@@ -867,18 +859,33 @@
    },
    "replaced_at": "2026-09-14T20:46:09",
    "rev": 1
-  }
- ],
- "sell": [
+  },
   {
-   "code": "600774.XSHG",
-   "name": "汉商集团",
-   "reason": "rebalance_out",
-   "ref_price": 7.7,
-   "shares": 5000,
-   "why": "候选池第 12/20 名"
+   "archived": "signals/_rev/2026-09-15.rev2.json",
+   "built_at": "2026-09-14T23:14:09",
+   "diff": {
+    "buy_added": [],
+    "buy_removed": [
+     "300980.XSHE"
+    ],
+    "changed": true,
+    "data_fp_changed": true,
+    "data_fp_new": "a8e99aaf7cc3",
+    "data_fp_old": "46b550296764",
+    "hold_added": [
+     "300980.XSHE"
+    ],
+    "hold_removed": [],
+    "sell_added": [],
+    "sell_removed": [
+     "600774.XSHG"
+    ]
+   },
+   "replaced_at": "2026-09-15T16:03:55",
+   "rev": 2
   }
  ],
+ "sell": [],
  "upcoming": [
   {
    "date": "2026-09-16",

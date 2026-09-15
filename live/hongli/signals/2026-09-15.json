@@ -1,6 +1,6 @@
 {
  "account": "hongli",
- "built_at": "2026-09-14T23:13:55",
+ "built_at": "2026-09-15T16:03:46",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 61569.55,
@@ -8,25 +8,25 @@
  "code_sha256": "edbdaeb00fe58a560712f687b7712b43113ad113e9f0088c168cc3fef12864a7",
  "data_asof": "2026-09-14",
  "data_fingerprint": {
-  "overall": "46b550296764",
+  "overall": "a8e99aaf7cc3",
   "parts": {
    "index": {
-    "hash": "10b529a3e3f8",
+    "hash": "1b7ca7248109",
     "n_files": 24,
-    "newest_mtime": "2026-09-14T16:22:58",
+    "newest_mtime": "2026-09-15T16:02:34",
     "total_bytes": 64694964
    },
    "panel": {
-    "hash": "4a98889d222c",
+    "hash": "2a599587c7a4",
     "n_files": 24,
-    "newest_mtime": "2026-09-14T16:23:43",
-    "total_bytes": 1339500308
+    "newest_mtime": "2026-09-15T16:03:11",
+    "total_bytes": 1339500306
    },
    "std": {
-    "hash": "a6c09a8dfc12",
+    "hash": "d8e30436d2fb",
     "n_files": 18,
-    "newest_mtime": "2026-09-14T16:23:58",
-    "total_bytes": 375754517
+    "newest_mtime": "2026-09-15T16:03:32",
+    "total_bytes": 375543267
    }
   }
  },
@@ -222,7 +222,8 @@
   "2026-09-14T20:00:11",
   "2026-09-14T21:31:01",
   "2026-09-14T22:34:31",
-  "2026-09-14T23:13:55"
+  "2026-09-14T23:13:55",
+  "2026-09-15T16:03:46"
  ],
  "revisions": [],
  "sell": [],
