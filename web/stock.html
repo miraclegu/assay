@@ -19,7 +19,29 @@
    ★ 一次并发拉 7 个接口，任何一个失败只让它那一块显示错误，
      不拖垮整页 —— 看 K 线的时候不该因为"解禁表读不了"整页白屏。 */
 let CODE = qs('code') || localStorage.getItem('skcode') || '';
-let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq', SUB = qs('sub') || 'macd';
+let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq';
+/* 副图指标：**一组**（最多 4 个），URL 里是 `sub=macd,kdj`。
+   ★ 老链接 `sub=macd` 照旧能用（单个就是一个元素的组）。
+   🔴 "一个都不要"写成 `sub=0` 而不是 `sub=` —— `nav()` 对空值是
+     **删掉这个参数**，于是下次打开又回到默认的 MACD，表现是
+     "关不掉的副图"，而它不报错。 */
+const KMAX = 4;
+let KINDS = kindsFromUrl();
+/* 指标参数（KDJ 看几日之类）。**存 localStorage、不进 URL**：它是
+   "我习惯看几日"的个人设置（同实盘页那个区间选择），而 URL 是拿去
+   分享/加书签的，塞一段 JSON 进去只会让链接没法看。 */
+let KP = kpLoad();
+/* 🔴 有哪些指标、各画哪几条线、什么颜色 —— **服务端给**
+   （/api/indicators/defs，正本在 assay/indicators.py）。页面硬编码一份的话，
+   加一个指标要改两处，而漏改那处的表现是**新指标在页面上根本不出现**：
+   不报错，只是没人知道它存在（同「可选基准由服务端给」那条）。 */
+let KDEFS = null, KPANELS = [];
+/* 🔴 参数面板开着没开着必须是**模块级**：改一个参数就 `load()` 一次，
+   而 `load()` 重渲染整块 `#body` —— 存在局部里的话面板立刻合上，
+   要改第二个参数得重新点开（同「LVSORT 必须是模块级」那条）。
+   ★ 但**不持久化到 localStorage**：下次打开该回到收起态
+     （同「待办折叠状态不持久化」）。 */
+let KPOPEN = false;
 /* 对数坐标：线性轴上「涨 1 块」在 10 元和 100 元处占同样高度，于是长
    区间里低价那一段的波动被压平 —— 翻倍的行情看着像条平线。默认关
    （对着券商软件看的是线性），存进 URL 所以能加书签。 */
@@ -43,7 +65,6 @@ let KSEL = null;
    页面看着正常，靠 pageerror 才抓到）。 */
 let KGEO = null;
 const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
-const SUBS = [['macd','MACD'],['kdj','KDJ'],['rsi','RSI'],['','无副图']];
 
 pageHead('stock', '📈 个股');
 $('#pg').innerHTML = `<div class="lvhead">
@@ -70,13 +91,21 @@ async function load() {
   const b = $('#body');
   b.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
   const one = u => j(u).catch(e => ({error: String(e)}));
+  /* 指标清单取一次就够（它在进程内不变）——每次进页面重取是同一份数据取 N 遍。
+     ★ 取不到不能让整页打不开：退回空清单，那时工具条上没有指标可选，
+       但 K 线照画（同「外部挂了退回本地那份」那条）。 */
+  if (!KDEFS) KDEFS = await j('/api/indicators/defs')
+    .catch(() => ({inds: [], signals: []}));
   const [p, k, ind, f, ev, pe, sc, lk, tr] = await Promise.all([
     one('/api/stock/profile?code=' + encodeURIComponent(CODE)),
     one(`/api/stock/kline?n=${N}&fq=${FQ}&off=${KOFF}&code=` + encodeURIComponent(CODE)),
     /* 🔴 副图也要带 `off` —— 不带的话翻页之后 MACD/KDJ 画的还是最新那一段，
        两张图**上下对不上**，而它不报错，看着像"指标和 K 线不同步"。 */
-    SUB ? one(`/api/stock/indicators?n=${N}&fq=${FQ}&off=${KOFF}&code=` + encodeURIComponent(CODE))
-        : Promise.resolve({rows: []}),
+    kIndsParam()
+      ? one(`/api/stock/indicators?n=${N}&fq=${FQ}&off=${KOFF}`
+            + `&inds=${encodeURIComponent(kIndsParam())}&code=`
+            + encodeURIComponent(CODE))
+      : Promise.resolve({rows: [], panels: []}),
     one('/api/stock/finance?n=12&code=' + encodeURIComponent(CODE)),
     one('/api/stock/events?code=' + encodeURIComponent(CODE)),
     one('/api/stock/peers?n=12&code=' + encodeURIComponent(CODE)),
@@ -93,6 +122,7 @@ async function load() {
   /* 翻页用：总根数（还能不能往左翻）+ 服务端实际落到的 off（钳过的） */
   if (!k.error) { KTOTAL = k.total || 0; KOFF = k.off || 0; }
   IND = (ind && !ind.error) ? ind.rows : null;
+  KPANELS = (ind && !ind.error) ? (ind.panels || []) : [];
   EVS = (ev && !ev.error) ? ev.events : [];
   b.innerHTML = head(p, lk) + kpiBox(p) + chartBox(k, ind)
     + linkBox(lk) + sectorBox(sc, pe) + tables(p, f, ev);
@@ -178,7 +208,7 @@ function chartBox(k, ind) {
       <a href="#" class="lvtag fq${FQ === 'hfq' ? ' on' : ''}" data-f="hfq"
         title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
       <span class="lvwhy">|</span>
-      ${SUBS.map(([s, t]) => `<a href="#" class="lvtag sb${SUB === s ? ' on' : ''}" data-s="${s}">${t}</a>`).join('')}
+      ${kTagsHtml()}
       <span class="lvwhy">|</span>
       <a href="#" class="lvtag${KLOG ? ' on' : ''}" id="klogt"
         title="对数坐标：等百分比涨幅 = 等高度。&#10;看几年的走势用它才可比 —— 线性轴会把低价那一段的波动压平">对数</a>
@@ -187,7 +217,9 @@ function chartBox(k, ind) {
       <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
     </h3>
     <div class="cvbox" id="cbox">
-      <canvas id="kcv" style="width:100%;height:${SUB ? 500 : 420}px;display:block;cursor:crosshair"></canvas>
+      <!-- ★ 画布跟着副图个数长高（每个 110px），不是把它们挤进同一个高度里 ——
+           4 个指标压在 500px 里每个只剩 50px，那种图看不出形态。 -->
+      <canvas id="kcv" style="width:100%;height:${KINDS.length ? 390 + 110 * KINDS.length : 420}px;display:block;cursor:crosshair"></canvas>
       <div class="cvtip" id="ktip"></div>
       <div class="selpop" id="kselpop"></div>
     </div>
@@ -197,6 +229,7 @@ function chartBox(k, ind) {
            涨跌幅等等信息太不明显，最好是在框选范围外展示一个浮窗"）——
            这行字在图**下面**，而眼睛还停在刚框完的那一段上，要往下扫一眼
            才看得到。读数改成贴着选区的浮窗（id=kselpop），就在视线里。 -->
+    ${kParamsHtml()}
     <div id="ksel" class="lvwhy" style="margin-top:6px">
       在图上<b>按住拖动</b>可框选一段，自动算区间涨跌幅 / 最高 / 最低 / 振幅。</div>
     <div class="lvwhy" style="margin-top:4px">
@@ -365,6 +398,39 @@ function tables(p, f, ev) {
 }
 
 /* ---- 交互 ---- */
+function kindsFromUrl() {
+  const raw = qs('sub');
+  if (raw === null) return ['macd'];      /* 没写 = 老样子，只看 MACD */
+  if (raw === '0') return [];             /* 显式的"一个都不要" */
+  return raw.split(',').map(x => x.trim()).filter(Boolean).slice(0, KMAX);
+}
+function kpLoad() {
+  try { return JSON.parse(localStorage.getItem('kindp') || '{}'); }
+  catch (e) { return {}; }
+}
+function kpSave() {
+  try { localStorage.setItem('kindp', JSON.stringify(KP)); } catch (e) {}
+}
+function kDef(id) { return ((KDEFS || {}).inds || []).find(x => x.id === id) || null; }
+/* 要问服务端算哪些：副图那几个 + 开了 BOLL 的话加上它（它叠在**主图**上，
+   不占副图的位置）。一个都不要时**整个请求都不发** —— 空结果也要花一次
+   往返，而这一页本来就并发拉着十个接口。 */
+function kWant() { return KINDS.concat(BOLL ? ['boll'] : []); }
+function kIndsParam() {
+  const ids = kWant();
+  if (!ids.length) return '';
+  const custom = ids.some(id => KP[id] && Object.keys(KP[id]).length);
+  return custom ? JSON.stringify(ids.map(id => ({id: id, params: KP[id] || {}})))
+                : ids.join(',');
+}
+/* 给 drawKChart 的副图数组。**画什么由服务端那份 panels 决定**，
+   页面只负责把同一份 rows 递进去（它们是同一条时间轴）。 */
+function kSubs() {
+  if (!IND || !KPANELS.length) return [];
+  return KPANELS.filter(x => x.panel === 'sub').map(x => ({
+    id: x.id, label: x.short || x.label, unit: x.unit,
+    rows: IND, series: x.series}));
+}
 function nav(over) {
   const u = new URL(location.href);
   u.searchParams.set('code', CODE);
@@ -385,8 +451,49 @@ function wire() {
     ev.preventDefault(); N = +e.dataset.n; nav({n: N}); load(); });
   $$('#body .fq').forEach(e => e.onclick = ev => {
     ev.preventDefault(); FQ = e.dataset.f; nav({fq: FQ}); load(); });
-  $$('#body .sb').forEach(e => e.onclick = ev => {
-    ev.preventDefault(); SUB = e.dataset.s; nav({sub: SUB}); load(); });
+  $$('#body .ind').forEach(e => e.onclick = ev => {
+    ev.preventDefault();
+    const id = e.dataset.i, at = KINDS.indexOf(id);
+    if (at >= 0) KINDS.splice(at, 1);
+    else if (KINDS.length >= KMAX) {
+      /* 🔴 到上限时**说出来**，不要静默不动 —— 点了没反应是最难查的
+         那种坏（同 backLink 那条）。 */
+      const m = $('#kimsg');
+      if (m) m.innerHTML = `　最多同时看 <b>${KMAX}</b> 个指标 —— 先取消一个`;
+      return;
+    } else KINDS.push(id);
+    nav({sub: KINDS.join(',') || '0'});
+    load();
+  });
+  if ($('#kpset')) $('#kpset').onclick = ev => {
+    ev.preventDefault();
+    const b = $('#kpbox');
+    if (!b) return;
+    KPOPEN = !KPOPEN;
+    b.style.display = KPOPEN ? 'block' : 'none';
+  };
+  $$('#body .kpi').forEach(e => e.onchange = () => {
+    const id = e.dataset.id, k = e.dataset.k, v = parseInt(e.value, 10);
+    const d = kDef(id), a = d && d.params.find(x => x.key === k);
+    const m = $('#kimsg');
+    /* 🔴 越界**当场拒**并说清范围 —— 让它发到服务端只会换来一句报错，
+       而输入框里还留着那个非法值。 */
+    if (!a || !(v >= a.min && v <= a.max)) {
+      if (m) m.innerHTML = `　${esc(a ? a.label : k)} 要在 ${a ? a.min : '?'}~${a ? a.max : '?'} 之间`;
+      e.value = (KP[id] || {})[k] != null ? KP[id][k] : (a ? a.default : '');
+      return;
+    }
+    KP[id] = Object.assign({}, KP[id]); KP[id][k] = v;
+    /* 与默认值相同就不存 —— 存了的话按钮上会一直挂着"(9,3,3)"这种
+       等于没改的括号。 */
+    if (v === a.default) { delete KP[id][k]; if (!Object.keys(KP[id]).length) delete KP[id]; }
+    kpSave(); load();
+  });
+  if ($('#kprst')) $('#kprst').onclick = ev => {
+    ev.preventDefault();
+    KINDS.forEach(id => delete KP[id]);
+    kpSave(); load();
+  };
   /* ★ 只**重画**，不重新取数 —— 换的是坐标映射，数据一个字没变
      （同 BOLL 那个按钮）。 */
   if ($('#klogt')) $('#klogt').onclick = ev => {
@@ -405,7 +512,12 @@ function wire() {
        ★ 高亮直接改 class：调 head() 是另一件事（它渲染的是页面头，
          而且要 p/lk 两个参数），拿来当"刷新那个标签"用会报错。 */
     ev.currentTarget.classList.toggle('on', BOLL);
-    if (BOLL && !IND) { load(); return; }
+    /* 🔴 **手上这份 IND 里有没有 BOLL** 才是判据，不是"IND 在不在"。
+       改造后 BOLL 只在被勾上时才让服务端算（它是按需取的一个指标），
+       于是"只重画"会画出**一条线都没有的布林带** —— 而它不报错。
+       ★ 判据用 `'ub' in 行`：预热那几根的 ub 是 **null**，
+         用 `!= null` 判会把"取回来了但头几根还没值"误判成"没取"。 */
+    if (BOLL && !(IND && IND.length && ('ub' in IND[0]))) { load(); return; }
     geo = redraw();
   };
   const ck = $('#evck');
@@ -596,6 +708,47 @@ function renderSel() {
   el.style.top = Math.max(4, Math.min(28, box.height - h - 4)) + 'px';
 }
 
+/* 指标选择条：**照服务端那份清单渲染**，页面不认识任何一个指标名。 */
+function kTagsHtml() {
+  const subs = ((KDEFS || {}).inds || []).filter(x => x.panel === 'sub');
+  if (!subs.length) return '';
+  const tags = subs.map(d => {
+    const on = KINDS.indexOf(d.id) >= 0, p = KP[d.id] || {};
+    /* 改过参数的在按钮上把参数写出来 —— 不写的话"我到底把 KDJ 调成几日了"
+       得点开设置才知道，而那个数直接决定图形。 */
+    const ps = Object.keys(p).length
+      ? '(' + d.params.map(a => (p[a.key] != null ? p[a.key] : a.default)).join(',') + ')'
+      : '';
+    return `<a href="#" class="lvtag ind${on ? ' on' : ''}" data-i="${d.id}"
+      title="${esc(d.label + '：' + d.desc)}">${esc(d.short)}${ps}</a>`;
+  }).join('');
+  return tags + `<a href="#" class="lvtag${KINDS.length ? '' : ' off'}" id="kpset"
+      title="${KINDS.length ? '改这几个指标的参数（周期之类）' : '先选一个指标'}">⚙</a>`
+    + '<span class="lvwhy" id="kimsg"></span>';
+}
+/* 参数面板：默认收起 —— 它是十来个输入框，常驻会把工具条撑成两行，
+   而绝大多数时候没人改参数（同费率那个「+ 新增费率」面板）。 */
+function kParamsHtml() {
+  if (!KINDS.length) return '';
+  const body = KINDS.map(id => {
+    const d = kDef(id);
+    if (!d) return '';
+    const p = KP[id] || {};
+    return `<span style="display:inline-block;margin:0 16px 4px 0"><b>${esc(d.short)}</b>`
+      + d.params.map(a => `<label style="margin-left:6px">${esc(a.label)}
+          <input class="kpi" data-id="${id}" data-k="${a.key}" type="number"
+            min="${a.min}" max="${a.max}" style="width:56px"
+            value="${p[a.key] != null ? p[a.key] : a.default}"></label>`).join('')
+      + '</span>';
+  }).join('');
+  return `<div id="kpbox" class="lvwhy" style="display:${KPOPEN ? 'block' : 'none'};margin-top:6px;
+       padding:8px;border:1px solid var(--line);border-radius:6px">
+    ${body}<a href="#" class="lvtag" id="kprst">恢复默认</a>
+    <div style="margin-top:4px">参数存在<b>本机</b>、不进 URL —— 它是"我习惯看几日"，
+      而链接是拿去分享的。指标一律在<b>服务端</b>算并预热（少取预热会让头部的值
+      悄悄错掉，而那不报错）。</div></div>`;
+}
+
 function redraw() {
   const cv = $('#kcv');
   if (!cv || !BARS) return null;
@@ -605,7 +758,7 @@ function redraw() {
   const bars = (BOLL && IND) ? BARS.map((b, i) => IND[i]
     ? Object.assign({}, b, {ub: IND[i].ub, lb: IND[i].lb}) : b) : BARS;
   return (KGEO = drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
-    sub: SUB ? IND : null, subKind: SUB, hover: HOVER, sel: KSEL,
+    subs: kSubs(), hover: HOVER, sel: KSEL,
     /* 🔴 **不复权时才画买卖点**：成交价是不复权实际价，切到后复权之后
        标记会整体飘走（同浮层 `spFq` 那条纪律，只是这一页可以切）。 */
     trades: FQ === 'bfq' ? TRADES : []}));

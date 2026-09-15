@@ -181,10 +181,33 @@ def current():
 
 
 def _tier(t):
-    """一档：{by:'price'|'yield', v:数}。填价存价、填率存率，另一个现算。"""
+    """一档：填价 / 填股息率 / **填一个指标条件**，另一个永远现算。
+
+    `by='ind'` 那种长这样：`{by:'ind', sig:'ma_dist', args:{'w':20}, v:-3}`
+    —— 条件定义（有哪些、各带什么参数）在 `assay/indicators.py`，
+    这里只管存**你填的那个**（同「每档存的是你填的那个，另一个现算」）：
+    触发价每天都不一样（均线在动），存下来第二天就是错的。
+    """
     by = (t.get('by') or '').strip()
+    if by == 'ind':
+        from assay import indicators as I
+        sid = (t.get('sig') or '').strip()
+        try:
+            args = I.sig_args(sid, t.get('args'))
+        except I.IndError as e:
+            raise AlertError(str(e))
+        try:
+            v = float(t.get('v'))
+        except Exception:                                   # noqa: BLE001
+            raise AlertError('第 %s 档的阈值不是数字：%r' % (t.get('i', '?'), t.get('v')))
+        if not (abs(v) < 1e4):
+            raise AlertError('阈值 %s 不像是真的' % v)
+        out = {'by': 'ind', 'sig': sid, 'args': args, 'v': round(v, 6)}
+        if t.get('note'):
+            out['note'] = str(t['note'])[:40]
+        return out
     if by not in ('price', 'yield'):
-        raise AlertError("每档的 by 只能是 price / yield，收到 %r" % by)
+        raise AlertError("每档的 by 只能是 price / yield / ind，收到 %r" % by)
     try:
         v = float(t.get('v'))
     except Exception:                                       # noqa: BLE001
@@ -586,10 +609,92 @@ def suggest_div(codes_in, root=None, day=None, ext=True):
 
 
 # ------------------------------------------------------------------- 估值
-def _derive(row, div):
+# 指标条件要日线：取多少根由**条件自己说**（`sig_warm`），再留一截余量。
+IND_BARS_MIN = 120
+IND_BARS_MAX = 600
+_BARS_CACHE = {}
+
+
+def _bars_for(codes, day, n, root=None):
+    """一次取全部票的近 n 根日线（**不复权**）。
+
+    🔴 **一次 SQL 取全部**，不逐只查 —— 这份数据每分钟轮询都要用，
+      逐只查就是 N 次 duckdb 往返（同「抓取范围合并去重」那条）。
+    🔴 **不复权**：这一页的目标价是**照着下单用的**，而下单看的是券商
+      软件里那个价（同 K 线图默认给不复权那条）。用后复权算出来的触发价
+      看着正常，却和你挂单要填的数字对不上。
+    ★ 按「面板最新日 + 根数」缓存：面板一天才动一次，而轮询每分钟一轮。
+    """
+    from assay import stock as st
+    key = (str(day), int(n), str(root), tuple(sorted(codes)))
+    if key in _BARS_CACHE:
+        return _BARS_CACHE[key]
+    if not codes:
+        return {}
+    c = st.con()
+    pn = st.panel(root)
+    q = "','".join(codes)
+    rows = c.execute("""
+        SELECT jq_code, date, open, high, low, close_bfq, volume_shares
+        FROM %s WHERE jq_code IN ('%s') AND date <= DATE '%s'
+        QUALIFY row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) <= %d
+        ORDER BY jq_code, date""" % (pn, q, day, int(n))).fetchall()
+    out = {}
+    for r in rows:
+        if None in (r[2], r[3], r[4], r[5]):
+            continue          # 停牌那天没有 OHLC —— 跳过，别拿 None 去算
+        out.setdefault(r[0], []).append(
+            {'date': r[1].isoformat(), 'open': r[2], 'high': r[3],
+             'low': r[4], 'close': r[5], 'volume': r[6] or 0})
+    _BARS_CACHE.clear()       # 只留最近一份：键里含日期，旧的永远不会再命中
+    _BARS_CACHE[key] = out
+    return out
+
+
+def _bars_now(bars, price, today):
+    """把**今天的实时价**接到日线末尾，再拿去算指标。
+
+    🔴 不接的话，「距 20 日线」算的是**昨天**离昨天那根均线多远 ——
+      而这一页问的是"现在离它多远"，盘中差一整天的行情，
+      **而它不报错**（那个数看着完全正常）。
+    ★ 面板已经有今天了（收盘后同步过）就**替换**最后一根，不再追加一根
+      ——否则同一天会被算成两天，均线的分母就错了。
+    """
+    if not bars or not price:
+        return bars
+    last = bars[-1]
+    if last['date'] >= today:
+        b = dict(last)
+        b['close'] = price
+        b['high'] = max(b['high'], price)
+        b['low'] = min(b['low'], price)
+        return bars[:-1] + [b]
+    return bars + [{'date': today, 'open': price, 'high': price,
+                    'low': price, 'close': price, 'volume': 0}]
+
+
+def _derive(row, div, bars=None):
     """把每一档展开成 {目标价, 目标股息率}。另一个**现算**，不存。"""
-    out = []
+    from assay import indicators as I
+    out, ind = [], []
     for t in row.get('tiers') or []:
+        if t['by'] == 'ind':
+            # 指标档：**触发价现算**（"今天收在什么价位这条件刚好成立"）。
+            # 于是它和价格档落在同一个口径上，页面那套「到价/接近/还差多少」
+            # 一行都不用改。解不出来时给 why，**不猜一个数**。
+            px, why, now = None, '没有行情', None
+            if bars:
+                try:
+                    now = I.sig_value(bars, t['sig'], t['args'])
+                    px, why = I.trigger_price(bars, t['sig'], t['args'], t['v'])
+                except I.IndError as e:
+                    why = str(e)
+            ind.append({'by': 'ind', 'sig': t['sig'], 'args': t['args'],
+                        'v': t['v'], 'price': px, 'now': now, 'why': why,
+                        'dir': I.sig_dir(t['sig']), 'unit': I.sig(t['sig'])['unit'],
+                        'text': I.sig_text(t['sig'], t['args'], t['v']),
+                        'yield': None, 'note': t.get('note') or ''})
+            continue
         if t['by'] == 'price':
             price, yld = t['v'], (div / t['v'] if t['v'] else None)
         else:
@@ -597,9 +702,16 @@ def _derive(row, div):
         out.append({'by': t['by'], 'price': (round(price, 3) if price else None),
                     'yield': (round(yld, 6) if yld else None),
                     'note': t.get('note') or ''})
-    # 目标价【从高到低】：价高的那档先触发，与表格里的排法一致
+    # 目标价【从高到低】：价高的那档先触发，与表格里的排法一致。
+    # ★ 指标档**排在价格档后面、保持原序**：它们的触发价有涨有跌
+    #   （金叉是涨上去才成立），混进"从高到低"里那句表头就是假的。
     out.sort(key=lambda x: -(x['price'] or 0))
-    return out
+    return out + ind
+
+
+def alerts_sig_warm(t):
+    from assay import indicators as I
+    return I.sig_warm(t.get('sig'), t.get('args'))
 
 
 def valued(root=None):
@@ -627,6 +739,24 @@ def valued(root=None):
     p = st.panel(root)
     d = con.execute('SELECT max(date) FROM %s' % p).fetchone()[0]
     out['date'] = str(d)[:10] if d else None
+    # ---- 指标档要日线：**只在真有指标档时才取**（多数清单只有价格档）----
+    today = _day()   # 已经是 'YYYY-MM-DD'
+    need, warm = [], 0
+    for x in rows:
+        for t in (x.get('tiers') or []):
+            if t.get('by') == 'ind':
+                need.append(x['code'])
+                try:
+                    warm = max(warm, alerts_sig_warm(t))
+                except Exception:                           # noqa: BLE001
+                    pass
+    bars = {}
+    if need:
+        nb = max(IND_BARS_MIN, min(IND_BARS_MAX, warm + 40))
+        try:
+            bars = _bars_for(sorted(set(need)), out['date'], nb, root=root)
+        except Exception as e:                              # noqa: BLE001
+            out['ind_err'] = '%s: %s' % (type(e).__name__, e)
     q = "','".join(x['code'] for x in rows)
     px = {r[0]: r for r in con.execute("""
         SELECT jq_code, sec_name, close_bfq, preclose, pe_ttm, pb, sw_l1_name,
@@ -682,15 +812,29 @@ def valued(root=None):
         it['yield_now'] = (round(div / pr, 6) if pr and div else None)
         near = it.get('near') if it.get('near') is not None else NEAR
         it['near_used'] = near
-        tiers = _derive(it, div)
+        tiers = _derive(it, div, _bars_now(bars.get(x['code']) or [], pr, today))
         hit_i = near_i = None
         for i, t in enumerate(tiers):
             tp = t['price']
             if not (tp and pr):
                 t['state'], t['gap'] = 'na', None
                 continue
-            # gap = 现价还要跌多少才到这一档（负数 = 已经跌破了）
+            # gap = 现价要变动多少才到这一档（负数 = 还要跌，正数 = 还要涨）
             t['gap'] = round(tp / pr - 1, 6)
+            # 🔴 **方向不是都朝下**：价格档与「距均线 / 超卖」是跌到才算，
+            #   而「金叉」是**涨上去**才成立。方向记反的话，一只已经金叉的
+            #   票会被显示成"还差 3%"，**而它不报错**。
+            if t.get('dir') == 'up':
+                if pr >= tp:
+                    t['state'] = 'hit'
+                    hit_i = i
+                elif pr >= tp * (1 - near):
+                    t['state'] = 'near'
+                    if near_i is None:
+                        near_i = i
+                else:
+                    t['state'] = 'far'
+                continue
             if pr <= tp:
                 t['state'] = 'hit'
                 hit_i = i               # 继续往下找：取跌破的【最深】那档
@@ -748,6 +892,10 @@ def check_fire(v=None, root=None, day=None):
                    'code': x['code'], 'name': x.get('name') or '',
                    'tier': i, 'kind': t['state'], 'target': t['price'],
                    'yield': t['yield'], 'price': x.get('price'),
+                   # ★ 指标档把**条件本身**记进去（"距 MA20 ≤ -3%"）——
+                   #   只记一个触发价的话，事后翻这条记录根本看不出
+                   #   当时是因为什么提醒的，而那正是要复盘的东西。
+                   'cond': t.get('text'), 'dir': t.get('dir') or 'down',
                    'src': x.get('rt_src') or 'close'}
             _append(rec, FIRED)
             seen.add(key)
@@ -757,8 +905,13 @@ def check_fire(v=None, root=None, day=None):
 
 def notify_text(rec):
     """一条通知的正文。**要把判据写进去** —— "东阿阿胶到了"没法据此下单。"""
-    kind = '跌破' if rec['kind'] == 'hit' else '接近'
-    return '%s %s：现价 %s，%s目标 %s（股息率 %.2f%%）' % (
+    up = rec.get('dir') == 'up'
+    kind = ('站上' if up else '跌破') if rec['kind'] == 'hit' else '接近'
+    if rec.get('cond'):
+        # 指标档：写清是**哪个条件**触发的，只给个价没法复盘
+        return '%s %s：现价 %s，触发价 %s（%s）' % (
+            (rec.get('name') or rec['code']), kind, rec.get('price'),
+            rec.get('target'), rec['cond'])
+    return '%s %s：现价 %s，目标 %s（股息率 %.2f%%）' % (
         (rec.get('name') or rec['code']), kind,
-        rec.get('price'), '' if rec['kind'] == 'hit' else '',
-        rec.get('target'), (rec.get('yield') or 0) * 100)
+        rec.get('price'), rec.get('target'), (rec.get('yield') or 0) * 100)

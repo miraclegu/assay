@@ -6346,7 +6346,7 @@ _BANDJS = r"""() => {
   const grab = (px) => Array.from(
     g.getImageData(Math.round(px * dpr), 40, 3, 60).data).join(',');
   const opt = (s) => ({bars: BARS, log: KLOG, events: SHOWEV ? EVS : [],
-    sub: SUB ? IND : null, subKind: SUB, hover: null, sel: s});
+    subs: kSubs(), hover: null, sel: s});
   const geo = drawKChart(cv, opt(null));
   const a = Math.min(sel.i0, sel.i1), b = Math.max(sel.i0, sel.i1);
   const xin = (geo.X(a) + geo.X(b)) / 2;
@@ -6493,7 +6493,7 @@ def t_kchart_readouts():
                 const seen = [];
                 g.fillText = function (t, x, y) { seen.push([String(t), x, y]);
                                                   return orig(t, x, y); };
-                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB,
+                try { drawKChart(cv, {bars: BARS, subs: kSubs(),
                                       hover: null}); }
                 finally { g.fillText = orig; }
                 /* 副图图例：DIF/DEA/MACD 那三个（不分大小写前缀匹配） */
@@ -6516,7 +6516,7 @@ def t_kchart_readouts():
                 const seen = [];
                 g.fillText = function (t, x, y) { seen.push(String(t));
                                                   return orig(t, x, y); };
-                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB,
+                try { drawKChart(cv, {bars: BARS, subs: kSubs(),
                                       hover: hv}); }
                 finally { g.fillText = orig; }
                 return seen.filter(t => t.toUpperCase().startsWith('DIF'));}""",
@@ -7029,7 +7029,7 @@ def t_stock_ui():
             #   原来这条查的是"读数里出现 K/D/J" —— **被改动作废**的判据。
             #   ★ 改成拦 `fillText`：直接验副图图例画了什么，
             #     比数像素准（那条带子里混着柱子与曲线，图例会被淹没）。
-            pg.locator('#body .sb[data-s="kdj"]').click()
+            pg.locator('#body .ind[data-i="kdj"]').click()
             pg.wait_for_timeout(1800)
             kdj = pg.evaluate("""() => {
                 const cv = document.getElementById('kcv');
@@ -7038,9 +7038,9 @@ def t_stock_ui():
                 const seen = [];
                 g.fillText = function (t, x, y) { seen.push(String(t));
                                                   return orig(t, x, y); };
-                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB}); }
+                try { drawKChart(cv, {bars: BARS, subs: kSubs()}); }
                 finally { g.fillText = orig; }
-                return seen.filter(t => /^(K|D|JJ)\\s/.test(t.toUpperCase()));}""")
+                return seen.filter(t => /^(K|D|J)\\s/.test(t.toUpperCase()));}""")
             assert len(kdj) >= 2, \
                 '切 KDJ 之后副图图例没画出 K/D/J（实得 %r）' % kdj
             assert any(any(ch.isdigit() for ch in t) for t in kdj), \
@@ -12409,7 +12409,13 @@ def t_stockpop():
                 ('画布只有 %dx%d —— B/S 圆点要能看出"哪根柱子"，'
                  '窄了 120 根柱子挤在一起圆点会互相压住' % (bs['w'], bs['h']))
             kc = _io.open('web/shared/kchart.js', encoding='utf-8').read()
-            seg = kc[kc.index('const trs = opts.trades'):kc.index('/* 副图 */')]
+            # 🔴 切片锚点要用**代码构造**，不要用注释：`/* 副图 */` 那句在
+            #   2026-09-15 改成多副图时被重写了，于是这条当场
+            #   `ValueError: substring not found` —— 看着像页面坏了，
+            #   其实是**锚点没了**（同「断言查字符串会命中自己写的注释」的
+            #   另一面：注释会变，代码构造不会）。
+            seg = kc[kc.index('const trs = opts.trades'):
+                     kc.index('subs.forEach(')]
             assert "fillText(buy ? 'B' : 'S'" in seg, \
                 '买卖点必须是带 B/S 字母的圆点（同花顺那种），不是三角'
             # 🔴 只查 `g.arc(` 太宽 —— 引线端点那个小圆也是 arc，
@@ -13751,6 +13757,538 @@ def t_page_inventory():
             % (len(DOMS), len(shared_files),
                len(shared_files) * (len(shared_files) - 1) // 2)
             % (len(defined), ' '.join(sorted(defined)), n))
+
+
+@case('指标：一处定义 / 口径跟行情软件 / 买点触发价是【反解】出来的', tag='fast')
+def t_indicators():
+    """🔴 2026-09-15 用户要「一个指标模块 + 个股页按需展示 + 买点按指标」。
+
+    改造前 MACD/KDJ/RSI/BOLL 的公式写死在 `stock.indicators()` 里，
+    而前端 `kchart.js` 又硬编码了一份"画哪几条线"与配色 —— 加一个指标
+    要改三处，**漏掉画的那处不报错**：选了它副图一片空白。
+
+    这条用例钉四件事：
+      ① 定义只有一处，且 `series` 里的每个 key 都真能算出来
+      ② 参数越界**报错不夹逼**（悄悄改成边界值的话，页面写着 200 画的是 60）
+      ③ 口径跟行情软件（KDJ 通用平滑 / BOLL 总体标准差 / ATR-RSI Wilder）
+      ④ 买点的触发价是**反解**出来的，且与解析解一致
+    """
+    from assay import indicators as I
+    from assay import stock as st
+    notes = []
+    bars = st.kline('601857.SH', n=320)['bars']
+    cl = [b['close'] for b in bars]
+
+    # ---- ① series 的每个 key 都要算得出来 ----
+    # 🔴 判据不是"defs() 返回了几个" —— 而是**画图要的那几个键**真在
+    #   calc 的输出里。少一个的话副图上就少一条线，而它不报错。
+    for d in I.defs():
+        sp = I.spec(d['id'])
+        col = sp.calc(bars, None)
+        for x in d['series']:
+            if x['style'] == 'zero':
+                continue
+            assert x['key'] in col,                 '%s 声明要画 %s，而 calc 根本没给这个键 —— 副图会少一条线' \
+                % (d['id'], x['key'])
+            assert any(v is not None for v in col[x['key']]),                 '%s 的 %s 整列都是 None（320 根还算不出来？）' % (d['id'], x['key'])
+        assert d['short'] and d['desc'], '%s 没有短名/说明' % d['id']
+    notes.append('%d 个指标的 series 逐个能算（%s）'
+                 % (len(I.REG), '/'.join(x.id for x in I.REG)))
+
+    # ---- ② 参数越界报错，不夹逼 ----
+    for iid, pr in (('kdj', {'n': 9999}), ('macd', {'fast': -1}),
+                    ('boll', {'k': 99})):
+        try:
+            I.compute(bars, iid, pr)
+            raise AssertionError('%s 的越界参数 %r 被【悄悄夹逼】了 —— '
+                                 '页面上写着一个数、画的是另一个' % (iid, pr))
+        except I.IndError:
+            pass
+    try:
+        I.spec('nosuch')
+        raise AssertionError('不存在的指标没报错')
+    except I.IndError:
+        pass
+    notes.append('越界与不存在都报错（不夹逼）')
+
+    # ---- ③ 口径：与行情软件的写法逐条对 ----
+    # KDJ：K = ((k-1)*前K + RSV)/k（通用平滑），不是 SMA(3)
+    kd = I.compute(bars, 'kdj', None)
+    i = len(bars) - 1
+    h9 = max(b['high'] for b in bars[i - 8:i + 1])
+    l9 = min(b['low'] for b in bars[i - 8:i + 1])
+    rsv = 50.0 if h9 == l9 else (cl[i] - l9) / (h9 - l9) * 100
+    kprev = I.compute(bars[:-1], 'kdj', None)['k'][-1]
+    assert abs(kd['k'][-1] - ((2 * kprev + rsv) / 3)) < 0.02, \
+        'KDJ 的 K 不是通用平滑（%.4f vs 手算 %.4f）—— 与券商软件对不上时，' \
+        '人会以为是数据错了' % (kd['k'][-1], (2 * kprev + rsv) / 3)
+    # BOLL：σ 是【总体】标准差（除 N），不是样本（除 N-1）
+    bl = I.compute(bars, 'boll', None)
+    seg = cl[-20:]
+    mu = sum(seg) / 20
+    sd_pop = (sum((x - mu) ** 2 for x in seg) / 20) ** 0.5
+    sd_smp = (sum((x - mu) ** 2 for x in seg) / 19) ** 0.5
+    assert abs(bl['ub'][-1] - (mu + 2 * sd_pop)) < 0.01, 'BOLL 上轨对不上总体标准差'
+    assert abs(bl['ub'][-1] - (mu + 2 * sd_smp)) > 1e-4, \
+        'BOLL 用的是样本标准差 —— 与行情软件差一点点，而那个差看着像舍入'
+    # ATR：Wilder 平滑（1/N 递推），不是简单均值
+    at = I.compute(bars, 'atr', None)
+    tr = I._tr(bars)
+    prev = I.compute(bars[:-1], 'atr', None)['atr'][-1]
+    assert abs(at['atr'][-1] - (prev * 13 + tr[-1]) / 14) < 0.005, \
+        'ATR 不是 Wilder 平滑'
+    notes.append('口径逐条对上行情软件（KDJ 通用平滑 / BOLL 总体σ / ATR Wilder）')
+
+    # ---- ④ 触发价：与【解析解】一致 ----
+    # 🔴 这是这次改造的核心：「离金叉还有多远」的答案**不是**今天那个百分比
+    #   （MA5 与 MA20 两条都在动），而是"今天收在什么价位就刚好金叉"。
+    f, sl = 5, 20
+    Sf, Ss = sum(cl[-f:-1]), sum(cl[-sl:-1])     # 【不含今天】，今天那格是待解的 P
+    exact = (f * Ss - sl * Sf) / (sl - f)
+    px, why = I.trigger_price(bars, 'ma_cross', {'fast': 5, 'slow': 20}, 0.0)
+    assert px is not None and abs(px - exact) < 0.01, \
+        '金叉触发价与解析解对不上：二分 %r vs 解析 %.4f（%s）' % (px, exact, why)
+    S19 = sum(cl[-20:-1])
+    exact2 = S19 * 0.97 / (20 - 0.97)
+    px2, _ = I.trigger_price(bars, 'ma_dist', {'w': 20}, -3.0)
+    assert px2 is not None and abs(px2 - exact2) < 0.01, \
+        '距 MA20 的触发价与解析解对不上：%r vs %.4f' % (px2, exact2)
+    # 反向自证：触发价两侧必须**刚好翻面**（否则那个数只是"看着正常"）
+    n_ok = 0
+    for sid, args, v in (('ma_cross', {'fast': 5, 'slow': 20}, 0.0),
+                         ('ma_dist', {'w': 20}, -3.0),
+                         ('rsi_low', {'w': 6}, 30.0),
+                         ('boll_low', {'n': 20, 'k': 2}, 0.0),
+                         ('cci_low', {'n': 14}, -100.0)):
+        pxx, _w = I.trigger_price(bars, sid, args, v)
+        if pxx is None:
+            continue
+        op = I.sig(sid)['op']
+        lo = I.sig_value(I._with_close(bars, pxx * 0.999), sid, args)
+        hi = I.sig_value(I._with_close(bars, pxx * 1.001), sid, args)
+        ok = (lo <= v < hi) if op == 'le' else (lo < v <= hi)
+        assert ok, '%s 的触发价 %s 没夹住阈值（两侧 %s / %s）' % (sid, pxx, lo, hi)
+        n_ok += 1
+    assert n_ok >= 4, '只验到 %d 条触发价（其余都解不出？）' % n_ok
+    # 🔴 反解时 **high/low 必须跟着收盘价改**：价格跌到触发价，那天的最低价
+    #   至少是它。只改 close 的话，KDJ/WR 这些读 high/low 的指标会算出
+    #   **今天根本不可能出现**的值 —— 判据用它们的定义域（K 与 WR 都是
+    #   0~100，数学上跑不出去），比"检查那两行代码在不在"硬。
+    #   ★ 上面那 5 条触发价全是只读收盘价的（bias/spread/RSI/BOLL/CCI），
+    #     所以这条**必须单独构造**，否则那个变异从头到尾没被执行到。
+    for fct in (0.2, 0.5, 0.8, 1.0, 1.4, 2.0):
+        bb = I._with_close(bars, cl[-1] * fct)
+        kv = I.compute(bb, 'kdj', None)['k'][-1]
+        wv = I.compute(bb, 'wr', None)['wr6'][-1]
+        assert 0 <= kv <= 100 and 0 <= wv <= 100, \
+            ('价格 ×%.1f 时 KDJ 的 K=%s / WR=%s 跑出了 0~100 —— '
+             '把收盘挪到那个价位时 high/low 没跟着改' % (fct, kv, wv))
+    # 解不出来时**说理由**，不猜一个数
+    p3, w3 = I.trigger_price(bars, 'rsi_low', {'w': 6}, 99.0)
+    assert p3 is None and w3, '恒成立的条件应该说"恒成立"而不是给个价'
+    # 方向：金叉是【涨上去】才成立
+    assert I.sig_dir('ma_cross') == 'up' and I.sig_dir('ma_dist') == 'down', \
+        '买点条件的方向标反了 —— 一只已经金叉的票会显示成"还差 x%"'
+    notes.append('触发价二分 == 解析（金叉 %.3f / 距MA20 %.3f），%d 条两侧翻面自证'
+                 % (px, px2, n_ok))
+
+    # ---- ⑤ 老接口的默认输出不许变（改造前后逐位等价已单独验过）----
+    d = st.indicators('601857.SH', n=60)
+    for k in ('dif', 'dea', 'macd', 'k', 'd', 'jj', 'rsi6', 'ub', 'lb'):
+        assert k in d['rows'][-1], '默认那份少了 %s —— 老页面读的就是它' % k
+    d2 = st.indicators('601857.SH', n=60, inds='atr,cci')
+    assert [x['id'] for x in d2['panels']] == ['atr', 'cci'], \
+        'inds= 没按点名的来：%r' % [x['id'] for x in d2['panels']]
+    assert 'dif' not in d2['rows'][-1], '没点名的指标也算了（白算一遍）'
+    notes.append('默认那份仍带老字段；inds= 只算点名的')
+    return '；'.join(notes)
+
+
+@case('个股页：副图最多 4 个 / 指标参数可调 / 画什么由服务端说（playwright）',
+      tag='web')
+def t_stock_multi_sub():
+    """🔴 2026-09-15 用户："可以在个股下按需展示指标……下面最多可以选择
+    同时展示 4 个指标。"
+
+    改造前副图只有一个，`kchart.js` 里还硬编码着"画哪几条线"与配色 ——
+    于是加一个指标要同时改前端，**漏了不报错**：选中它副图一片空白。
+    现在 `subs` 是个数组，每个副图画什么由**服务端那份定义**（panels）说。
+
+    四条判据各有各的构造条件，混在一起测全是空转：
+      ① 选 4 个 -> 真的画出 4 条**各自带值的图例**（拦 fillText，不数像素）
+      ② 选第 5 个 -> **要有一句话**，不许静默不动
+      ③ 改参数 -> 服务端真的按新参数算（值必须变），且面板不被重渲染冲掉
+      ④ URL 带得走（`sub=macd,kdj` 刷新后还是两个）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1200})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto(base + '/stock.html?code=601857.XSHG',
+                    wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(800)
+
+            # ---- 指标按钮是【照服务端清单】渲染的，不是页面写死的 ----
+            want = [d['id'] for d in pg.evaluate('() => KDEFS.inds')
+                    if d['panel'] == 'sub']
+            got = pg.evaluate(
+                "() => [...document.querySelectorAll('#body .ind')]"
+                ".map(e => e.dataset.i)")
+            assert got == want, \
+                ('工具条上的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
+                 '页面写死一份的话，加一个指标它根本不出现，而那不报错'
+                 % (got, want))
+            h0 = pg.evaluate(
+                "() => document.querySelector('#kcv').getBoundingClientRect().height")
+
+            # ---- ① 选到 4 个：每个副图都要有**带值**的图例 ----
+            for iid in ('kdj', 'atr', 'spread'):
+                pg.locator('#body .ind[data-i="%s"]' % iid).click()
+                pg.wait_for_timeout(1300)
+            st = pg.evaluate("() => ({k: KINDS, n: kSubs().length})")
+            assert st['k'] == ['macd', 'kdj', 'atr', 'spread'] and st['n'] == 4, \
+                '选了 4 个但 kSubs 只给了 %r' % (st,)
+            # 🔴 判据是**拦 fillText**，不是数像素：那条带子里混着柱子与
+            #   曲线，图例会被淹没（本项目为此试错过三个判据）。
+            drew = pg.evaluate(r"""() => {
+                const cv = document.getElementById('kcv');
+                const g = cv.getContext('2d');
+                const orig = g.fillText.bind(g);
+                const seen = [];
+                g.fillText = function (t, x, y) { seen.push([String(t), y]);
+                                                  return orig(t, x, y); };
+                try { drawKChart(cv, {bars: BARS, subs: kSubs(), hover: null}); }
+                finally { g.fillText = orig; }
+                return seen;}""")
+            ys = {}
+            for t, y in drew:
+                ys.setdefault(round(y), []).append(t)
+            # 每个副图的图例各在一行（y 不同），且那一行里要有数字
+            panes = pg.evaluate("() => kSubs().map(x => x.label)")
+            for lab in panes:
+                rows = [r for r in ys.values() if any(t == lab for t in r)]
+                assert rows, '副图「%s」左上角没有图例' % lab
+                vals = [t for t in rows[0] if any(c.isdigit() for c in t)]
+                assert vals, \
+                    ('副图「%s」的图例只有名字没有值：%r —— 用户要的是'
+                     '"数字跟随变化"' % (lab, rows[0]))
+            notes.append('4 个副图各带一行有值的图例（%s）' % ' / '.join(panes))
+            h4 = pg.evaluate(
+                "() => document.querySelector('#kcv').getBoundingClientRect().height")
+            assert h4 > h0 + 200, \
+                ('画布没跟着长高（%d -> %d）—— 4 个副图挤进同一个高度里，'
+                 '每个只剩 50px，那种图看不出形态' % (h0, h4))
+            notes.append('画布 %d -> %dpx' % (h0, h4))
+
+            # ---- ② 第 5 个要【说一句话】，不许静默 ----
+            pg.locator('#body .ind[data-i="rsi"]').click()
+            pg.wait_for_timeout(500)
+            m = pg.locator('#kimsg').inner_text()
+            assert '4' in m and pg.evaluate('() => KINDS.length') == 4, \
+                ('点第 5 个指标既没拦住也没说明：%r —— 点了没反应是最难查的'
+                 '那种坏' % m)
+            notes.append('第 5 个被拦住并说明了原因')
+
+            # ---- ③ 改参数：服务端真的按新参数算 ----
+            k_before = pg.evaluate("() => IND[IND.length - 1].k")
+            pg.click('#kpset')
+            pg.wait_for_timeout(200)
+            assert pg.locator('#kpbox').is_visible(), '参数面板打不开'
+            box = pg.locator('#kpbox .kpi[data-id="kdj"][data-k="n"]').first
+            box.fill('19')
+            box.dispatch_event('change')
+            pg.wait_for_timeout(1800)
+            k_after = pg.evaluate("() => IND[IND.length - 1].k")
+            assert k_before != k_after, \
+                ('KDJ 周期 9 -> 19，K 值却没变（%r）—— 参数根本没送到服务端'
+                 % k_before)
+            # 🔴 面板**不能被重渲染冲掉**：改一个参数就 load() 一次，
+            #   存在局部里的话面板立刻合上，要改第二个得重新点开。
+            assert pg.locator('#kpbox').is_visible(), \
+                '改完一个参数面板就自己合上了（KPOPEN 必须是模块级）'
+            assert '19' in pg.locator('#body .ind[data-i="kdj"]').inner_text(), \
+                '改过参数的指标按钮上没写出参数 —— 那个数直接决定图形'
+            # 越界当场拒，不发到服务端
+            box.fill('9999')
+            box.dispatch_event('change')
+            pg.wait_for_timeout(500)
+            assert '之间' in pg.locator('#kimsg').inner_text(), \
+                '越界参数没被当场拒'
+            pg.click('#kprst')
+            pg.wait_for_timeout(1500)
+            assert abs(pg.evaluate("() => IND[IND.length - 1].k")
+                       - k_before) < 1e-9, '「恢复默认」没还原'
+            notes.append('参数可调且真的生效（K %s -> %s），越界当场拒、面板不被冲掉'
+                         % (k_before, k_after))
+
+            # ---- ④ URL 带得走 ----
+            pg.goto(base + '/stock.html?code=601857.XSHG&sub=kdj,rsi',
+                    wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(1000)
+            assert pg.evaluate('() => KINDS') == ['kdj', 'rsi'], \
+                'URL 里的 sub=kdj,rsi 没生效（分享出去的链接看到的是另一张图）'
+            # "一个都不要"要**存得住**：nav() 对空值是删参数，于是写 '0'
+            pg.goto(base + '/stock.html?code=601857.XSHG&sub=0',
+                    wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(600)
+            assert pg.evaluate('() => KINDS.length') == 0 and \
+                pg.evaluate('() => kSubs().length') == 0, \
+                '「一个副图都不要」存不住'
+            notes.append('URL 带得走（sub=kdj,rsi / sub=0）')
+            assert not errs, 'JS 报错：%r' % errs[:3]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
+@case('买点也能按【指标】：触发价现算 / 方向不是都朝下（playwright）', tag='web')
+def t_alerts_by_indicator():
+    """🔴 2026-09-15 用户："买点功能不仅可以根据价格提示，还可以根据指标
+    提示买点，比如距离 20 日线的距离、MA5/MA20 金叉的距离。"
+
+    ★ 做法上的关键一步：指标条件**反解成一个触发价**（"今天收在什么价位，
+      这个条件刚好成立"）。于是它和价格档落在同一个口径上，这一页那套
+      「到价 / 接近 / 还差多少」一行都不用改。
+      直接报"现在离金叉还差 2.3%"是**会骗人**的：MA5 与 MA20 两条都在动，
+      那个百分比推不出"涨到多少就金叉"。
+
+    三条判据：
+      ① 存的是**条件**、不是触发价（触发价每天都不一样，存下来第二天就错）
+      ② **方向**：金叉是涨上去才成立 —— 记反的话，已经金叉的票会显示成"还差"
+      ③ 页面上要说清是**哪个条件**（只给一个价，事后没法复盘）
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import json as _json
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    import re as _re
+
+    from assay import alerts as al
+    from assay import indicators as I
+    from assay import server as sv
+    from assay import stock as _st
+    old_live, old_allow = al.LIVE, sv.ALLOW_LIVE
+    _o_fetch, _o_extpath = al._ext_fetch, al.ext_path
+    sv.ALLOW_LIVE = True
+    tmp = tempfile.mkdtemp()
+    al.LIVE = tmp                    # ★ 不往真账本里写测试数据
+    al.ext_path = lambda root=None: os.path.join(tmp, 'div_ext.json')
+    al._ext_fetch = lambda cs, day=None: {}
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    notes = []
+    try:
+        # ---- ① 服务端：存条件、算触发价、方向 ----
+        # ★ 这个阈值**运行时挑**：写死一个数的话，它可能落在"今天到不了"
+        #   的区间里（state='na'），于是"还要涨 x%"那条路又是空转的
+        #   （实测踩过：v=20 解不出触发价，页面显示的是"就算涨到 17.78 也
+        #   到不了"，而我的判据只查了个"涨"字，被那句话蒙混过关）。
+        _bars = _st.kline('601857.SH', n=320)['bars']
+        _cur = _bars[-1]['close']
+        _upv = None
+        for _c in (1, 2, 3, 5, 8, 12):
+            _px, _w = I.trigger_price(_bars, 'ma_cross',
+                                      {'fast': 5, 'slow': 20}, float(_c))
+            if _px and _px > _cur * 1.015:
+                _upv = float(_c)
+                break
+        assert _upv is not None, '挑不出一个"解得出但还没到"的金叉阈值'
+        al.set_row('601857.SH', [
+            {'by': 'price', 'v': 8.0},
+            {'by': 'ind', 'sig': 'ma_dist', 'args': {'w': 20}, 'v': -3},
+            {'by': 'ind', 'sig': 'ma_cross', 'args': {'fast': 5, 'slow': 20},
+             'v': 0},
+            # ★ 再来一档**远没到**的 up 档：上面那档常常已经金叉（state=hit），
+            #   只验它的话“还要涨 x%”那条路**一次都不会执行**
+            #   （变异实测：把涨/跌写死成“跌”照样全绿）。
+            {'by': 'ind', 'sig': 'ma_cross', 'args': {'fast': 5, 'slow': 20},
+             'v': _upv},
+        ])
+        # ★ 再加**只有一个 up 档、且整行都没到**的一只 —— 上面那只整行是
+        #   'hit'，于是「状态」那列走的是"到价 · 第 N 档"分支，
+        #   "还要涨/跌 x%" 那条路**一次都不执行**（变异实测：把它写死成
+        #   "还要跌"照样全绿）。
+        _b2 = _st.kline('600900.SH', n=320)['bars']
+        _c2 = _b2[-1]['close']
+        _upv2 = None
+        for _c in (1, 2, 3, 5, 8, 12):
+            _px2, _ = I.trigger_price(_b2, 'ma_cross',
+                                      {'fast': 5, 'slow': 20}, float(_c))
+            if _px2 and _px2 > _c2 * 1.02:
+                _upv2 = float(_c)
+                break
+        assert _upv2 is not None, '第二只票也挑不出"解得出但还没到"的阈值'
+        al.set_row('600900.SH', [
+            {'by': 'ind', 'sig': 'ma_cross', 'args': {'fast': 5, 'slow': 20},
+             'v': _upv2}])
+        raw = [_json.loads(l) for l in _io.open(
+            os.path.join(tmp, 'alerts.jsonl'), encoding='utf-8')]
+        # ★ 认准**那条记录**，不是"最后一行" —— 账本里后面还追加了第二只票，
+        #   拿 raw[-1] 会取到另一行（实测当场 IndexError）。
+        tiers = [r for r in raw if r.get('code', '').startswith('601857')][-1]['tiers']
+        assert tiers[1] == {'by': 'ind', 'sig': 'ma_dist', 'args': {'w': 20},
+                            'v': -3.0}, \
+            ('账本里存的不是【条件本身】：%r —— 存触发价的话第二天就是错的'
+             '（均线在动），同「每档存的是你填的那个，另一个现算」' % tiers[1])
+        v = al.valued()
+        row = [r for r in v['rows'] if r['code'].startswith('601857')][0]
+        row2 = [r for r in v['rows'] if r['code'].startswith('600900')][0]
+        assert row2['state'] == 'far' and row2['next'] \
+            and row2['next'].get('dir') == 'up' and row2['next']['gap'] > 0, \
+            ('第二只票该是"还没到的 up 档"，实得 %r'
+             % {k: row2.get(k) for k in ('state', 'next')})
+        ind = [t for t in row['tiers'] if t['by'] == 'ind']
+        assert len(ind) == 3, '三个指标档没都出来：%r' % row['tiers']
+        far_up = [t for t in ind if t['sig'] == 'ma_cross'
+                  and t['v'] == _upv][0]
+        assert (far_up['dir'] == 'up' and far_up['state'] in ('far', 'near')
+                and far_up['price'] and far_up['gap'] > 0), \
+            ('那档要"涨上去"的金叉必须是【解得出且还没到】的，实得 %r —— '
+             '否则页面上"还要涨 x%%"那条路一次都走不到' % far_up)
+        cross = [t for t in ind if t['sig'] == 'ma_cross'][0]
+        dist = [t for t in ind if t['sig'] == 'ma_dist'][0]
+        assert cross['dir'] == 'up' and dist['dir'] == 'down', \
+            ('方向标错了（金叉 %r / 距均线 %r）—— 一只已经金叉的票会被'
+             '显示成"还要涨 x%%"' % (cross['dir'], dist['dir']))
+        assert cross['price'] and dist['price'], \
+            '触发价没算出来：%r' % [(t['sig'], t['price'], t['why']) for t in ind]
+        # 触发价必须**跟着行情走**，不是账本里存着的死数
+        assert cross['text'] and 'MA5' in cross['text'], \
+            '没给出这条件的人话：%r' % cross['text']
+        # 状态判定要**按方向**：把金叉那档按"跌到"判的话，结论正好反
+        pr = row['price']
+        want = 'hit' if pr >= cross['price'] else (
+            'near' if pr >= cross['price'] * (1 - row['near_used']) else 'far')
+        assert cross['state'] == want, \
+            ('金叉那档的状态按方向应是 %s，实得 %s（现价 %s / 触发价 %s）'
+             % (want, cross['state'], pr, cross['price']))
+        notes.append('账本存条件；触发价现算（距MA20 %s / 金叉 %s）；方向 down/up'
+                     % (dist['price'], cross['price']))
+
+        # 通知文案要写清**是哪个条件**触发的
+        for rec in al.check_fire(v):
+            if rec.get('cond'):
+                txt = al.notify_text(rec)
+                assert rec['cond'] in txt, \
+                    '通知没写清是哪个条件触发的：%r' % txt
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1600, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto(base + '/alerts.html', wait_until='networkidle')
+            pg.wait_for_selector('table.pkt', timeout=40000)
+
+            # ---- ② 条件清单【由服务端给】，页面不写死 ----
+            page_ids = pg.evaluate('() => ASIG.map(x => x.id)')
+            assert page_ids == [x['id'] for x in I.signal_defs()], \
+                ('页面上的条件清单与服务端对不上：%r —— 写死一份的话，'
+                 '加一条条件它根本选不到' % page_ids)
+
+            # ---- ③ 表里要说清是哪个条件 + 方向对的措辞 ----
+            txt = pg.locator('table.pkt').inner_text()
+            assert cross['text'] in txt, \
+                '表里没写出条件本身（只有一个价，事后没法复盘）：%s' % txt[:300]
+            cell = pg.evaluate("""() => {
+                const tds = [...document.querySelectorAll('table.pkt td')];
+                const td = tds.find(e => e.innerText.indexOf('MA5') >= 0);
+                return td ? td.innerText : null;}""")
+            assert cell, '找不到金叉那一档的格子'
+            need = '已站上' if cross['state'] == 'hit' else '涨'
+            assert need in cell, \
+                ('金叉那档写的是 %r —— 方向反了（它是涨上去才成立，'
+                 '不是"还要跌"）' % cell)
+            # 🔴 **还没到**的那档必须写"涨 x%"：一律写"跌"的话，一只离金叉
+            #   还差 20% 的票会被读成"还要跌 20%"，意思正好反了。
+            cell2 = pg.evaluate(
+                "(t) => {const tds = [...document.querySelectorAll("
+                "'table.pkt td')];"
+                " const td = tds.find(e => e.innerText.indexOf(t) >= 0);"
+                " return td ? td.innerText : null;}", far_up['text'])
+            # 🔴 判据要认准**那句涨跌措辞**（"涨 8.3%"），不能只查一个"涨"字 ——
+            #   解不出触发价时页面写的是"就算涨到 17.78 也到不了"，
+            #   里面也有个"涨"（实测被它蒙混过关过一次）。
+            assert cell2 and _re.search(r'涨\s*\d', cell2) \
+                and not _re.search(r'跌\s*-?\d', cell2), \
+                ('还没到的金叉档写的是 %r —— 它要涨上去才成立，'
+                 '写"还要跌"意思正好反了' % cell2)
+            # 整行「状态」那列也要认方向（它走的是另一条分支：x.next）
+            st2 = pg.evaluate(
+                "(c) => {const tr = [...document.querySelectorAll("
+                "'table.pkt tr')].find(e => e.innerText.indexOf(c) >= 0);"
+                " if (!tr) return null; const td = tr.cells[tr.cells.length - 2];"
+                " return td ? td.innerText : null;}", '600900')
+            assert st2 and _re.search(r'涨\s*\d', st2) \
+                and not _re.search(r'跌\s*-?\d', st2), \
+                ('整行状态写的是 %r —— 那一行唯一没到的是个"涨上去才成立"'
+                 '的条件，写"还要跌"意思正好反了' % st2)
+            notes.append('页面给出条件本身与方向正确的措辞（档 %r / 整行 %r）'
+                         % (cell.replace('\n', ' '), (st2 or '').strip()))
+
+            # ---- ④ 改一行：回填的是【条件】不是触发价 ----
+            pg.locator('a.aed').first.click()
+            pg.wait_for_timeout(600)
+            sel = pg.locator('.asig')
+            assert sel.count() == 3, '编辑器里没回填出三个指标档：%d' % sel.count()
+            assert pg.evaluate(
+                "() => FORM.tiers.filter(t => t.by === 'ind')"
+                ".every(t => t.sig && t.args && t.v != null)"), \
+                ('回填的指标档缺 sig/args/阈值 —— 照触发价回填的话，'
+                 '"距 MA20 -3%" 会变成一个死价格')
+            # 改成 RSI 超卖并保存：服务端要按新条件重算
+            sel.first.select_option('rsi_low')
+            pg.wait_for_timeout(400)
+            pg.click('#asave')
+            pg.wait_for_timeout(2500)
+            got = pg.evaluate("""() => {
+                const r = (V.rows || [])[0] || {};
+                return (r.tiers || []).filter(t => t.by === 'ind')
+                       .map(t => t.sig);}""")
+            assert 'rsi_low' in got, '换成 RSI 超卖没存进去：%r' % got
+            notes.append('回填的是条件本身，换条件能存进去')
+            assert not errs, 'JS 报错：%r' % errs[:3]
+            br.close()
+    finally:
+        httpd.shutdown()
+        al.LIVE, sv.ALLOW_LIVE = old_live, old_allow
+        al._ext_fetch, al.ext_path = _o_fetch, _o_extpath
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
 
 
 def main():

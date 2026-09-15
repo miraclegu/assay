@@ -359,120 +359,95 @@ def finance(code, n=16, root=None):
     return {'code': jc, 'rows': [dict(zip(keys, r)) for r in rows]}
 
 
-# ================================ 副图指标 ================================
-# ★ 全部在【服务端】算并预热，同 MA 的理由：前端自己算就得多取预热数据，
-#   而"少取了导致头部值是错的"**不报错**，只是曲线不对。
-#   预热长度按最长的那个指标定（MACD 的 EMA26 + DEA9，取 120 根够）。
-IND_WARM = 120
+# ================================ 指标 ================================
+# 🔴 **算法与定义全在 `assay/indicators.py`（唯一正本）** —— 这里只管
+#   "取多少根、预热多少、平铺成行"。原来 MACD/KDJ/RSI/BOLL 的公式写死在
+#   这个文件里，而前端 kchart.js 又硬编码了一份"画哪几条线"，于是加一个
+#   指标要改三处、漏了画的那处**不报错**（选了它副图一片空白）。
+def parse_inds(spec_str):
+    """把 URL 上的 `inds=` 解析成 [{'id','params'}]。
 
-
-def _ema(xs, n):
-    """EMA。第一个值用 SMA 起步（而不是直接拿首值），少一点起步偏差。"""
-    out = [None] * len(xs)
-    if len(xs) < n:
-        return out
-    s = sum(xs[:n]) / n
-    out[n - 1] = s
-    k = 2.0 / (n + 1)
-    for i in range(n, len(xs)):
-        s = xs[i] * k + s * (1 - k)
-        out[i] = s
-    return out
-
-
-def indicators(code, n=250, fq='bfq', end=None, off=0, root=None,
-               macd=(12, 26, 9), kdj=(9, 3, 3), rsi=(6, 12, 24), boll=(20, 2)):
-    """MACD / KDJ / RSI / BOLL。
-
-    参数默认值取通用口径（MACD 12/26/9、KDJ 9/3/3、RSI 6/12/24、BOLL 20±2σ）。
-
-    ★ KDJ 用**通用平滑**（K = 2/3·前K + 1/3·RSV，即 SMA(3) 的递推形式），
-      与通达信/同花顺一致。用简单移动平均会和券商软件对不上，
-      而"对不上"会让人以为数据错了。
-    ★ BOLL 的 σ 用**总体标准差**（除 N，不是 N−1）—— 同上，与行情软件一致。
+    两种写法都认：`macd,kdj`（默认参数）与 JSON
+    `[{"id":"kdj","params":{"n":9}}]`（要改参数时用）。
+    ★ 认两种是因为**大多数时候不改参数**，而让人在 URL 里手写一段 JSON
+      才能换个副图，等于把这个功能藏起来。
     """
+    import json
+    t = (spec_str or '').strip()
+    if not t:
+        return None
+    if t[0] == '[':
+        try:
+            arr = json.loads(t)
+        except Exception as e:                              # noqa: BLE001
+            raise StockError('inds 不是合法 JSON：%s' % e)
+        out = []
+        for x in arr:
+            if isinstance(x, str):
+                out.append({'id': x, 'params': None})
+            else:
+                out.append({'id': x.get('id'), 'params': x.get('params')})
+        return out
+    return [{'id': x.strip(), 'params': None} for x in t.split(',') if x.strip()]
+
+
+# 🔴 预热有个【下限】而不只是"按需要取"：RSI/ATR 这类 Wilder 递推
+#   **永远记着起点**（多喂 24 根，末尾的值就会差一点）。下限钉在 120
+#   是为了让默认那几个指标与改造前**逐位一致** —— 少喂一点不报错，
+#   只是页面上的 RSI 悄悄变了几厘。
+IND_WARM = 120
+IND_DEFAULT = ['macd', 'kdj', 'rsi', 'boll']
+
+
+def indicators(code, n=250, fq='bfq', end=None, off=0, root=None, inds=None):
+    """按需算一组指标。定义全在 `assay/indicators.py`（唯一正本）。
+
+    `inds` 不给时算 `IND_DEFAULT`（MACD/KDJ/RSI/BOLL）——
+    那是改造前的行为，个股页与浮层的老链接照旧能用。
+
+    返回 `rows` 是**一行一天、所有指标的键平铺在一起**（`dif`/`k`/`rsi6`…），
+    与改造前同形；`panels` 是每个指标画哪几条线、什么样式、什么颜色，
+    **页面照它渲染，不认识任何指标名**。
+    """
+    from assay import indicators as _I
     # ★ n 可能是 URL 里来的字符串 —— 在【入口】转 int，不要指望调用方转。
-    #   直接 n + IND_WARM 会抛 "can only concatenate str"，
-    #   而那个报错完全指不到"参数没转型"这件事上。
     n = max(10, min(int(n or 250), 3000))
+    want = inds if inds is not None else [{'id': x, 'params': None}
+                                          for x in IND_DEFAULT]
+    if isinstance(want, str):
+        want = parse_inds(want)
+    specs = []
+    try:
+        for w in (want or []):
+            sp = _I.spec(w.get('id'))
+            specs.append((sp, sp.merge(w.get('params'))))
+    except _I.IndError as e:
+        raise StockError(str(e))
+    warm = max([IND_WARM] + [sp.warm(p) for sp, p in specs])
     # 🔴 `off` 必须一路传下去 —— 不传的话翻页后副图画的还是最新那一段，
     #   与主图**上下对不上**，而它不报错，看着像"指标和 K 线不同步"。
-    k = kline(code, n=n + IND_WARM, fq=fq, end=end, off=off, root=root)
+    k = kline(code, n=n + warm, fq=fq, end=end, off=off, root=root)
     bars = k['bars']
-    cl = [b['close'] for b in bars]
-    hi = [b['high'] for b in bars]
-    lo = [b['low'] for b in bars]
     m = len(bars)
     out = [{'date': b['date'], 'close': b['close']} for b in bars]
-
-    # ---- MACD ----
-    f, sl, sg = macd
-    ef, es = _ema(cl, f), _ema(cl, sl)
-    dif = [(ef[i] - es[i]) if (ef[i] is not None and es[i] is not None) else None
-           for i in range(m)]
-    got = [x for x in dif if x is not None]
-    dea_raw = _ema(got, sg)
-    off = m - len(got)
-    for i in range(m):
-        d = dif[i]
-        e = dea_raw[i - off] if i >= off else None
-        out[i]['dif'] = _r3(d)
-        out[i]['dea'] = _r3(e)
-        out[i]['macd'] = _r3((d - e) * 2) if (d is not None and e is not None) else None
-
-    # ---- KDJ ----
-    pk, a1, a2 = kdj
-    kk = dd = 50.0
-    for i in range(m):
-        if i < pk - 1:
-            out[i]['k'] = out[i]['d'] = out[i]['jj'] = None
-            continue
-        h = max(x for x in hi[i - pk + 1:i + 1] if x is not None)
-        l_ = min(x for x in lo[i - pk + 1:i + 1] if x is not None)
-        rsv = 50.0 if h == l_ else (cl[i] - l_) / (h - l_) * 100
-        kk = ((a1 - 1) * kk + rsv) / a1
-        dd = ((a2 - 1) * dd + kk) / a2
-        out[i]['k'] = round(kk, 2)
-        out[i]['d'] = round(dd, 2)
-        out[i]['jj'] = round(3 * kk - 2 * dd, 2)
-
-    # ---- RSI ----
-    for w in rsi:
-        key = 'rsi%d' % w
-        up = dn = 0.0
-        for i in range(m):
-            if i == 0:
-                out[i][key] = None
-                continue
-            ch = cl[i] - cl[i - 1]
-            u, v = max(ch, 0.0), max(-ch, 0.0)
-            if i <= w:
-                up += u / w
-                dn += v / w
-                out[i][key] = (round(up / (up + dn) * 100, 2)
-                               if i == w and (up + dn) else None)
-            else:
-                up = (up * (w - 1) + u) / w
-                dn = (dn * (w - 1) + v) / w
-                out[i][key] = round(up / (up + dn) * 100, 2) if (up + dn) else None
-
-    # ---- BOLL ----
-    bw, bk = boll
-    for i in range(m):
-        if i < bw - 1:
-            out[i]['mb'] = out[i]['ub'] = out[i]['lb'] = None
-            continue
-        seg = cl[i - bw + 1:i + 1]
-        mu = sum(seg) / bw
-        sd = (sum((x - mu) ** 2 for x in seg) / bw) ** 0.5   # 总体标准差
-        out[i]['mb'] = round(mu, 3)
-        out[i]['ub'] = round(mu + bk * sd, 3)
-        out[i]['lb'] = round(mu - bk * sd, 3)
-
+    panels = []
+    for sp, p in specs:
+        try:
+            col = sp.calc(bars, p)
+        except _I.IndError as e:
+            raise StockError(str(e))
+        for key, vals in col.items():
+            for i in range(m):
+                out[i][key] = vals[i]
+        panels.append({'id': sp.id, 'label': sp.label, 'short': sp.short,
+                       'panel': sp.panel,
+                       'unit': sp.unit, 'desc': sp.desc,
+                       'params': p, 'series': sp.series(p)})
     return {'code': k['code'], 'fq': fq, 'n': min(n, m),
             'warmup_dropped': max(0, m - n), 'rows': out[-n:],
-            'params': {'macd': list(macd), 'kdj': list(kdj),
-                       'rsi': list(rsi), 'boll': list(boll)}}
+            'panels': panels,
+            # ★ 老字段留着：改造前的调用方（浮层/用例）读的是它
+            'params': dict((sp.id, p) for sp, p in specs)}
 
 
 # ================================ 事件 ================================

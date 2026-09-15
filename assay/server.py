@@ -84,6 +84,7 @@ ROUTES = {
     '/api/rt/status': rt.api_rt_status,
     '/api/rt/bars': rt.api_rt_bars,
     '/api/stock/indicators': stock.api_stock_indicators,
+    '/api/indicators/defs': stock.api_indicator_defs,
     '/api/stock/events': stock.api_stock_events,
     '/api/stock/peers': stock.api_stock_peers,
     '/api/stock/links': stock.api_stock_links,

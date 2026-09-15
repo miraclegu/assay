@@ -26,7 +26,8 @@ const EV_COLOR = {xr: '#ff8fb1', fin: '#8ea9ff', unlock: '#ffb066',
 const BOLL_COLOR = '#7b8794';
 
 /* 主图 K 线 + 成交量 + 可选事件标记与副图。
-   opts: {bars, events, sub, subKind, hover, sel} —— hover 是索引或 null；
+   opts: {bars, events, subs, trades, hover, sel, log} —— hover 是索引或 null；
+   subs = 最多 4 个副图，每个 {label, rows, series:[{key,label,style,color}]}；
    sel = {i0, i1} 是框选区间（按**索引**给，不是像素 —— 重画后要落在同样那几天）。
    返回几何信息供命中测试用。 */
 function drawKChart(cv, opts) {
@@ -36,13 +37,27 @@ function drawKChart(cv, opts) {
   const UP = cssv('--up', '#f05b5b'), DN = cssv('--down', '#2fb87a');
   const LINE = cssv('--line', '#2a313a'), DIM = cssv('--dim', '#8b97a6');
   const PADL = 54, PADR = 8, PADT = 8, PADB = 18;
-  const sub = opts.sub && opts.sub.length ? opts.sub : null;
+  /* 副图可以有【多个】（最多 4 个）。每个 = {label, unit, rows, series}，
+     而 series 是 [{key,label,style,color}]，style: line / bar / zero。
+     🔴 **画哪几条线、什么颜色由调用方给**（服务端 /api/indicators/defs）——
+       原来这里硬编码 `keys` 与一张配色表，于是加一个指标必须同时改这里，
+       而漏了**不报错**：选了新指标，副图一片空白。 */
+  const subs = (opts.subs || []).filter(p => p && p.rows && p.rows.length)
+                                .slice(0, 4);
+  const nSub = subs.length;
   const GAP = 8;
-  const volH = Math.round(H * (sub ? 0.15 : 0.22));
-  const subH = sub ? Math.round(H * 0.20) : 0;
-  const mainH = H - PADT - PADB - GAP * (sub ? 2 : 1) - volH - subH;
+  const volH = Math.round(H * (nSub ? 0.15 : 0.22));
+  const avail = H - PADT - PADB - volH - GAP * (nSub + 1);
+  /* ★ 单个副图时**刻意与改造前同高**（H×0.20）—— 那是现在页面的样子，
+       没有理由因为"支持多个"就把它改掉。多个时按可用高度分，
+       并给主图留住 38%：主图才是主角，副图是注解。 */
+  const subH = nSub ? Math.max(56, Math.min(Math.round(H * 0.20),
+                                            Math.floor(avail * 0.62 / nSub))) : 0;
+  const mainH = avail - subH * nSub;
   const volTop = PADT + mainH + GAP;
-  const subTop = volTop + volH + GAP;
+  const subTop = volTop + volH + GAP;          /* 第一个副图的顶 */
+  const subY = j => subTop + j * (subH + GAP); /* 第 j 个副图的顶 */
+  const subBot = nSub ? subY(nSub - 1) + subH : volTop + volH;
   const w = W - PADL - PADR;
   let lo = Infinity, hi = -Infinity, vmax = 0;
   bars.forEach(b => {
@@ -229,63 +244,78 @@ function drawKChart(cv, opts) {
     g.restore();
   }
 
-  /* 副图 */
-  if (sub) {
-    const rows = opts.sub;
-    const kind = opts.subKind || 'macd';
+  /* 副图：逐个画。每个自成一套 y 轴 —— 它们量纲完全不同
+     （MACD 是价差、KDJ 是 0~100、OBV 是万手），共用一个轴等于全压平。 */
+  subs.forEach((pane, j) => {
+    const rows = pane.rows, top = subY(j);
+    const ser = (pane.series || []).filter(x => x.style !== 'zero');
+    const wantZero = (pane.series || []).some(
+      x => x.style === 'zero' || x.style === 'bar');
     let slo = Infinity, shi = -Infinity;
-    const keys = kind === 'macd' ? ['dif', 'dea', 'macd']
-      : kind === 'kdj' ? ['k', 'd', 'jj'] : ['rsi6', 'rsi12', 'rsi24'];
-    rows.forEach(r => keys.forEach(k => {
-      if (r[k] != null) { slo = Math.min(slo, r[k]); shi = Math.max(shi, r[k]); }
+    rows.forEach(r => ser.forEach(x => {
+      const v = r[x.key];
+      if (v != null) { slo = Math.min(slo, v); shi = Math.max(shi, v); }
     }));
-    if (isFinite(slo) && isFinite(shi)) {
-      if (shi === slo) { shi += 1; slo -= 1; }
-      const SY = v => subTop + subH - (v - slo) / (shi - slo) * subH;
-      g.strokeStyle = LINE; g.globalAlpha = .5;
-      g.beginPath(); g.moveTo(PADL, subTop); g.lineTo(W - PADR, subTop); g.stroke();
-      g.globalAlpha = 1;
-      g.textAlign = 'right'; g.fillStyle = DIM;
-      g.fillText(shi.toFixed(1), PADL - 5, subTop + 8);
-      g.fillText(slo.toFixed(1), PADL - 5, subTop + subH);
-      if (kind === 'macd') {
+    if (!isFinite(slo) || !isFinite(shi)) return;
+    if (wantZero) { slo = Math.min(slo, 0); shi = Math.max(shi, 0); }
+    if (shi === slo) { shi += 1; slo -= 1; }
+    const SY = v => top + subH - (v - slo) / (shi - slo) * subH;
+    g.strokeStyle = LINE; g.globalAlpha = .5;
+    g.beginPath(); g.moveTo(PADL, top); g.lineTo(W - PADR, top); g.stroke();
+    g.globalAlpha = 1;
+    g.font = '10px ui-monospace,Menlo,monospace';
+    g.textAlign = 'right'; g.fillStyle = DIM;
+    const fmt = v => (v == null ? '—'
+      : (Math.abs(v) >= 1000 ? v.toFixed(0)
+         : Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(2)));
+    g.fillText(fmt(shi), PADL - 5, top + 8);
+    g.fillText(fmt(slo), PADL - 5, top + subH);
+    /* 0 轴：有柱子或指标自己要求时画一条虚线 —— MACD/BIAS/均线差这些
+       「过零点」本身就是信号，没有那条线就看不出是正是负。 */
+    if (wantZero && slo < 0 && shi > 0) {
+      g.strokeStyle = DIM; g.globalAlpha = .45; g.setLineDash([3, 3]);
+      g.beginPath(); g.moveTo(PADL, SY(0)); g.lineTo(W - PADR, SY(0)); g.stroke();
+      g.setLineDash([]); g.globalAlpha = 1;
+    }
+    ser.forEach(x => {
+      if (x.style === 'bar') {
         rows.forEach((r, i) => {
-          if (r.macd == null) return;
-          g.fillStyle = r.macd >= 0 ? UP : DN;
-          const y0 = SY(0), y1 = SY(r.macd);
+          const v = r[x.key]; if (v == null) return;
+          g.fillStyle = v > 0 ? UP : (v < 0 ? DN : DIM);
+          const y0 = SY(0), y1 = SY(v);
           g.fillRect(X(i) - bw / 2, Math.min(y0, y1), bw, Math.abs(y1 - y0) || 1);
         });
+        return;
       }
-      const SC = {dif: '#e0a33c', dea: '#5b9cf0', k: '#e0a33c', d: '#5b9cf0',
-                  jj: '#a06bf0', rsi6: '#e0a33c', rsi12: '#5b9cf0', rsi24: '#a06bf0'};
-      keys.filter(k => k !== 'macd').forEach(k => {
-        g.strokeStyle = SC[k] || DIM; g.lineWidth = 1.1; g.beginPath();
-        let st = false;
-        rows.forEach((r, i) => {
-          const v = r[k]; if (v == null) { st = false; return; }
-          if (!st) { g.moveTo(X(i), SY(v)); st = true; } else g.lineTo(X(i), SY(v));
-        });
-        g.stroke();
+      g.strokeStyle = x.color || DIM; g.lineWidth = 1.1; g.beginPath();
+      let st = false;
+      rows.forEach((r, i) => {
+        const v = r[x.key]; if (v == null) { st = false; return; }
+        if (!st) { g.moveTo(X(i), SY(v)); st = true; } else g.lineTo(X(i), SY(v));
       });
-      /* 副图图例：名称 + **那一天的值**，跟着光标变。
-         🔴 用户 2026-09-15："MACD的信息应该放在MACD的左上角，数字跟随变化"
-           —— 原来这里只有名字没有值，于是 DIF/DEA/MACD 得去读数浮窗里找，
-           而那三个数**只在副图上有意义**（主图的 MA 图例早就带值了，
-           所以浮窗里再列一遍是重复）。
-         ★ 光标没停在哪天就显示**最后一根**（同主图图例那条）。 */
-      g.textAlign = 'left'; let lx = PADL + 2;
-      const sr = rows[(opts.hover != null && rows[opts.hover]) ? opts.hover
-                      : rows.length - 1] || {};
-      keys.forEach(k => {
-        g.fillStyle = k === 'macd' ? DIM : (SC[k] || DIM);
-        const v = sr[k];
-        const t = k.toUpperCase() + ' '
-          + (v == null ? '—' : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)));
-        g.fillText(t, lx, subTop + 10);
-        lx += g.measureText(t).width + 9;
-      });
+      g.stroke();
+    });
+    /* 副图图例：**指标名 + 每条线那一天的值**，跟着光标变。
+       🔴 用户 2026-09-15："MACD的信息应该放在MACD的左上角，数字跟随变化"
+         —— 那三个数**只在副图上有意义**（主图的 MA 图例早就带值了，
+         所以读数浮窗里再列一遍是同一份信息看两处）。
+       ★ 光标没停在哪天就显示**最后一根**（同主图图例那条）。 */
+    g.textAlign = 'left';
+    const sr = rows[(opts.hover != null && rows[opts.hover]) ? opts.hover
+                    : rows.length - 1] || {};
+    let lx = PADL + 2;
+    if (pane.label) {
+      g.fillStyle = DIM;
+      g.fillText(pane.label, lx, top + 10);
+      lx += g.measureText(pane.label).width + 8;
     }
-  }
+    (pane.series || []).filter(x => x.style !== 'zero').forEach(x => {
+      g.fillStyle = x.style === 'bar' ? DIM : (x.color || DIM);
+      const t = x.label + ' ' + fmt(sr[x.key]);
+      g.fillText(t, lx, top + 10);
+      lx += g.measureText(t).width + 9;
+    });
+  });
   /* ---- 图例：色块 + 名称 + 【那一天的值】 ----
      ★ 光标停在哪天就显示那天的值，没停就显示最后一根。
      🔴 值必须给 —— 只有名字的话，几条颜色相近的线还是分不出谁是谁；
@@ -318,7 +348,7 @@ function drawKChart(cv, opts) {
   if (opts.hover != null && bars[opts.hover]) {
     const x = X(opts.hover);
     g.strokeStyle = DIM; g.globalAlpha = .6; g.setLineDash([3, 3]);
-    g.beginPath(); g.moveTo(x, PADT); g.lineTo(x, subTop + (sub ? subH : 0) || volTop + volH);
+    g.beginPath(); g.moveTo(x, PADT); g.lineTo(x, subBot);
     g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
   }
   /* 框选出来的区间：一条半透明带 + 两条边界线，**贯穿主图/量/副图** ——
@@ -330,7 +360,7 @@ function drawKChart(cv, opts) {
     const a = Math.max(0, Math.min(opts.sel.i0, opts.sel.i1));
     const b = Math.min(n - 1, Math.max(opts.sel.i0, opts.sel.i1));
     const x0 = X(a) - step / 2, x1 = X(b) + step / 2;
-    const yb = (sub ? subTop + subH : volTop + volH);
+    const yb = subBot;
     g.fillStyle = cssv('--accent', '#5b9cf0');
     g.globalAlpha = .12;
     g.fillRect(x0, PADT, Math.max(1, x1 - x0), yb - PADT);
@@ -340,7 +370,8 @@ function drawKChart(cv, opts) {
     g.moveTo(x1, PADT); g.lineTo(x1, yb); g.stroke();
     g.globalAlpha = 1;
   }
-  return {trHits: trHits, PADL, PADR, step, n, X};
+  return {trHits: trHits, PADL, PADR, step, n, X,
+          mainTop: PADT, mainH, volTop, volH, subTop, subH, nSub, subBot};
 }
 
 /* 多股归一涨幅折线（对比页用）。series: [{code,name,ret:[...]}] */

@@ -46,6 +46,11 @@ async function load() {
   try {
     V = await j('/api/alerts');
     if (V.error) throw new Error(V.error);
+    /* 买点条件清单取一次就够（进程内不变）。取不到也**不能让整页打不开**：
+       退回空清单，那时只能按价格/股息率填，而不是白屏
+       （同「外部挂了退回本地那份并把 err 给页面」那条）。 */
+    if (!ASIG.length) ASIG = ((await j('/api/indicators/defs')
+      .catch(() => ({}))).signals) || [];
     render();
   } catch (e) {
     pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
@@ -131,6 +136,40 @@ function divTag() {
 /* ---- 一行的编辑器 ----
    ★ 表单每一项都有【标签】，不靠 placeholder —— 字段取不到值时
      placeholder 也没了，剩一个空框，人不知道要填什么。 */
+/* 🔴 有哪些买点条件（距均线 / 金叉 / 超卖…）**由服务端给**
+   （/api/indicators/defs，正本在 assay/indicators.py）。页面写死一份的话，
+   加一条条件要改两处，而漏改那处的表现是**新条件在页面上根本选不到**：
+   不报错，只是没人知道它存在（同「可选基准由服务端给」那条）。 */
+let ASIG = [];
+function asig(id) { return ASIG.find(x => x.id === id) || null; }
+/* 新加一个指标档时的默认值：第一条条件 + 它自己的默认参数与默认阈值。 */
+function aNewInd() {
+  const d = ASIG[0];
+  if (!d) return {by: 'price', v: ''};
+  const args = {};
+  d.args.forEach(a => args[a.key] = a.default);
+  return {by: 'ind', sig: d.id, args: args, v: d.v};
+}
+/* 一个指标档在编辑器里的样子：条件下拉 + 它的参数 + 阈值。
+   ★ 参数框是**照服务端那份 args 渲染**的 —— 页面不知道 `w` 该念成
+     "均线周期"还是别的，那句中文在服务端（同「指标的中文标签在服务端」）。 */
+function indCell(t, i) {
+  const d = asig(t.sig) || ASIG[0] || {args: [], unit: '', tip: ''};
+  const args = t.args || {};
+  return `<select class="asig" data-i="${i}" style="max-width:150px">
+      ${ASIG.map(x => `<option value="${x.id}"${x.id === t.sig ? ' selected' : ''}
+        >${esc(x.label)}</option>`).join('')}
+    </select>
+    ${d.args.map(a => `<label style="margin-left:6px" title="${esc(a.label)}">${esc(a.label)}
+      <input class="aarg" data-i="${i}" data-k="${a.key}" type="number"
+        min="${a.min}" max="${a.max}" style="width:56px"
+        value="${args[a.key] == null ? a.default : args[a.key]}"></label>`).join('')}
+    <label style="margin-left:6px">${d.dir === 'up' ? '涨到' : '跌到'}
+      <input class="av" data-i="${i}" value="${t.v == null ? '' : t.v}"
+        style="width:70px;text-align:right"></label>${esc(d.unit || '')}
+    <div class="lvwhy">${esc(d.tip || '')}</div>`;
+}
+
 function editor() {
   const f = FORM || {};
   const tiers = f.tiers || [];
@@ -177,12 +216,22 @@ function editor() {
             ? (div / v * 100).toFixed(2) + '%　（' + div + '/' + v + '）'
             : (div / (v >= 1 ? v / 100 : v)).toFixed(2) + ' 元';
         }
-        return `<tr>
-        <td class="tx lvwhy">${i + 1}</td>
-        <td class="tx"><select class="aby" data-i="${i}">
+        const byCell = `<td class="tx"><select class="aby" data-i="${i}">
           <option value="price"${t.by === 'price' ? ' selected' : ''}>目标价</option>
           <option value="yield"${t.by === 'yield' ? ' selected' : ''}>目标股息率 %</option>
-        </select></td>
+          <option value="ind"${t.by === 'ind' ? ' selected' : ''}>指标条件</option>
+        </select></td>`;
+        if (t.by === 'ind') return `<tr>
+        <td class="tx lvwhy">${i + 1}</td>
+        ${byCell}
+        <td class="tx" colspan="2">${indCell(t, i)}</td>
+        <td class="tx"><input class="an" data-i="${i}" value="${esc(t.note || '')}"
+          style="width:120px"></td>
+        <td class="tx"><a href="#" class="atrm" data-i="${i}">删</a></td>
+      </tr>`;
+        return `<tr>
+        <td class="tx lvwhy">${i + 1}</td>
+        ${byCell}
         <td class="rt"><input class="av" data-i="${i}" value="${t.v == null ? '' : t.v}"
           style="width:90px;text-align:right"></td>
         <td class="rt lvwhy">${esc(other)}</td>
@@ -209,7 +258,8 @@ function table(rows) {
   const st = {hit: ['到价', 'var(--up)'], near: ['接近', 'var(--warn)'],
               far: ['', 'var(--dim)'], na: ['', 'var(--dim)']};
   return `<div class="lvsec"><h3>盯价
-      <span class="lvwhy">目标价从高到低 · 跌到哪一档就点亮哪一档</span></h3>
+      <span class="lvwhy">价格档从高到低（指标档排在后面）· 到了哪一档就点亮哪一档
+        ·「触发价」对指标档是<b>现算</b>的：今天收在那个价位，条件刚好成立</span></h3>
     <div class="pw"><table class="pkt">
       <tr><th class="tx">代码</th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">当日</th>
@@ -238,22 +288,35 @@ function table(rows) {
           const t = (x.tiers || [])[i];
           if (!t) return '<td class="rt lvwhy">—</td>';
           const s = st[t.state] || st.far;
+          const up = t.dir === 'up';
+          /* 🔴 **方向不是都朝下**：价格档与「距均线/超卖」是跌到才算，
+             「金叉」是涨上去才成立。一律写"跌 x%"的话，一只离金叉还差
+             2% 的票会被读成"还要跌 2%"——意思正好反了，而它不报错。 */
+          const gapTxt = t.gap == null ? ''
+            : (t.state === 'hit' ? (up ? '已站上' : '已跌破')
+               : (t.gap < 0 ? '跌 ' + (-t.gap * 100).toFixed(1) + '%'
+                            : '涨 ' + (t.gap * 100).toFixed(1) + '%'));
           return `<td class="rt" style="color:${s[1]}"
-            title="${t.by === 'price' ? '填的是目标价' : '填的是目标股息率'}${
+            title="${t.by === 'ind' ? esc(t.text || '') + '　触发价是【现算】的：'
+                      + '今天收在这个价位，这个条件刚好成立（均线每天在动，'
+                      + '所以它每天都不一样）'
+                      : (t.by === 'price' ? '填的是目标价' : '填的是目标股息率')}${
               t.note ? '　' + esc(t.note) : ''}">
-            <b>${fmtN(t.price)}</b>
+            <b>${t.price == null ? '—' : fmtN(t.price)}</b>
             <div class="lvwhy" style="color:inherit">${
-              t.yield == null ? '' : (t.yield * 100).toFixed(2) + '%'}</div>
-            <div class="lvwhy">${t.gap == null ? ''
-              : (t.state === 'hit' ? '已跌破'
-                 : '跌 ' + (-t.gap * 100).toFixed(1) + '%')}</div></td>`;
+              t.by === 'ind' ? esc(t.text || '')
+                : (t.yield == null ? '' : (t.yield * 100).toFixed(2) + '%')}</div>
+            <div class="lvwhy">${t.by === 'ind' && t.price == null
+              ? esc(t.why || '算不出') : gapTxt}</div></td>`;
         }).join('')}
         <td class="tx">${x.state === 'hit'
           ? `<b style="color:var(--up)">到价 · 第 ${x.hit + 1} 档</b>`
           : (x.state === 'near'
              ? `<b style="color:var(--warn)">接近 · 第 ${x.near + 1} 档</b>`
-             : (x.next ? '<span class="lvwhy">还要跌 '
-                 + (-x.next.gap * 100).toFixed(1) + '%</span>' : ''))}</td>
+             : (x.next && x.next.gap != null
+                ? '<span class="lvwhy">还要' + (x.next.gap < 0
+                    ? '跌 ' + (-x.next.gap * 100).toFixed(1)
+                    : '涨 ' + (x.next.gap * 100).toFixed(1)) + '%</span>' : ''))}</td>
         <td class="tx"><a href="#" class="aed" data-c="${esc(x.code)}"
           title="${x.note ? '备注：' + esc(x.note) : '改这一行'}">改</a></td>
       </tr>`).join('')}
@@ -351,14 +414,44 @@ function wire() {
     const nv = $('#anear').value.trim();
     FORM.near = nv === '' ? null : (parseFloat(nv) / 100);
     $$('.aby').forEach(e => FORM.tiers[+e.dataset.i].by = e.value);
+    $$('.asig').forEach(e => FORM.tiers[+e.dataset.i].sig = e.value);
+    $$('.aarg').forEach(e => {
+      const t = FORM.tiers[+e.dataset.i];
+      t.args = Object.assign({}, t.args);
+      t.args[e.dataset.k] = parseInt(e.value, 10);
+    });
     $$('.av').forEach(e => FORM.tiers[+e.dataset.i].v = e.value.trim());
     $$('.an').forEach(e => FORM.tiers[+e.dataset.i].note = e.value);
   };
   const redraw = () => { pull(); render(); };
-  $$('.aby').forEach(e => e.onchange = redraw);
+  $$('.aby').forEach(e => e.onchange = e2 => {
+    const i = +e.dataset.i, by = e.value;
+    /* 切到「指标条件」时要**带上默认的条件与参数**：留个空壳的话
+       下拉是空的、保存直接报错，而人看不出要填什么。 */
+    FORM.tiers[i] = by === 'ind'
+      ? aNewInd()
+      : {by: by, v: '', note: FORM.tiers[i].note || ''};
+    render();
+  });
+  $$('.asig').forEach(e => e.onchange = () => {
+    const i = +e.dataset.i, d = asig(e.value);
+    const args = {};
+    (d ? d.args : []).forEach(a => args[a.key] = a.default);
+    FORM.tiers[i] = {by: 'ind', sig: e.value, args: args, v: d ? d.v : '',
+                     note: FORM.tiers[i].note || ''};
+    render();
+  });
+  $$('.aarg').forEach(e => e.onchange = () => {
+    const i = +e.dataset.i;
+    FORM.tiers[i].args = Object.assign({}, FORM.tiers[i].args);
+    FORM.tiers[i].args[e.dataset.k] = parseInt(e.value, 10);
+    pull(); render();
+  });
   $$('.av').forEach(e => e.onchange = redraw);
   $('#atadd').onclick = () => { pull();
-    FORM.tiers.push({by: FORM.tiers.length && FORM.tiers[0].by || 'yield', v: ''});
+    const prev = FORM.tiers[FORM.tiers.length - 1];
+    FORM.tiers.push(prev && prev.by === 'ind' ? aNewInd()
+      : {by: (FORM.tiers.length && FORM.tiers[0].by) || 'yield', v: ''});
     render(); };
   $$('.atrm').forEach(a => a.onclick = ev => { ev.preventDefault(); pull();
     FORM.tiers.splice(+a.dataset.i, 1); render(); });
@@ -375,7 +468,10 @@ function wire() {
     pull();
     const tiers = FORM.tiers
       .filter(t => String(t.v).trim() !== '')
-      .map(t => ({by: t.by, v: parseFloat(t.v), note: t.note || ''}));
+      .map(t => (t.by === 'ind'
+        ? {by: 'ind', sig: t.sig, args: t.args || {},
+           v: parseFloat(t.v), note: t.note || ''}
+        : {by: t.by, v: parseFloat(t.v), note: t.note || ''}));
     try {
       await post('/api/alerts', {act: 'set', code: FORM.code,
         tiers: tiers, note: FORM.note, near: FORM.near});
@@ -391,9 +487,15 @@ function formOf(code) {
      照着显示值回填会把"我填的是股息率"变成"我填的是价格"。 */
   return {code: code, name: x.name || '', note: x.note || '',
     near: x.near_used === (V.near_default) ? null : x.near_used,
-    tiers: (x.tiers || []).map(t => ({by: t.by,
-      v: t.by === 'price' ? t.price : +(t.yield * 100).toFixed(4),
-      note: t.note || ''}))};
+    tiers: (x.tiers || []).map(t => (t.by === 'ind'
+      /* 指标档回填的是**条件与阈值**，不是那个触发价 —— 触发价是现算的
+         派生物，照它回填等于把"距 MA20 -3%"变成"目标价 10.84"，
+         而明天那个数就不对了（同「照显示值回填会把股息率变成价格」）。 */
+      ? {by: 'ind', sig: t.sig, args: Object.assign({}, t.args), v: t.v,
+         note: t.note || ''}
+      : {by: t.by,
+         v: t.by === 'price' ? t.price : +(t.yield * 100).toFixed(4),
+         note: t.note || ''}))};
 }
 
 function msg(t, bad) {

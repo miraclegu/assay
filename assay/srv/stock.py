@@ -78,12 +78,29 @@ def api_stock_finance(q):
 
 
 def api_stock_indicators(q):
-    """GET /api/stock/indicators?code=&n=&fq= —— MACD/KDJ/RSI/BOLL。"""
+    """GET /api/stock/indicators?code=&n=&fq=&off=[&inds=] —— 按需算一组指标。
+
+    `inds` 不传 = 老行为（MACD/KDJ/RSI/BOLL），老链接照旧能用。
+    传 `macd,kdj` 或一段 JSON（要改参数时）—— 定义全在
+    `assay/indicators.py`，这里一个指标名都不认识。
+    """
     m = _stock()
     return _stock_err(lambda: m.indicators(q.get('code') or '',
                                            n=q.get('n') or 250,
                                            fq=(q.get('fq') or 'bfq'),
-                                           off=q.get('off') or 0))
+                                           off=q.get('off') or 0,
+                                           inds=m.parse_inds(q.get('inds'))))
+
+
+def api_indicator_defs(q):
+    """GET /api/indicators/defs —— 有哪些指标、各带什么参数、画哪几条线。
+
+    🔴 **清单由服务端给**（同「可选基准由服务端给」「口径解释在服务端」）：
+      页面硬编码一份的话，加一个指标要改两处，而漏改那处的表现是
+      **新指标在页面上根本不出现** —— 不报错，只是没人知道它存在。
+    """
+    from assay import indicators as I
+    return {'inds': I.defs(), 'signals': I.signal_defs()}
 
 
 
