@@ -234,6 +234,9 @@ function chartBox(k, ind) {
       <div id="kslots">${kSlotHtml()}</div>
     </div>
     <!-- 参数弹窗的容器：**平时是空的**（见 kModal） -->
+    <div id="kaddrow" class="lvform" style="margin-top:6px;gap:8px"
+      >${kAddRowHtml()}</div>
+    <!-- 参数弹窗的容器：**平时是空的**（见 kModal） -->
     <div id="kmodal"></div>
     <!-- ★ 常驻一行提示（没选时说怎么用）而不是选了才出现：
          **看不出能用的功能 = 没有这个功能**（同"看不出能点的入口"那条）。
@@ -492,22 +495,27 @@ function wire() {
     const a = ev.target.closest('a');
     if (!a) return;
     ev.preventDefault();
-    if (a.id === 'kadd') {
-      if (!kSlotAdd()) {
-        /* 🔴 到上限时**说出来**，不要静默不动 —— 点了没反应是最难查的
-           那种坏（同 backLink 那条）。 */
-        const m = $('#kimsg');
-        if (m) m.innerHTML = `　最多 <b>${KMAX}</b> 个副图 —— 先去掉一个`;
-        return;
-      }
-      await reloadInd();
-      return;
-    }
     if (a.id === 'kparam') { kModal(true); return; }
     if (a.classList.contains('kmain')) {
       kToggleMain(a.dataset.i);
       await reloadInd();
     }
+  };
+  const arow = $('#kaddrow');
+  if (arow) arow.onclick = async ev => {
+    const a = ev.target.closest('a');
+    if (!a || a.id !== 'kadd') return;
+    ev.preventDefault();
+    if (!kSlotAdd()) {
+      /* 🔴 到上限时**说出来**，不要静默不动（同 backLink 那条）。
+         ★ 这句话要**自己说得完整**：它旁边可能还有别的文字，
+           "先去掉一个"后面紧跟着"主图"就会被读成"先去掉一个主图"。 */
+      const m = $('#kimsg');
+      if (m) m.innerHTML = `　<b>副图最多 ${KMAX} 个</b>，`
+        + '先用某个副图右上角的 × 去掉一个再加（主图那两个不占名额）';
+      return;
+    }
+    await reloadInd();
   };
   /* 副图左上角那组控件（下拉框 + ⚙ + ×）—— 它们浮在画布上。 */
   const sbox = $('#kslots');
@@ -562,12 +570,19 @@ function wire() {
       /* 🔴 越界**当场拒**并说清范围 —— 让它发到服务端只会换来一句报错，
          而输入框里还留着那个非法值。 */
       if (!a2 || !(v >= a2.min && v <= a2.max)) {
-        const m = $('#kimsg');
-        if (m) m.innerHTML = `　${esc(a2 ? a2.label : k)} 要在 `
-          + `${a2 ? a2.min : '?'}~${a2 ? a2.max : '?'} 之间`;
+        /* ★ 提示放在**弹窗里**（就在那个输入框旁边）—— 扔到图下面那行去的话，
+           人盯着输入框却看不到为什么被退回来。 */
+        const m = $('#kmmsg');
+        if (m) {
+          m.className = 'lvmsg bad';
+          m.textContent = (a2 ? a2.label : k) + ' 要在 '
+            + (a2 ? a2.min : '?') + '~' + (a2 ? a2.max : '?') + ' 之间';
+        }
         e.value = (KP[id] || {})[k] != null ? KP[id][k] : (a2 ? a2.default : '');
         return;
       }
+      const _ok = $('#kmmsg');
+      if (_ok) { _ok.className = 'lvmsg'; _ok.textContent = ''; }
       KP[id] = Object.assign({}, KP[id]); KP[id][k] = v;
       /* 与默认值相同就不存 —— 存了的话弹窗里会一直挂着等于没改的值。 */
       if (v === a2.default) {
@@ -794,12 +809,28 @@ function renderSel() {
    ★ 下拉框浮在画布上（不是画在画布里）：canvas 里画不出可点的控件，
      而"每个副图自己选"要求它就在那个副图的左上角。 */
 function kPickHtml() {
-  const n = KINDS.length;
-  return `<a href="#" class="lvtag${n >= KMAX ? ' off' : ''}" id="kadd"
-      title="${n >= KMAX ? '最多 ' + KMAX + ' 个副图' : '加一个副图'}"
+  /* 🔴 这里**不放「+ 副图」、也不放提示文字**。
+     用户 2026-09-15 反馈："最多 4 个副图 —— 先去掉一个主图，这个没看懂，
+     主图的数量和副图的数量会冲突吗？" —— 两者不冲突，是**两段文字挨在
+     一起被读成了一句**：提示排在「主图 [均线][布林带]」前面，屏幕上就是
+     "…先去掉一个｜主图 均线 布林带"。
+     ★ 所以提示要跟着**它说的那个按钮**走（挪到图下面那一行），
+       而不是挤在工具条里跟别的标签做邻居。 */
+  return `<a href="#" class="lvtag" id="kparam"
+      title="改指标参数（弹窗，不动布局）">⚙ 参数</a>`;
+}
+
+/* 「+ 副图」那一行：**贴在最后一个副图下面**（用户："添加副图的按钮应该
+   放在主图的最下面，或者说当前最后一个副图的下面"）—— 那正是你看完最后
+   一个副图、想再加一个时手停的位置。
+   ★ 放在画布**外面**而不是浮在画布里：画布底部那 18px 是 x 轴的日期，
+     浮上去会压住它。 */
+function kAddRowHtml() {
+  const n = KINDS.length, full = n >= KMAX;
+  return `<a href="#" class="lvtag${full ? ' off' : ''}" id="kadd"
+      title="${full ? '副图最多 ' + KMAX + ' 个' : '在下面再加一个副图'}"
       >+ 副图</a>
-    <a href="#" class="lvtag" id="kparam" title="改指标参数（弹窗，不动布局）"
-      >⚙ 参数</a>
+    <span class="lvwhy">副图 ${n}/${KMAX} · 每个副图左上角可以换指标</span>
     <span class="lvwhy" id="kimsg"></span>`;
 }
 
@@ -905,6 +936,7 @@ function kModalHtml() {
       <div class="lvwhy">这里只列<b>当前用着的</b>指标。参数是"我习惯看几日"
         的个人设置，所以存 localStorage 而不进 URL（URL 是拿去分享的）。</div>
       ${rows || '<div class="none">当前没有用到带参数的指标</div>'}
+      <div class="lvmsg" id="kmmsg"></div>
       <div class="lvform" style="margin-top:8px;gap:6px">
         <a href="#" class="lvtag" id="kprst">恢复默认参数</a>
         <a class="lvtag" id="kmore" href="/indicators.html?code=${encodeURIComponent(CODE)}"
@@ -940,6 +972,8 @@ async function reloadInd() {
   if (box) box.innerHTML = kPickHtml() + kMainHtml();
   const sl = $('#kslots');
   if (sl) sl.innerHTML = kSlotHtml();
+  const ar = $('#kaddrow');
+  if (ar) ar.innerHTML = kAddRowHtml();
   /* 弹窗**开着才重渲染**：关着时它是空的，渲染进去等于把它打开 */
   if (KMODAL) kModal(true);
   KGEO = redraw();

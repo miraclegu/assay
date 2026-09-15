@@ -14074,13 +14074,36 @@ def t_stock_multi_sub():
             assert '4' in _m and pg.evaluate('() => KINDS.length') == 4, \
                 ('到上限时既没拦住也没说明：%r —— 点了没反应是最难查的'
                  '那种坏' % _m)
+            # 🔴 这句话要**自己说得完整**。用户 2026-09-15 把它读成了
+            #   "先去掉一个主图"：原来提示排在工具条里、紧挨着
+            #   「主图 [均线][布林带]」，屏幕上就是"…先去掉一个｜主图 均线"。
+            #   判据两条：提示**不许**待在放主图开关的那个容器里，
+            #   且它自己要点明说的是"副图"。
+            assert not pg.evaluate(
+                "() => !!document.querySelector('#kpickbox #kimsg')"), \
+                ('副图的提示又跑回工具条里了 —— 它会紧挨着「主图」那两个'
+                 '开关，被读成"先去掉一个主图"（主图与副图各算各的，不冲突）')
+            assert '副图' in _m, '提示没说清是"副图"到上限了：%r' % _m
             _before = pg.evaluate('() => KINDS.slice()')
             pg.locator('#kslots .ksdel[data-j="0"]').click()
             pg.wait_for_timeout(1000)
             assert pg.evaluate('() => KINDS') == _before[1:], \
                 '「×」删的不是那个槽位：%r -> %r' % (_before,
                                                 pg.evaluate('() => KINDS'))
-            notes.append('+ 副图 / × 删槽位 / 到 4 个有提示')
+            # 🔴 用户："添加副图的按钮应该放在主图的最下面，或者说当前
+            #   最后一个副图的下面。" —— 那才是你看完最后一个副图、想再加
+            #   一个时手停的位置。判据是**几何**：它必须在画布下边界之下。
+            _ab = pg.evaluate(
+                "() => {const c = document.querySelector('#kcv')"
+                ".getBoundingClientRect();"
+                " const a = document.querySelector('#kadd')"
+                ".getBoundingClientRect();"
+                " return {cb: c.bottom, at: a.top};}")
+            assert _ab['at'] >= _ab['cb'] - 1, \
+                ('「+ 副图」不在图的下面（按钮 top=%.0f / 画布底=%.0f）—— '
+                 '它该贴着最后一个副图，而不是躲在工具条里'
+                 % (_ab['at'], _ab['cb']))
+            notes.append('+ 副图 在图下方 / × 删槽位 / 到 4 个有提示且说清是副图')
 
             # ---- ⑤ 参数在【弹窗】里改，且开关它布局一个像素都不动 ----
             # 🔴 用户原话："修改指标的参数应该在单独的地方（至少是一个单独的
@@ -14116,8 +14139,11 @@ def t_stock_multi_sub():
             box.fill('9999')
             box.dispatch_event('change')
             pg.wait_for_timeout(500)
-            assert '之间' in pg.locator('#kimsg').inner_text(), \
-                '越界参数没被当场拒'
+            # ★ 提示要在**弹窗里**（就在那个输入框旁边）：扔到图下面那行去的话，
+            #   人盯着输入框却看不到为什么被退回来。
+            assert '之间' in pg.locator('#kmwrap #kmmsg').inner_text(), \
+                ('越界参数没在弹窗里当场拒：%r'
+                 % pg.locator('#kmwrap').inner_text()[:120])
             pg.click('#kprst')
             pg.wait_for_timeout(1600)
             assert abs(pg.evaluate("() => IND[IND.length - 1].k") - _k0) < 1e-9, \
