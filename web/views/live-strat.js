@@ -74,14 +74,22 @@ async function openStrat(aid, sha){
       </div>
     </div>
     <div class="lvsec" style="margin-top:12px"><h3>版本历史（append-only，删 runs/ 也读得到）</h3>
-      ${vs.length?`<table class="lvt lvvt"><tr><th>时间</th><th>版本</th><th>参数</th></tr>
-        ${vs.map(x=>`<tr><td>${esc(x.ts.slice(0,10))}<br><span class="lvwhy">${esc(x.ts.slice(11,16))}</span></td>
-          <td><a class="lvver" href="#" data-sha="${esc(x.code_sha256)}"
+      ${/* 🔴 **参数与「为什么换」是两件事，各占一列。** 原来挤在同一格里，
+             而那一格是 `.lvpar`（flex + justify-content:flex-end）—— 理由一长
+             就把参数 chip 推到行首，于是**每行的起点都不一样**，整列纵向
+             扫不下来（实测：第 1 行 chip 在最左、第 2 行在最右）。
+             ★ 这几列全是文本，一律 `.tx` 左对齐 —— `table.lvt` 默认右对齐，
+               不标的话 8 位 hash 与中文说明都靠右，看着像错位（同
+               「数字列 .rt / 文本列 .tx」那条）。 */''}
+      ${vs.length?`<table class="lvt lvvt"><tr><th class="tx">时间</th><th class="tx">版本</th
+        ><th class="tx">参数</th><th class="tx">为什么换</th></tr>
+        ${vs.map(x=>`<tr><td class="tx">${esc(x.ts.slice(0,10))}<br><span class="lvwhy">${esc(x.ts.slice(11,16))}</span></td>
+          <td class="tx"><a class="lvver" href="#" data-sha="${esc(x.code_sha256)}"
                  title="${esc(x.strategy_path||'')}">${esc(x.code_sha)}</a>
               ${x.code_sha256===sha?'<br><span class="lvwhy">当前</span>':''}</td>
-          <td class="lvpar">${Object.entries(x.params||{}).map(([k,y])=>
-              `<span class="lvkv">${esc(k)}=${esc(y)}</span>`).join('')||'<span class="lvwhy">默认</span>'}
-              ${x.reason?`<div class="lvwhy">${esc(x.reason)}</div>`:''}</td></tr>`).join('')}</table>`
+          <td class="tx lvpar">${Object.entries(x.params||{}).map(([k,y])=>
+              `<span class="lvkv">${esc(k)}=${esc(y)}</span>`).join('')||'<span class="lvwhy">默认</span>'}</td>
+          <td class="tx lvrsn">${x.reason?esc(x.reason):'<span class="lvwhy">—</span>'}</td></tr>`).join('')}</table>`
         :'<div class="none">还没绑定过</div>'}
       <div class="lvform">
         <input id="bp" placeholder="strategies/…/x.py" style="flex:1;min-width:200px"

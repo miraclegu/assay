@@ -3095,6 +3095,47 @@ def t_live_ui():
                 'disabled 的按钮点了没反应、也不显示 title —— 改成可点 + 说原因'
             _cb = pg.evaluate('() => LV.can_backtest')
 
+            # ---- 版本历史表：四列各就各位，没有一格溢出 ----
+            # 🔴 用户："版本历史（append-only，删 runs/ 也读得到），下面的
+            #   内容文字有错位。" 两个成因，都不报错：
+            #   ① **参数 chip 与「为什么换」挤在同一格**，而那一格是
+            #      `.lvpar`（flex + justify-content:flex-end）—— 理由一长就把
+            #      chip 推到行首，于是**每行的起点都不一样**，整列扫不下来。
+            #   ② 日期列 64px 装不下 `2026-09-06`，溢出去贴住右边的 8 位 hash。
+            # ★ 判据是**可量的事实**：每列的左边界逐行相同 + 没有一格
+            #   `scrollWidth > clientWidth`（那正是"贴在一起"的成因），
+            #   而不是"有没有那个 class" —— 后者在列被合回去时照样命中。
+            _vt = pg.evaluate("""() => {
+                const t = document.querySelector('table.lvvt');
+                if(!t) return null;
+                const L = el => Math.round(el.getBoundingClientRect().left);
+                return {n: t.rows[0].cells.length,
+                  head: [...t.rows[0].cells].map(c => c.textContent.trim()),
+                  cols: [...t.rows].map(tr => [...tr.cells].map(L)),
+                  align: [...t.rows].slice(1).map(
+                      tr => [...tr.cells].map(td => getComputedStyle(td).textAlign)),
+                  over: [].concat(...[...t.rows].slice(1).map(
+                      (tr, r) => [...tr.cells].map((td, i) => (
+                        td.scrollWidth > td.clientWidth + 1
+                          ? [r, i, td.textContent.trim().slice(0, 14)] : null))
+                      )).filter(Boolean)};}""")
+            assert _vt and _vt['n'] == 4, \
+                '版本历史该是四列（时间/版本/参数/为什么换），现在是 %r' % (_vt,)
+            assert '为什么换' in _vt['head'][3], \
+                ('「为什么换」必须自己一列 —— 与参数 chip 挤在一格时，理由一长'
+                 '就把 chip 推走，每行起点都不一样：%r' % (_vt['head'],))
+            for _i in range(_vt['n']):
+                _xs = {row[_i] for row in _vt['cols']}
+                assert len(_xs) == 1, \
+                    ('版本历史第 %d 列的左边界逐行不同 %s —— 那就是"文字错位"'
+                     % (_i + 1, sorted(_xs)))
+            assert all(set(r) == {'left'} for r in _vt['align']), \
+                ('版本历史四列全是文本，必须 .tx 左对齐（table.lvt 默认右对齐）'
+                 '：%r' % (_vt['align'][0],))
+            assert not _vt['over'], \
+                ('有格子装不下自己的内容（会溢出去贴住右边那列）：%r'
+                 % (_vt['over'],))
+
             # 关掉网页回测，验"点了要有话说"（不是静默）
             sv.ALLOW_BACKTEST = False
             pg.reload(wait_until='networkidle')
@@ -13277,8 +13318,25 @@ def t_pos_sort():
                 "(n) => document.querySelectorAll("
                 "'#lvbody table.lvpos tr').length - 1 >= n", arg=n_rows,
                 timeout=30000)
-            _check('quiet 刷新（每分钟那次）后')
-            # 全量重渲染也要保持
+            # 🔴🔴 **quiet 刷新之后不能拿 `lvSortRows(LVO)` 当期望** ——
+            #   `livePatch` 会把 `LVO` 换成**新数据**（live.js:238），而 DOM
+            #   **故意不重排**（那正是产品规则：刷新只换数字、不重排）。
+            #   于是盘中价格一动，“新数据排出来的顺序”就可能与表里的不同——
+            #   **而那不是 bug，是设计**。拿它当判据必然偶发：
+            #   这是同一处第二次偶发 —— 上一版把“行序一字不差”换成了它，
+            #   而那次换错了方向（换掉的恰恰是唯一不受刷新影响的那个）。
+            #   ★ quiet 这一次的判据就是**行序一字不差**，再加 LVSORT 还在；
+            #   ★ “按那一列有序”由**全量重渲染**那次去钉 —— 那条路径上
+            #     `LVO` 与渲染同源，不受刷新抖动影响。
+            o_q = pg.evaluate(ORDER)
+            assert o_q == o1, \
+                ('quiet 刷新（每分钟那次）重排了行序 —— livePatch 必须只换'
+                 '数字、不动 DOM 结构\n  刷新前 %s\n  刷新后 %s'
+                 % (o1[:6], o_q[:6]))
+            assert pg.evaluate(
+                '() => JSON.parse(JSON.stringify(LVSORT))').get('k'), \
+                'quiet 刷新之后 LVSORT 空了 —— 它必须是模块级'
+            # 全量重渲染要按当前排序重排（这条路径 LVO 与渲染同源）
             pg.evaluate("async () => { await loadLive(LVSEL); }")
             pg.wait_for_function(
                 "(n) => document.querySelectorAll("

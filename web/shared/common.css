@@ -432,8 +432,16 @@ table.lvt tr:last-child td{border-bottom:0}
 /* 版本表：参数列原来直接塞 JSON 字符串，长了就顶出容器。
    改成【固定表宽 + 参数拆成小 chip + 允许换行】—— 单元格不再是一行长文本。 */
 table.lvvt{table-layout:fixed}
-table.lvvt th:nth-child(1),table.lvvt td:nth-child(1){width:64px}
-table.lvvt th:nth-child(2),table.lvvt td:nth-child(2){width:72px}
+/* 🔴 64px 装不下 `2026-09-06`（12px 字下约 68px）—— 它会溢出去
+   贴住右边那个 8 位 hash，看着就是两列粘在一起。列宽要按**最长的
+   那个内容**给，而这两列的内容都是定长的（日期 10 字 / hash 8 字）。 */
+table.lvvt th:nth-child(1),table.lvvt td:nth-child(1){width:78px}
+table.lvvt th:nth-child(2),table.lvvt td:nth-child(2){width:84px}
+/* 参数列固定宽，剩下的全给「为什么换」——它是这张表里最有信息量的一列
+   （chip 是机读的，说明是给人看的）。两列都左对齐，起点才对得齐。 */
+table.lvvt th:nth-child(3),table.lvvt td:nth-child(3){width:240px}
+table.lvvt .lvpar{justify-content:flex-start}
+table.lvvt td.lvrsn{white-space:normal;color:var(--dim);line-height:1.5}
 .lvpar{display:flex;flex-wrap:wrap;gap:3px;justify-content:flex-end}
 .lvkv{font-family:"SF Mono",Menlo,monospace;font-size:10px;white-space:nowrap;
   background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--dim)}
