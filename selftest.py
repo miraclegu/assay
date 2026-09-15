@@ -14403,7 +14403,7 @@ def t_alerts_by_indicator():
     return '；'.join(notes)
 
 
-@case('指标广场：照服务端清单渲染 / 每张卡有真图 / 四处进得来（playwright）',
+@case('指标广场：主图/副图分页签 + 分页只取当前页 / 每张卡有真图（playwright）',
       tag='web')
 def t_indicator_plaza():
     """🔴 2026-09-15 用户："查看全部指标的地方在哪里？应该有指标广场。"
@@ -14447,21 +14447,35 @@ def t_indicator_plaza():
             pg.wait_for_selector('.icard', timeout=40000)
             pg.wait_for_timeout(1500)
 
-            # ---- ① 一张卡一个指标，顺序与服务端一致 ----
+            # ---- ① 主图 / 副图**分两个页签**（用户 2026-09-15）----
+            # 它们是两回事：主图那几条与 K 线共用价格坐标，副图各自一套。
+            # 混在一个流里的话，"哪些能叠在 K 线上"得一张张卡去看。
+            want_main = [d['id'] for d in defs if d['panel'] == 'main']
+            want_sub = [d['id'] for d in defs if d['panel'] == 'sub']
+            tabs = pg.locator('#tabs .itab')
+            assert tabs.count() == 2, '没有分成两个页签：%d' % tabs.count()
+            _tt = ' '.join(pg.locator('#tabs').inner_text().split())
+            assert str(len(want_main)) in _tt and str(len(want_sub)) in _tt, \
+                '页签上没写各有几个：%r' % _tt
             ids = pg.evaluate(
                 "() => [...document.querySelectorAll('.icard')]"
                 ".map(e => e.dataset.i)")
-            assert ids == [d['id'] for d in defs], \
-                ('广场上的指标与服务端清单对不上：页面 %r / 服务端 %r —— '
-                 '页面写死一份的话，加一个指标它根本不出现'
-                 % (ids, [d['id'] for d in defs]))
+            assert ids == want_main, \
+                ('主图页签列的不是主图那几个：%r / 应为 %r' % (ids, want_main))
+            pg.locator('#tabs .itab[data-t="sub"]').click()
+            pg.wait_for_timeout(1500)
+            ids = pg.evaluate(
+                "() => [...document.querySelectorAll('.icard')]"
+                ".map(e => e.dataset.i)")
+            assert ids == want_sub, \
+                ('副图页签列的不是副图那几个：%r / 应为 %r' % (ids, want_sub))
             # 顶栏点亮的是**父级**（个股），不是它自己：NAV 里没有这一项，
             # 传一个不存在的 key 会让整条顶栏一个都不亮
             assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
                 '子页没点亮父级「个股」：%s' % pg.locator('#top .btn.nav.on').inner_text()
 
             # ---- ② 每张卡：公式 / 参数 / 色块 / 真图 ----
-            for d in defs:
+            for d in [x for x in defs if x['panel'] == 'sub']:
                 card = pg.locator('.icard[data-i="%s"]' % d['id'])
                 t = card.inner_text()
                 assert d['short'] in t and d['desc'][:8] in t, \
@@ -14488,10 +14502,73 @@ def t_indicator_plaza():
                   let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
                   return [cv.dataset.i, n];})""")
             blank = [x for x in px if x[1] < 3000]
-            assert len(px) == len(defs) and not blank, \
+            assert len(px) == len(want_sub) and not blank, \
                 '这几张卡是空白的：%r（共 %d 张）' % (blank, len(px))
-            notes.append('%d 张卡：公式/参数/色块齐，图都真画了（最少 %d 像素）'
-                         % (len(defs), min(x[1] for x in px)))
+            notes.append('两个页签各列各的（主图 %d / 副图 %d），图都真画了'
+                         % (len(want_main), len(want_sub)))
+
+            # ---- ②b 分页：**只向服务端要当前这一页那几个指标** ----
+            # 🔴 用户："考虑如果指标数量非常多（几十上百个），怎么分页"。
+            #   这一页的开销**不在列表**，在于每张卡都要一张真图 ——
+            #   一次算完上百个再画上百张画布，页面必卡。所以判据不是
+            #   "分了页"，而是**请求里只带这一页的 id**。
+            # ★ 用 `per=3` 把分页逼出来：真实只有十来个指标，
+            #   不压小每页个数的话这段永远是"第 1/1 页"，等于没测。
+            _api = []
+            pg.on('request', lambda r: _api.append(r.url)
+                  if '/api/stock/indicators' in r.url else None)
+            pg.goto(base + '/indicators.html?tab=sub&per=3',
+                    wait_until='networkidle')
+            pg.wait_for_selector('.icard', timeout=40000)
+            pg.wait_for_timeout(900)
+            _p1 = pg.evaluate("() => [...document.querySelectorAll('.icard')]"
+                              ".map(e => e.dataset.i)")
+            assert _p1 == want_sub[:3], '第一页不是前 3 个：%r' % _p1
+            import urllib.parse as _up
+            _got = _up.unquote(_api[-1].split('inds=')[1].split('&')[0])
+            assert _got.split(',') == _p1, \
+                ('请求里带的不是这一页那几个指标（%r vs 页面 %r）—— '
+                 '上百个指标时这就是"一次全算"与"只算 3 个"的区别' % (_got, _p1))
+            assert '1/%d 页' % ((len(want_sub) + 2) // 3) \
+                in pg.locator('#ipinfo').inner_text(), \
+                '分页信息不对：%r' % pg.locator('#ipinfo').inner_text()
+            pg.click('#inext')
+            pg.wait_for_timeout(1500)
+            _p2 = pg.evaluate("() => [...document.querySelectorAll('.icard')]"
+                              ".map(e => e.dataset.i)")
+            assert _p2 == want_sub[3:6] and 'page=2' in pg.url, \
+                '翻页没换内容或没进 URL：%r / %s' % (_p2, pg.url)
+            _got2 = _up.unquote(_api[-1].split('inds=')[1].split('&')[0])
+            assert _got2.split(',') == _p2, \
+                '翻页之后请求的还是上一页那几个：%r' % _got2
+            _px2 = pg.evaluate("""() => [...document.querySelectorAll('.icv')]
+                .map(cv => {const g = cv.getContext('2d');
+                  const d = g.getImageData(0, 0, cv.width, cv.height).data;
+                  let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+                  return n;})""")
+            assert len(_px2) == 3 and min(_px2) > 3000, \
+                '第二页的图没画出来：%r' % _px2
+            notes.append('分页只取当前页（per=3：%s -> %s）'
+                         % (','.join(_p1), ','.join(_p2)))
+
+            # ---- ②c 搜索：上百个指标时，靠翻页是翻不到的 ----
+            pg.fill('#iq', '均线')
+            pg.wait_for_timeout(1800)
+            _hit = pg.evaluate("() => [...document.querySelectorAll('.icard')]"
+                               ".map(e => e.dataset.i)")
+            assert _hit and all(
+                '均线' in (d['desc'] + d['formula'] + d['label'])
+                for d in defs if d['id'] in _hit), \
+                '搜索结果不对：%r' % _hit
+            assert 'q=' in pg.url, '搜索词没进 URL（刷新就丢）'
+            pg.fill('#iq', 'zzz没有这个')
+            pg.wait_for_timeout(1800)
+            assert '没有匹配' in pg.locator('#pg').inner_text(), \
+                '搜不到时没有空态提示（一片空白看着像坏了）'
+            notes.append('搜索（名称/说明/公式）+ 空态')
+            pg.goto(base + '/indicators.html?tab=sub', wait_until='networkidle')
+            pg.wait_for_selector('.icard', timeout=40000)
+            pg.wait_for_timeout(800)
 
             # ---- ③ 「在个股页看」要真的选中那个指标 ----
             href = pg.locator('.icard[data-i="kdj"] a.ilink').get_attribute('href')

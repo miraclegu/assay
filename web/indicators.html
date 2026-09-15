@@ -27,7 +27,25 @@
      指标是看盘时用的东西，而这一页是低频的参考（同板块之于盘面）。 */
 let CODE = qs('code') || localStorage.getItem('skcode') || '601857.XSHG';
 let N = +(qs('n') || 120);
+/* 🔴 **主图指标与副图指标分成两个页签**（用户 2026-09-15）：它们是两回事
+   —— 主图那几条与 K 线共用价格坐标（叠上去），副图各自一套坐标。
+   摆在一个流里的话，"哪些能叠在 K 线上"这件事就得一张张卡去看。 */
+let TAB = qs('tab') === 'sub' ? 'sub' : 'main';
+/* 🔴 **分页 + 搜索**：现在 12 个指标一屏放得下，但这一页的开销不在列表 ——
+   在于**每张卡都要一张真图**。上百个指标时，"一次算完再画一百张画布"
+   必然把页面拖死。所以：
+     ① 只向服务端要**当前这一页**那几个指标（`inds=` 只带这一页的 id）
+     ② 每页固定 `PER` 张，翻页才算下一批
+     ③ 搜索先过滤再分页 —— 上百个的时候，找一个指标靠翻页是翻不到的
+   ★ `per` 放进 URL（而不是写死）：既能按屏幕大小调，
+     也让"分页真的在工作"可以被验证。 */
+let PAGE = Math.max(1, +(qs('page') || 1));
+let PER = Math.min(60, Math.max(1, +(qs('per') || 12)));
+let Q = qs('q') || '';
 let D = null, BARS = null, ROWS = null, PANELS = [];
+/* 上一次取 K 线用的 (code, n) —— 换页签/翻页/搜索时**不重取 K 线**，
+   它跟指标无关（同一段行情）。 */
+let BKEY = null;
 
 pageHead('stock', '📊 指标广场');
 load();
@@ -35,40 +53,72 @@ load();
 function nav() {
   const u = new URL(location.href);
   u.searchParams.set('code', CODE);
-  u.searchParams.set('n', N);
+  u.searchParams.set('tab', TAB);
+  if (PAGE > 1) u.searchParams.set('page', PAGE); else u.searchParams.delete('page');
+  if (Q) u.searchParams.set('q', Q); else u.searchParams.delete('q');
   history.replaceState(null, '', u);
+}
+
+/* 当前页签 + 搜索之后剩下哪些指标（分页之前）。
+   ★ 搜索匹配**名称 / 说明 / 公式**：上百个指标时，人记得住的往往是
+     "那个算离均线多远的"，而不是它叫 BIAS。 */
+function inTab() {
+  const q = Q.trim().toLowerCase();
+  return ((D || {}).inds || []).filter(d => d.panel === TAB).filter(d => {
+    if (!q) return true;
+    return [d.id, d.short, d.label, d.desc, d.formula]
+      .join(' ').toLowerCase().indexOf(q) >= 0;
+  });
+}
+function pages() { return Math.max(1, Math.ceil(inTab().length / PER)); }
+function pageItems() {
+  const all = inTab();
+  PAGE = Math.min(PAGE, Math.max(1, Math.ceil(all.length / PER)));
+  return all.slice((PAGE - 1) * PER, PAGE * PER);
 }
 
 async function load() {
   const pg = $('#pg');
-  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
   const one = u => j(u).catch(e => ({error: String(e)}));
-  D = await one('/api/indicators/defs');
-  if (D.error) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(D.error) + '</div>';
-    return;
+  if (!D) {
+    pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+    D = await one('/api/indicators/defs');
+    if (D.error) {
+      pg.innerHTML = '<div class="lvmsg bad">' + esc(D.error) + '</div>';
+      return;
+    }
   }
-  const ids = (D.inds || []).map(x => x.id).join(',');
-  /* ★ 一次把全部指标算出来（一个请求），不是一个指标一个请求 ——
-     11 个指标就是 11 次往返，而它们用的是同一段 K 线。 */
+  const items = pageItems();
+  const ids = items.map(x => x.id).join(',');
+  const bkey = CODE + '|' + N;
+  /* 🔴 **只要这一页那几个指标**。一次要全部的话，上百个指标就是一个
+     几兆的响应 + 一百次计算，而屏幕上同时也就看得见十来张卡。 */
   const [k, ind] = await Promise.all([
-    one('/api/stock/kline?fq=bfq&n=' + N + '&code=' + encodeURIComponent(CODE)),
-    one('/api/stock/indicators?fq=bfq&n=' + N + '&inds=' + ids
-        + '&code=' + encodeURIComponent(CODE)),
+    (BARS && BKEY === bkey) ? Promise.resolve(null)
+      : one('/api/stock/kline?fq=bfq&n=' + N + '&code=' + encodeURIComponent(CODE)),
+    ids ? one('/api/stock/indicators?fq=bfq&n=' + N + '&inds=' + ids
+              + '&code=' + encodeURIComponent(CODE))
+        : Promise.resolve({rows: [], panels: []}),
   ]);
-  BARS = k.error ? null : k.bars;
+  if (k) { BARS = k.error ? null : k.bars; BKEY = k.error ? null : bkey; }
   ROWS = ind.error ? null : ind.rows;
   PANELS = ind.error ? [] : (ind.panels || []);
-  pg.innerHTML = head(k, ind) + ipCards() + sigTable() + foot();
+  pg.innerHTML = head(k, ind) + ipCards(items) + sigTable() + foot();
   wire();
   draw();
 }
 
 function head(k, ind) {
-  const err = k.error || ind.error;
+  const err = (k && k.error) || ind.error;
+  const all = ((D || {}).inds || []);
+  const nMain = all.filter(x => x.panel === 'main').length;
+  const nSub = all.filter(x => x.panel === 'sub').length;
+  const T = [['main', '主图指标', nMain, '与 K 线共用价格坐标，直接叠在上面'],
+             ['sub', '副图指标', nSub, '各自一套坐标，画在主图下方']];
+  const n = inTab().length, np = pages();
   return '<div class="lvhead"><h2>📊 指标广场</h2>'
-    + '<span class="lvtags"><span class="lvtag">共 ' + (D.inds || []).length
-    + ' 个指标</span><span class="lvtag">' + (D.signals || []).length
+    + '<span class="lvtags"><span class="lvtag">' + all.length
+    + ' 个指标</span><span class="lvtag">' + ((D || {}).signals || []).length
     + ' 条买点条件</span></span>'
     + '<span style="flex:1"></span>'
     + '<label class="lvwhy">示例用哪只票'
@@ -77,21 +127,40 @@ function head(k, ind) {
     + '</div>'
     + (err ? '<div class="lvmsg bad">示例图取不到：' + esc(err)
              + '（指标定义仍然照常列出）</div>' : '')
+    + '<div id="tabs">' + T.map(([kk, t, c, why]) =>
+        '<div class="itab' + (TAB === kk ? ' on' : '') + '" data-t="' + kk
+        + '" title="' + esc(why) + '">' + t + ' <span class="lvwhy">'
+        + c + '</span></div>').join('') + '</div>'
+    + '<div class="lvform" style="margin:10px 0 8px;gap:8px">'
+    + '<label class="lvwhy">搜索<input id="iq" value="' + esc(Q)
+    + '" placeholder="名称 / 说明 / 公式" style="width:180px"></label>'
+    + '<span class="lvwhy">' + (T.find(x => x[0] === TAB) || [])[3] + '</span>'
+    + '<span style="flex:1"></span>'
+    + '<span class="lvwhy" id="ipinfo">共 ' + n + ' 个 · 第 ' + PAGE + '/'
+    + np + ' 页（每页 ' + PER + ' 个）</span>'
+    + '<a href="#" class="lvtag' + (PAGE <= 1 ? ' off' : '') + '" id="iprev">‹ 上一页</a>'
+    + '<a href="#" class="lvtag' + (PAGE >= np ? ' off' : '') + '" id="inext">下一页 ›</a>'
+    + '</div>'
     + '<div class="lvwhy" style="margin:2px 0 10px">'
     + '定义、参数、画哪几条线、预热多少根 —— <b>全在服务端一处</b>'
     + '（<code>assay/indicators.py</code>），这一页只是把它显示出来；'
     + '所以加一个指标，这里自动就有。'
-    + '<br>指标一律在<b>服务端</b>算并预热（少取预热会让头部的值悄悄错掉，'
-    + '而那不报错）。示例图用<b>不复权</b>近 ' + N + ' 根。</div>';
+    + '<br>🔴 <b>只取当前这一页的指标</b>：这一页的开销不在列表，而在'
+    + '<b>每张卡都要一张真图</b> —— 上百个指标时"一次全算完再画一百张画布"'
+    + '会把页面拖死。示例图用<b>不复权</b>近 ' + N + ' 根。</div>';
 }
 
-function ipCards() {
-  return '<div class="igrid">'
-    + (D.inds || []).map((d, i) => ipCard(d, i)).join('') + '</div>';
+function ipCards(items) {
+  if (!items.length) {
+    return '<div class="none">' + (Q ? '没有匹配「' + esc(Q) + '」的指标'
+      : '这一组还没有指标') + '</div>';
+  }
+  return '<div class="igrid">' + items.map((d, i) => ipCard(d, i)).join('')
+    + '</div>';
 }
 
 function ipCard(d, i) {
-  const sigs = (D.signals || []).filter(s => s.ind === d.id);
+  const sigs = ((D || {}).signals || []).filter(s => s.ind === d.id);
   const pan = d.panel === 'main' ? '叠在主图' : '独立副图';
   return '<div class="icard" data-i="' + d.id + '">'
     + '<h4><span style="font-size:15px">' + esc(d.short) + '</span>'
@@ -104,17 +173,19 @@ function ipCard(d, i) {
        ☞ 这**不是**"点股票代码跳走"的那种链接（那种一律走 spLink 开浮层），
          它是"带着这个指标去个股页看"的功能入口，跳走正是它要做的事。 */
     + '<a class="lvtag ilink" href="' + stockHref(CODE)
-    + (d.panel === 'main' ? (d.id === 'boll' ? '&boll=1' : '')
+    + (d.panel === 'main' ? (d.id === 'boll' ? '&main=ma,boll' : '')
                           : '&sub=' + encodeURIComponent(d.id))
     + '" data-i="' + d.id + '">在个股页看 ›</a></h4>'
     + '<div class="lvwhy">' + esc(d.desc) + '</div>'
     + '<div class="ifml">' + esc(d.formula || '（略）') + '</div>'
-    + '<div class="ipar">参数：' + (d.params || []).map(p =>
-        esc(p.label) + ' <b>' + p.default + '</b>'
-        + '<span class="lvwhy">(' + p.min + '~' + p.max + ')</span>').join('　')
+    + '<div class="ipar">参数：' + ((d.params || []).length
+        ? (d.params).map(a => esc(a.label) + ' <b>' + a.default + '</b>'
+            + '<span class="lvwhy">(' + a.min + '~' + a.max + ')</span>').join('　')
+        : '<span class="lvwhy">没有可配的参数</span>')
       + '　│　画：' + (d.series || []).filter(x => x.style !== 'zero').map(x =>
         '<span class="idot" style="background:' + esc(x.color) + '"></span>'
-        + esc(x.label) + (x.style === 'bar' ? '<span class="lvwhy">柱</span>' : ''))
+        + esc(x.label) + (x.style === 'bar' || x.style === 'vbar'
+                          ? '<span class="lvwhy">柱</span>' : ''))
         .join('　') + '</div>'
     + '<div class="cvbox" style="margin-top:6px">'
     + '<canvas class="icv" data-i="' + d.id
@@ -168,7 +239,8 @@ function foot() {
 }
 
 /* 每张卡画一张小图。**复用 drawKChart** —— 另写一个"迷你画法"的话，
-   广场上看到的形状会和个股页上的慢慢不一样，而那不报错。 */
+   广场上看到的形状会和个股页上的慢慢不一样，而那不报错。
+   ★ 只画**当前页**那几张：卡片本来就只渲染了这一页。 */
 function draw() {
   if (!BARS || !ROWS) return;
   const by = {};
@@ -200,12 +272,37 @@ function wire() {
   const go = () => {
     const v = ($('#icode').value || '').trim();
     if (!v) return;
-    CODE = v; nav(); load();
+    CODE = v; BKEY = null; nav(); load();
   };
   if ($('#igo')) $('#igo').onclick = ev => { ev.preventDefault(); go(); };
   if ($('#icode')) $('#icode').onkeydown = ev => {
     if (ev.key === 'Enter') go();
   };
+  /* 页签：换一组**从第 1 页开始** —— 停在第 3 页而新的一组只有 1 页的话，
+     屏幕上就是一片空白（而它不报错）。 */
+  $$('#tabs .itab').forEach(e => e.onclick = () => {
+    if (TAB === e.dataset.t) return;
+    TAB = e.dataset.t; PAGE = 1; nav(); load();
+  });
+  const pgo = d => {
+    const np = pages(), want = Math.min(np, Math.max(1, PAGE + d));
+    if (want === PAGE) return;
+    PAGE = want; nav(); load();
+  };
+  if ($('#iprev')) $('#iprev').onclick = ev => { ev.preventDefault(); pgo(-1); };
+  if ($('#inext')) $('#inext').onclick = ev => { ev.preventDefault(); pgo(1); };
+  const q = $('#iq');
+  if (q) {
+    /* ★ 搜索**防抖**：每敲一个字就重取一次指标数据的话，
+       上百个指标时每次都是一轮请求。 */
+    let t = null;
+    q.oninput = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        Q = q.value; PAGE = 1; nav(); load();
+      }, 260);
+    };
+  }
 }
 window.addEventListener('resize', () => { if (BARS) draw(); });
 </script>
