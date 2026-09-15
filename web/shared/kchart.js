@@ -267,10 +267,21 @@ function drawKChart(cv, opts) {
         });
         g.stroke();
       });
+      /* 副图图例：名称 + **那一天的值**，跟着光标变。
+         🔴 用户 2026-09-15："MACD的信息应该放在MACD的左上角，数字跟随变化"
+           —— 原来这里只有名字没有值，于是 DIF/DEA/MACD 得去读数浮窗里找，
+           而那三个数**只在副图上有意义**（主图的 MA 图例早就带值了，
+           所以浮窗里再列一遍是重复）。
+         ★ 光标没停在哪天就显示**最后一根**（同主图图例那条）。 */
       g.textAlign = 'left'; let lx = PADL + 2;
+      const sr = rows[(opts.hover != null && rows[opts.hover]) ? opts.hover
+                      : rows.length - 1] || {};
       keys.forEach(k => {
         g.fillStyle = k === 'macd' ? DIM : (SC[k] || DIM);
-        const t = k.toUpperCase(); g.fillText(t, lx, subTop + 10);
+        const v = sr[k];
+        const t = k.toUpperCase() + ' '
+          + (v == null ? '—' : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)));
+        g.fillText(t, lx, subTop + 10);
         lx += g.measureText(t).width + 9;
       });
     }

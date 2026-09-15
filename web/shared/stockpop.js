@@ -30,6 +30,43 @@
    ★ 这里一度按来源分支（回测用 hfq）—— 那是**将就归档的存储口径**。
      把数据源本身修正之后，分支就该消失：**规则只有一条**。
    ★ 要看后复权曲线去完整个股页（浮层右上角有出口）。 */
+/* 某一天的成交明细（HTML 片段）。**hover 到那一根 K 线就出**，
+   不必精确指到那个 7.5px 的圆点上 —— 用户 2026-09-15：
+   "鼠标移到K线图上时，在买入、卖出那一根时看不到买入、卖出的价格数量。
+    需要一个独立的浮窗展示出来，如果有多笔交易就展示多笔"。
+
+   🔴 **多笔全列，不合并成一行。** 同日同向可能有好几笔（最低佣金按成交笔收，
+     分笔录入就是对的：002910 实测同日 3100 股 + 600 股 各收 5.00），
+     合成"均价 × 总股数"会把这件事抹掉，而那正是对账时要看的。
+   ★ 返回空串表示那天没有成交 —— 调用方据此决定加不加这一段。 */
+function tradesOfDay(trades, date) {
+  const hit = (trades || []).filter(t => t.date === date);
+  if (!hit.length) return '';
+  const one = t => {
+    const buy = t.side === 'buy';
+    return `<div class="sptr">`
+      + `<b class="${buy ? 'up' : 'dn'}">${buy ? '买' : '卖'}</b> `
+      + `${num(t.shares, 0)} 股 @ <b>${num(t.price, 3)}</b>`
+      + `<span class="spdim"> = ${num((+t.shares || 0) * (+t.price || 0), 0)}`
+      + (t.fee == null ? '' : ' · 费 ' + num(t.fee, 2))
+      + (t.account_name || t.account
+         ? ' · ' + esc(t.account_name || t.account) : '')
+      + `</span></div>`;
+  };
+  /* 多笔时先给一行合计 —— 逐笔在下面，两个都要（合计回答"这天动了多少"，
+     逐笔回答"分几次动的"）。 */
+  let head = '';
+  if (hit.length > 1) {
+    const sum = side => hit.filter(t => t.side === side)
+      .reduce((a, t) => a + (+t.shares || 0), 0);
+    const b = sum('buy'), sl = sum('sell');
+    head = `<div class="spdim">${hit.length} 笔`
+      + (b ? ` · 买 ${num(b, 0)} 股` : '')
+      + (sl ? ` · 卖 ${num(sl, 0)} 股` : '') + '</div>';
+  }
+  return `<div class="sptrs">${head}${hit.map(one).join('')}</div>`;
+}
+
 const spFq = () => 'bfq';
 const SP_NS = [60, 120, 250];
 let SP = null;            /* {code, n, bars, trades, prof, geo} */
@@ -329,7 +366,11 @@ function spBindHover(cv){
       <br>昨收 ${num(b.preclose, 2)}
       <br>量 ${num((b.volume || 0) / 1e4, 1)} 万股${
         b.turnover == null ? '' : ' · 换手 ' + pctn(b.turnover, 2)}
-      <br>额 ${num((b.amount || 0) / 1e8, 2)} 亿`;
+      <br>额 ${num((b.amount || 0) / 1e8, 2)} 亿`
+      /* 🔴 **那天的成交接在这里** —— 原来只有精确悬停到那个 7.5px 的
+         B/S 圆点上才看得到，而人是往**那根 K 线**上移的（用户报的就是这个）。
+         圆点那条路径保留：它给的是"这一笔"，这里给的是"这一天的全部"。 */
+      + tradesOfDay(SP.trades, b.date);
     _tipAt(tip, e.clientX, e.clientY);
     if(i !== SP.hover){ SP.hover = i; spDraw(i); }
   };

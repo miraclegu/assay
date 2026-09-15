@@ -33,8 +33,15 @@ let BARS = null, IND = null, EVS = null, HOVER = null, SHOWEV = true;
    按日期翻要前端自己算交易日，而前端没有交易日历（本项目为此栽过：
    硬编码判据误报了一整页假告警）。服务端一句 OFFSET 就够。 */
 let KOFF = 0, KTOTAL = 0;
+/* 我在这只票上的成交（跨账户）。**画成 B/S 标记 + hover 时列出那天的明细** ——
+   与实盘浮层同一个接口、同一种画法（`drawKChart` 的 `trades`）。 */
+let TRADES = [];
 /* 框选出来的区间（**索引**，不是像素）：重画之后要落在同样那几天上。 */
 let KSEL = null;
+/* 画布几何（`drawKChart` 的返回）。**模块级** —— `renderSel()` 在
+   `wire()` 外面，用它那个局部 `geo` 会 ReferenceError（只在控制台里报，
+   页面看着正常，靠 pageerror 才抓到）。 */
+let KGEO = null;
 const RANGES = [[60,'3月'],[120,'半年'],[250,'1年'],[500,'2年'],[1200,'5年']];
 const SUBS = [['macd','MACD'],['kdj','KDJ'],['rsi','RSI'],['','无副图']];
 
@@ -63,7 +70,7 @@ async function load() {
   const b = $('#body');
   b.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
   const one = u => j(u).catch(e => ({error: String(e)}));
-  const [p, k, ind, f, ev, pe, sc, lk] = await Promise.all([
+  const [p, k, ind, f, ev, pe, sc, lk, tr] = await Promise.all([
     one('/api/stock/profile?code=' + encodeURIComponent(CODE)),
     one(`/api/stock/kline?n=${N}&fq=${FQ}&off=${KOFF}&code=` + encodeURIComponent(CODE)),
     /* 🔴 副图也要带 `off` —— 不带的话翻页之后 MACD/KDJ 画的还是最新那一段，
@@ -75,10 +82,14 @@ async function load() {
     one('/api/stock/peers?n=12&code=' + encodeURIComponent(CODE)),
     one('/api/stock/sectors?code=' + encodeURIComponent(CODE)),
     one('/api/stock/links?code=' + encodeURIComponent(CODE)),
+    /* ★ 取不到（没开实盘 / 没这只票）就是空数组，不该让整页打不开 */
+    one('/api/live/trades_of?code=' + encodeURIComponent(CODE))
+      .catch(() => ({trades: []})),
   ]);
   if (p.error) { b.innerHTML = '<div class="lvmsg bad">' + esc(p.error) + '</div>'; return; }
   CODE = p.jq_code; localStorage.setItem('skcode', CODE);
   BARS = k.error ? null : k.bars;
+  TRADES = ((tr || {}).trades) || [];
   /* 翻页用：总根数（还能不能往左翻）+ 服务端实际落到的 off（钳过的） */
   if (!k.error) { KTOTAL = k.total || 0; KOFF = k.off || 0; }
   IND = (ind && !ind.error) ? ind.rows : null;
@@ -178,9 +189,14 @@ function chartBox(k, ind) {
     <div class="cvbox" id="cbox">
       <canvas id="kcv" style="width:100%;height:${SUB ? 500 : 420}px;display:block;cursor:crosshair"></canvas>
       <div class="cvtip" id="ktip"></div>
+      <div class="selpop" id="kselpop"></div>
     </div>
-    <!-- 框选读数。★ 常驻一行提示（没选时说怎么用）而不是选了才出现：
-         **看不出能用的功能 = 没有这个功能**（同"看不出能点的入口"那条）。 -->
+    <!-- ★ 常驻一行提示（没选时说怎么用）而不是选了才出现：
+         **看不出能用的功能 = 没有这个功能**（同"看不出能点的入口"那条）。
+         🔴 但**读数不在这儿**（2026-09-15 用户："框选一段范围，展示范围内
+           涨跌幅等等信息太不明显，最好是在框选范围外展示一个浮窗"）——
+           这行字在图**下面**，而眼睛还停在刚框完的那一段上，要往下扫一眼
+           才看得到。读数改成贴着选区的浮窗（id=kselpop），就在视线里。 -->
     <div id="ksel" class="lvwhy" style="margin-top:6px">
       在图上<b>按住拖动</b>可框选一段，自动算区间涨跌幅 / 最高 / 最低 / 振幅。</div>
     <div class="lvwhy" style="margin-top:4px">
@@ -424,31 +440,56 @@ function wire() {
     if (i == null) { tip.style.display = 'none'; return; }
     const b = BARS[i], q = IND ? IND[i] : null;
     tip.style.display = 'block';
+    /* 🔴 **不重复图上已有的东西**（用户 2026-09-15）：
+         · MA 四条：主图左上角的图例本来就带**那一天的值**，跟着光标变
+         · DIF/DEA/MACD（及 KDJ/RSI）：改到**副图自己的左上角**，
+           那三个数只在副图上有意义，浮窗里再列一遍是同一份信息两处看
+       浮窗只留**那根 K 线自己的事实**：OHLC / 涨跌 / 换手 / 量额 /
+       事件 / 那天的成交。 */
     const ln = [
       b.date + (b.limit_up ? '  涨停' : '') + (b.limit_down ? '  跌停' : ''),
       '开 ' + b.open + '   高 ' + b.high,
       '低 ' + b.low + '   收 ' + b.close,
       '涨跌 ' + pctv(b.change_pct) + '   换手 ' + pctn(b.turnover),
       '量 ' + yiv(b.volume) + '股  额 ' + yiv(b.amount),
-      'MA5 ' + (b.ma5 ?? '—') + '  MA10 ' + (b.ma10 ?? '—'),
-      'MA20 ' + (b.ma20 ?? '—') + '  MA60 ' + (b.ma60 ?? '—'),
     ];
-    if (q && SUB === 'macd') ln.push('DIF ' + (q.dif ?? '—') + '  DEA ' + (q.dea ?? '—') + '  MACD ' + (q.macd ?? '—'));
-    if (q && SUB === 'kdj') ln.push('K ' + (q.k ?? '—') + '  D ' + (q.d ?? '—') + '  J ' + (q.jj ?? '—'));
-    if (q && SUB === 'rsi') ln.push('RSI6 ' + (q.rsi6 ?? '—') + '  12 ' + (q.rsi12 ?? '—') + '  24 ' + (q.rsi24 ?? '—'));
+    /* ★ BOLL 留着：它叠在**主图**上，而主图图例只列 MA 不列上下轨。 */
     if (BOLL && q && q.mb != null)
       ln.push('BOLL ' + q.lb + ' ~ ' + q.ub + '（中轨 ' + q.mb + ' = MA20）');
     const hitEv = (EVS || []).filter(x => x.date === b.date);
     hitEv.forEach(x => ln.push('◆ ' + x.label + ' ' + (x.detail || '').slice(0, 30)));
+    /* 🔴 **那天的成交**（用户 2026-09-15："移到买入、卖出那一根时看不到
+         买入、卖出的价格数量，需要一个独立的浮窗，多笔就展示多笔"）。
+       ★ `.cvtip` 是 `white-space:pre` 的**纯文本**浮窗，所以这里拼文本
+         而不是 HTML —— 用 `tradesOfDay` 那个 HTML 版会把标签原样印出来
+         （两个浮窗的实现不同，不能照搬）。 */
+    (TRADES || []).filter(t => t.date === b.date).forEach((t, k, arr) => {
+      if (!k) ln.push('── 我的成交 ' + (arr.length > 1 ? arr.length + ' 笔' : ''));
+      ln.push('  ' + (t.side === 'buy' ? '买' : '卖') + ' ' + num(t.shares, 0)
+        + ' 股 @ ' + num(t.price, 3)
+        + '  = ' + num((+t.shares || 0) * (+t.price || 0), 0)
+        + (t.fee == null ? '' : '  费 ' + num(t.fee, 2))
+        + (t.account_name ? '  ' + t.account_name : ''));
+    });
     tip.textContent = ln.join('\n');
     posTip(ev);
   };
   const posTip = ev => {
+    /* 🔴 **按实测尺寸翻转，不要写死 210/170。** 原来那两个数是浮窗当时的
+       大致宽高 —— 内容一变（比如加了"我的成交"几行）就不够，
+       浮窗右半边被切在容器外面，而**那不报错**，只是读数看不全
+       （实测："费 5.8" 被截断）。
+       ★ 必须**先量再算**：`offsetWidth` 在 `textContent` 赋值之前是**旧值**，
+         用它算翻转会翻错边（`_tipAt` 那次就是这么错的）。调用方已经先填
+         内容再调这里，所以这里量到的是新尺寸。 */
     const box = $('#cbox').getBoundingClientRect();
+    const tw = tip.offsetWidth || 210, th = tip.offsetHeight || 170;
     let x = ev.clientX - box.left + 12, y = ev.clientY - box.top + 12;
-    if (x + 210 > box.width) x = ev.clientX - box.left - 210;
-    tip.style.left = x + 'px';
-    tip.style.top = Math.min(y, box.height - 170) + 'px';
+    if (x + tw > box.width) x = ev.clientX - box.left - tw - 12;
+    if (y + th > box.height) y = ev.clientY - box.top - th - 12;
+    /* 极窄时宁可压着光标也要可见（同 `_tipAt` 的钳制那条） */
+    tip.style.left = Math.max(0, Math.min(x, box.width - tw)) + 'px';
+    tip.style.top = Math.max(0, Math.min(y, box.height - th)) + 'px';
   };
   /* ---- 框选测算 ----
      🔴 **与十字光标共存**：按下不动只是"准备选"，拖过 4px 才算框选，
@@ -496,17 +537,13 @@ function wire() {
    ★ 振幅 = (区间最高 − 区间最低) / 基点，与"单日振幅"同一个形状，
      这样两个数可以直接比。 */
 function renderSel() {
-  const el = $('#ksel');
+  const el = $('#kselpop');
   if (!el) return;
-  if (!KSEL || !BARS) {
-    el.innerHTML = '在图上<b>按住拖动</b>可框选一段，'
-      + '自动算区间涨跌幅 / 最高 / 最低 / 振幅。';
-    return;
-  }
+  if (!KSEL || !BARS) { el.style.display = 'none'; return; }
   const a = Math.max(0, Math.min(KSEL.i0, KSEL.i1));
   const b = Math.min(BARS.length - 1, Math.max(KSEL.i0, KSEL.i1));
   const seg = BARS.slice(a, b + 1);
-  if (!seg.length) { el.textContent = '选区里没有数据'; return; }
+  if (!seg.length) { el.style.display = 'none'; return; }
   let base = seg[0].preclose, how = '首根前收';
   if (base == null && a > 0) { base = BARS[a - 1].close; how = '上一根收盘'; }
   if (base == null) { base = seg[0].open; how = '首根开盘（前收取不到）'; }
@@ -518,14 +555,45 @@ function renderSel() {
   const vol = seg.reduce((s, x) => s + (x.volume || 0), 0);
   const amt = seg.reduce((s, x) => s + (x.amount || 0), 0);
   const up = seg.filter(x => x.change_pct > 0).length;
-  el.innerHTML = `<b>${esc(seg[0].date)} ~ ${esc(seg[seg.length-1].date)}</b>`
-    + `　${seg.length} 个交易日（${up} 涨 / ${seg.length - up} 跌平）`
-    + `　区间涨跌 <b style="color:${upc(ret)}">${ret == null ? '—' : ratv(ret)}</b>`
-    + `　最高 <b>${isFinite(hi) ? hi : '—'}</b>　最低 <b>${isFinite(lo) ? lo : '—'}</b>`
-    + `　振幅 <b>${amp == null ? '—' : (amp * 100).toFixed(2) + '%'}</b>`
-    + `　量 ${yiv(vol)} 股　额 ${yiv(amt)}`
-    + `<span class="lvwhy">　基点 ${esc(how)} ${base == null ? '—' : base}`
-    + `　· 点一下图上任意处取消选区</span>`;
+  /* 竖排而不是一长行：浮窗要窄才贴得住选区旁边，而横排到 800px
+     又会盖住半张图。★ 区间涨跌放最上面并加大 —— 框选就是为了看它。 */
+  el.innerHTML = `<div class="sphi" style="color:${upc(ret)}">${
+      ret == null ? '—' : ratv(ret)}</div>`
+    + `<div><b>${esc(seg[0].date)}</b> ~ <b>${esc(seg[seg.length-1].date)}</b></div>`
+    + `<div>${seg.length} 个交易日 · ${up} 涨 / ${seg.length - up} 跌平</div>`
+    + `<div>最高 <b>${isFinite(hi) ? hi : '—'}</b>`
+    + `　最低 <b>${isFinite(lo) ? lo : '—'}</b></div>`
+    + `<div>振幅 <b>${amp == null ? '—' : (amp * 100).toFixed(2) + '%'}</b>`
+    + `　量 ${yiv(vol)} 股</div>`
+    + `<div>额 ${yiv(amt)}</div>`
+    + `<div class="lvwhy">基点 ${esc(how)} ${base == null ? '—' : base}<br>`
+    + `点一下图上任意处取消</div>`;
+  el.style.display = 'block';
+  /* ---- 贴在**选区外侧** ----
+     🔴 不能盖住选区本身 —— 那正是人刚框出来、正在看的东西。
+       所以：选区在左半边就贴右侧，在右半边就贴左侧；竖直居中于图。
+     ★ 先填内容再量尺寸（offsetWidth 在赋值前是旧值 —— _tipAt 那次
+       就是这么翻错边的）。
+     ⚠️ 这段注释在模板字符串外面，但上面那条 HTML 注释在**模板里** ——
+       那里不许出现反引号（写过一次，当场把模板闭合掉，整个文件
+       SyntaxError；同 CLAUDE.md 里 chart.js 那条）。 */
+  /* 🔴 `geo` 是 `wire()` 里的**局部变量**，这个函数在它外面 ——
+       直接引用会 `ReferenceError: geo is not defined`，而那**只在控制台里报**，
+       浮窗照样弹出、只是位置没算（实测就是这么发现的：功能"看着好了"，
+       是 pageerror 抓出来的）。
+     ★ 用 `KGEO`（模块级，`redraw()` 每次更新）—— 同 `LVSORT` 必须模块级那条。 */
+  const box = $('#cbox').getBoundingClientRect();
+  /* 🔴 `KGEO.X(i)` 返回的**已经是 CSS 像素** —— `cvPrep` 是按 canvas 的
+     实际宽度绘制的，不是固定 viewBox。我一度又乘了一次 `width/1160`，
+     算出来的 x 跑到画布外面（实测 1522 > 视口 1440），只是被下面的钳制
+     兜住了才"看着正常" —— 那种错最难查：**功能看着是好的**。
+     ★ 判据：拿 `KGEO.X(最后一根)` 与画布 CSS 宽度比一比就知道该不该换算。 */
+  const x0 = KGEO ? KGEO.X(a) : 0, x1 = KGEO ? KGEO.X(b) : 0;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let x = (x0 + x1) / 2 < box.width / 2 ? x1 + 14 : x0 - w - 14;
+  x = Math.max(4, Math.min(x, box.width - w - 4));
+  el.style.left = x + 'px';
+  el.style.top = Math.max(4, Math.min(28, box.height - h - 4)) + 'px';
 }
 
 function redraw() {
@@ -536,7 +604,10 @@ function redraw() {
        带上就是同一条线画两遍（kchart 那边也不画中轨，两处都堵住）。 */
   const bars = (BOLL && IND) ? BARS.map((b, i) => IND[i]
     ? Object.assign({}, b, {ub: IND[i].ub, lb: IND[i].lb}) : b) : BARS;
-  return drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
-    sub: SUB ? IND : null, subKind: SUB, hover: HOVER, sel: KSEL});
+  return (KGEO = drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
+    sub: SUB ? IND : null, subKind: SUB, hover: HOVER, sel: KSEL,
+    /* 🔴 **不复权时才画买卖点**：成交价是不复权实际价，切到后复权之后
+       标记会整体飘走（同浮层 `spFq` 那条纪律，只是这一页可以切）。 */
+    trades: FQ === 'bfq' ? TRADES : []}));
 }
 </script>

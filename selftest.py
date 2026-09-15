@@ -6238,6 +6238,230 @@ _BANDJS = r"""() => {
 }"""
 
 
+@case('K 线读数：那天的成交 / 框选浮窗贴在选区外 / 副图读数在副图上（playwright）',
+       tag='web')
+def t_kchart_readouts():
+    """2026-09-15 用户三条，都是"信息该出现在该出现的地方"：
+
+      ① "鼠标移到K线图上时，在买入、卖出那一根时看不到买入、卖出的价格数量。
+         需要一个独立的浮窗展示出来，如果有多笔交易就展示多笔"
+      ② "框选一段范围，展示范围内涨跌幅等等信息太不明显，
+         最好是在框选范围外展示一个浮窗"
+      ③ "正常的K线浮窗里不要展示MA信息、MACD信息，MA信息是已经有了，
+         MACD的信息应该放在MACD的左上角，数字跟随变化"
+
+    🔴 ③ 的实质是**同一份信息不要两处看**：MA 四条主图图例本来就带当天值、
+      DIF/DEA/MACD 只在副图上有意义 —— 浮窗里再列一遍，就是让眼睛在
+      两个地方之间来回找（同「汇总数字只在 KPI 板出现一次」那条）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        # 挑一只**有成交**的票（没有的话 ① 验不到）
+        from assay import live as lv
+        code = None
+        for a in lv.load_accounts():
+            if a.get('archived'):
+                continue
+            for f in lv.fills(a['id']):
+                code = f['code']
+                break
+            if code:
+                break
+        if not code:
+            return '跳过（没有任何成交）'
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/stock.html?code=%s&sub=macd'
+                    % (port, code), wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=90000)
+            pg.wait_for_timeout(2500)
+
+            n_tr = pg.evaluate('() => (TRADES || []).length')
+            assert n_tr > 0, '这只票取不到成交（%s）—— ① 验不到' % code
+
+            # ---- ① hover 到成交那根：读数里要有买卖明细 ----
+            geo = pg.evaluate("""(dt) => {
+                const i = BARS.findIndex(b => b.date === dt);
+                if (i < 0) return null;
+                const cv = document.getElementById('kcv');
+                const g = drawKChart(cv, {bars: BARS, trades: TRADES});
+                const r = cv.getBoundingClientRect();
+                /* ★ `X()` 返回的**已经是 CSS 像素**（canvas 按实际宽度
+                   绘制，不是固定 viewBox）—— 再乘一次比例会把坐标算到
+                   画布外面（实测 1522 > 视口 1440，鼠标根本没落在页面上）。 */
+                return {i: i, x: r.left + g.X(i),
+                        y: r.top + r.height * 0.25,
+                        hits: (g.trHits || []).length};}""",
+                pg.evaluate('() => TRADES[0].date'))
+            assert geo, '成交那天不在当前窗口里（换区间）'
+            # 🔴 B/S 标记也要画出来 —— 读数有了但图上没标记，人不知道去哪 hover
+            # 🔴 判据要用**页面自己渲染**的那次（`KGEO` 是 `redraw()` 存下的），
+            #   不是我在断言里重画一次的结果 —— 后者传的是**我给的**参数，
+            #   页面传什么都不影响它（变异"不画 B/S 标记"因此漏过一轮）。
+            n_hit = pg.evaluate('() => (KGEO && KGEO.trHits || []).length')
+            assert n_hit > 0, \
+                ('图上没画 B/S 标记（页面渲染的 KGEO.trHits 是空的）—— '
+                 '读数再全，人也不知道该往哪一根上移')
+            pg.mouse.move(geo['x'], geo['y'])
+            pg.wait_for_timeout(700)
+            tip = pg.inner_text('#ktip')
+            assert '我的成交' in tip, \
+                ('hover 到成交那根，读数里没有成交明细：%r —— 原来要精确指到'
+                 '那个 7.5px 的圆点上才看得到，而人是往**那根 K 线**上移的'
+                 % tip[:120])
+            import re as _re
+            assert _re.search(r'[买卖]\s+[\d,]+\s*股\s*@', tip), \
+                '成交明细里没有"买/卖 N 股 @ 价"：%r' % tip[:160]
+            notes.append('hover 那根 K 线就出成交明细（%d 笔）' % n_tr)
+
+            # ---- ③ 读数里不许再有 MA / MACD ----
+            for bad in ('MA5', 'MA10', 'MA20', 'MA60', 'DIF', 'DEA', 'MACD'):
+                assert bad not in tip, \
+                    ('读数里还有「%s」—— MA 在主图图例里、DIF/DEA/MACD 在副图'
+                     '左上角，浮窗里再列一遍就是同一份信息两处看：%r'
+                     % (bad, tip[:160]))
+            # 🔴 但它们**不能就此消失**：主图图例要有 MA+值，副图要有 DIF+值。
+            #   只删不补的话这条断言"通过"了，而信息被弄丢了。
+            px = pg.evaluate("""() => {
+                const cv = document.getElementById('kcv');
+                const g = cv.getContext('2d');
+                const W = cv.width, H = cv.height;
+                const dpr = W / cv.getBoundingClientRect().width;
+                // 主图图例带（上方 ~14px 处）、副图图例带（副图顶 +10px）
+                const strip = (y0, h) => {
+                  const d = g.getImageData(0, Math.round(y0 * dpr),
+                                           Math.round(260 * dpr),
+                                           Math.round(h * dpr)).data;
+                  let n = 0;
+                  for (let i = 3; i < d.length; i += 4) if (d[i] > 40) n++;
+                  return n;
+                };
+                const hpx = cv.getBoundingClientRect().height;
+                return {main: strip(4, 16), sub: strip(hpx * 0.72, 16)};}""")
+            assert px['main'] > 200, \
+                '主图左上角没有图例（MA 的值也跟着没了）：%d 像素' % px['main']
+            assert px['sub'] > 100, \
+                ('副图左上角没有图例 —— DIF/DEA/MACD 从浮窗里拿掉了，'
+                 '就必须出现在副图上（用户原话："放在MACD的左上角"）：'
+                 '%d 像素' % px['sub'])
+            # 🔴 **光有图例带不够，要有【值】，而且要"跟随变化"。**
+            #   ★ 判据不能靠数像素：那条带子里混着 MACD 柱子与曲线，
+            #     图例那几个字完全被淹没 —— 实测"只有名字"与"带值"两态
+            #     扫出来都是 1268，像素这条路走不通（我试了两个版本才放弃）。
+            #   ★ 改成**拦截绘制调用**：把 `fillText` 包一层，记下副图图例
+            #     那一行画了什么。这直接验的是"画上去的文字"，
+            #     比任何像素阈值都准，也不依赖布局。
+            drew = pg.evaluate("""() => {
+                const cv = document.getElementById('kcv');
+                const g = cv.getContext('2d');
+                const orig = g.fillText.bind(g);
+                const seen = [];
+                g.fillText = function (t, x, y) { seen.push([String(t), x, y]);
+                                                  return orig(t, x, y); };
+                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB,
+                                      hover: null}); }
+                finally { g.fillText = orig; }
+                /* 副图图例：DIF/DEA/MACD 那三个（不分大小写前缀匹配） */
+                const keys = ['DIF', 'DEA', 'MACD'];
+                return seen.map(x => x[0])
+                  .filter(t => keys.some(k => t.toUpperCase().startsWith(k)));}""")
+            assert drew, '副图上根本没画 DIF/DEA/MACD 图例'
+            import re as _re2
+            withval = [t for t in drew if _re2.search(r'[-\d]', t)]
+            assert len(withval) >= 2, \
+                ('副图图例画的是 %r —— 只有名字没有值。用户要的是'
+                 '"MACD的信息应该放在MACD的左上角，**数字跟随变化**"，'
+                 '而把它从浮窗里拿掉之后就必须在这儿看得到' % drew)
+            # 🔴 **"跟随变化"**：hover 到另一天，值必须跟着变。
+            #   只验"有数字"的话，写死一个常数也全绿。
+            drew2 = pg.evaluate("""(hv) => {
+                const cv = document.getElementById('kcv');
+                const g = cv.getContext('2d');
+                const orig = g.fillText.bind(g);
+                const seen = [];
+                g.fillText = function (t, x, y) { seen.push(String(t));
+                                                  return orig(t, x, y); };
+                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB,
+                                      hover: hv}); }
+                finally { g.fillText = orig; }
+                return seen.filter(t => t.toUpperCase().startsWith('DIF'));}""",
+                5)
+            dif0 = next(t for t in drew if t.upper().startswith('DIF'))
+            assert drew2 and drew2[0] != dif0, \
+                ('hover 到第 5 根时 DIF 图例还是 %r —— 值没有跟着光标变'
+                 '（用户原话："数字跟随变化"）' % drew2)
+            notes.append('副图图例带值且跟随光标（%s -> %s）' % (dif0, drew2[0]))
+            notes.append('读数不再重复 MA/MACD，两处图例都在')
+
+            # ---- ② 框选浮窗：贴在选区【外侧】，不盖住它 ----
+            box = pg.query_selector('#kcv').bounding_box()
+            y = box['y'] + box['height'] * 0.3
+            for lab, (fa, fb) in (('选左半', (0.15, 0.40)),
+                                  ('选右半', (0.60, 0.85))):
+                pg.mouse.move(box['x'] + box['width'] * fa, y)
+                pg.mouse.down()
+                pg.mouse.move(box['x'] + box['width'] * (fa + 0.05), y)
+                pg.mouse.move(box['x'] + box['width'] * fb, y, steps=8)
+                pg.mouse.up()
+                pg.wait_for_timeout(700)
+                d = pg.evaluate("""() => {
+                    const e = document.getElementById('kselpop');
+                    if (!e || getComputedStyle(e).display === 'none') return null;
+                    const c = document.getElementById('cbox').getBoundingClientRect();
+                    const r = e.getBoundingClientRect();
+                    const cv = document.getElementById('kcv');
+                    const g = drawKChart(cv, {bars: BARS, sel: KSEL});
+                    const a = Math.min(KSEL.i0, KSEL.i1);
+                    const b = Math.max(KSEL.i0, KSEL.i1);
+                    return {l: r.left - c.left, r: r.right - c.left,
+                            selL: g.X(a), selR: g.X(b),
+                            inside: r.right <= c.right + 1 && r.left >= c.left - 1,
+                            txt: e.innerText};}""")
+                assert d, '%s：框选之后没有浮窗（#kselpop）' % lab
+                assert d['inside'], '%s：浮窗跑到容器外面了' % lab
+                # 🔴 **不许盖住选区** —— 那正是人刚框出来、正在看的东西
+                overlap = not (d['r'] <= d['selL'] or d['l'] >= d['selR'])
+                assert not overlap, \
+                    ('%s：浮窗[%.0f,%.0f] 盖住了选区[%.0f,%.0f] —— '
+                     '用户要的是"在框选范围**外**展示"'
+                     % (lab, d['l'], d['r'], d['selL'], d['selR']))
+                for want in ('最高', '最低', '振幅', '交易日'):
+                    assert want in d['txt'], \
+                        '%s：浮窗里缺「%s」：%r' % (lab, want, d['txt'][:100])
+                assert _re.search(r'[+-]\d+\.\d+%', d['txt']), \
+                    '%s：浮窗里没有区间涨跌幅：%r' % (lab, d['txt'][:100])
+            notes.append('框选浮窗贴在选区外侧（左右两侧都验）')
+            # 点一下取消
+            pg.mouse.move(box['x'] + box['width'] * 0.5, y)
+            pg.mouse.down()
+            pg.mouse.up()
+            pg.wait_for_timeout(500)
+            assert pg.evaluate("""() => getComputedStyle(
+                document.getElementById('kselpop')).display""") == 'none', \
+                '点一下没收起浮窗'
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('K 线左右移动 + 框选测算区间（playwright）', tag='web')
 def t_kchart_pan_select():
     """2026-09-14 用户："K线图还需要有左右移动、框选一段范围自动测算区间
@@ -6329,8 +6553,11 @@ def t_kchart_pan_select():
             pg.wait_for_timeout(600)
             sel = pg.evaluate('() => KSEL')
             assert sel and sel['i0'] != sel['i1'], '拖动之后没有选区：%s' % sel
-            txt = pg.inner_text('#ksel')
-            for k in ('区间涨跌', '最高', '最低', '振幅'):
+            # ★ 2026-09-15 起读数在**浮窗**里（`#kselpop`），不在图下那行
+            #   （`#ksel` 现在只留"怎么用"的说明）—— 用户："太不明显，
+            #   最好是在框选范围外展示一个浮窗"。**失败的是断言不是产品。**
+            txt = pg.inner_text('#kselpop')
+            for k in ('最高', '最低', '振幅'):
                 assert k in txt, '框选读数缺「%s」：%s' % (k, txt[:120])
             # 🔴 **数字要自己复算一遍** —— 只查"有没有这四个字"的话，
             #   算错了照样绿（把 max 写成 min 也有"最高"两个字）。
@@ -6349,7 +6576,9 @@ def t_kchart_pan_select():
             assert ('最低 %s' % chk['lo']) in txt.replace('　', ' '), \
                 '最低价对不上：读数 %s / 复算 %s' % (txt[:140], chk['lo'])
             import re as _re
-            m = _re.search(r'区间涨跌\s*([+-][\d.]+)%', txt.replace('　', ' '))
+            # ★ 浮窗里区间涨跌幅是**第一行的大字**（`.sphi`），不再带
+            #   "区间涨跌"这个前缀 —— 取那个元素本身比在全文里正则更准。
+            m = _re.search(r'([+-][\d.]+)%', pg.inner_text('#kselpop .sphi'))
             assert m, '读不出区间涨跌幅：%s' % txt[:140]
             shown = float(m.group(1))
             assert abs(shown - chk['ret'] * 100) < 0.02, \
@@ -6622,8 +6851,18 @@ def t_stock_ui():
             pg.wait_for_timeout(500)
             assert pg.locator('#ktip').is_visible(), '十字光标没出读数'
             tip = pg.locator('#ktip').inner_text()
-            for kk in ('开', '高', '低', '收', 'MA20', 'MA60', 'DIF'):
+            # 🔴 **MA / DIF 不再出现在读数里**（2026-09-15 用户要求）：
+            #   MA 四条主图图例本来就带那一天的值、DIF/DEA/MACD 改到副图
+            #   左上角 —— 浮窗里再列一遍就是同一份信息两处看。
+            #   这两处"搬到哪儿去了"由「K 线读数」那条用例专门钉着，
+            #   这里只保留"读数本身要有 OHLC"。**失败的是断言不是产品。**
+            for kk in ('开', '高', '低', '收'):
                 assert kk in tip, '读数缺「%s」：%s' % (kk, tip.replace('\n', ' '))
+            for kk in ('MA20', 'MA60', 'DIF'):
+                assert kk not in tip, \
+                    ('读数里还有「%s」—— 它该在图例上（主图 MA / 副图 DIF），'
+                     '不该在跟着光标的浮窗里重复一遍：%s'
+                     % (kk, tip.replace('\n', ' ')))
             assert 'undefined' not in tip and 'NaN' not in tip, \
                 '读数里有 undefined/NaN：%s' % tip
 
@@ -6664,14 +6903,31 @@ def t_stock_ui():
             assert abs(pg.evaluate(NZ) - _no) < 300, \
                 '关掉 BOLL 后画布没回到原样'
 
-            # ---- 切副图 KDJ：读数跟着换 ----
+            # ---- 切副图 KDJ：**副图图例**跟着换（不再是读数）----
+            # 🔴 2026-09-15 起指标值从跟着光标的浮窗搬到了副图左上角
+            #   （用户："MACD的信息应该放在MACD的左上角，数字跟随变化"）。
+            #   原来这条查的是"读数里出现 K/D/J" —— **被改动作废**的判据。
+            #   ★ 改成拦 `fillText`：直接验副图图例画了什么，
+            #     比数像素准（那条带子里混着柱子与曲线，图例会被淹没）。
             pg.locator('#body .sb[data-s="kdj"]').click()
             pg.wait_for_timeout(1800)
-            pg.mouse.move(bb['x'] + bb['width'] * 0.6, bb['y'] + bb['height'] * 0.3)
-            pg.wait_for_timeout(400)
-            tip2 = pg.locator('#ktip').inner_text()
-            assert 'K ' in tip2 and 'DIF' not in tip2, \
-                '切 KDJ 后读数没换：%s' % tip2.replace('\n', ' ')
+            kdj = pg.evaluate("""() => {
+                const cv = document.getElementById('kcv');
+                const g = cv.getContext('2d');
+                const orig = g.fillText.bind(g);
+                const seen = [];
+                g.fillText = function (t, x, y) { seen.push(String(t));
+                                                  return orig(t, x, y); };
+                try { drawKChart(cv, {bars: BARS, sub: IND, subKind: SUB}); }
+                finally { g.fillText = orig; }
+                return seen.filter(t => /^(K|D|JJ)\\s/.test(t.toUpperCase()));}""")
+            assert len(kdj) >= 2, \
+                '切 KDJ 之后副图图例没画出 K/D/J（实得 %r）' % kdj
+            assert any(any(ch.isdigit() for ch in t) for t in kdj), \
+                '副图 KDJ 图例只有名字没有值：%r' % kdj
+            tip2 = pg.locator('#ktip').inner_text() if \
+                pg.locator('#ktip').is_visible() else ''
+            assert 'DIF' not in tip2, '切了 KDJ，读数里还留着 DIF：%s' % tip2
 
             # ---- 切区间：根数变了，画布也重画了 ----
             pg.locator('#body .rg').first.click()      # 3 月
