@@ -33,9 +33,9 @@ PEP 562 的模块级 `__getattr__` **只拦读**：一旦有人 `lv.LIVE = tmp`�
 import sys
 import types
 
-from .lv import base, fee, paper, perf, pos, px, sig, ver
+from .lv import base, fee, hist, paper, perf, pos, px, sig, ver
 
-_FACADE = (base, fee, px, pos, ver, sig, perf, paper)
+_FACADE = (base, fee, px, pos, ver, sig, perf, paper, hist)
 
 
 class _Facade(types.ModuleType):

@@ -4233,6 +4233,183 @@ _DDJS = r"""() => {
 }"""
 
 
+@case('实盘不许比回测少：每日持仓 + 交易记录（FIFO 往返）（playwright）',
+       tag='web')
+def t_live_hist():
+    """2026-09-15 用户："发现实盘功能反而没有交易记录、每日持仓，
+    实盘的信息不应该比回测少。" —— 是。对照下来实盘缺两块：
+
+        回测「持仓」页      每日快照、逐日回看      实盘只有**当前**持仓
+        回测「交易记录」页  一笔平仓的收益率/盈亏    实盘只有成交流水（录入视角）
+
+    🔴 **数据本来就有，只是没人把它展开**：`equity_curve` 已经在逐日
+      `lots_asof` 重放持仓了，只是把逐只明细扔掉只留合计；成交也一直在账本
+      里，缺的是"按 FIFO 配对成一笔往返"这一层。所以没引任何新数据源。
+
+    🔴 **最关键的自证：每日持仓算出的权益必须逐日等于【业绩页那条曲线】。**
+      两处各算各的话，"同一天两个总资产"不报错，只是两页对不上 ——
+      而这一页存在的理由就是复盘时对着看。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from assay import live as lv
+    from assay import server as sv
+    from http.server import ThreadingHTTPServer
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        # 🔴 要挑**有平仓往返**的账户 —— 只挑"有成交"的话可能全是买入，
+        #   下面"收益率含费"整段会静默跳过（第一版就挑到了 0 笔往返的账户，
+        #   用例照样绿）。有往返的优先，没有再退回任意有成交的。
+        cands = [a['id'] for a in lv.load_accounts()
+                 if not a.get('archived') and lv.fills(a['id'])]
+        aid = next((c for c in cands if lv.round_trips(c)['total']), None) \
+            or (cands[0] if cands else None)
+        if not aid:
+            return '跳过（没有有成交的账户）'
+
+        # ---- ① 服务端：每日持仓的权益必须 == 权益曲线 ----
+        h = lv.daily_holdings(aid, limit=500)
+        assert h['total'] > 0, '每日持仓是空的'
+        cur = lv.equity_curve(aid)
+        emap = dict(zip(cur['dates'], cur['equity']))
+        bad = [(r['date'], r['equity'], emap[r['date']]) for r in h['rows']
+               if r['date'] in emap and abs(emap[r['date']] - r['equity']) > 1.0]
+        assert not bad, \
+            ('每日持仓算出的权益与业绩页那条曲线对不上（%d 天）：%s —— '
+             '两处各算各的，"同一天两个总资产"不报错，只是两页对不上'
+             % (len(bad), bad[:3]))
+        # 🔴 **反向自证**：这条断言不是空转 —— 日期必须真的有交集
+        hit = len({r['date'] for r in h['rows']} & set(emap))
+        assert hit >= 3, '只对上了 %d 天，这条对账基本没生效' % hit
+        notes.append('每日持仓 %d 行 / %d 天，权益与曲线逐日一致（对了 %d 天）'
+                     % (h['total'], h['n_days'], hit))
+
+        # ★ 权重的分母必须是**总权益**（含现金），不是持仓市值 ——
+        #   后者会让满仓与半仓都显示 100%，而仓位正是要看的东西。
+        one = [r for r in h['rows'] if r['date'] == h['rows'][0]['date']]
+        wsum = sum(r['weight'] or 0 for r in one)
+        mv = sum(r['value'] for r in one)
+        assert abs(wsum - mv / one[0]['equity']) < 1e-4, \
+            '权重之和 %.4f 与 市值/权益 %.4f 对不上' % (wsum, mv / one[0]['equity'])
+        if one[0]['cash'] > 1:
+            assert wsum < 0.9999, \
+                ('有 %.0f 现金，权重之和却是 %.4f —— 分母用成了持仓市值，'
+                 '那样满仓与半仓都显示 100%%' % (one[0]['cash'], wsum))
+        notes.append('权重分母是总权益（仓位 %.1f%%，现金 %.0f）'
+                     % (wsum * 100, one[0]['cash']))
+
+        # ---- ② 交易记录：FIFO 往返，收益率【含费】 ----
+        t = lv.round_trips(aid, limit=500)
+        if not t['total']:
+            notes.append('⚠ 这个账户还没有平仓往返，"收益率含费"那几条没验到')
+        if t['total']:
+            r0 = t['rows'][0]
+            for k in ('entry_date', 'exit_date', 'entry_price', 'exit_price',
+                      'shares', 'ret', 'pnl', 'holding_days', 'fee'):
+                assert k in r0, '往返记录缺字段 %s' % k
+            # 🔴 **含费**：不含的话是报高，而"报高"在实盘上是最危险的方向。
+            gross, cost = r0['shares'] * r0['exit_price'], r0['shares'] * r0['entry_price']
+            naive = gross / cost - 1 if cost else 0
+            assert r0['fee'] > 0, '这笔往返的费用是 0，验不出含不含费（换个账户）'
+            # 🔴 判据按**费用的量级**给，不是 `abs(diff) > 1e-9` ——
+            #   后者太松：变异成"不含费"之后两者仍差 1e-10（`round(…,6)` 与
+            #   展示价四舍五入的残差），断言照样通过（变异实测漏过一轮）。
+            #   真正该出现的差距是"费用 / 成本"那个量级，这里取它的一半当下界。
+            expect = r0['fee'] / cost if cost else 0
+            assert expect > 1e-5, '费用占成本只有 %.2g，验不出（换个样本）' % expect
+            assert naive - r0['ret'] > expect * 0.5, \
+                ('收益率 %.6f 与不含费的 %.6f 只差 %.2g，而费用占成本 %.2g —— '
+                 '说明费用没算进去（不含费就是报高）'
+                 % (r0['ret'], naive, naive - r0['ret'], expect))
+            # 盈亏与收益率必须自洽（同一笔不能一个正一个负）
+            assert (r0['pnl'] > 0) == (r0['ret'] > 0), \
+                '盈亏 %.2f 与收益率 %.4f 符号不一致' % (r0['pnl'], r0['ret'])
+            notes.append('往返 %d 笔，收益率含费（%.4f%% < 不含费 %.4f%%）'
+                         % (t['total'], r0['ret'] * 100, naive * 100))
+        # ★ 未平仓的也要给 —— 回测的 trades.parquet 恰恰没有它们
+        assert 'n_open' in t and 'open' in t, \
+            '没给未平仓批次 —— "我现在拿着什么"在实盘里是天天要看的'
+
+        # ---- ③ 停牌那天按【最后已知价】挂账，并且标出来 ----
+        # 🔴 当前账户没有停牌票，所以这条**必须构造**才测得到 ——
+        #   不构造的话那段代码是空转的，改坏了也全绿（变异实测漏过）。
+        #   造法：把某只票某天的收盘价从价格表里抹掉，模拟"那天没有行情"。
+        import assay.lv.hist as _h
+        _orig_feed = _h._feed
+        drop = {}
+        def _feed2(rows, flows, datalake=None):
+            feed, days, px = _orig_feed(rows, flows, datalake)
+            if len(days) >= 3:
+                d = days[-2]
+                for (c, dd) in list(px):
+                    if dd == d:
+                        drop[(c, dd)] = px.pop((c, dd))
+            return feed, days, px
+        _h._feed = _feed2
+        try:
+            h2 = _h.daily_holdings(aid, limit=500)
+        finally:
+            _h._feed = _orig_feed
+        if drop:
+            day = sorted({str(d) for _c, d in drop})[-1]
+            hit = [r for r in h2['rows'] if r['date'] == day]
+            assert hit, '构造的停牌日 %s 一行都没有 —— 那天的持仓被整个丢了' % day
+            assert all(r['stale_price'] for r in hit), \
+                ('停牌那天没标 stale_price —— 价格是上一个交易日的，不标的话'
+                 '人会以为"这只票今天没动"，而事实是没有数据')
+            assert all(r['last_price'] for r in hit), \
+                ('停牌那天的价格是空的 —— 该按**最后已知价**挂账，'
+                 '直接跳过会让那天的市值凭空少一块，而它不报错')
+            notes.append('停牌日按最后已知价挂账且标 stale（构造 %d 只验证）'
+                         % len(hit))
+
+        # ---- ④ 页面 ----
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 1000})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid),
+                    wait_until='networkidle')
+            pg.wait_for_selector('#lp_hdt table', timeout=90000)
+            pg.wait_for_timeout(1500)
+            assert pg.locator('#lp_hdt table tbody tr').count() > 0, \
+                '每日持仓表没渲染出行'
+            # 🔴 分页条不许是 NaN —— 字段写成 `h.lim`（实际是 `limit`）时
+            #   会印出 "第 NaN / NaN 页"，而**接口断言看不到**（total 是对的），
+            #   只有看页面才发现。
+            txt = pg.inner_text('#lp_hold')
+            assert 'NaN' not in txt, \
+                '每日持仓的分页条出现 NaN（字段名写错了？）：%s' \
+                % [x for x in txt.split('\\n') if 'NaN' in x][:2]
+            assert 'NaN' not in pg.inner_text('#lp_trip'), '交易记录出现 NaN'
+            # 翻页真的生效
+            first = pg.evaluate(
+                "() => document.querySelector('#lp_hdt table tbody tr').textContent")
+            pg.locator('#lp_hold .hs').first.select_option('50')
+            pg.wait_for_timeout(1500)
+            pg.locator('#lp_hold .hn').first.click()
+            pg.wait_for_timeout(1500)
+            second = pg.evaluate(
+                "() => document.querySelector('#lp_hdt table tbody tr').textContent")
+            assert first != second, '翻页之后第一行没变 —— 分页没生效'
+            notes.append('页面：两块都渲染、分页无 NaN 且翻页生效')
+            assert not errs, 'JS 报错：%s' % errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('业绩页：回撤是【副图】不是页签 / 全页只有一个返回按钮（playwright）',
        tag='web')
 def t_live_perf_dd_and_back():
@@ -12262,14 +12439,52 @@ def t_pos_sort():
                 .map(tr => (tr.children[0]||{}).textContent || '')""")
             o1 = pg.evaluate(ORDER)
             assert len(o1) >= 3, '持仓行太少（%d），测不出行序' % len(o1)
+            # 🔴 **判据是「排序规则仍然成立」，不是「行序一字不差」。**
+            #   盘中实时价每分钟都在动，而相邻两行的浮盈可能只差几块钱
+            #   （实测 2026-09-15 10:13：−1749.00 与 −1754.37 只差 5.37），
+            #   刷新之后它们**真的会换位** —— 那不是"排序丢了"，是数据变了。
+            #   拿"行序完全相同"当判据，在交易时段必然偶发失败
+            #   （实测 3 次挂 1 次），而**偶发绿的用例比红的更危险**。
+            #   ★ 真正要保的是：刷新之后**仍然按那一列有序**，
+            #     外加**行集合不变**（真丢了东西要抓到）。
+            def _desc(vs):
+                return bool(vs) and all(vs[i] >= vs[i + 1]
+                                        for i in range(len(vs) - 1))
+            # ★ 复用上面那个 `vals(name)`（按 th 精确匹配取列）——
+            #   我一度自写了第二套"按第一行 children 正则找列"的取法，
+            #   而 `#lvbody` 里不止一张表时它会取错表 -> 值对不上 ->
+            #   报"排序丢了"。**同一件事两处写**，又一次。
+            v1 = [x for x in (vals('浮盈') or []) if x is not None]
+            assert v1 and len(v1) >= 3, '取不到浮盈那一列：%r' % v1
+            assert _desc(v1), '点完表头本身就没排好序：%r' % v1[:5]
+            # 🔴 **等"渲染完了"，不等固定时间。** `loadLive` 是异步的，
+            #   `wait_for_timeout(1200)` 在机器忙时不够 —— 实测读到过
+            #   只有 5 行的**半截表**，于是"后面还有行、顺序不对"，
+            #   报成"排序丢了"（偶发 5 次挂 1 次）。
+            #   判据：行数回到刷新前那么多，再读值。
+            n_rows = len(o1)
             pg.evaluate("async () => { await loadLive(LVSEL, true); }")
-            pg.wait_for_timeout(1200)
-            assert pg.evaluate(ORDER) == o1, \
-                'quiet 刷新（每分钟那次）把行序重排了 —— LVSORT 必须是模块级'
+            pg.wait_for_function(
+                "(n) => document.querySelectorAll("
+                "'#lvbody table.lvpos tr').length - 1 >= n", arg=n_rows,
+                timeout=30000)
+            v2 = [x for x in (vals('浮盈') or []) if x is not None]
+            assert _desc(v2), \
+                ('quiet 刷新（每分钟那次）之后不再按浮盈有序：%r —— '
+                 'LVSORT 必须是模块级，存局部里会被每分钟的重渲染冲掉' % v2[:5])
+            assert sorted(pg.evaluate(ORDER)) == sorted(o1), \
+                'quiet 刷新之后持仓的行集合变了'
             # 全量重渲染也要保持
             pg.evaluate("async () => { await loadLive(LVSEL); }")
-            pg.wait_for_timeout(1500)
-            assert pg.evaluate(ORDER) == o1, '全量重渲染把排序丢了'
+            pg.wait_for_function(
+                "(n) => document.querySelectorAll("
+                "'#lvbody table.lvpos tr').length - 1 >= n", arg=n_rows,
+                timeout=30000)
+            v3 = [x for x in (vals('浮盈') or []) if x is not None]
+            assert _desc(v3), '全量重渲染之后不再按浮盈有序：%r' % v3[:5]
+            assert sorted(pg.evaluate(ORDER)) == sorted(o1), \
+                '全量重渲染之后持仓的行集合变了'
+
             on = pg.evaluate("""() => { const t=document.querySelector(
                 '#lvbody th.lvsth.on'); return t ? t.textContent.trim() : null; }""")
             assert on and '浮盈' in on and '▼' in on, \

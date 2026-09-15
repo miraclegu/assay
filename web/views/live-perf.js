@@ -150,7 +150,11 @@ function renderPerf(aid){
     + '<div id="lp_dd" class="lpbox lpsub"></div>'
     + '<div id="lp_tbl" class="lpbox"></div>'
     /* ★ 执行差异放在收益表之后：它是复盘时才看的，而「我涨了多少」是第一眼要看的。 */
-    + '<div id="lp_exec" class="lpbox"></div>';
+    + '<div id="lp_exec" class="lpbox"></div>'
+    /* 每日持仓 / 交易记录：排在执行差异之后 —— 前面那几块回答"我赚了多少"，
+       这两块是**明细**，翻到下面才看（同「能进 tooltip 的就别占列」的取舍）。 */
+    + '<div id="lp_hold" class="lpbox"></div>'
+    + '<div id="lp_trip" class="lpbox"></div>';
   /* 🔴 曲线与收益明细都用**裁剪后**的数据（LPS），KPI 板用**全程**
      （上面那四格标着 TWR/最大回撤，是开户至今的口径）——
      两者混着看会以为对不上，所以区间条下面单独给这一段的收益。 */
@@ -166,6 +170,14 @@ function renderPerf(aid){
   /* ★ 执行差异也在这里调一次：它的数据可能**先**到（见上面那条竞态）。 */
   renderExec(aid);
   renderPerfTable(aid);
+  /* 每日持仓 / 交易记录：各自取数、各自渲染。
+     ★ 不塞进上面那个 Promise.all —— 它们只是明细，慢一点无妨；
+       而让整页等它们会把"我赚了多少"这个第一眼要看的东西也推后。
+     ★ 翻页时只重画自己那一块（`renderHoldings/renderTrips` 自己重取），
+       不碰曲线 —— 曲线要重放整条权益，白重放一次是纯浪费。 */
+  LPH.off = 0; LPT.off = 0;
+  renderHoldings(aid);
+  renderTrips(aid);
 }
 
 /* ============ 时间区间 ============
@@ -702,4 +714,143 @@ function xdSection(it){
       </tr>`;
     }).join('')}</tbody></table></div>
   </div>`;
+}
+
+/* ================= 每日持仓 / 交易记录（2026-09-15 加）=================
+   用户："实盘功能反而没有交易记录、每日持仓，实盘的信息不应该比回测少。"
+
+   🔴 **复用回测详情页的 `tbl()`**（run-detail.js 的顶层函数，同一个
+     index.html 里全局可见）—— 两页各写一套表格渲染的话，排序、分组、
+     数字格式、列宽会慢慢分叉，而那不报错，只是"同一个东西两页长得不一样"。
+   ★ 放在业绩页而不是另开一页：这一页本来就是"复盘时看的"，
+     而这两块正是复盘要看的东西（同「主视图只放天天要看的」那条）。 */
+let LPH = {off: 0, lim: 100};      // 每日持仓分页
+let LPT = {off: 0, lim: 100};      // 交易记录分页
+
+function lpNav(p, np, cls) {
+  /* ★ 上下两套导航用 class 不用 id —— 同 paneHoldings 那条（id 拼接过歧义）。 */
+  return `<div class="pg">
+     <button class="${cls}f" ${p <= 1 ? 'disabled' : ''}>« 首页</button>
+     <button class="${cls}p" ${p <= 1 ? 'disabled' : ''}>‹ 上一页</button>
+     <span>第 <input class="${cls}i" value="${p}"> / ${np} 页</span>
+     <button class="${cls}n" ${p >= np ? 'disabled' : ''}>下一页 ›</button>
+     <button class="${cls}l" ${p >= np ? 'disabled' : ''}>末页 »</button>
+     <span style="margin-left:10px">每页
+       <select class="${cls}s">${[50, 100, 200].map(x =>
+         `<option ${x === (cls === 'h' ? LPH : LPT).lim ? 'selected' : ''}>${x}</option>`
+       ).join('')}</select> 条</span>
+   </div>`;
+}
+
+function lpBind(root, cls, st, np, redraw) {
+  const go = o => { st.off = Math.max(0, Math.min(o, (np - 1) * st.lim)); redraw(); };
+  const on = (k, fn, ev) => document.querySelectorAll(root + ' .' + cls + k)
+    .forEach(e => e[ev || 'onclick'] = fn);
+  on('f', () => go(0));
+  on('p', () => go(st.off - st.lim));
+  on('n', () => go(st.off + st.lim));
+  on('l', () => go((np - 1) * st.lim));
+  on('s', e => { st.lim = +e.target.value; st.off = 0; redraw(); }, 'onchange');
+  on('i', e => { const v = +e.target.value; if (v >= 1 && v <= np) go((v - 1) * st.lim); },
+     'onchange');
+}
+
+async function renderHoldings(aid) {
+  const el = $('#lp_hold');
+  if (!el) return;                 /* 人已经走开（同 renderChart 那条） */
+  let h;
+  try { h = await j(`/api/live/holdings?id=${encodeURIComponent(aid)}`
+      + `&offset=${LPH.off}&limit=${LPH.lim}`); }
+  catch (e) { el.innerHTML = `<div class="lvmsg bad">${esc(String(e))}</div>`; return; }
+  if (!$('#lp_hold')) return;
+  if (!h.total) {
+    el.innerHTML = '<div class="ttl">每日持仓</div>'
+      + '<div class="none">还没有持仓记录 —— 先去「✎ 记一笔」录成交。</div>';
+    return;
+  }
+  /* 🔴 字段是 `limit` 不是 `lim` —— 写错了不报错，只是 `NaN/NaN 页`
+       （截图里一眼能看到，但接口断言看不到：`total` 是对的）。 */
+  const p = Math.floor(h.offset / h.limit) + 1;
+  const np = Math.max(1, Math.ceil(h.total / h.limit));
+  const nav = lpNav(p, np, 'h');
+  el.innerHTML = `<div class="ttl">每日持仓
+      <span class="lvwhy">${h.n_days} 个交易日 · ${h.total.toLocaleString()} 行</span></div>
+    <div class="note">逐日快照，<b>按日期倒序</b>；同日内按权重降序。
+      份额与价格都是<b>真实的那个数</b>（不复权）。
+      <b>权重的分母是当日总权益</b>（持仓 + 现金）—— 用持仓市值当分母的话，
+      满仓与半仓都显示 100%，而仓位正是要看的东西。
+      点<b>名称/代码</b>弹速览浮层并定位到那一天。</div>
+    ${nav}<div id="lp_hdt"></div>${nav}`;
+  tbl($('#lp_hdt'), h.rows, [
+    {k: 'code', t: '股票', l: 1,
+     f: (v, r) => spLink(v, r.name || v, '', {date: r.date, html:
+        (r.name ? `${esc(r.name)}<span class="cd">${esc(v)}</span>`
+                : `<span class="cd0">${esc(v)}</span>`)})},
+    {k: 'weight', t: '权重', f: v => pct(v, 2)},
+    {k: 'value', t: '市值', f: v => v == null ? '—' : (+v).toFixed(0)},
+    {k: 'shares', t: '份额', f: v => num(v, 0)},
+    {k: 'last_price', t: '现价', f: (v, r) => fmtN(v, 3)
+       + (r.stale_price ? '<span class="lvwhy" title="那天停牌，按最后已知价挂账">停</span>' : '')},
+    {k: 'cost', t: '成本', f: v => fmtN(v, 3),
+     h: '摊薄成本（含买入费）—— 与实盘持仓页同口径，那里的"浮盈"就是按它算的。'},
+    {k: 'entry_date', t: '建仓日', l: 1},
+    {k: 'unrealized_ret', t: '浮动收益', f: v => pct(v, 2), s: 1},
+    {k: 'unrealized_pnl', t: '浮动盈亏', f: v => v == null ? '—' : (+v).toFixed(0), s: 1},
+  ], null, {group: 'date', groupNote: rs => {
+    const mv = rs.reduce((a, r) => a + (r.value || 0), 0);
+    const w = rs.reduce((a, r) => a + (r.weight || 0), 0);
+    return `${rs.length} 只 · 市值 ${num(mv, 0)} · 仓位 ${(w * 100).toFixed(1)}%`
+      + ` · 现金 ${num(rs[0].cash, 0)}`;
+  }});
+  lpBind('#lp_hold', 'h', LPH, np, () => renderHoldings(aid));
+}
+
+async function renderTrips(aid) {
+  const el = $('#lp_trip');
+  if (!el) return;
+  let t;
+  try { t = await j(`/api/live/trips?id=${encodeURIComponent(aid)}`
+      + `&offset=${LPT.off}&limit=${LPT.lim}`); }
+  catch (e) { el.innerHTML = `<div class="lvmsg bad">${esc(String(e))}</div>`; return; }
+  if (!$('#lp_trip')) return;
+  /* ★ 未平仓那几批**也要说出来** —— 回测的 trades.parquet 恰恰没有它们，
+       而实盘"我现在拿着什么、成本多少"是天天要看的。 */
+  const openNote = t.n_open
+    ? `<span class="lvwhy">另有 <b>${t.n_open}</b> 批未平仓（在「每日持仓」里看）</span>`
+    : '';
+  if (!t.total) {
+    el.innerHTML = '<div class="ttl">交易记录 ' + openNote + '</div>'
+      + '<div class="none">还没有<b>平仓</b>记录 —— 买入之后卖出才会配成一笔往返。</div>';
+    return;
+  }
+  const p = Math.floor(t.offset / t.limit) + 1;
+  const np = Math.max(1, Math.ceil(t.total / t.limit));
+  const nav = lpNav(p, np, 't');
+  el.innerHTML = `<div class="ttl">交易记录
+      <span class="lvwhy">${t.total.toLocaleString()} 笔往返</span> ${openNote}</div>
+    <div class="note">按 <b>FIFO 把买入与卖出配成一笔往返</b>，回答"这一笔赚了多少"
+      —— 与「流水」那页是两件事（那里是<b>录入视角</b>：那天买了/卖了什么）。
+      🔴 <b>收益率与盈亏都【含费】</b>：买入费摊进成本、卖出费从收入里扣。
+      回测那边的收益率只含滑点不含佣金（与引擎 entry_price 同口径），
+      所以两边的数<b>本来就不一样</b>，不该硬凑成一致。
+      点<b>名称/代码</b>弹速览浮层并定位到平仓日。</div>
+    ${nav}<div id="lp_tpt"></div>${nav}`;
+  tbl($('#lp_tpt'), t.rows, [
+    {k: 'exit_date', t: '平仓日', l: 1},
+    {k: 'code', t: '股票', l: 1,
+     f: (v, r) => spLink(v, r.name || v, '', {date: r.exit_date, html:
+        (r.name ? `${esc(r.name)}<span class="cd">${esc(v)}</span>`
+                : `<span class="cd0">${esc(v)}</span>`)})},
+    {k: 'entry_date', t: '建仓日', l: 1},
+    {k: 'holding_days', t: '持有天', f: v => v == null ? '—' : v},
+    {k: 'shares', t: '份额', f: v => num(v, 0)},
+    {k: 'entry_price', t: '买入价', f: v => fmtN(v, 3)},
+    {k: 'exit_price', t: '卖出价', f: v => fmtN(v, 3)},
+    {k: 'gross_amount', t: '卖出额', f: v => v == null ? '—' : (+v).toFixed(0)},
+    {k: 'fee', t: '费用', f: v => fmtN(v, 2), h: '买卖两侧的真实费用（按份额摊到这一批）。'},
+    {k: 'ret', t: '收益率', f: v => pct(v, 2), s: 1},
+    {k: 'pnl', t: '盈亏', f: v => v == null ? '—' : (+v).toFixed(0), s: 1},
+    {k: 'reason', t: '备注', l: 1},
+  ]);
+  lpBind('#lp_trip', 't', LPT, np, () => renderTrips(aid));
 }

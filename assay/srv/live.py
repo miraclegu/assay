@@ -669,6 +669,31 @@ def _live_guard():
 
 
 
+def api_live_holdings(q):
+    """GET /api/live/holdings?id=&offset=&limit= —— 【每日】持仓快照。
+
+    ★ 与实盘主视图那个「当前持仓」是两件事：那个回答"我现在拿着什么"，
+      这个回答"那天我拿着什么" —— 回测详情页早就有后者（holdings.parquet），
+      实盘一直没有（用户 2026-09-15 指出）。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    return _live_err(lambda: m.daily_holdings(
+        aid, offset=q.get('offset') or 0, limit=q.get('limit') or 100))
+
+
+def api_live_trips(q):
+    """GET /api/live/trips?id=&offset=&limit= —— 交易记录（FIFO 往返）。
+
+    ★ 与「成交流水」是两件事：流水是**录入视角**（那天买了/卖了什么），
+      这个是**往返视角**（这一笔赚了多少、持有多久）。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    return _live_err(lambda: m.round_trips(
+        aid, offset=q.get('offset') or 0, limit=q.get('limit') or 100))
+
+
 def api_live_paper(_q, body):
     """模拟盘：推进到最新数据日 / 删档重建。
 
