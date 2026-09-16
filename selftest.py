@@ -3532,24 +3532,56 @@ def t_live_ui():
             for k in ('成本', '现价', '当日', '当日盈亏', '市值', '浮盈',
                       '仓位'):
                 assert k in _thz, '持仓表缺「%s」列：%s' % (k, th)
+            # 🔴 **代码不再单独占一列**（2026-09-16 用户："名称、代码放在
+            #   一个格子里"，与每日持仓/清仓记录一致）。这里两头都钉：
+            #   没有"代码"那一列 + 名称那一格里**确实带着代码**。
+            assert '代码' not in _thz, \
+                '代码又单独占了一列：%s —— 它该跟名称同格（.cd 小字）' % th
+            _n1 = pg.locator(
+                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(1)')
+            assert _n1.locator('.cd,.cd0').count() == 1, \
+                '名称那一格里没有小字代码：%r' % _n1.inner_text()
             # 🔴 列数是有限的：保本价 / 估卖出费 / "含买入费"这种注解都退到
             #    悬浮提示与 ⓘ 里 —— 十几列会把要看的数字挤出屏幕。
             for k in ('保本价', '估卖出费', '含买入费'):
                 assert k not in _thz, '「%s」不该再占一列：%s' % (k, th)
+            # 🔴 **按列名找那一格**，不按第几列 —— 列序是会变的
+            #   （2026-09-16 用户重排过一次），写死 `td:nth-child(4)` 的话，
+            #   重排之后这条会去读另一列的 title，报的却是"缺摊薄成本"，
+            #   看着像产品坏了。
+            _ci = pg.evaluate(
+                "() => [...document.querySelectorAll("
+                "'#lvbody table.lvpos th')].findIndex("
+                "e => e.textContent.trim().indexOf('成本') === 0) + 1")
+            assert _ci > 0, '持仓表找不到「成本」列'
             _ct = pg.locator(
-                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(4)'
+                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(%d)' % _ci
             ).get_attribute('title') or ''
             for k in ('摊薄成本', '成交均价', '保本价'):
                 assert k in _ct, \
                     '三个成本口径要在「成本」列的悬浮提示里给全，缺「%s」：%s' \
                     % (k, _ct)
             # 当日盈亏的基准：以前买的按昨收，今天买的按成交价
+            _di = pg.evaluate(
+                "() => [...document.querySelectorAll("
+                "'#lvbody table.lvpos th')].findIndex("
+                "e => e.textContent.trim().indexOf('当日盈亏') === 0) + 1")
+            assert _di > 0, '持仓表找不到「当日盈亏」列'
             _dt = pg.locator(
-                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(7)'
+                '#lvbody table.lvpos tr:nth-child(2) td:nth-child(%d)' % _di
             ).get_attribute('title') or ''
             assert '基准' in _dt, '当日盈亏没说基准是什么：%s' % _dt
-            # 代码与名称【各占一列】—— 挤在一格里没法按名称扫
-            assert th[:2] == ['代码', '名称'], '持仓表前两列应是代码/名称：%s' % th
+            # 🔴 **这条规矩被用户推翻了**（2026-09-16）：原来钉的是
+            #   "代码与名称各占一列 —— 挤在一格里没法按名称扫"，而实际用下来
+            #   每日持仓 / 清仓记录早就是「名称 + 小字代码」同一格，
+            #   于是同一份信息在不同页面长得不一样。用户原话：
+            #   "应该都做成类似于每日持仓、清仓记录中的样式"。
+            #   新规矩钉在上面（没有"代码"列 + 名称格里带小字代码），
+            #   这里只留下**列序**这条：名称打头。
+            assert th[0] == '名称', '持仓表第一列应该是名称：%s' % th
+            # 列序是用户定的：先回答"今天怎么样"，再回答成本与规模
+            assert th[:5] == ['名称', '当日', '当日盈亏', '幅度', '浮盈'], \
+                '持仓表列序不对（要 名称/当日/当日盈亏/幅度/浮盈 打头）：%s' % th
             _pc = [x.strip() for x in
                    pg.locator('#lvbody table.lvpos tr td:nth-child(1)').all_inner_texts()]
             _pn = [x.strip() for x in
@@ -3852,8 +3884,11 @@ def t_live_ui():
             assert _sk.count() >= 2, \
                 '持仓表里的代码/名称没挂速览：%d' % _sk.count()
             _n_pos = pg.locator('#lvbody table.lvpos tr').count() - 1
-            assert _sk.count() >= _n_pos * 2, \
-                '每只持仓的代码与名称都该可点：%d 只 vs %d 个链接' \
+            # ★ 代码与名称合成一格之后，**一行一个链接**（那一格整体可点，
+            #   名称与小字代码都在它里面）—— 原来是两格两个链接。
+            #   要保的事没变：每一行都点得开。
+            assert _sk.count() >= _n_pos, \
+                '每只持仓的名称格都该可点：%d 只 vs %d 个链接' \
                 % (_n_pos, _sk.count())
             _sk.first.click()
             pg.wait_for_selector('#spwrap', state='visible', timeout=20000)
@@ -3899,17 +3934,37 @@ def t_live_ui():
             # 列序按【看的顺序】：哪天、买还是卖、哪只票、什么价、多少股、多少钱。
             # 录入时间与来源是审计信息，平时不看，排在最后。
             _fh = [x.strip() for x in pg.locator('#main table.lvt th').all_inner_texts()]
-            _want = ['成交日', '方向', '代码', '名称', '价格', '股数', '金额', '费用']
+            # ★ 代码与名称合成一格（2026-09-16 全站统一）—— 列序其余不变：
+            #   哪天、买还是卖、哪只票、什么价、多少股、多少钱。
+            _want = ['成交日', '方向', '名称', '价格', '股数', '金额', '费用']
             assert _fh[:len(_want)] == _want, '流水列序不对：%s' % _fh
+            assert pg.locator('#main table.lvt tr:nth-child(2) '
+                              'td .cd, #main table.lvt tr:nth-child(2) '
+                              'td .cd0').count() >= 1, \
+                '流水页的名称格里没有小字代码'
             assert _fh.index('录入时间') > _fh.index('费用') and \
                 _fh.index('来源') > _fh.index('费用'), \
                 '录入时间/来源应排在最后：%s' % _fh
-            # 名称必须真的填上 —— 批量粘贴的成交只有代码，得服务端补
-            _nm = [x.strip() for x in
-                   pg.locator('#main table.lvt tr td:nth-child(4)').all_inner_texts()]
-            assert _nm and any(_nm), '流水的「名称」列全空 —— 服务端没补名称'
-            assert not any(x.isdigit() for x in ''.join(_nm)), \
-                '名称列里出现数字，可能列错位了：%s' % _nm[:4]
+            # 名称必须真的填上 —— 批量粘贴的成交只有代码，得服务端补。
+            # 🔴 判据取的是那一格里**名称那一部分**（整格文字减去小字代码）：
+            #   合成一格之后，整格文字里本来就有代码那串数字，
+            #   照老写法"名称列不许出现数字"必然误报。
+            #   ★ 列位置也**按表头找**，不写死第几列（列序会变）。
+            _nm = pg.evaluate(
+                "(want) => {const ths = [...document.querySelectorAll("
+                "'#main table.lvt th')];"
+                " const i = ths.findIndex(e => e.textContent.trim() === want);"
+                " if (i < 0) return null;"
+                " return [...document.querySelectorAll('#main table.lvt tr')]"
+                "   .slice(1).map(tr => {const td = tr.cells[i]; if (!td) return '';"
+                "     const cd = td.querySelector('.cd,.cd0');"
+                "     const all = (td.textContent || '').trim();"
+                "     return cd ? all.replace((cd.textContent || '').trim(), '').trim()"
+                "               : all;});}", '名称')
+            assert _nm is not None, '流水表找不到「名称」列'
+            assert any(_nm), '流水的「名称」列全空 —— 服务端没补名称'
+            assert not any(x and x.replace('.', '').isdigit() for x in _nm), \
+                '名称那一部分是纯数字，可能列错位了：%s' % _nm[:4]
             assert '第 1/1 页' in pg.locator('#main').inner_text(), '分页控件没渲染'
             assert pg.locator('#pprev').is_disabled(), '第一页的「上一页」应置灰'
             n_before = len(lv.fills(aid))
@@ -8562,9 +8617,15 @@ def t_alerts_ui():
             assert pg.locator('#adivref').count() == 1, \
                 '缺「刷新分红」（平时一天一次，刚出公告时要能手动催一次）'
             th = ' '.join(pg.locator('table.pkt th').all_inner_texts())
-            for k in ('代码', '名称', '现价', '实际分红', '当前股息率',
+            for k in ('名称', '现价', '实际分红', '当前股息率',
                       '第 1 档', '状态'):
                 assert k in th, '盯价表缺「%s」列：%s' % (k, th)
+            # ★ 代码与名称**同一格**（2026-09-16 全站统一）——
+            #   判据两头：没有"代码"列 + 名称那格里带着小字代码。
+            assert '代码' not in th, '代码又单独占了一列：%s' % th
+            assert pg.locator('table.pkt tr:nth-child(2) td:nth-child(1) .cd,'
+                              'table.pkt tr:nth-child(2) td:nth-child(1) .cd0'
+                              ).count() == 1, '买点表的名称格里没有小字代码'
             # ★ 能进 tooltip 的就别占列：备注是给自己看的一句话、长短不定，
             #   摆进表里会把要扫的数字挤走。但**信息不能丢** ——
             #   有备注的行要带 ✎ 且 title 里是原文。
@@ -13251,11 +13312,24 @@ def t_pos_sort():
             pg.goto('http://127.0.0.1:%d/#/live' % port)
             pg.wait_for_selector('#lvbody table.lvpos', timeout=25000)
             pg.wait_for_timeout(3000)
-            WANT = ['当日', '当日盈亏', '市值', '浮盈', '幅度', '仓位']
+            # 🔴 比**集合**而不是写死的顺序：列序是产品决定、会变
+            #   （2026-09-16 用户重排过一次），写死顺序的话每次重排都要
+            #   手改这一行，而"忘了改"的表现是报告在说谎。
+            #   ★ 但**顺序也要钉**：它必须与页面那份**唯一列定义**
+            #     （LVPOS_COLS）一致 —— 表头与单元格分两处拼的话，
+            #     整表会错位一格，而那不报错。
+            WANT = set(pg.evaluate('() => Object.values(LVSORT_COLS)'))
             ths = pg.locator('#lvbody th.lvsth')
             got = [ths.nth(i).inner_text().strip().rstrip('▼▲ ')
                    for i in range(ths.count())]
-            assert got == WANT, '可排序的列不对：%r（要 %r）' % (got, WANT)
+            assert set(got) == WANT, \
+                '可排序的列不对：%r（要 %r）' % (got, sorted(WANT))
+            _order = pg.evaluate(
+                "() => LVPOS_COLS.filter(c => LVSORT_COLS[c.k])"
+                ".map(c => LVSORT_COLS[c.k])")
+            assert got == _order, \
+                ('表头顺序与列定义 LVPOS_COLS 对不上：%r vs %r —— '
+                 '两处拼的话整表会错位一格' % (got, _order))
 
             def vals(name):
                 return pg.evaluate("""(nm) => {
@@ -13289,9 +13363,12 @@ def t_pos_sort():
             # ---- ④ quiet 刷新不许重排 ----
             pg.locator('#lvbody th.lvsth', has_text='浮盈').first.click()
             pg.wait_for_timeout(700)
+            # 🔴 第一格现在是「名称 + 小字代码」同一格（2026-09-16 用户要求），
+            #   所以**代码从 `data-sp` 读**，不再拿那一格的文字当代码 ——
+            #   拿文字比的话，两边永远不等，而报出来的却是"排序坏了"。
             ORDER = ("""() => [...document.querySelectorAll(
                 '#lvbody table.lvpos tr')].slice(1)
-                .map(tr => (tr.children[0]||{}).textContent || '')""")
+                .map(tr => ((tr.querySelector('[data-sp]') || {}).dataset || {}).sp || '')""")
             o1 = pg.evaluate(ORDER)
             assert len(o1) >= 3, '持仓行太少（%d），测不出行序' % len(o1)
             # 🔴🔴 **判据要拿"渲染那一刻的数据"比，不能重新读实时价。**
@@ -13307,7 +13384,8 @@ def t_pos_sort():
             CHECK = ("""(k) => {
                 const rows = [...document.querySelectorAll(
                     '#lvbody table.lvpos tr')].slice(1)
-                  .map(tr => (tr.children[0] || {}).textContent.trim());
+                  .map(tr => ((tr.querySelector('[data-sp]') || {}).dataset
+                              || {}).sp || '');
                 const items = ((LVO || {}).pos || {}).items || [];
                 const want = lvSortRows(items).map(x => x.code);
                 return {dom: rows, want: want,
@@ -13335,7 +13413,8 @@ def t_pos_sort():
                 const by = {}; items.forEach(x => by[x.code] = x);
                 const dom = [...document.querySelectorAll(
                     '#lvbody table.lvpos tr')].slice(1)
-                  .map(tr => (tr.children[0] || {}).textContent.trim());
+                  .map(tr => ((tr.querySelector('[data-sp]') || {}).dataset
+                              || {}).sp || '');
                 return {vals: dom.map(c => (by[c] || {})[LVSORT.k]),
                         desc: LVSORT.desc};}""")
             vv = [x for x in ind['vals'] if x is not None]
@@ -14257,7 +14336,10 @@ def t_alerts_by_indicator():
         for _c in (1, 2, 3, 5, 8, 12):
             _px2, _ = I.trigger_price(_b2, 'ma_cross',
                                       {'fast': 5, 'slow': 20}, float(_c))
-            if _px2 and _px2 > _c2 * 1.02:
+            # 🔴 要 `far` 就得**离得够远**：near 阈值是 3%，只要求
+            #   +2% 的话触发价会落进"接近"区间，那一行的状态就是 near，
+            #   而"还要涨 x%"那条路只在 far 时才走到（实测偶发）。
+            if _px2 and _px2 > _c2 * 1.07:
                 _upv2 = float(_c)
                 break
         assert _upv2 is not None, '第二只票也挑不出"解得出但还没到"的阈值'

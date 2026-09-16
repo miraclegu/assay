@@ -297,18 +297,10 @@ async function loadLive(aid, quiet){
         ${Object.keys((LVWHYH||{}).entry||{}).length
           ?'<span class="lvwhy">名称后的 <b>?</b> 进它建仓那一期的选股理由</span>':''}`:''}</h3>
     ${it.length?`<div class="pw"><table class="lvt lvpos">
-      <tr><th>代码</th><th class="tx">名称</th><th class="rt">股数</th>
-          <th class="rt">成本</th>
-          <th class="rt">现价</th>
-          ${Object.entries(LVSORT_COLS).map(([k,v])=>lvSortTh(k,v)).join('')}
-          <th class="tx">建仓</th></tr>
-      ${lvSortRows(it).map(x=>`<tr>
-        <td>${skLink(x.code, x.code)}</td>
-        <td class="tx">${skLink(x.code, x.name||'')}${lvHoldMark(aid, x.code)}</td>
-        <td class="rt">${num(x.shares)}</td>
-        <td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee,2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost,4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven==null?'—':num(x.breakeven,3)}（含估算卖出费 ${x.exit_fee_est==null?'—':num(x.exit_fee_est,2)}）">${num(x.cost_net,3)}</td>
-        ${LV_RT_FIELDS.map(f=>lvRtd(f, x, P)).join('')}
-        <td class="lvwhy tx">${esc(x.entry)}</td></tr>`).join('')}
+      <tr>${LVPOS_COLS.map(c => LVSORT_COLS[c.k] ? lvSortTh(c.k, LVSORT_COLS[c.k])
+        : `<th class="${c.tx ? 'tx' : 'rt'}">${esc(c.t || LVPOS_TH[c.k] || c.k)}</th>`).join('')}</tr>
+      ${lvSortRows(it).map(x=>`<tr>${LVPOS_COLS.map(c =>
+        c.rt ? lvRtd(c.k, x, P) : lvPosTd(c, x, aid)).join('')}</tr>`).join('')}
       </table></div>
       <!-- 持仓表包在 .pw 里，见本文件顶部注释 -->
       ${P.fee_estimated_n?'<div class="lvwhy" style="margin-top:6px">'
@@ -481,6 +473,41 @@ const LVSORT_COLS = {
   chg_day: '当日', pnl_day: '当日盈亏', value: '市值',
   pnl: '浮盈', pnl_pct: '幅度', weight: '仓位',
 };
+
+/* 🔴 **持仓表的列写在这一处**，表头与单元格都读它。
+   改之前是两处：表头照 `LVSORT_COLS` 的顺序拼、单元格照 `LV_RT_FIELDS`
+   的顺序拼，中间还夹着几个静态列 —— 想把「成本」插到「浮盈」与「现价」
+   之间，就得同时改两处顺序，**漏一处就是整表错位一格，而它不报错**
+   （同「★ 选中的规则」那条：列定义写一处，表头/排序/单元格都读它）。
+
+   列序是用户 2026-09-16 定的：
+     名称 · 当日 · 当日盈亏 · 幅度 · 浮盈 · 成本 · 现价 · 股数 · 市值 · 仓位 · 建仓
+   —— 先回答"今天怎么样"，再回答"这笔是什么成本、多大规模"。 */
+const LVPOS_COLS = [
+  {k: 'name', t: '名称', tx: 1},
+  {k: 'chg_day', rt: 1}, {k: 'pnl_day', rt: 1},
+  {k: 'pnl_pct', rt: 1}, {k: 'pnl', rt: 1},
+  {k: 'cost', t: '成本'},
+  {k: 'price', rt: 1},
+  {k: 'shares', t: '股数'},
+  {k: 'value', rt: 1}, {k: 'weight', rt: 1},
+  {k: 'entry', t: '建仓', tx: 1},
+];
+
+/* 一行的静态格（实时那几个走 `lvRtd`，它是刷新与渲染的唯一定义）。 */
+function lvPosTd(c, x, aid) {
+  switch (c.k) {
+    case 'name':
+      /* 名称 + 小字代码**同一格**（`cnCell`，全站唯一定义）——
+         原来代码与名称各占一列，而这张表已经十来列了。 */
+      return `<td class="tx">${cnCell(x.code, x.name)}${lvHoldMark(aid, x.code)}</td>`;
+    case 'cost':
+      return `<td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee, 2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost, 4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven == null ? '—' : num(x.breakeven, 3)}（含估算卖出费 ${x.exit_fee_est == null ? '—' : num(x.exit_fee_est, 2)}）">${num(x.cost_net, 3)}</td>`;
+    case 'shares': return `<td class="rt">${num(x.shares)}</td>`;
+    case 'entry': return `<td class="lvwhy tx">${esc(x.entry)}</td>`;
+  }
+  return '';
+}
 let LVSORT = {k: null, desc: true};
 
 function lvSortRows(items){
@@ -497,6 +524,9 @@ function lvSortRows(items){
     return (x - y) * sgn;
   });
 }
+
+/* 不参与排序的实时列（现价）也要有表头 —— 它在 LVSORT_COLS 里没有条目。 */
+const LVPOS_TH = {price: '现价'};
 
 function lvSortTh(k, label){
   const on = LVSORT.k === k;
@@ -783,16 +813,16 @@ function sigHtml(s, alert, alertWhy){
     ${rc}${banner}${strip}
     <div class="lvgrid">
       <div><b style="color:var(--up)">卖出 ${(s.sell||[]).length} 只</b>
-        ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th>代码</th><th class="tx">名称</th>
+        ${(s.sell||[]).length?`<table class="lvt lvsell"><tr><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">参考价</th><th class="tx">原因</th></tr>
-          ${s.sell.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}${lvWhyMark(x)}</td>
+          ${s.sell.map(x=>`<tr><td class="tx">${cnCell(x.code, x.name)}${lvWhyMark(x)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.ref_price,2)}</td><td class="lvwhy tx">${esc(why[x.reason]||x.reason)}</td></tr>`).join('')}</table>`
           :'<div class="none">无</div>'}</div>
       <div><b style="color:var(--down)">买入 ${(s.buy||[]).length} 只</b>
-        ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th>代码</th><th class="tx">名称</th>
+        ${(s.buy||[]).length?`<table class="lvt lvbuy"><tr><th class="tx">名称</th>
             <th class="rt">股数</th><th class="rt">限价</th><th class="rt">金额</th></tr>
-          ${s.buy.map(x=>`<tr><td>${skLink(x.code, x.code)}</td><td class="tx">${skLink(x.code, x.name)}${lvWhyMark(x)}</td>
+          ${s.buy.map(x=>`<tr><td class="tx">${cnCell(x.code, x.name)}${lvWhyMark(x)}</td>
             <td class="rt">${num(x.shares)}</td>
             <td class="rt">${num(x.limit,2)}</td><td class="rt">${num(x.amount)}</td></tr>`).join('')}</table>
           <div class="lvwhy">限价 = T-1 收盘 × 1.05（防高开买不进）；twopass 分配，估余 ${num(s.left_est)}

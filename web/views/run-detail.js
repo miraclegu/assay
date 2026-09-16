@@ -350,7 +350,9 @@ async function drawDay(S){
   catch(err){ box.innerHTML=`<div class="note">加载失败：${err.message}</div>`; return; }
   if(DSEL!==d) return;                 // 点得快时后到的响应不要覆盖当前选择
   const pos=e.cash_pct?(1-e.cash_pct[i]):null;
-  const nm=r=>`${r.code}${r.name?' '+r.name:''}`;
+  /* ★ 与别处同一种排布（名称 + 小字代码），不再是"代码 名称"的纯文本 ——
+     同一个页面里两种排法，眼睛每换一张表就要重新找一次。 */
+  const nm=r=>cnCell(r.code, r.name, {date:d, run:CUR});
   const money=v=>v==null?'—':(+v).toLocaleString('en',{maximumFractionDigits:0});
   const px=v=>v==null?'—':(+v).toFixed(3);
   box.innerHTML=`<h3 class="sec">${d} · 当日明细</h3>
@@ -451,9 +453,7 @@ function tbl(el,rows,cols,note,opt){
      平行的 etf_lake 上，不带的话浮层去主面板找，一行都取不到、画出一片空白。
    ★ `html` 里的 name/code 自己转义：`nmcode` 那个老写法是直接插值的，
      这里不沿用（名称来自我们自己的 parquet，风险低，但没理由把它扩散）。 */
-const nmpop=(v,r)=>spLink(v, r.name||v, '', {date:r.date||r.entry_date, run:CUR,
-  html:(r.name?`${esc(r.name)}<span class="cd">${esc(v)}</span>`
-              :`<span class="cd0">${esc(v)}</span>`)});
+const nmpop=(v,r)=>cnCell(v, r.name, {date:r.date||r.entry_date, run:CUR});
 
 async function paneTrades(){
   const t=await j(`/api/trades?id=${CUR}&offset=${TD.off}&limit=${TD.lim}`);

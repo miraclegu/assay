@@ -111,14 +111,13 @@ function members(mem) {
     <a class="chip" href="/compare.html?codes=${encodeURIComponent(rows.slice(0,6).map(x=>x.code).join(','))}"
       title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a></h3>
     <div class="pw"><table class="pkt">
-      <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
+      <tr><th class="tx"></th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
         <th class="rt">振幅</th><th class="rt">成交额</th><th class="rt">流通市值</th>
         <th class="rt">PE</th><th class="rt">PB</th><th class="tx">行业</th></tr>
       ${rows.map(x => `<tr>
         <td class="tx">${starHtml(x.code, false)}</td>
-        <td class="tx">${spLink(x.code, x.code.slice(0,6))}</td>
-        <td class="tx">${spLink(x.code, x.name || '')}
+        <td class="tx">${cnCell(x.code, x.name)}
           ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}
           ${x.limit_down ? '<span class="lvwhy" style="color:var(--down)">跌停</span>' : ''}</td>
         <td class="rt">${fmtN(x.close)}</td>

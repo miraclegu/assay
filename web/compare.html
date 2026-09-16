@@ -101,7 +101,7 @@ function table() {
   const ss = DATA.series || [];
   return `<div class="lvsec" style="margin-top:14px"><h3>区间表现</h3>
     <div class="pw"><table class="pkt">
-      <tr><th class="tx"></th><th class="tx">代码</th><th class="tx">名称</th>
+      <tr><th class="tx"></th><th class="tx">名称</th>
         <th class="rt">区间涨幅</th><th class="rt">最大回撤</th>
         <th class="rt">最好</th><th class="rt">最差</th>
         <th class="rt">有效天数</th><th class="tx"></th></tr>
@@ -111,8 +111,7 @@ function table() {
         v.forEach(x => { peak = Math.max(peak, x); mdd = Math.max(mdd, (peak - x) / (1 + peak)); });
         return `<tr>
           <td class="tx"><span style="color:${PAL[i % PAL.length]}">━</span> ${starHtml(s.code, false)}</td>
-          <td class="tx">${spLink(s.code, s.code.slice(0,6))}</td>
-          <td class="tx">${spLink(s.code, s.name || '')}</td>
+          <td class="tx">${cnCell(s.code, s.name)}</td>
           <td class="rt"><b style="color:${upc(v.length ? v[v.length-1] : null)}">${ratv(v.length ? v[v.length-1] : null)}</b></td>
           <td class="rt" style="color:var(--down)">${v.length ? '−' + (mdd*100).toFixed(2) + '%' : '—'}</td>
           <td class="rt" style="color:var(--up)">${ratv(v.length ? Math.max(...v) : null)}</td>

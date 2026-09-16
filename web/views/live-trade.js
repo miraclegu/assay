@@ -177,7 +177,7 @@ function fillsTableHtml(rows, opt) {
     <!-- 列序按【看的顺序】排：哪天、买还是卖、哪只票、什么价、多少股、
          多少钱。录入时间与来源是审计信息，平时不看，挪到最后并压暗。
          数字列右对齐 + tabular-nums，位数才对得齐（.rt / .lvt td.rt）。 -->
-    <tr><th>成交日</th><th class="tx">方向</th><th class="tx">代码</th><th class="tx">名称</th>
+    <tr><th>成交日</th><th class="tx">方向</th><th class="tx">名称</th>
         <th class="rt">价格</th><th class="rt">股数</th><th class="rt">金额</th>
         <th class="rt">费用</th>${showRev ? '<th></th>' : ''}
         <th class="lvwhy tx">录入时间</th><th class="lvwhy tx">来源</th></tr>
@@ -186,8 +186,7 @@ function fillsTableHtml(rows, opt) {
       return `<tr class="${rev || dead ? 'lvrev' : ''}">
       <td>${esc(f.trade_date)}</td>
       <td class="tx" style="color:${f.side === 'buy' ? 'var(--up)' : 'var(--down)'}">${f.side === 'buy' ? '买' : '卖'}</td>
-      <td class="tx">${skLink(f.code, f.code)}</td>
-      <td class="tx">${skLink(f.code, f.name || '')}</td>
+      <td class="tx">${cnCell(f.code, f.name)}</td>
       <td class="rt" title="${f.price_from ? '取的成交日' + (f.price_from === 'open' ? '开盘价' : '收盘价') + '，不是券商回报' : ''}">${num(f.price, 3)}${
         f.price_from ? '<span class="lvwhy">' + (f.price_from === 'open' ? '开' : '收') + '</span>' : ''}</td>
       <td class="rt">${num(f.shares)}</td>

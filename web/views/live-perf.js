@@ -715,7 +715,7 @@ function xdSection(it){
     ${it.scale_why ? `<div class="lvwhy" style="margin:0 0 6px">
         ⓘ ${esc(it.scale_why)}</div>` : ''}
     <div class="pw"><table class="lvt xdt"><thead><tr>
-      <th>代码</th><th class="tx">名称</th><th class="tx">差异</th>
+      <th class="tx">名称</th><th class="tx">差异</th>
       <th>提示股数</th><th>实际股数</th>
       <th>策略成交价</th><th>我的成交价</th><th>价差</th>
       <th class="tx">候选名次</th><th>笔数</th>
@@ -725,8 +725,7 @@ function xdSection(it){
          原始那个数是按信号里的 cash 算的，与这个账户无关。 */
       const wantSh = r.want_shares == null ? '—' : num(r.want_shares, 0);
       return `<tr class="${r.kind === 'ok' ? '' : 'xdbad'}">
-        <td>${spLink(r.code, r.code)}</td>
-        <td class="tx">${spLink(r.code, r.name || '')}</td>
+        <td class="tx">${cnCell(r.code, r.name)}</td>
         <td class="tx ${cls}">${lbl}</td>
         <td>${wantSh}</td>
         <td>${r.got_buy != null ? num(r.got_buy, 0)
@@ -840,10 +839,7 @@ async function renderHoldings(aid) {
       点<b>名称/代码</b>弹速览浮层并定位到那一天。</div>
     ${nav}<div id="lp_hdt"></div>${nav}`;
   tbl($('#lp_hdt'), h.rows, [
-    {k: 'code', t: '股票', l: 1,
-     f: (v, r) => spLink(v, r.name || v, '', {date: r.date, html:
-        (r.name ? `${esc(r.name)}<span class="cd">${esc(v)}</span>`
-                : `<span class="cd0">${esc(v)}</span>`)})},
+    {k: 'code', t: '股票', l: 1, f: (v, r) => cnCell(v, r.name, {date: r.date})},
     {k: 'weight', t: '权重', f: v => pct(v, 2)},
     {k: 'value', t: '市值', f: v => v == null ? '—' : (+v).toFixed(0)},
     {k: 'shares', t: '份额', f: v => num(v, 0)},
@@ -941,9 +937,7 @@ async function renderTrips(aid) {
   tbl($('#lp_tpt'), t.rows, [
     {k: 'exit_date', t: '平仓日', l: 1},
     {k: 'code', t: '股票', l: 1,
-     f: (v, r) => spLink(v, r.name || v, '', {date: r.exit_date, html:
-        (r.name ? `${esc(r.name)}<span class="cd">${esc(v)}</span>`
-                : `<span class="cd0">${esc(v)}</span>`)})},
+     f: (v, r) => cnCell(v, r.name, {date: r.exit_date})},
     {k: 'entry_date', t: '建仓日', l: 1},
     {k: 'holding_days', t: '持有天', f: v => v == null ? '—' : v},
     {k: 'shares', t: '份额', f: v => num(v, 0)},

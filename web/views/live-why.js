@@ -231,8 +231,7 @@ function lvWhyGroup(p, e, g){
     const note=(r.dropped_by||{}).why || (r.facts||[]).join('、') || '';
     return gap+`<tr class="${st[1]}">
       <td class="rt">${r.rank}</td>
-      <td>${skLink(r.code, r.code)}</td>
-      <td class="tx">${skLink(r.code, r.name||r.code)}</td>
+      <td class="tx">${cnCell(r.code, r.name)}</td>
       <td class="tx"><span class="lvbadge ${st[1]}">${esc(st[0])}</span>${sets}
         ${note?`<span class="lvwhy" title="${esc(note)}">${esc(note)}</span>`:''}</td>
       ${cells}</tr>`;
@@ -262,7 +261,7 @@ function lvWhyGroup(p, e, g){
     <div class="lvpar whyargs">${args}</div>
     ${g.sql?`<pre class="stcode" id="${sid}" style="display:none">${esc(g.sql)}</pre>`:''}
     <div class="pw"><table class="lvt lvpoolt">
-      <tr><th class="rt">#</th><th>代码</th><th class="tx">名称</th>
+      <tr><th class="rt">#</th><th class="tx">名称</th>
           <th class="tx">状态</th>${cols}</tr>${body}</table></div>
   </div>`;
 }

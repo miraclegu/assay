@@ -359,6 +359,27 @@ function wireStarsAll() {
 }
 /* 个股链接 —— 每处都跳同一个地方，别各拼一遍 URL */
 const stockHref = c => '/stock.html?code=' + encodeURIComponent(c);
+
+/* 🔴 **「名称 + 小字代码」放同一格 —— 唯一定义在这里。**
+   用户 2026-09-16："当前持仓、执行差异、交易记录中的名称和代码的排布方式，
+   应该都做成类似于每日持仓、清仓记录中的样式（名称、代码放在一个格子里），
+   现在不同地方的排布方式不同。"
+
+   改之前这份 HTML 有**三份各自的写法**（app.js 的 `nmcode`、run-detail 的
+   `nmpop`、live-perf 里内联的一段），另有五六张表干脆拆成"代码"与"名称"
+   两列 —— 于是同一份信息在每个页面长得都不一样，而**那不报错**。
+   ★ 合成一格还顺带省出一列：那些表本来就宽（十来列），代码列占着一格
+     而人扫的是名称。
+   ★ `opt` 直接透给 `spLink`（date / run / cls）—— 点开速览浮层并定位到
+     那一天的能力，各处保持一致。 */
+function cnCell(code, name, opt) {
+  if (!code) return esc(name || '');
+  const html = name
+    ? `${esc(name)}<span class="cd">${esc(code)}</span>`
+    : `<span class="cd0">${esc(code)}</span>`;
+  return spLink(code, name || code, (opt || {}).cls || '',
+                Object.assign({}, opt || {}, {html: html}));
+}
 const sectorHref = (c, k) => '/sector.html?kind=' + encodeURIComponent(k || 'sw')
   + '&code=' + encodeURIComponent(c);
 /* URL 参数 */

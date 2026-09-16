@@ -245,7 +245,7 @@ function table(w) {
     + ' —— 右上角搜代码或名称加进来，或者在个股页/盘面榜单里点 ★</div>';
   return `<div class="lvsec"><h3>盯盘 <span class="lvwhy">${esc(GROUP)}</span></h3>
     <div class="pw"><table class="pkt">
-      <tr><th class="tx">分组</th><th class="tx">代码</th><th class="tx">名称</th>
+      <tr><th class="tx">分组</th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
         <th class="rt">成交额</th><th class="rt">流通市值</th><th class="rt">PE</th>
         <th class="rt">PB</th><th class="rt">ROE</th><th class="tx">行业</th>
@@ -253,8 +253,7 @@ function table(w) {
       ${rows.map(x => `<tr>
         <td class="tx"><a href="#" class="chip wgr" data-c="${esc(x.code)}"
           data-g="${esc(x.group)}" title="点击改分组">${esc(x.group)}</a></td>
-        <td class="tx">${spLink(x.code, x.code.slice(0,6))}</td>
-        <td class="tx">${spLink(x.code, x.name || '')}
+        <td class="tx">${cnCell(x.code, x.name)}
           ${x.missing ? '<span class="stale" title="面板里查不到 —— 可能已退市或还没上市。这一行刻意留着，不静默丢掉">查不到行情</span>' : ''}
           ${x.is_st ? '<span class="stale">ST</span>' : ''}
           ${x.limit_up ? '<span class="lvwhy" style="color:var(--up)">涨停</span>' : ''}

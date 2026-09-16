@@ -263,15 +263,14 @@ function table(rows) {
       <span class="lvwhy">价格档从高到低（指标档排在后面）· 到了哪一档就点亮哪一档
         ·「触发价」对指标档是<b>现算</b>的：今天收在那个价位，条件刚好成立</span></h3>
     <div class="pw"><table class="pkt">
-      <tr><th class="tx">代码</th><th class="tx">名称</th>
+      <tr><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">当日</th>
         <th class="rt">实际分红</th><th class="rt">当前股息率</th>
         ${Array.from({length: nt}, (_, i) => `<th class="rt">第 ${i + 1} 档</th>`).join('')}
         <th class="tx">状态</th><th class="tx"></th></tr>
       ${rows.map(x => `<tr${x.state === 'hit' ? ' class="ahit"'
           : (x.state === 'near' ? ' class="anear"' : '')}>
-        <td class="tx">${spLink(x.code, x.code.slice(0, 6))}</td>
-        <td class="tx">${spLink(x.code, x.name || '')}${x.missing
+        <td class="tx">${cnCell(x.code, x.name)}${x.missing
             ? '<span class="stale" title="面板里查不到这个代码 —— 可能填错了，或已退市/未上市。这一行刻意留着，不静默丢掉">查不到</span>' : ''}
           ${x.is_st ? '<span class="stale">ST</span>' : ''}
           ${x.note ? `<span class="lvwhy" style="cursor:help"
@@ -331,12 +330,11 @@ function foot() {
   return `${fired.length ? `<div class="lvsec" style="margin-top:12px">
       <h3>今天提醒过 <span class="lvwhy">${fired.length} 条 · 同一档一天只提醒一次</span></h3>
       <table class="lvt">
-        <tr><th class="tx">时刻</th><th class="tx">代码</th><th class="tx">名称</th>
+        <tr><th class="tx">时刻</th><th class="tx">名称</th>
           <th class="tx">类型</th><th class="rt">目标价</th><th class="rt">当时现价</th></tr>
         ${fired.slice().reverse().slice(0, 30).map(r => `<tr>
           <td class="tx lvwhy">${esc(String(r.ts || '').replace('T', ' ').slice(5))}</td>
-          <td class="tx">${esc((r.code || '').slice(0, 6))}</td>
-          <td class="tx">${esc(r.name || '')}</td>
+          <td class="tx">${cnCell(r.code, r.name)}</td>
           <td class="tx">${r.kind === 'hit' ? '到价' : '接近'}</td>
           <td class="rt">${fmtN(r.target)}</td>
           <td class="rt">${fmtN(r.price)}</td></tr>`).join('')}
