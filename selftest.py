@@ -5310,7 +5310,9 @@ def t_live_perf_ui():
             #   ---- 记住选择（localStorage），刷新后还在 ----
             pg.locator('#lp_bm a.lpb[data-b="sh000905"]').click()
             pg.wait_for_timeout(300)
-            assert pg.evaluate("()=>localStorage.getItem('lvbench')") \
+            # 🔴 基准是**按账户**记的（`lvbench:<aid>`）—— 全局一把键的话
+            #   在 A 账户选的会把 B 账户的覆盖掉（用户 2026-09-16 报的）。
+            assert pg.evaluate("(a)=>localStorage.getItem('lvbench:'+a)", aid) \
                 == 'sh000905', \
                 ('选中的基准要存进 localStorage —— 刷新一次就没了的话'
                  '每次进来都要重选，而这是"每天看同一个对比"的场景')
@@ -5327,7 +5329,8 @@ def t_live_perf_ui():
             #     代码或手改的垃圾。不校验就拿一个取不到数据的 symbol 去画，
             #     表现是"选中了但没有线"，而它不报错。
             for junk in ('DROP TABLE x', 'sh999999'):
-                pg.evaluate("(v)=>localStorage.setItem('lvbench',v)", junk)
+                pg.evaluate("([a,v])=>localStorage.setItem('lvbench:'+a,v)",
+                            [aid, junk])
                 pg.reload(wait_until='networkidle')
                 pg.wait_for_selector('#lp_tab a.lpc', timeout=90000)
                 pg.wait_for_timeout(900)
@@ -5376,7 +5379,7 @@ def t_live_perf_ui():
             pg.wait_for_timeout(300)
             assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
                 '「不比」之后该只剩净值一条线'
-            assert not pg.evaluate("()=>localStorage.getItem('lvbench')"), \
+            assert not pg.evaluate("(a)=>localStorage.getItem('lvbench:'+a)", aid), \
                 '取消基准时也要清掉 localStorage（不然刷新又回来了）'
 
             # ---- 收益明细是**方格热力图**，不是列表 ----
@@ -13200,7 +13203,9 @@ def t_strat_bench():
             # 🔴 先清掉记忆：localStorage 里可能存着上一次选的基准，
             #   那样"默认不画"这条会因为环境而时绿时红。
             pg.goto('http://127.0.0.1:%d/' % port)
-            pg.evaluate("() => localStorage.removeItem('lvbench')")
+            pg.evaluate("() => Object.keys(localStorage)"
+                        ".filter(k => k.indexOf('lvbench') === 0)"
+                        ".forEach(k => localStorage.removeItem(k))")
             pg.goto('http://127.0.0.1:%d/#/live/froec/perf' % port)
             pg.wait_for_selector('#lp_bm a.lpbs', timeout=25000)
             pg.wait_for_timeout(2500)
@@ -13316,7 +13321,9 @@ def t_bench_custom_web():
             errs = []
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.goto('http://127.0.0.1:%d/' % port)
-            pg.evaluate("() => localStorage.removeItem('lvbench')")
+            pg.evaluate("() => Object.keys(localStorage)"
+                        ".filter(k => k.indexOf('lvbench') === 0)"
+                        ".forEach(k => localStorage.removeItem(k))")
             pg.goto('http://127.0.0.1:%d/#/live/froec/perf' % port)
             pg.wait_for_selector('#lp_bmore', timeout=25000)
             pg.wait_for_timeout(1800)
@@ -13472,6 +13479,75 @@ def t_bench_custom_web():
                 ('策略曲线没有**按日期**对齐：%r —— 两边交易日不等长，'
                  '按下标并的话错一位就整条线平移，而它不报错' % (fy['b'],))
             notes.append('区间基点取前一天（缺数据往前找）· 策略线按日期对齐且同轴')
+
+            # ---- ⑦🔴 基准是【按账户】记的，两个账户互不覆盖 ----
+            # 用户 2026-09-16："不同实盘账户的业绩曲线比较基准会互相同步。
+            #   每个账户设置了自己的比较基准之后应该是要记忆住的，不应该会
+            #   被另一个账户覆盖。"
+            # 原来是**一把全局 key**：在 A 选了红利 ETF，切到 B 也变成它、
+            # 而且**回写**成 B 的选择 —— 谁最后打开谁说了算。而不同账户跑的
+            # 是不同策略（小市值 vs 红利），要比的对象本来就不一样。
+            accs = pg.evaluate("() => fetch('/api/live/accounts')"
+                               ".then(r => r.json()).then(o => (o.accounts || [])"
+                               ".map(a => a.id))")
+            assert len(accs) >= 2, \
+                '只有 %d 个账户，"互不覆盖"这条判据是空转的' % len(accs)
+            a1, a2 = accs[0], accs[1]
+            # 🔴 **故意留一个全局旧键**：按账户存是后来改的，老用户已经选过
+            #   的那个不该凭空消失（读不到账户键时退回它）。而且不留的话，
+            #   下面「点了不比不许又退回全局旧键」那条**根本执行不到** ——
+            #   全清掉的话退回去读到的也是空，断言照样绿（变异实测漏过）。
+            pg.evaluate("() => { Object.keys(localStorage)"
+                        ".filter(k => k.indexOf('lvbench:') === 0)"
+                        ".forEach(k => localStorage.removeItem(k));"
+                        " localStorage.setItem('lvbench', 'sh000688'); }")
+
+            def _pick(aid, code):
+                pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid))
+                pg.wait_for_selector('#lp_bm a.lpb', timeout=25000)
+                pg.wait_for_timeout(1500)
+                pg.evaluate("(c) => [...document.querySelectorAll('#lp_bm a.lpb')]"
+                            ".find(a => a.dataset.b === c).click()", code)
+                pg.wait_for_timeout(1200)
+
+            def _cur(aid):
+                # 🔴 **必须 reload**：`goto` 到**同一个 hash** 不会重新加载
+                #   页面，于是读到的是内存里那个 `LPB`，根本没走
+                #   localStorage 那条路 —— 变异测试实测：把"清掉"改成
+                #   `removeItem`（会退回全局旧键）时这条断言照样绿。
+                pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid))
+                pg.reload(wait_until='networkidle')
+                pg.wait_for_selector('#lp_bm a.lpb', timeout=25000)
+                pg.wait_for_timeout(1500)
+                return pg.evaluate('()=>LPB')
+
+            # 没选过的账户要**继承那个全局旧值**（不然老用户的选择凭空没了）
+            assert _cur(a1) == ['sh000688'], \
+                ('%s 没有自己的键时该退回全局旧键（老用户选过的那个），'
+                 '实际 %r' % (a1, _cur(a1)))
+            _pick(a1, 'sh000001')
+            _pick(a2, 'sh000905')
+            got1, got2 = _cur(a1), _cur(a2)
+            assert got1 == ['sh000001'], \
+                ('在 %s 选了上证，去 %s 选了中证500 之后，%s 的基准变成 %r —— '
+                 '两个账户共用一把 localStorage key，互相覆盖'
+                 % (a1, a2, a1, got1))
+            assert got2 == ['sh000905'], '%s 的基准没记住：%r' % (a2, got2)
+            # 「不比」也要按账户记：清掉之后**不许**退回那个全局旧键
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, a1))
+            pg.wait_for_selector('#lp_bclr', timeout=25000)
+            pg.wait_for_timeout(1200)
+            pg.click('#lp_bclr')
+            pg.wait_for_timeout(1000)
+            assert _cur(a1) == [], \
+                ('%s 点了「不比」，切走再回来基准又出来了（%r）—— 清掉时要写'
+                 '空串，`removeItem` 之后读到 null 会退回那个全局旧键'
+                 % (a1, _cur(a1)))
+            assert _cur(a2) == ['sh000905'], \
+                '%s 点「不比」把 %s 的也清掉了' % (a1, a2)
+            notes.append('基准按账户记（%s=上证 / %s=中证500，互不覆盖；'
+                         '没选过的继承全局旧键，点「不比」之后不再退回它）'
+                         % (a1, a2))
 
             # 取消
             pg.evaluate("""() => document.getElementById('lp_bclr').click()""")
@@ -14335,11 +14411,38 @@ def t_stock_multi_sub():
             #   判据要两头钉：接口没多打 + DOM 没重建（只比接口数的话，
             #   重建出一模一样的 DOM 也算通过，而 hover、选中的文字、
             #   滚动位置已经断了）。
+            # 🔴🔴 判据要钉到**每个元素**，不能只钉 `#kcv`。
+            #   用户 2026-09-16 又报了一次："切换副图时整个页面会闪一下。"
+            #   —— 而上面那条断言当时是**绿的**：`#kcv` 确实没被换，
+            #   被 `innerHTML` 整块换掉的是工具条 / 槽位层 / 加副图行。
+            #   代价是**用户刚点的那个 `<select>` 被销毁重建**：焦点没了、
+            #   原生控件重绘，看上去就是闪一下。
+            #   ★ 这也是"第一次切换"才暴露的：签名若存在变量里，首屏那几块
+            #     是 `load()` 拼模板直接吐的、不经过 reloadInd，于是初值永远
+            #     不等 —— **每次打开页面的第一次切换照样重建**。所以标记要在
+            #     页面刚加载后就打，并且**第一次**切换就验。
+            MARK = ("""() => { let i = 0;
+                document.querySelectorAll(
+                  '#kpickbox a, #kslots .kslot, #kslots select, #kaddrow a')
+                  .forEach(e => e.dataset.mk = 'k' + (i++));
+                return i; }""")
+            CHK = ("""() => [...document.querySelectorAll(
+                  '#kpickbox a, #kslots .kslot, #kslots select, #kaddrow a')]
+                  .map(e => e.dataset.mk || 'NEW')""")
             reqs.clear()
             pg.evaluate("() => { document.querySelector('#kcv')"
                         ".dataset.mark = 'keep'; }")
+            _n_mk = pg.evaluate(MARK)
+            assert _n_mk >= 5, '控件只找到 %d 个，这条判据怕是没扫到' % _n_mk
             pg.locator('#kslots .kssel[data-j="1"]').select_option('kdj')
             pg.wait_for_timeout(1400)
+            _mk = pg.evaluate(CHK)
+            assert 'NEW' not in _mk, \
+                ('换一个副图指标重建了 %d 个控件（%r）—— 这三块没有一块跟着'
+                 '指标变（工具条是设置+主图开关、槽位是下拉框+⚙+×、'
+                 '「+副图」只跟个数有关），换掉它们就是把用户刚点的那个'
+                 'select 销毁重建：焦点没了、控件重绘，屏幕上就是闪一下'
+                 % (_mk.count('NEW'), _mk))
             _heavy = [u for u in reqs if '/api/stock/profile' in u
                       or '/api/stock/finance' in u or '/api/stock/peers' in u]
             assert not _heavy, \
@@ -14365,7 +14468,41 @@ def t_stock_multi_sub():
             assert any(t.startswith('K ') for t in drew) \
                 and not any(t.startswith('DIF') for t in drew), \
                 '换成 KDJ 之后画的还是 MACD：%r' % drew[:8]
-            notes.append('换指标只重取指标接口、DOM 不重建')
+            notes.append('换指标只重取指标接口、一个控件都不重建')
+
+            # ★ 另外两条路径**各自钉各自的规矩**（同实盘页 quiet/全量那条）：
+            #   主图开关只许动工具条、加副图只许动槽位层与「+副图」行 ——
+            #   只钉"换指标不重建"的话，把判据写成"永远不重建"也全绿，
+            #   而那会让加/删副图之后 `data-j` 不重排（换错槽位且不报错）。
+            pg.evaluate(MARK)
+            pg.locator('#kpickbox a.kmain[data-i="boll"]').click()
+            pg.wait_for_timeout(1400)
+            _mk2 = pg.evaluate(CHK)
+            _tool = pg.evaluate("""() => [...document.querySelectorAll('#kpickbox a')]
+                .map(e => e.dataset.mk || 'NEW')""")
+            _slot = pg.evaluate("""() => [...document.querySelectorAll('#kslots .kslot')]
+                .map(e => e.dataset.mk || 'NEW')""")
+            assert 'NEW' in _tool, '主图开关没更新工具条（按钮的选中态不会变）'
+            assert 'NEW' not in _slot, \
+                '主图开关把副图那几组控件也重建了：%r —— 它们跟主图无关' % _slot
+            pg.evaluate(MARK)
+            pg.locator('#kaddrow #kadd').click()
+            pg.wait_for_timeout(1400)
+            _tool2 = pg.evaluate("""() => [...document.querySelectorAll('#kpickbox a')]
+                .map(e => e.dataset.mk || 'NEW')""")
+            _slot2 = pg.evaluate("""() => [...document.querySelectorAll('#kslots .kslot')]
+                .map(e => e.dataset.mk || 'NEW')""")
+            assert 'NEW' in _slot2, \
+                ('加了一个副图但槽位层没重建 —— 新槽位的 data-j 不重排的话，'
+                 '换指标会换错那个槽位，而它不报错')
+            assert 'NEW' not in _tool2, \
+                '加副图把工具条也重建了：%r —— 主图那两个开关没有变' % _tool2
+            notes.append('主图开关只动工具条 · 加副图只动槽位层')
+            # 收拾回原样，后面的断言照旧从两个槽位起步
+            pg.locator('#kslots .ksdel[data-j="2"]').click()
+            pg.wait_for_timeout(1200)
+            pg.locator('#kpickbox a.kmain[data-i="boll"]').click()
+            pg.wait_for_timeout(1200)
 
             # ---- ④ 加 / 删槽位，到上限要说一句 ----
             for _ in range(3):
@@ -14775,46 +14912,73 @@ def t_indicator_plaza():
                 ('主图页签列的不是主图那几个：%r / 应为 %r' % (ids, want_main))
             pg.locator('#tabs .itab[data-t="sub"]').click()
             pg.wait_for_timeout(1500)
+            # 🔴 副图**一页放不下**（每页 9 个），所以判据是「翻完所有页
+            #   刚好覆盖服务端那份清单、顺序也对」——只验第一页的话，
+            #   第 2 页漏掉一个不会有人发现（而它不报错）。
+            #   ★ 这比原来那条"一页必须等于全部"更强，也不会因为以后调
+            #     每页个数就过期。
+            # 🔴 副图**一页放不下**（每页 9 个），所以判据要**翻完所有页**：
+            #   只验第一页的话，第 2 页少一张卡不会有人发现（而它不报错）。
+            #   ★ 逐卡那几条内容断言也跟着进循环 —— 它们对**每一页**都该成立，
+            #     留在外面的话会去找不在当前页上的卡，表现是 30 秒超时、
+            #     看着像页面坏了（实测踩过）。
+            ids, seen, blank = [], 0, []
+            while True:
+                cur = pg.evaluate(
+                    "() => [...document.querySelectorAll('.icard')]"
+                    ".map(e => e.dataset.i)")
+                ids += cur
+                for d in [x for x in defs if x['id'] in cur]:
+                    card = pg.locator('.icard[data-i="%s"]' % d['id'])
+                    t = card.inner_text()
+                    assert d['short'] in t and d['desc'][:8] in t, \
+                        '%s 这张卡缺短名或说明' % d['id']
+                    fml = card.locator('.ifml').inner_text().strip()
+                    assert fml and fml != '（略）' \
+                        and d['formula'].split('\n')[0][:10] in fml, \
+                        ('%s 没写出公式（广场要回答"怎么算的"）：%r'
+                         % (d['id'], fml))
+                    for a in d['params']:
+                        assert a['label'] in t, \
+                            '%s 少了参数「%s」' % (d['id'], a['label'])
+                    dots = card.locator('.idot').count()
+                    n_line = len([x for x in d['series'] if x['style'] != 'zero'])
+                    assert dots == n_line, \
+                        ('%s 的色块 %d 个、实际要画 %d 条线 —— 对不上的话，'
+                         '"图上哪条线是哪个"就只能靠猜' % (d['id'], dots, n_line))
+                # 🔴 图**必须真的画了**：判据是画布上的非透明像素。
+                #   只查 <canvas> 在不在的话，画崩了（尺寸算错/坐标 NaN）
+                #   表现就是一张空白画布，而它不报错。
+                blank += [x for x in pg.evaluate(
+                    """() => [...document.querySelectorAll('.icv')]
+                    .map(cv => {const g = cv.getContext('2d');
+                      const d = g.getImageData(0, 0, cv.width, cv.height).data;
+                      let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+                      return [cv.dataset.i, n];})""") if x[1] < 3000]
+                nxt = pg.locator('#inext')
+                if not nxt.count() or 'off' in (nxt.get_attribute('class') or ''):
+                    break
+                seen += 1
+                assert seen < 20, '翻页翻不完 —— 「下一页」没有终点'
+                nxt.click()
+                pg.wait_for_timeout(1400)
+            assert not blank, '这几张卡是空白的：%r' % blank
+            assert ids == want_sub, \
+                ('把所有页翻完列的不是副图那几个：%r / 应为 %r' % (ids, want_sub))
+            assert seen >= 1, \
+                ('副图只有一页 —— "翻完所有页"这条判据是空转的'
+                 '（共 %d 个）' % len(want_sub))
+            pg.goto(base + '/indicators.html?tab=sub', wait_until='networkidle')
+            pg.wait_for_selector('.icard', timeout=40000)
+            pg.wait_for_timeout(1200)
             ids = pg.evaluate(
                 "() => [...document.querySelectorAll('.icard')]"
                 ".map(e => e.dataset.i)")
-            assert ids == want_sub, \
-                ('副图页签列的不是副图那几个：%r / 应为 %r' % (ids, want_sub))
             # 顶栏点亮的是**父级**（个股），不是它自己：NAV 里没有这一项，
             # 传一个不存在的 key 会让整条顶栏一个都不亮
             assert '个股' in pg.locator('#top .btn.nav.on').inner_text(), \
                 '子页没点亮父级「个股」：%s' % pg.locator('#top .btn.nav.on').inner_text()
 
-            # ---- ② 每张卡：公式 / 参数 / 色块 / 真图 ----
-            for d in [x for x in defs if x['panel'] == 'sub']:
-                card = pg.locator('.icard[data-i="%s"]' % d['id'])
-                t = card.inner_text()
-                assert d['short'] in t and d['desc'][:8] in t, \
-                    '%s 这张卡缺短名或说明' % d['id']
-                fml = card.locator('.ifml').inner_text().strip()
-                assert fml and fml != '（略）' \
-                    and d['formula'].split('\n')[0][:10] in fml, \
-                    ('%s 没写出公式（广场要回答"怎么算的"）：%r'
-                     % (d['id'], fml))
-                for a in d['params']:
-                    assert a['label'] in t, \
-                        '%s 少了参数「%s」' % (d['id'], a['label'])
-                dots = card.locator('.idot').count()
-                n_line = len([x for x in d['series'] if x['style'] != 'zero'])
-                assert dots == n_line, \
-                    ('%s 的色块 %d 个、实际要画 %d 条线 —— 对不上的话，'
-                     '"图上哪条线是哪个"就只能靠猜' % (d['id'], dots, n_line))
-            # 🔴 图**必须真的画了**：判据是画布上的非透明像素。
-            #   只查 <canvas> 在不在的话，画崩了（尺寸算错/坐标 NaN）
-            #   表现就是一张空白画布，而它不报错。
-            px = pg.evaluate("""() => [...document.querySelectorAll('.icv')]
-                .map(cv => {const g = cv.getContext('2d');
-                  const d = g.getImageData(0, 0, cv.width, cv.height).data;
-                  let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
-                  return [cv.dataset.i, n];})""")
-            blank = [x for x in px if x[1] < 3000]
-            assert len(px) == len(want_sub) and not blank, \
-                '这几张卡是空白的：%r（共 %d 张）' % (blank, len(px))
             notes.append('两个页签各列各的（主图 %d / 副图 %d），图都真画了'
                          % (len(want_main), len(want_sub)))
 
@@ -14897,12 +15061,31 @@ def t_indicator_plaza():
             pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
             pg.wait_for_selector('#kcv', timeout=40000)
             pg.wait_for_timeout(800)
-            # ★ 入口在「⚙ 参数」弹窗里（改指标的地方），先点开
+            # ★ 入口在工具条那个**齿轮**里（用户 2026-09-16："现在找不到指标
+            #   广场的入口了……个股页面里加个设置按钮（齿轮），可以在里面
+            #   进入指标广场"）。入口一直在，但那个按钮当时叫「⚙ 参数」、
+            #   而广场链接排在弹窗**最底下**跟「恢复默认参数」挤一起 ——
+            #   **一个叫"参数"的按钮，没人会指望里面有"都支持哪些指标"**。
+            _gear = pg.locator('#kparam').inner_text()
+            assert '⚙' in _gear and '参数' not in _gear, \
+                ('工具条那个按钮写的是 %r —— 它管的不只是参数（里面还有'
+                 '指标广场），叫"参数"的话人不会去点' % _gear)
             pg.click('#kparam')
             pg.wait_for_timeout(400)
             assert pg.locator('#kmore').count() == 1, \
-                '参数弹窗里没有去指标广场的入口 —— '\
+                '设置弹窗里没有去指标广场的入口 —— '\
                 '那里只有参数框，"这个指标是什么、怎么算的"答不了'
+            # 🔴 它要排在**最前面**：排在最后跟「恢复默认参数」挤一起时，
+            #   用户就是找不到（这一轮的起因）。判据取**位置**不是"存在"。
+            _pos = pg.evaluate("""() => {
+                const box = document.querySelector('#kmwrap .stbox');
+                const a = document.querySelector('#kmore');
+                const kids = [...box.children];
+                return [kids.findIndex(c => c.contains(a)), kids.length]; }""")
+            assert _pos[0] <= 1, \
+                ('指标广场的入口排在弹窗第 %d/%d 块 —— 它要在最前面：'
+                 '"都支持哪些指标"是进来之前就想问的，而下面那些只回答'
+                 '"这几个怎么调"' % (_pos[0] + 1, _pos[1]))
             pg.locator('#kmore').click()
             pg.wait_for_selector('.icard', timeout=40000)
             assert '/indicators.html' in pg.url, \
@@ -14962,6 +15145,96 @@ def t_indicator_plaza():
                 ('买点条件表没写方向 —— 金叉是涨上去才成立，'
                  '不写的话会被当成"跌到就买"')
             notes.append('%d 条买点条件逐条对上且标了方向' % len(sigs))
+
+            # ---- ⑤🔴 同一行的几张卡，【图的位置必须一样高】 ----
+            # 用户 2026-09-16："每个图里面公式、说明占的空间和下面图占的
+            #   空间位置相对要固定，不然图不对齐不太好看。"
+            # 说明与公式长短不一，不锁高度的话同一行几张卡的画布各在各的
+            # 高度上 —— 要横向比形态时眼睛得上下找。
+            pg.goto(base + '/indicators.html?tab=sub', wait_until='networkidle')
+            pg.wait_for_selector('.icard .icv', timeout=40000)
+            pg.wait_for_timeout(1500)
+            n_card = pg.locator('.icard').count()
+            assert n_card <= 9, \
+                ('副图一页 %d 张 —— 用户说"6 个或者 9 个已经够了，超出则分页"'
+                 % n_card)
+            rows = pg.evaluate("""() => {
+              const g = {};
+              document.querySelectorAll('.icard').forEach(c => {
+                const cv = c.querySelector('.icv');
+                if(!cv) return;
+                const k = Math.round(c.getBoundingClientRect().top);
+                (g[k] = g[k] || []).push(Math.round(cv.getBoundingClientRect().top));
+              });
+              return g; }""")
+            # 🔴 反向自证：真的有"一行多张"，否则这条判据是空转的
+            wide = [v for v in rows.values() if len(v) > 1]
+            assert wide, '每行只有一张卡（视口 %d 宽），这条判据测不到' % 1500
+            for tops in rows.values():
+                assert len(set(tops)) == 1, \
+                    ('同一行的画布没对齐：%r —— 说明/公式长短不一时，'
+                     '文字区必须锁住高度（.ihead），否则图各在各的高度上' % tops)
+            notes.append('每页 %d 张 · 同一行 %d 张卡的画布 top 完全一致'
+                         % (n_card, max(len(v) for v in rows.values())))
+
+            # ---- ⑥ 文字过长只显示几行，可展开 ----
+            # ★ 「展开」**只在真的被截断时**才露出来 —— 常驻一个点了没变化
+            #   的按钮比不给更糟（同 backLink 那条）。
+            cut = pg.evaluate("""() => [...document.querySelectorAll('.icard')]
+              .map(c => ({id: c.dataset.i,
+                          cut: [...c.querySelectorAll('.iclamp')].some(
+                                 e => e.scrollHeight - e.clientHeight > 2),
+                          btn: !c.querySelector('.imore').hidden}))""")
+            for r in cut:
+                assert r['cut'] == r['btn'], \
+                    ('%s 截断=%s 而「展开」可见=%s —— 两者必须一致：没截断还'
+                     '摆个按钮是"点了没变化"，截断了不给按钮是把内容藏没了'
+                     % (r['id'], r['cut'], r['btn']))
+            # 🔴 反向自证：真有一张被截断，否则上面那条是"全 False == 全 False"
+            hit = [r['id'] for r in cut if r['cut']]
+            assert hit, \
+                ('没有一条说明/公式被截断 —— 收起的行数给得太宽松，'
+                 '这条功能和它的判据都是空转的')
+            # 🔴 截断必须是 `-webkit-line-clamp` 干的（**按整行切**），
+            #   不能是别的机制把它压扁的。踩过：`.ihead` 写成 flex 容器时，
+            #   flex 子项的 display 被 blockify，`-webkit-box` 当场变成
+            #   `flow-root` —— **line-clamp 整个失效**，而 flex 仍然会把超出
+            #   的子项压扁，于是"看着还是截断了、展开也还能用"，
+            #   **只是文字在中间被硬切**。判据取"可见高度是行高的整数倍"。
+            geo = pg.evaluate("""() => [...document.querySelectorAll('.icard .iclamp')]
+              .filter(e => e.scrollHeight - e.clientHeight > 2)
+              .map(e => { const c = getComputedStyle(e);
+                return {id: e.closest('.icard').dataset.i, disp: c.display,
+                        h: e.clientHeight, lh: parseFloat(c.lineHeight),
+                        pad: parseFloat(c.paddingTop) + parseFloat(c.paddingBottom)}; })""")
+            assert geo, '没量到被截断的元素'
+            # ★ 判据**不能用 `display` 是不是 `-webkit-box`**：Chrome 对这个
+            #   legacy 值的 computed style 报的是 `flow-root`（正常态实测就是
+            #   这样），拿它当判据在正常代码上就先挂了。
+            for r in geo:
+                lines = (r['h'] - r['pad']) / r['lh']
+                assert abs(lines - round(lines)) < 0.12, \
+                    ('%s 截断后可见 %.2f 行 —— 不是整行，文字被切了一半'
+                     % (r['id'], lines))
+            card = pg.locator('.icard:has(.imore:not([hidden]))').first
+            h0 = card.bounding_box()['height']
+            card.locator('.imorea').click()
+            pg.wait_for_timeout(350)
+            h1 = card.bounding_box()['height']
+            assert h1 > h0 + 2, \
+                '点「展开」卡片没变高（%.0f -> %.0f）—— 点了没反应' % (h0, h1)
+            assert '收起' in card.locator('.imorea').inner_text(), \
+                '展开之后按钮还写着"展开" —— 人不知道能收回去'
+            assert not pg.evaluate("""(c) => {
+                const e = document.querySelector('.icard[data-i='+c+'] .ifml');
+                return e.scrollHeight - e.clientHeight > 2; }""",
+                card.get_attribute('data-i')), '展开之后公式还被截着'
+            card.locator('.imorea').click()
+            pg.wait_for_timeout(350)
+            assert abs(card.bounding_box()['height'] - h0) < 3, \
+                '再点一次没收回去'
+            notes.append('长文本收起可展开（%s 被截断，展开 %.0f→%.0f px）'
+                         % ('/'.join(hit), h0, h1))
             assert not errs, 'JS 报错：%r' % errs[:3]
             br.close()
     finally:

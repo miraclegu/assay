@@ -813,3 +813,21 @@ a.spl.accent{color:var(--accent)}
       vertical-align:middle;margin-right:4px}
 .ipar{font-size:11px;color:var(--dim)}
 .ipar b{color:var(--fg)}
+/* 🔴 **文字区高度固定，图才对得齐**（用户 2026-09-16："每个图里面公式、
+   说明占的空间和下面图占的空间位置相对要固定，不然图不对齐不太好看"）。
+   说明与公式长短不一，不锁高度的话同一行几张卡的画布各在各的高度上 ——
+   要横向比较形态时眼睛得上下找。
+   ★ 锁的是**这一整块**（说明 + 公式 + 参数）而不是逐项：逐项锁的话
+     三块都留白，卡片会虚高一大截。 */
+/* 🔴 **不能是 flex 容器** —— flex 子项的 `display` 会被 blockify，
+   `-webkit-box` 当场变成 `flow-root`，于是 `-webkit-line-clamp` **整个失效**
+   而不报错：公式照样摊开 5 行、「展开」一个都不出现（实测踩过，
+   是量 `getComputedStyle().display` 才定位到的）。 */
+.ihead{min-height:150px}
+/* 超出的部分收起来，点「展开」再看全 —— 把十几行的公式全摊开，
+   一屏就只剩两张卡了。 */
+.iclamp{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
+.idesc.iclamp{-webkit-line-clamp:2}
+.ifml.iclamp{-webkit-line-clamp:3}
+.iclamp.on{display:block;-webkit-line-clamp:unset;overflow:visible}
+.imore{font-size:11px;padding-top:2px}

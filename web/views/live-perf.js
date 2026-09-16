@@ -44,12 +44,28 @@ let LPBCH = null, LPXD = null, LPBCH_NOTE = '';
      只有一处状态，不会出现"既选了上证又开着策略"这种要额外记的组合。 */
 const LPB_STRAT = 'strat';
 
-let LPB = (() => {
+/* 🔴🔴 **按账户存**（`lvbench:<aid>`）。用户 2026-09-16："不同实盘账户的
+   业绩曲线比较基准会互相同步。每个账户设置了自己的比较基准之后应该是要
+   记忆住的，不应该会被另一个账户覆盖。"
+   原来是一个全局 key，于是在 A 账户选了红利 ETF，切到 B 账户也变成它、
+   而且**回写**成 B 的选择 —— 两个账户互相覆盖，谁最后打开谁说了算。
+   而不同账户跑的是不同策略（小市值 vs 红利），要比的对象本来就不一样。
+   ★ 所以 `LPB` **不能在文件加载时初始化** —— 那时还不知道是哪个账户。
+     改成进入某个账户的业绩页时再读（`lpbLoad`）。 */
+let LPB = [], LPB_AID = null;
+function lpbKey(aid){ return 'lvbench:' + (aid || ''); }
+function lpbLoad(aid){
+  LPB_AID = aid;
+  let v = '';
   try {
-    const v = localStorage.getItem('lvbench') || '';
-    return (v === LPB_STRAT || /^(sh|sz)\d{6}$/.test(v)) ? [v] : [];
-  } catch (e) { return []; }
-})();
+    /* ★ 读不到账户自己的键时**退回那个全局旧键**（只读不写）：
+       按账户存是后来改的，老用户已经选过的那个不该凭空消失。
+       一旦他在这个账户上选过一次，就以账户键为准。 */
+    v = localStorage.getItem(lpbKey(aid));
+    if (v == null) v = localStorage.getItem('lvbench') || '';
+  } catch (e) { v = ''; }
+  LPB = (v === LPB_STRAT || /^(sh|sz)\d{6}$/.test(v)) ? [v] : [];
+}
 /* 手填的那个基准（不在预设清单里）的**名字** —— 由服务端给
    （`equity` 的 `bench_meta`）。页面只存 symbol：名字存前端的话，
    标的改过名就会一直显示旧名，而它不报错。 */
@@ -58,8 +74,12 @@ let LPB_META = {};
 function lpbSet(code){
   LPB = code ? [code] : [];
   try {
-    if(code) localStorage.setItem('lvbench', code);
-    else localStorage.removeItem('lvbench');
+    /* 🔴 写的是**这个账户**那把键。写全局键的话，下一个账户一打开就被
+       覆盖掉（这一轮的起因）。
+       ★ 清掉时写一个空串而不是 `removeItem`：`removeItem` 之后
+         `getItem` 返回 null，`lpbLoad` 又会退回全局旧键 ——
+         表现是"点了『不比』，切走再回来它又回来了"。 */
+    localStorage.setItem(lpbKey(LPB_AID), code || '');
   } catch (e) { /* 隐私模式下写不了 —— 不该因此打挂整页 */ }
 }
 /* 请求时一次取全部（见 showPerf 里的注释）。真正可选哪些由**服务端**给
@@ -127,6 +147,7 @@ function lpbReload(aid){
 }
 
 function showPerf(aid){
+  lpbLoad(aid);                 /* 🔴 基准是**按账户**记的，见 lpbKey */
   const b = $('#main');
   $('#cat').innerHTML = ''; $('#vp').innerHTML = '';
   b.innerHTML = '<div class="none">读取中…（要重放整条权益曲线）</div>';

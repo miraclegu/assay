@@ -816,8 +816,13 @@ function kPickHtml() {
      "…先去掉一个｜主图 均线 布林带"。
      ★ 所以提示要跟着**它说的那个按钮**走（挪到图下面那一行），
        而不是挤在工具条里跟别的标签做邻居。 */
+  /* ★ 叫「设置」不叫「参数」：用户 2026-09-16 反馈"现在找不到指标广场的
+       入口了……个股页面里加个设置按钮（齿轮），可以在里面进入指标广场"。
+     入口一直在这个弹窗里，但它叫「参数」、而广场入口又排在最底下跟
+     「恢复默认参数」挤一起 —— **一个叫"参数"的按钮，没人会指望里面有
+     "都支持哪些指标"**。现在弹窗第一行就是广场入口。 */
   return `<a href="#" class="lvtag" id="kparam"
-      title="改指标参数（弹窗，不动布局）">⚙ 参数</a>`;
+      title="指标设置：改参数、看全部指标说明（弹窗，不动布局）">⚙ 设置</a>`;
 }
 
 /* 「+ 副图」那一行：**贴在最后一个副图下面**（用户："添加副图的按钮应该
@@ -856,7 +861,8 @@ function kSlotHtml() {
         ${subs.map(d => `<option value="${d.id}"${d.id === id ? ' selected' : ''}
           >${esc(d.short)}</option>`).join('')}
       </select>
-      <a href="#" class="ksgear" data-i="${id}" title="改它的参数">⚙</a>
+      <a href="#" class="ksgear" data-j="${j}" data-i="${id}"
+         title="改它的参数">⚙</a>
       <a href="#" class="ksdel" data-j="${j}" title="去掉这个副图">×</a>
     </div>`).join('');
 }
@@ -929,18 +935,26 @@ function kModalHtml() {
      而它不报错（第一版就是这么挂的，截图上一眼看出来）。 */
   return `<div id="kmwrap" class="stmodal">
     <div class="stbox" style="max-width:720px">
-      <h3>⚙ 指标参数
-        <span class="lvwhy">改完立刻生效 · 存在本机、不进 URL</span>
+      <h3>⚙ 指标设置
         <span style="flex:1"></span>
         <a href="#" class="lvtag" id="kmclose">关闭</a></h3>
+      <!-- 🔴 指标广场的入口放**第一行**，不排在底部跟「恢复默认参数」挤
+           一起：用户找不到它（"现在找不到指标广场的入口了"）。
+           这一格回答的是"都支持哪些指标"，而下面那些只回答"这几个怎么调"
+           —— 前者是进来之前就想问的。 -->
+      <div class="lvform" style="margin:2px 0 10px;gap:8px;align-items:center">
+        <a class="lvtag on" id="kmore" href="/indicators.html?code=${encodeURIComponent(CODE)}"
+           title="指标广场：都支持什么、怎么算的、能用在哪">📊 指标广场 ↗</a>
+        <span class="lvwhy">看全部指标：怎么算的、长什么样、能不能拿来当买点</span>
+      </div>
+      <h4 style="margin:0 0 4px">参数
+        <span class="lvwhy">改完立刻生效 · 存在本机、不进 URL</span></h4>
       <div class="lvwhy">这里只列<b>当前用着的</b>指标。参数是"我习惯看几日"
         的个人设置，所以存 localStorage 而不进 URL（URL 是拿去分享的）。</div>
-      ${rows || '<div class="none">当前没有用到带参数的指标</div>'}
+      ${rows || '<div class="none">当前用着的指标都没有参数可调</div>'}
       <div class="lvmsg" id="kmmsg"></div>
       <div class="lvform" style="margin-top:8px;gap:6px">
         <a href="#" class="lvtag" id="kprst">恢复默认参数</a>
-        <a class="lvtag" id="kmore" href="/indicators.html?code=${encodeURIComponent(CODE)}"
-           title="指标广场：都支持什么、怎么算的、能用在哪">📊 全部指标说明 ↗</a>
       </div>
     </div></div>`;
 }
@@ -966,14 +980,55 @@ async function reloadInd() {
   }
   IND = ind.error ? null : ind.rows;
   KPANELS = ind.error ? [] : (ind.panels || []);
+  /* 🔴 **只重建真的变了的那一块**（同实盘页 `livePatch` / `lvSig` 那条）。
+     用户 2026-09-16："切换副图时整个页面会闪一下。这种局部切换图、数据的
+     都不应该刷新整个页面。"
+
+     换一个副图指标时，这三块**没有一块跟着变**：工具条是「⚙ 设置 + 主图
+     开关」、槽位层是「下拉框 + ⚙ + ×」（下拉框的 value 本来就是用户刚选
+     的那个）、「+ 副图」那行只跟槽位**个数**有关。无条件 `innerHTML` 换掉
+     它们的代价是：**用户刚操作的那个 `<select>` 被销毁重建** —— 焦点没了、
+     原生控件重绘，看上去就是闪一下。
+     ★ 判据是**签名**不是"猜哪次该重建"：主图看 KMAIN、槽位看个数
+       （换指标不改个数，加/删才改；删了之后 `data-j` 要重排，所以必须重建）。 */
+  /* 🔴 签名**从 DOM 读**，不从状态变量读（也不另存一份"上次渲染成什么样"）。
+     首屏那几块是 `load()` 里拼模板直接吐出来的、根本不经过这个函数 ——
+     存一份"上次的签名"就会在**每次打开页面的第一次切换**上说谎（初值
+     永远不等），于是第一次切换照样整块重建、照样闪一下。实测踩过。
+     ★ 从 DOM 读的话不需要任何地方去"记得同步"：页面现在长什么样是事实，
+       而记录会过期（同「判据永远是现在的状态，不是记录」那条）。 */
+  const nSlot = KINDS.length;
   const cv = $('#kcv');
-  if (cv) cv.style.height = (KINDS.length ? 390 + 110 * KINDS.length : 420) + 'px';
+  /* 高度只在真的不同时赋值 —— 同值赋 style 也会让浏览器重新算一遍布局。 */
+  if (cv) {
+    const h = (nSlot ? 390 + 110 * nSlot : 420) + 'px';
+    if (cv.style.height !== h) cv.style.height = h;
+  }
   const box = $('#kpickbox');
-  if (box) box.innerHTML = kPickHtml() + kMainHtml();
+  if (box) {
+    /* ★ 两边都排序再比：`KMAIN` 是**点击顺序**，而 DOM 里按 defs 的顺序渲染
+       —— 不排的话 ['boll','ma'] 与 'ma,boll' 永远不等，等于没有这个判据。 */
+    const domMain = [...box.querySelectorAll('a.kmain.on')]
+      .map(a => a.dataset.i).sort().join(',');
+    if (domMain !== KMAIN.slice().sort().join(','))
+      box.innerHTML = kPickHtml() + kMainHtml();
+  }
   const sl = $('#kslots');
-  if (sl) sl.innerHTML = kSlotHtml();
-  const ar = $('#kaddrow');
-  if (ar) ar.innerHTML = kAddRowHtml();
+  if (sl && sl.querySelectorAll('.kslot').length !== nSlot) {
+    /* 个数变了才重建 —— 删一个之后 `data-j` 要整体重排，非重建不可。 */
+    sl.innerHTML = kSlotHtml();
+    const ar = $('#kaddrow');
+    if (ar) ar.innerHTML = kAddRowHtml();   /* 它只显示 n/KMAX，跟着个数走 */
+  } else if (sl) {
+    /* 个数没变：**一个元素都不碰**，只把 value 对齐（用户手动选的那个本来
+       就对，这一步是给"程序化改了 KINDS"兜底，幂等、不引起重绘）。 */
+    KINDS.forEach((id, j) => {
+      const e = sl.querySelector('.kssel[data-j="' + j + '"]');
+      if (e && e.value !== id) e.value = id;
+      const g = sl.querySelector('.ksgear[data-j="' + j + '"]');
+      if (g && g.dataset.i !== id) g.dataset.i = id;
+    });
+  }
   /* 弹窗**开着才重渲染**：关着时它是空的，渲染进去等于把它打开 */
   if (KMODAL) kModal(true);
   KGEO = redraw();

@@ -40,7 +40,10 @@ let TAB = qs('tab') === 'sub' ? 'sub' : 'main';
    ★ `per` 放进 URL（而不是写死）：既能按屏幕大小调，
      也让"分页真的在工作"可以被验证。 */
 let PAGE = Math.max(1, +(qs('page') || 1));
-let PER = Math.min(60, Math.max(1, +(qs('per') || 12)));
+/* ★ 默认 **9**（3×3）：用户 2026-09-16"副图指标一页展示 6 个或者 9 个
+   已经够了，超出则分页"。`?per=` 仍可覆盖 —— selftest 靠它把每页压到 3
+   才测得到分页（真实只有十来个指标，不压小的话那段永远是"第 1/1 页"）。 */
+let PER = Math.min(60, Math.max(1, +(qs('per') || 9)));
 let Q = qs('q') || '';
 let D = null, BARS = null, ROWS = null, PANELS = [];
 /* 上一次取 K 线用的 (code, n) —— 换页签/翻页/搜索时**不重取 K 线**，
@@ -106,6 +109,9 @@ async function load() {
   pg.innerHTML = head(k, ind) + ipCards(items) + sigTable() + foot();
   wire();
   draw();
+  /* 🔴 量截断必须在**画完之后**：`ipCards` 刚填进 DOM 时布局还没定，
+     scrollHeight 量出来是 0，于是一个「展开」都不会出现（而它不报错）。 */
+  ipClamp();
 }
 
 function head(k, ind) {
@@ -176,8 +182,12 @@ function ipCard(d, i) {
     + (d.panel === 'main' ? (d.id === 'boll' ? '&main=ma,boll' : '')
                           : '&sub=' + encodeURIComponent(d.id))
     + '" data-i="' + d.id + '">在个股页看 ›</a></h4>'
-    + '<div class="lvwhy">' + esc(d.desc) + '</div>'
-    + '<div class="ifml">' + esc(d.formula || '（略）') + '</div>'
+    /* 🔴 说明 / 公式 / 参数包进**定高**的 `.ihead` —— 不锁的话文字长短
+       不一，同一行几张卡的画布各在各的高度上，横向比形态时眼睛要上下找
+       （用户原话："公式、说明占的空间和下面图占的空间位置相对要固定"）。 */
+    + '<div class="ihead">'
+    + '<div class="lvwhy idesc iclamp">' + esc(d.desc) + '</div>'
+    + '<div class="ifml iclamp">' + esc(d.formula || '（略）') + '</div>'
     + '<div class="ipar">参数：' + ((d.params || []).length
         ? (d.params).map(a => esc(a.label) + ' <b>' + a.default + '</b>'
             + '<span class="lvwhy">(' + a.min + '~' + a.max + ')</span>').join('　')
@@ -187,6 +197,11 @@ function ipCard(d, i) {
         + esc(x.label) + (x.style === 'bar' || x.style === 'vbar'
                           ? '<span class="lvwhy">柱</span>' : ''))
         .join('　') + '</div>'
+    /* 「展开」只在**真的被截断**时才显示（渲染后量 scrollHeight，见 ipClamp）
+       —— 常驻一个点了没变化的按钮比不给更糟（同 backLink 那条）。 */
+    + '<div class="imore" data-i="' + d.id + '" hidden>'
+    + '<a href="#" class="lvtag imorea">展开 ▾</a></div>'
+    + '</div>'
     + '<div class="cvbox" style="margin-top:6px">'
     + '<canvas class="icv" data-i="' + d.id
     + '" style="width:100%;height:190px;display:block"></canvas></div>'
@@ -267,8 +282,39 @@ function draw() {
   });
 }
 
+/* 「展开」按钮：**只在文字真的被截断时才露出来**。
+   常驻一个点了没变化的按钮比不给更糟（同 backLink 那条），而"截没截断"
+   只有渲染完量一下才知道 —— 同一段说明在宽屏上三行装得下、窄屏上装不下。
+   🔴 所以它也要跟着 resize 重算：窄屏截断了、拉宽之后按钮还留着的话，
+     点了什么都不会变。 */
+function ipClamp() {
+  $$('.icard').forEach(card => {
+    const more = card.querySelector('.imore');
+    if (!more) return;
+    const cut = [...card.querySelectorAll('.iclamp')]
+      .some(e => !e.classList.contains('on')
+                 && e.scrollHeight - e.clientHeight > 2);
+    /* 已经展开的那张：按钮要留着（收起来用），别因为"现在不截断"就藏掉。 */
+    const open = !!card.querySelector('.iclamp.on');
+    more.hidden = !(cut || open);
+  });
+}
+
 function wire() {
   wireStarsAll();
+  /* 展开 / 收起：事件委托绑在**稳定的容器**上 —— 卡片是 innerHTML 整块
+     填进去的，逐个绑的话翻一页就全没 handler（点了没反应且不报错）。 */
+  const cb = $('#pg');
+  if (cb) cb.onclick = ev => {
+    const a = ev.target.closest('.imorea');
+    if (!a) return;
+    ev.preventDefault();
+    const card = a.closest('.icard');
+    const on = !card.querySelector('.iclamp.on');
+    card.querySelectorAll('.iclamp').forEach(e => e.classList.toggle('on', on));
+    a.textContent = on ? '收起 ▴' : '展开 ▾';
+    ipClamp();
+  };
   const go = () => {
     const v = ($('#icode').value || '').trim();
     if (!v) return;
@@ -304,5 +350,8 @@ function wire() {
     };
   }
 }
-window.addEventListener('resize', () => { if (BARS) draw(); });
+/* 🔴 resize 之后**两件事都要做**：重画（画布是按 CSS 像素算的）+ 重算
+   截断（同一段说明在宽屏三行装得下、窄屏装不下）。只重画的话，拉宽之后
+   「展开」还留在那儿，点了什么都不会变（同"给一个点了没反应的按钮"）。 */
+window.addEventListener('resize', () => { if (BARS) draw(); ipClamp(); });
 </script>
