@@ -489,8 +489,10 @@ def _alt_name(sym, root=None):
 
 
 # ---------------------------------------------------------------- K 线
-def kline(code, n=250, fq='bfq', end=None, off=0, root=None):
-    """日 K。`fq`：'bfq' 不复权（默认）/ 'hfq' 后复权。
+def kline(code, n=250, fq=None, end=None, off=0, root=None):
+    """日 K。`fq`：'bfq' 不复权 / 'qfq' 前复权 / 'hfq' 后复权。
+
+    **不给 `fq` = 让服务端按标的类别定**：ETF 前复权、其余不复权（见下）。
 
     `off` = **往回翻几根**（跳过最新的 off 根）。K 线图左右移动用它。
     🔴 **不用「把 end 往前挪」来实现翻页** —— 那要前端自己算交易日，
@@ -504,8 +506,22 @@ def kline(code, n=250, fq='bfq', end=None, off=0, root=None):
       预热数据，而"少取了 60 根导致头部均线是错的"不会报错，只是曲线不对。
     ★ 后复权 OHLC 由不复权 × hfq_factor 推得（面板只存 close_hfq）。
     """
-    if fq not in ('bfq', 'hfq'):
-        raise StockError("fq 只能是 bfq / hfq，收到 %r" % fq)
+    # 🔴 **默认口径由服务端定**（不给 `fq` 时）：ETF 默认**前复权**，
+    #   其余仍是不复权。
+    #   ★ 为什么 ETF 不一样：它分红频繁（红利 ETF 的因子 1.0 -> 1.81），
+    #     不复权的图上是一串**假跌幅**；而后复权的纵轴写着 6.11，
+    #     人在券商那儿看到的现价却是 3.37 —— 对不上。前复权两头都占：
+    #     最新一根就是当前实际价，历史按分红往下调、没有假跌幅。
+    #   ★ 股票保持不复权：那是这一页原有的决定（对着券商软件看的是它，
+    #     且 `open` 就是当日集合竞价成交价），用户没要求改，不顺手扩大。
+    #   🔴 默认放在**服务端**而不是页面：页面要先拿到 profile 才知道这是
+    #     ETF 还是股票，那就得把 K 线那一发排到它后面（现在十个接口是
+    #     并发的）—— 而"多等一个往返"是看得见的（同「可选清单由服务端给」
+    #     那条：只有服务端知道的事就别让前端猜）。
+    if not fq:
+        fq = 'qfq' if (alt_kind(code, root) or ('', ''))[0] == 'etf' else 'bfq'
+    if fq not in ('bfq', 'qfq', 'hfq'):
+        raise StockError("fq 只能是 bfq / qfq / hfq，收到 %r" % fq)
     n = max(10, min(int(n or 250), 3000))
     off = max(0, int(off or 0))
     c = con()
@@ -533,15 +549,29 @@ def kline(code, n=250, fq='bfq', end=None, off=0, root=None):
     if not rows:
         raise StockError('取不到 %s 的日线' % jc)
     rows = list(reversed(rows))
+    # 🔴🔴 **前复权的基准是"今天"，不是"这一屏的最后一根"。**
+    #   `qfq = 不复权 × 因子 ÷ 【全局最新】因子` —— 拿窗口内最后一根的因子
+    #   当分母的话，往回翻页时同一天的价格会**跟着翻页变**，
+    #   而它不报错（图看着一切正常，只是纵轴悄悄换了一套刻度）。
+    #   所以这里单独查一次全局最新因子，不复用上面那批行。
+    qf = 1.0
+    if fq == 'qfq':
+        r0 = c.execute(
+            'SELECT hfq_factor FROM %s WHERE jq_code = ? AND hfq_factor IS NOT NULL'
+            ' ORDER BY date DESC LIMIT 1' % p, [jc]).fetchone()
+        qf = (r0[0] if r0 and r0[0] else 1.0) or 1.0
     out = []
     for r in rows:
         f = r[6] or 1.0
         o, h, l_, cb = r[1], r[2], r[3], r[4]
-        if fq == 'hfq':
-            o = o * f if o is not None else None
-            h = h * f if h is not None else None
-            l_ = l_ * f if l_ is not None else None
-            cl = r[5] if r[5] is not None else (cb * f if cb is not None else None)
+        if fq in ('hfq', 'qfq'):
+            k = f / qf if fq == 'qfq' else f      # qfq 时 qf 是全局最新因子
+            o = o * k if o is not None else None
+            h = h * k if h is not None else None
+            l_ = l_ * k if l_ is not None else None
+            cl = (r[5] / qf if (fq == 'qfq' and r[5] is not None)
+                  else (r[5] if fq == 'hfq' and r[5] is not None
+                        else (cb * k if cb is not None else None)))
         else:
             cl = cb
         out.append({
@@ -550,6 +580,12 @@ def kline(code, n=250, fq='bfq', end=None, off=0, root=None):
             'volume': r[7], 'amount': r[8], 'change_pct': r[9],
             'turnover': r[10], 'limit_up': bool(r[11]), 'limit_down': bool(r[12]),
             'preclose': _r3(r[13]),
+            # 这一天的**换算系数**（当前坐标价 ÷ 不复权价），bfq 恒 1。
+            # 🔴 给出来是为了让页面能把**买卖点**（成交价是不复权实际价）
+            #   画到同一套坐标上 —— 前端自己再存一份不复权 bars 去比的话，
+            #   就是同一份信息两处算（而且翻页、换区间都要各自跟着变）。
+            'fqk': (round(f / qf, 8) if fq == 'qfq'
+                    else (round(f, 8) if fq == 'hfq' else 1.0)),
         })
     for w in (5, 10, 20, 60):
         _ma(out, w)
@@ -664,7 +700,7 @@ IND_WARM = 120
 IND_DEFAULT = ['macd', 'kdj', 'rsi', 'boll']
 
 
-def indicators(code, n=250, fq='bfq', end=None, off=0, root=None, inds=None):
+def indicators(code, n=250, fq=None, end=None, off=0, root=None, inds=None):
     """按需算一组指标。定义全在 `assay/indicators.py`（唯一正本）。
 
     `inds` 不给时算 `IND_DEFAULT`（MACD/KDJ/RSI/BOLL）——
@@ -692,6 +728,7 @@ def indicators(code, n=250, fq='bfq', end=None, off=0, root=None, inds=None):
     # 🔴 `off` 必须一路传下去 —— 不传的话翻页后副图画的还是最新那一段，
     #   与主图**上下对不上**，而它不报错，看着像"指标和 K 线不同步"。
     k = kline(code, n=n + warm, fq=fq, end=end, off=off, root=root)
+    fq = k['fq']        # 服务端解析后的真实口径（不给时按类别定）
     bars = k['bars']
     m = len(bars)
     out = [{'date': b['date'], 'close': b['close']} for b in bars]

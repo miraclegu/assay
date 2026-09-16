@@ -4605,26 +4605,55 @@ def t_live_perf_tabs():
     return '；'.join(notes)
 
 
+def _kset(pg, open_=True):
+    """个股页的「⚙ 设置」浮窗 —— 主图叠加 / 复权口径 / 坐标 / 指标参数
+    都在里面（2026-09-16 起，用户："全部变成主图的设置选项"）。"""
+    shown = pg.locator('#kmwrap .stbox').count() > 0
+    if open_ and not shown:
+        pg.click('#ktoolbar #kparam')
+        pg.wait_for_selector('#kmwrap .stbox', timeout=8000)
+        pg.wait_for_timeout(300)
+    elif not open_ and shown:
+        pg.locator('#kmclose').click()
+        pg.wait_for_timeout(300)
+
+
 def _kmain(pg, ind, on=True):
     """个股页：把某个**主图**指标叠上去 / 拿下来。
 
-    🔴 这个入口**变过三次**（工具条独立开关 -> 指标面板里那组 ->
-      工具条两个开关 -> 现在的「已选 chip + 「+ 主图」挑」），而要证的事
-      一次没变：默认关 / 开了画布真的变 / 状态进 URL。
-      所以把"怎么点"收进这一个函数 —— 散在各条用例里的话，
-      入口再变一次就要改 N 处（同 `_via_pop` / `_lp_tab` 那两个）。
+    🔴 这个入口**变过五次**（工具条独立开关 -> 指标面板里那组 -> 工具条两个
+      开关 -> chip + 「+ 主图」挑 -> 现在的**浮窗里勾选**），而要证的事一次
+      没变：默认关 / 开了画布真的变 / 状态进 URL。
+      所以把"怎么点"收进这一个函数 —— 散在各条用例里的话，入口再变一次
+      就要改 N 处（同 `_via_pop` / `_lp_tab` 那两个）。
     """
-    chip = pg.locator('#kpickbox .chipw a.kmain[data-i="%s"]' % ind)
-    has = chip.count() > 0
-    if on == has:
-        return
-    if on:
-        pg.click('#kmadd')
-        pg.wait_for_selector('#kmpick .kmpicka[data-i="%s"]' % ind, timeout=6000)
-        pg.locator('#kmpick .kmpicka[data-i="%s"]' % ind).click()
-    else:
-        pg.locator('#kpickbox .chipx[data-x="%s"]' % ind).click()
-    pg.wait_for_timeout(1300)
+    _kset(pg, True)
+    box = pg.locator('#kmwrap .kmain[data-i="%s"]' % ind)
+    assert box.count() == 1, '设置里没有主图指标 %s' % ind
+    if box.is_checked() != on:
+        box.click()
+        pg.wait_for_timeout(1400)
+    # 🔴 **用完就收**：浮窗是个遮罩，开着会把工具条（区间 / 翻页）挡住 ——
+    #   playwright 报的是"另一个元素拦截了点击"，看着像那个按钮坏了。
+    _kset(pg, False)
+
+
+def _kfq(pg, fq):
+    """切价格口径（不复权 / 前复权 / 后复权）—— 它也搬进设置浮窗了。"""
+    _kset(pg, True)
+    if pg.evaluate('()=>FQ') != fq:
+        pg.locator('#kmwrap .fq[data-f="%s"]' % fq).click()
+        pg.wait_for_timeout(2000)
+    _kset(pg, False)
+
+
+def _klog(pg, on=True):
+    """切线性 / 对数坐标 —— 同上。"""
+    _kset(pg, True)
+    if bool(pg.evaluate('()=>KLOG')) != on:
+        pg.locator('#kmwrap #%s' % ('klogt' if on else 'klin')).click()
+        pg.wait_for_timeout(1200)
+    _kset(pg, False)
 
 
 def _lp_tab(pg, name, timeout=90000):
@@ -6411,11 +6440,27 @@ def t_stock():
     # profile 的区间涨幅用的是后复权 —— 不能等于不复权那个
     assert abs(st.profile('601088.SH')['ret_250d'] - rh_) < 0.03, \
         'profile.ret_250d 没用后复权'
-    try:
-        st.kline('601857.SH', fq='qfq')
-        raise AssertionError('前复权应被拒（基准是"今天"，不能做特征）')
-    except st.StockError:
-        pass
+    # 🔴 前复权：**看盘页给、特征与回测不给**（2026-09-16 起）。
+    #   这条断言原来钉的是"`kline` 必须拒绝 qfq" —— 而那把两件事混成了
+    #   一件。要保的是**引擎那条路**不许有前复权（基准是"今天"，每来一次
+    #   分红整条历史重算，拿它做特征就是未来函数）；
+    #   展示层是另一回事，券商软件默认就是它。
+    _q = st.kline('601857.SH', fq='qfq')['bars']
+    _b = st.kline('601857.SH', fq='bfq')['bars']
+    assert abs(_q[-1]['close'] - _b[-1]['close']) < 0.01, \
+        '前复权最新一根该等于当前实际价'
+    # **引擎/feed 那条路一个 qfq 都不许有** —— 判据走 ast，不查字符串
+    #   （注释里提到它也会命中）。
+    import ast as _ast
+    import io as _io
+    for _f in ('assay/feed.py', 'assay/guard.py', 'assay/engine.py',
+               'assay/broker.py'):
+        _src = _io.open(_f, encoding='utf-8').read()
+        _lits = [nd.value for nd in _ast.walk(_ast.parse(_src))
+                 if isinstance(nd, _ast.Constant) and isinstance(nd.value, str)]
+        assert 'qfq' not in _lits, \
+            ('%s 里出现了前复权 —— 它的基准是"今天"，每来一次分红整条历史'
+             '重算一遍，拿它做特征就是未来函数' % _f)
 
     # ---- 6) 财务时序：一个报告期一行，且报告期 ≠ 公告日 ----
     f = st.finance('601857.SH', n=8)
@@ -7106,13 +7151,18 @@ def t_stock_ui():
             #   （副图改成槽位之后，面板整个没了，主图那两个本来就只有两个、
             #   做成下拉反而绕）。要证的仍是那三件事：
             #   默认关 / 开了画布真的变 / 状态进 URL（刷新不丢）。
-            #   第四次：现在是「已选的 chip（各带一个 ×）+ 一个「+ 主图」挑」
-            #   —— 平铺全部的话，主图指标一多那一行就绕成几排
-            #   （用户 2026-09-16："如果后续主图的数量增多，都要显示不下了"）。
-            assert pg.locator('#kmadd').count() == 1, \
-                '工具条上没有「+ 主图」这个入口'
-            assert pg.locator('#kpickbox .chipw a.kmain[data-i="boll"]').count() == 0, \
+            #   第四次：chip + 「+ 主图」挑；**第五次**（2026-09-16）：
+            #   全部收进「⚙ 设置」浮窗里**勾选** —— 工具条原来塞着四组东西
+            #   （翻页 + 区间 + 复权 + 主图 + 对数 + 事件），窄一点就绕成两排
+            #   （用户："排版总是感觉太挤……全部变成主图的设置选项"）。
+            assert pg.locator('#ktoolbar #kparam').count() == 1, \
+                '工具条上没有「⚙ 设置」这个入口'
+            _kset(pg, True)
+            assert pg.locator('#kmwrap .kmain[data-i="boll"]').count() == 1, \
+                '设置里没有 BOLL 这个主图指标'
+            assert not pg.locator('#kmwrap .kmain[data-i="boll"]').is_checked(), \
                 'BOLL 默认就叠上去了（默认该只有均线）'
+            _kset(pg, False)
             assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
                 'BOLL 状态位不对'
             # ★ 先把光标移开画布再量基线 —— 十字光标本身就画了几百个像素
@@ -7125,8 +7175,10 @@ def t_stock_ui():
             _yes = pg.evaluate(NZ)
             assert _yes > _no, \
                 '开了 BOLL 画布像素没变多（%d -> %d）' % (_no, _yes)
-            assert pg.locator('#kpickbox .chipw a.kmain[data-i="boll"]').count() == 1, \
-                'BOLL 叠上去了却没有它的 chip —— 那就没法再把它拿下来'
+            _kset(pg, True)
+            assert pg.locator('#kmwrap .kmain[data-i="boll"]').is_checked(), \
+                'BOLL 叠上去了，设置里那个勾却没打上 —— 那就没法再把它拿下来'
+            _kset(pg, False)
             assert 'main=ma%2Cboll' in pg.url or 'main=ma,boll' in pg.url, \
                 'BOLL 状态没进 URL（刷新就丢）：%s' % pg.url
             _kmain(pg, 'boll', False)
@@ -7162,14 +7214,14 @@ def t_stock_ui():
             assert 'DIF' not in tip2, '切了 KDJ，读数里还留着 DIF：%s' % tip2
 
             # ---- 切区间：根数变了，画布也重画了 ----
-            pg.locator('#body .rg').first.click()      # 3 月
+            pg.locator('#ktoolbar .rg').first.click()  # 3 月
             pg.wait_for_timeout(2000)
             nz2 = pg.evaluate(NZ)
             assert nz2 > 3000 and nz2 != nz1, \
                 '切区间后画布没变（%d -> %d）' % (nz1, nz2)
 
             # ---- 切复权：说明也要跟着换 ----
-            pg.locator('#body .fq[data-f="hfq"]').click()
+            _kfq(pg, 'hfq')
             pg.wait_for_timeout(2000)
             note = pg.locator('#body .lvsec').first.inner_text()
             assert '后复权' in note and '跨期' in note, \
@@ -13062,7 +13114,12 @@ def t_log_and_dd():
             # ---- ① 对数坐标的几何等距性 ----
             pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port)
             pg.wait_for_timeout(4000)
-            assert pg.locator('#klogt').count() == 1, '个股页没有「对数」按钮'
+            # 「对数」也搬进了设置浮窗（同上）——判据只是入口多一步
+            _kset(pg, True)
+            assert pg.locator('#kmwrap #klogt').count() == 1 \
+                and pg.locator('#kmwrap #klin').count() == 1, \
+                '设置里没有「线性 / 对数」这一组'
+            _kset(pg, False)
             r = pg.evaluate("""() => {
               const cv = document.createElement('canvas');
               cv.width = 400; cv.height = 400;
@@ -13101,11 +13158,16 @@ def t_log_and_dd():
                 ('对数轴上等比数列 10/20/40/80 的间距是 %r，应当相等 —— '
                  '坐标映射写错了（只查"传了 log 参数"是抓不到这个的）' % lg)
             # 按钮点了要真的重画（不重新取数）
-            pg.click('#klogt')
-            pg.wait_for_timeout(800)
+            _klog(pg, True)
+            _kset(pg, True)
             assert 'log=1' in pg.url, '「对数」没写进 URL（书签会丢掉这个状态）'
-            assert 'on' in (pg.locator('#klogt').get_attribute('class') or ''), \
+            assert 'on' in (pg.locator('#kmwrap #klogt').get_attribute('class') or ''), \
                 '「对数」按钮点了没高亮'
+            # ★ 工具条上那句"· 对数"是全收进浮窗之后**唯一**能看出当前坐标
+            #   的地方 —— 不跟着变的话，关掉浮窗就再也看不出是哪种坐标。
+            assert '对数' in (pg.locator('#ktoolbar #kparam').inner_text() or ''), \
+                '切了对数，工具条上那个「⚙ 设置」没把它说出来'
+            _kset(pg, False)
             notes.append('对数轴等距（线性 %r -> 对数 %r）' % (ln, lg))
 
             # ---- ②③ 回撤图 ----
@@ -14517,6 +14579,57 @@ def t_etf_index():
         '指数被复权了（%.4f vs %.4f）—— 它不除权，因子表里没有它的行' % (ih, ib)
     notes.append('K 线与指标照画（ETF 后复权 %.2f vs %.2f / 指数不复权）' % (hb, bb))
 
+    # ---- ④b🔴 前复权：ETF 的默认口径 ----
+    # 用户 2026-09-16："ETF 怎么只有不复权和后复权的选择，应该默认是前复权吧。"
+    # ★ 项目里那条「前复权不提供」保护的是**特征与回测**（基准是"今天"，
+    #   每来一次分红整条历史重算一遍）；**展示**是另一回事：不复权的 ETF
+    #   图上是一串假跌幅，后复权的纵轴写 6.11 而券商那儿是 3.37 —— 对不上。
+    for sym in ('sh510880', '601857.XSHG'):
+        q = st.kline(sym, n=250, fq='qfq')['bars']
+        b0 = st.kline(sym, n=250, fq='bfq')['bars']
+        # 🔴 最新一根 == 不复权（基准是"今天"）—— 这正是它和后复权的分界
+        assert abs(q[-1]['close'] - b0[-1]['close']) < 0.01, \
+            ('%s 前复权最新一根 %.3f != 不复权 %.3f —— 前复权的基准是"今天"，'
+             '最新那根就该是当前实际价' % (sym, q[-1]['close'], b0[-1]['close']))
+        # 历史价被往下调（分红从历史里扣掉），且**不等于**不复权
+        assert q[0]['close'] < b0[0]['close'], \
+            '%s 前复权的历史价没被往下调（%.3f vs %.3f）' % (
+                sym, q[0]['close'], b0[0]['close'])
+        # 🔴 **往回翻页不许改变同一天的价**：分母必须是**全局最新**因子。
+        #   ★ 判据要用 `off > 0` —— 只改窗口大小（n=60 vs n=120）的话，
+        #     两种实现取到的都是最新那根，**测不出区别**（变异实测漏过）。
+        #     往回翻之后窗口里根本没有最新那根，错的实现当场露馅。
+        base = {b['date']: b['close'] for b in st.kline(sym, n=250, fq='qfq')['bars']}
+        back = st.kline(sym, n=60, fq='qfq', off=120)['bars']
+        assert back, '%s 翻不回去' % sym
+        same = [b for b in back if b['date'] in base]
+        assert len(same) >= 30, \
+            '%s 翻页后只有 %d 天能对照，这条判据成了空转' % (sym, len(same))
+        bad = [(b['date'], b['close'], base[b['date']]) for b in same
+               if abs(b['close'] - base[b['date']]) > 1e-9]
+        assert not bad, \
+            ('%s 往回翻页之后同一天的前复权价变了（%r）—— 分母必须是'
+             '**全局最新**因子，不是这一屏的最后一根；否则翻一页就换一套刻度，'
+             '而图看着一切正常' % (sym, bad[:2]))
+        # 每根的 `fqk` 要能把不复权价换算到当前坐标（买卖点靠它落位）
+        bad = [i for i, (x, y) in enumerate(zip(b0, q))
+               if abs(x['close'] * y['fqk'] - y['close']) > 0.01]
+        assert not bad, '%s 有 %d 根的 fqk 换算对不上' % (sym, len(bad))
+    # ---- ④c ETF 默认就是前复权，其余仍是不复权（默认由**服务端**定）----
+    assert st.kline('sh510880', n=20)['fq'] == 'qfq', \
+        'ETF 的默认口径不是前复权'
+    for sym in ('601857.XSHG', 'sh000001'):
+        assert st.kline(sym, n=20)['fq'] == 'bfq', \
+            '%s 的默认口径被一起改掉了 —— 股票那条是这一页原有的决定' % sym
+    assert st.kline('sh510880', n=20, fq='bfq')['fq'] == 'bfq', \
+        '显式指定的口径被默认值盖掉了'
+    # 🔴 指标必须**跟着 K 线同一个口径** —— 两边不一致的话，
+    #   图上是前复权的价、副图是不复权算的 MACD，而它不报错。
+    for sym in ('sh510880', '601857.XSHG'):
+        assert st.indicators(sym, n=20, inds='macd')['fq'] \
+            == st.kline(sym, n=20)['fq'], '%s 的指标口径与 K 线对不上' % sym
+    notes.append('前复权（最新一根=现价 / 翻页自洽 / fqk 可换算）· ETF 默认它')
+
     # ---- ⑤ 没有的块要**明说**，不是静默的空 ----
     for fn, nm in ((st.finance, '财务'), (st.events, '事件'), (st.peers, '同行业'),
                    (mk.stock_sectors, '所属板块')):
@@ -14588,6 +14701,22 @@ def t_etf_index_web():
                     let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
                     return n;}""")
                 assert px > 30000, '%s 的 K 线没画出来（%d 个像素）' % (sym, px)
+                # 三个复权口径在「⚙ 设置」浮窗里，且默认那个是亮的
+                _kset(pg, True)
+                fqs = pg.evaluate(
+                    "()=>[...document.querySelectorAll('#kmwrap .fq')]"
+                    ".map(a=>a.dataset.f)")
+                assert fqs == ['bfq', 'qfq', 'hfq'], \
+                    '复权那三个按钮不全：%r' % fqs
+                on = pg.evaluate(
+                    "()=>[...document.querySelectorAll('#kmwrap .fq.on')]"
+                    ".map(a=>a.dataset.f)")
+                want = 'qfq' if sym == 'sh510880' else 'bfq'
+                assert on == [want], \
+                    ('%s 默认高亮的是 %r，应当是 %r —— 默认口径由服务端定，'
+                     '页面要把它读回来，否则三个按钮一个都不亮、'
+                     '人看不出现在是哪种口径' % (sym, on, want))
+                _kset(pg, False)
                 # 不适用的块要**说一句**，不是空白
                 for t in ('所属板块', '同行业', '财务'):
                     txt = pg.evaluate("""(t) => {
@@ -14761,17 +14890,15 @@ def t_stock_multi_sub():
             # 🔴 **反向自证缓存键**：换复权 / 换区间 / 翻页必须重取。
             #   只钉"零请求"的话，把缓存写成"永远命中"也全绿 ——
             #   而那会拿着不复权的数字去画后复权的图，且不报错。
-            for _lbl, _sel in (('复权', '#body .fq[data-f="hfq"]'),
-                               ('区间', '#body .rg[data-n="60"]')):
+            for _lbl, _sel in (('区间', '#ktoolbar .rg[data-n="60"]'),
+                               ('区间2', '#ktoolbar .rg[data-n="120"]')):
                 reqs.clear()
                 pg.locator(_sel).click()
                 pg.wait_for_timeout(1600)
                 assert [u for u in reqs if '/api/stock/indicators' in u], \
                     ('换%s之后没重取指标 —— 缓存键里少了它，'
                      '画出来的是上一个口径的数字而不报错' % _lbl)
-            pg.locator('#body .fq[data-f="bfq"]').click()
-            pg.wait_for_timeout(1400)
-            pg.locator('#body .rg[data-n="250"]').click()
+            pg.locator('#ktoolbar .rg[data-n="250"]').click()
             pg.wait_for_timeout(1600)
             # 回到默认之后再验一次：换指标仍然零请求
             reqs.clear()
@@ -14800,32 +14927,59 @@ def t_stock_multi_sub():
             notes.append('换指标只重取指标接口、一个控件都不重建')
 
             # ★ 另外两条路径**各自钉各自的规矩**（同实盘页 quiet/全量那条）：
-            #   主图开关只许动工具条、加副图只许动槽位层与「+副图」行 ——
+            #   勾主图只该动主图那条线、加副图才动槽位层 ——
             #   只钉"换指标不重建"的话，把判据写成"永远不重建"也全绿，
             #   而那会让加/删副图之后 `data-j` 不重排（换错槽位且不报错）。
+            _SLOT = ("""() => [...document.querySelectorAll('#kslots .kslot')]
+                .map(e => e.dataset.mk || 'NEW')""")
             pg.evaluate(MARK)
             _kmain(pg, 'boll', True)
-            _mk2 = pg.evaluate(CHK)
-            _tool = pg.evaluate("""() => [...document.querySelectorAll('#kpickbox a')]
-                .map(e => e.dataset.mk || 'NEW')""")
-            _slot = pg.evaluate("""() => [...document.querySelectorAll('#kslots .kslot')]
-                .map(e => e.dataset.mk || 'NEW')""")
-            assert 'NEW' in _tool, '主图开关没更新工具条（按钮的选中态不会变）'
-            assert 'NEW' not in _slot, \
-                '主图开关把副图那几组控件也重建了：%r —— 它们跟主图无关' % _slot
+            assert 'NEW' not in pg.evaluate(_SLOT), \
+                ('勾一个主图指标把副图那几组控件也重建了 —— 它们跟主图无关'
+                 '（主图是叠在 K 线上的，副图是下面的槽位）')
+            assert pg.evaluate("() => KMAIN.indexOf('boll') >= 0"), \
+                '勾了 BOLL 但状态位没变'
             pg.evaluate(MARK)
             pg.locator('#kaddrow #kadd').click()
             pg.wait_for_timeout(1400)
-            _tool2 = pg.evaluate("""() => [...document.querySelectorAll('#kpickbox a')]
-                .map(e => e.dataset.mk || 'NEW')""")
-            _slot2 = pg.evaluate("""() => [...document.querySelectorAll('#kslots .kslot')]
-                .map(e => e.dataset.mk || 'NEW')""")
-            assert 'NEW' in _slot2, \
+            assert 'NEW' in pg.evaluate(_SLOT), \
                 ('加了一个副图但槽位层没重建 —— 新槽位的 data-j 不重排的话，'
                  '换指标会换错那个槽位，而它不报错')
-            assert 'NEW' not in _tool2, \
-                '加副图把工具条也重建了：%r —— 主图那两个开关没有变' % _tool2
-            notes.append('主图开关只动工具条 · 加副图只动槽位层')
+            notes.append('勾主图不动副图槽位 · 加副图才重建槽位层')
+
+            # ---- ③c🔴 工具条只留三样，其余全在「⚙ 设置」里 ----
+            # 用户 2026-09-16："添加主图的方式仍然不够友好，可以打开一个浮窗，
+            #   在里面勾选，最多勾选 3 个这样，不然排版总是感觉太挤。
+            #   前复权/后复权/不复权、对数/线性图也一样，全部变成主图的设置选项。"
+            _kset(pg, False)
+            _tool = [x.strip() for x in
+                     pg.locator('#ktoolbar a').all_inner_texts()]
+            for _bad in ('不复权', '前复权', '后复权', '对数', '线性', '+ 主图'):
+                assert not any(_bad in t and '设置' not in t for t in _tool), \
+                    ('「%s」还留在工具条上：%r —— 它们该收进「⚙ 设置」浮窗'
+                     % (_bad, _tool))
+            assert pg.locator('#ktoolbar #evck').count() == 0, \
+                '「事件」那个勾还留在工具条上'
+            # 留下的是**看的时候一直在调**的那两组
+            assert pg.locator('#ktoolbar .kpan').count() == 3 \
+                and pg.locator('#ktoolbar .rg').count() >= 4, \
+                '工具条上该留着翻页与区间：%r' % _tool
+            # 🔴 全收进浮窗之后，"现在是哪种口径"在屏幕上就只剩这一处
+            _kfq(pg, 'hfq')
+            assert '后复权' in (pg.locator('#ktoolbar #kparam').inner_text() or ''), \
+                ('切了后复权，工具条上那个「⚙ 设置」没把它说出来 —— '
+                 '关掉浮窗之后就再也看不出当前是哪种口径了')
+            # 🔴 在浮窗里改设置，浮窗**不许自己消失**（原来走 load() 重建
+            #   整个 #body，而浮窗就在里面 —— 点完一个就得重新点开）
+            _kset(pg, True)
+            pg.locator('#kmwrap .fq[data-f="bfq"]').click()
+            pg.wait_for_timeout(2000)
+            assert pg.locator('#kmwrap .stbox').is_visible(), \
+                ('在设置里点了复权，浮窗自己没了 —— 它就在 #body 里，'
+                 '走整页 `load()` 会把它一起换掉')
+            assert pg.evaluate('()=>FQ') == 'bfq', '复权没切过去'
+            _kset(pg, False)
+            notes.append('工具条只留翻页+区间+⚙（其余进浮窗，改完浮窗不消失）')
 
             # ---- ③d🔴 主图叠加**有上限**，到了要说清怎么腾位置 ----
             # 用户 2026-09-16："主图选择的方式也改一下，如果后续主图的数量
@@ -14838,28 +14992,30 @@ def t_stock_multi_sub():
             assert _real_max >= 2, '上限 %r 太小，正常使用都会被挡' % _real_max
             pg.evaluate("() => { KMAIN_MAX = 1; }")
             try:
-                pg.evaluate("() => { const b = document.querySelector('#kpickbox');"
-                            " b.innerHTML = kPickHtml() + kMainHtml(); }")
-                assert 'off' in (pg.locator('#kmadd').get_attribute('class') or ''), \
-                    '已经到上限了，「+ 主图」还是可点的样子'
-                pg.click('#kmadd')
-                pg.wait_for_timeout(400)
-                assert pg.locator('#kmpick .kmpicka').count() == 0, \
-                    '到上限还让接着叠 —— 上限形同虚设'
-                _m = pg.evaluate("() => { const e = document.querySelector('#kmpick');"
-                                 " return e ? e.innerText.trim() : ''; }")
-                assert '1' in _m and '×' in _m, \
-                    ('到上限只是静默不动（提示 %r）—— 要说清怎么腾位置'
-                     '（同「+ 副图」那条）' % _m)
-                # 🔴 数据那道也要有：URL 里手写 `main=a,b,c,d` 绕得过按钮
+                _kset(pg, True)
+                pg.evaluate("() => kModal(true)")      # 按新上限重渲染浮窗
+                pg.wait_for_timeout(300)
+                # 已勾的那个（均线）还能点（要留出"去掉一个"的路），
+                # 而**没勾的那些被禁用**并说清怎么腾位置
+                assert pg.locator('#kmwrap .kmain[data-i="boll"]').is_disabled(), \
+                    '到上限了，没勾的那些还能接着勾 —— 上限形同虚设'
+                assert not pg.locator('#kmwrap .kmain[data-i="ma"]').is_disabled(), \
+                    ('已经叠上去的那个也被禁用了 —— 那就再也去不掉，'
+                     '人被锁死在当前这一组里')
+                _m = pg.locator('#kmwrap .kmgrid').inner_text()
+                assert '1' in _m and ('上限' in _m or '去掉' in _m), \
+                    ('到上限只是静默点不动（写的是 %r）—— 要说清怎么腾位置'
+                     '（同「+ 副图」那条）' % _m[-60:])
+                # 🔴 数据那道也要有：URL 里手写 `main=a,b,c,d` 绕得过界面
                 assert pg.evaluate("() => kToggleMain('boll')") is False, \
                     '到上限了 kToggleMain 还返回成功 —— 数据层那道上限没有'
                 assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
                     '被拒了却还是叠上去了'
             finally:
                 pg.evaluate("(v) => { KMAIN_MAX = v; }", _real_max)
-                pg.evaluate("() => { const b = document.querySelector('#kpickbox');"
-                            " b.innerHTML = kPickHtml() + kMainHtml(); }")
+                pg.evaluate("() => kModal(true)")
+                pg.wait_for_timeout(200)
+                _kset(pg, False)
             # URL 那条路也截断（手写超限时只认前 N 个）
             assert pg.evaluate(
                 "() => { const u = new URL(location.href);"
@@ -14892,9 +15048,27 @@ def t_stock_multi_sub():
             #     "单跑通过、全量失败"这次不是缓存，是我没收拾干净）。
             #   ★ route handler 里**不要调页面 API**（`pg.wait_for_timeout`
             #     之类）—— 它跑在事件回调里，会把自己锁死。
+            # 🔴 另一头：换区间/翻页**不许把整页那十个接口又打一遍**。
+            #   只钉"没塌陷"是不够的 —— `load()` 现在也不清空内容了，
+            #   于是"又走了一遍 load"这件事在画面上看不出来，而它会把
+            #   财务、事件、板块、同行业、我的持仓全重取一遍（变异实测漏过）。
+            _r2 = []
+            pg.on('request', lambda r: _r2.append(r.url)
+                  if '/api/stock/' in r.url or '/api/live/trades_of' in r.url
+                  else None)
+            pg.locator('#ktoolbar .rg[data-n="120"]').click()
+            pg.wait_for_timeout(2200)
+            _heavy = [u for u in _r2 if any(
+                x in u for x in ('profile', 'finance', 'events', 'peers',
+                                 'sectors', 'links', 'trades_of'))]
+            assert not _heavy, \
+                ('换区间把整页那批接口又打了一遍：%r —— 这几样只影响 K 线'
+                 '那一块，profile 的 KPI、财务、板块一个都不跟着变'
+                 % [u.split('/api/')[-1].split('?')[0] for u in _heavy][:4])
+            assert [u for u in _r2 if 'kline' in u], '换区间连 K 线都没重取'
             _held = []
             pg.route('**/api/stock/finance*', lambda r: _held.append(r))
-            pg.locator('#body .rg[data-n="60"]').click()
+            pg.locator('#ktoolbar .rg[data-n="60"]').click()
             pg.wait_for_timeout(700)
             assert pg.locator('#kcv').count() == 1, \
                 ('换区间时把画布清掉了（换成了「加载中…」）—— 高度先塌陷'

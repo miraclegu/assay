@@ -848,3 +848,16 @@ a.spl.accent{color:var(--accent)}
 /* ★ 触摸屏没有 hover —— 那里就一直显示，否则删不掉（同「看不出能点的
    入口 = 没有入口」那条）。 */
 @media (hover:none){ .chipx{opacity:1} }
+
+/* 个股页「⚙ 设置」浮窗里的勾选项（主图叠加、事件三角）。
+   ★ 做成一格一格的网格而不是一行挤下去：主图指标以后会变多，
+     一行排不下就会绕成几排、对不齐（用户："排版总是感觉太挤"）。 */
+.kmgrid{display:grid;gap:4px 10px;
+        grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.kmchk{display:flex;align-items:center;gap:6px;font-size:12px;
+       padding:3px 0;cursor:pointer}
+.kmchk input{margin:0}
+/* 到上限时未勾的那几个禁用 —— 灰掉且不给手型，但**仍然看得见**
+   （藏起来的话人不知道还有这个指标，同「看不出能点的入口 = 没有入口」）。 */
+.kmchk.off{opacity:.45;cursor:not-allowed}
+.kmchk .lvwhy{font-size:11px}

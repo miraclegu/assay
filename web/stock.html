@@ -19,7 +19,7 @@
    ★ 一次并发拉 7 个接口，任何一个失败只让它那一块显示错误，
      不拖垮整页 —— 看 K 线的时候不该因为"解禁表读不了"整页白屏。 */
 let CODE = qs('code') || localStorage.getItem('skcode') || '';
-let N = +(qs('n') || 250), FQ = qs('fq') || 'bfq';
+let N = +(qs('n') || 250), FQ = qs('fq') || '';
 /* 副图指标：**一组**（最多 4 个），URL 里是 `sub=macd,kdj`。
    ★ 老链接 `sub=macd` 照旧能用（单个就是一个元素的组）。
    🔴 "一个都不要"写成 `sub=0` 而不是 `sub=` —— `nav()` 对空值是
@@ -175,6 +175,10 @@ async function load() {
   TRADES = ((tr || {}).trades) || [];
   /* 翻页用：总根数（还能不能往左翻）+ 服务端实际落到的 off（钳过的） */
   if (!k.error) { KTOTAL = k.total || 0; KOFF = k.off || 0; }
+  /* 🔴 **默认口径是服务端定的**（ETF 前复权、其余不复权）—— 把它读回来，
+     否则工具条上三个按钮一个都不亮，人看不出现在是哪种口径。
+     ★ 只在**没显式选过**时接受它：人点过「不复权」就该一直是不复权。 */
+  if (!FQ && k && k.fq) FQ = k.fq;
   if (seq !== KSEQ) return;      /* 有更新的一次在飞，这一份已经作废 */
   IND = (ind && !ind.error) ? ind.rows : null;
   KPANELS = (ind && !ind.error) ? (ind.panels || []) : [];
@@ -264,29 +268,8 @@ function chartBox(k, ind) {
        按钮加 `.off` 变灰并把原因写进 title —— 点了没反应是最难查的那种坏
        （同 backLink 那条）。★ 但**不设 disabled**：那种元素连 title 都
        不触发，人连"为什么点不动"都看不到（本项目明令：按钮一律不 disabled）。 */
-  const atNew = KOFF <= 0, atOld = KTOTAL && (KOFF + N >= KTOTAL);
-  return `<div class="lvsec" style="margin-bottom:14px"><h3>日 K
-      <a href="#" class="lvtag kpan${atOld ? ' off' : ''}" data-pan="-1"
-        title="${atOld ? '已经到最早的一根了' : '往前看半屏（' + Math.ceil(N / 2) + ' 根）'}">‹ 早</a>
-      <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="1"
-        title="${atNew ? '已经是最新的一页' : '往后看半屏'}">晚 ›</a>
-      <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="0"
-        title="回到最新">最新</a>
-      <span class="lvwhy">|</span>
-      <span style="flex:1"></span>
-      ${RANGES.map(([n, t]) => `<a href="#" class="lvtag rg${N === n ? ' on' : ''}" data-n="${n}">${t}</a>`).join('')}
-      <span class="lvwhy">|</span>
-      <a href="#" class="lvtag fq${FQ === 'bfq' ? ' on' : ''}" data-f="bfq"
-        title="券商软件看到的价；open 就是当日集合竞价成交价">不复权</a>
-      <a href="#" class="lvtag fq${FQ === 'hfq' ? ' on' : ''}" data-f="hfq"
-        title="跨除权日比较涨幅必须用它 —— 不复权在除权日会有假跌幅">后复权</a>
-      <span class="lvwhy">|</span>
-      <span id="kpickbox">${kPickHtml() + kMainHtml()}</span>
-      <span class="lvwhy">|</span>
-      <a href="#" class="lvtag${KLOG ? ' on' : ''}" id="klogt"
-        title="对数坐标：等百分比涨幅 = 等高度。&#10;看几年的走势用它才可比 —— 线性轴会把低价那一段的波动压平">对数</a>
-      <label class="lvwhy" style="flex:0 0 auto"><input type="checkbox" id="evck" ${SHOWEV ? 'checked' : ''}> 事件</label>
-    </h3>
+  return `<div class="lvsec" style="margin-bottom:14px">
+    <h3 id="ktoolbar">${kToolHtml()}</h3>
     <div class="cvbox" id="cbox">
       <!-- ★ 画布跟着副图个数长高（每个 110px），不是把它们挤进同一个高度里 ——
            4 个指标压在 500px 里每个只剩 50px，那种图看不出形态。 -->
@@ -313,8 +296,11 @@ function chartBox(k, ind) {
       MA 与副图指标都由<b>服务端</b>算（多取预热再切掉）—— 前端自己算就得多取，
       而"少取了导致头部值是错的"不报错，只是曲线不对。
       ${ie ? '<b style="color:var(--warn)">　副图取失败：' + esc(ind.error) + '</b>' : ''}
-      ${FQ === 'bfq' ? '当前<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切后复权。'
-                     : '当前<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'}
+      ${{bfq: '当前<b>不复权</b>：除权日会有跳空，比较跨期涨幅请切前/后复权。',
+          qfq: '当前<b>前复权</b>：跨期涨幅是对的，最新那根还等于当前实际价；'
+               + '代价是每来一次分红整条历史都会重算（所以它只适合看）。',
+          hfq: '当前<b>后复权</b>：与券商软件显示的价格不同，但跨期涨幅才对。'
+        }[FQ] || ''}
       <br>均线在图左上角有<b>图例</b>（色块 + 当前值，光标停哪天就显示那天的值）。
       🔴 事件三角与均线<b>刻意不共用颜色</b> —— 原来四条均线的色值与四种事件
       三角完全相同，图例写着"▲除权除息"用的正是 MA5 那个色。
@@ -578,37 +564,28 @@ function wire() {
   /* 🔴 **事件委托绑在容器上**：这几处的内容都会被 `reloadInd()` 用
      innerHTML 整块换掉，逐个绑的话换完那些元素永远没有 handler ——
      点了没反应且不报错（对比页「移除」栽过）。 */
-  const pbox = $('#kpickbox');
-  if (pbox) pbox.onclick = async ev => {
+  /* 工具条上现在只有翻页 / 区间 / 「⚙ 设置」—— 其余全在浮窗里。
+     ★ 委托绑在 `#ktoolbar` 上：`reloadK()` 会把它整块换掉（翻页到头、
+       选中哪一档都要跟着变），逐个绑的话换完就没有 handler 了。 */
+  const tbar = $('#ktoolbar');
+  if (tbar) tbar.onclick = async ev => {
     const a = ev.target.closest('a');
     if (!a) return;
     ev.preventDefault();
     if (a.id === 'kparam') { kModal(true); return; }
-    /* 「+ 主图」：到上限就**说清怎么腾位置**，不许静默不动。 */
-    if (a.id === 'kmadd') {
-      const on = KMAIN.filter(id => kDef(id) && kDef(id).panel === 'main');
-      const pk = $('#kmpick');
-      if (on.length >= KMAIN_MAX) {
-        if (pk) pk.innerHTML = `　<b>主图最多叠 ${KMAIN_MAX} 个</b>，`
-          + '先点某个主图 chip 右上角的 × 去掉一个再叠（副图那几个不占名额）';
-        return;
-      }
-      if (pk) pk.innerHTML = pk.innerHTML ? '' : kMainPickHtml();
-      return;
+    if (a.classList.contains('rg')) {
+      N = +a.dataset.n; KSEL = null; nav({n: N}); await reloadK(); return;
     }
-    if (a.classList.contains('kmpicka')) {      /* 从清单里挑一个叠上去 */
-      kToggleMain(a.dataset.i);
-      await reloadInd();
-      return;
-    }
-    if (a.classList.contains('kmainx')) {       /* chip 右上角的 × */
-      kToggleMain(a.dataset.x);
-      await reloadInd();
-      return;
-    }
-    if (a.classList.contains('kmain')) {        /* 点 chip 本身 = 也是取消 */
-      kToggleMain(a.dataset.i);
-      await reloadInd();
+    if (a.classList.contains('kpan')) {
+      const d = +a.dataset.pan;
+      /* 半屏一步：整屏跳的话左右两页**没有重叠**，接不上形态。 */
+      const stepN = Math.ceil(N / 2);
+      const was = KOFF;
+      KOFF = d === 0 ? 0 : Math.max(0, KOFF + (d < 0 ? stepN : -stepN));
+      if (KTOTAL) KOFF = Math.min(KOFF, Math.max(0, KTOTAL - N));
+      if (KOFF === was) return;         /* 到头了：不白打一次接口 */
+      KSEL = null;                      /* 换了时间段，旧选区不再成立 */
+      await reloadK();
     }
   };
   const arow = $('#kaddrow');
@@ -688,9 +665,46 @@ function wire() {
         } finally { krst = false; }
         return;
       }
+      /* ---- 复权口径：只重取 K 线与指标，**不重建整页** ----
+         🔴 走 `load()` 的话 `#body` 整块换掉，而这个浮窗**就在 #body 里**
+           —— 点完"后复权"浮窗自己没了，人得重新点开才能接着调别的。 */
+      if (a && a.classList.contains('fq')) {
+        if (FQ === a.dataset.f) return;
+        FQ = a.dataset.f;
+        nav({fq: FQ});
+        await reloadK();
+        kModal(true);            /* 重渲染浮窗：高亮与那段说明要跟着变 */
+        return;
+      }
+      /* ---- 坐标：只重画，数据一个字没变 ---- */
+      if (a && (a.id === 'klogt' || a.id === 'klin')) {
+        const want = a.id === 'klogt';
+        if (KLOG === want) return;
+        KLOG = want;
+        nav({log: KLOG ? '1' : ''});
+        KGEO = redraw();
+        kModal(true);
+        const tb = $('#ktoolbar');
+        if (tb) tb.innerHTML = kToolHtml();   /* 按钮上那句"· 对数" */
+        return;
+      }
       /* 点遮罩关掉（点框里不关）—— 同浮层那套 */
       if (ev.target.id === 'kmwrap') kModal(false);
     };
+    /* 主图叠加 / 事件三角：它们是 `<input>`，走 change 不走 click。 */
+    mbox.addEventListener('change', async ev => {
+      const e = ev.target;
+      if (!e.classList) return;
+      if (e.id === 'evck') {
+        SHOWEV = e.checked; KGEO = redraw(); return;
+      }
+      if (e.classList.contains('kmain')) {
+        if (krst) return;
+        kToggleMain(e.dataset.i);
+        await reloadInd();
+        kModal(true);        /* 勾选状态 / 到上限的禁用都要跟着变 */
+      }
+    });
     mbox.onchange = async ev => {
       const e = ev.target;
       if (!e.classList || !e.classList.contains('kpi')) return;
@@ -738,32 +752,6 @@ function wire() {
       kpSave(); await reloadInd();
     };
   }
-  /* 🔴 「对数」这个 handler 曾被我连着 BOLL 那段一起删掉（改指标选择器时
-     整段替换，它恰好夹在中间）—— 按钮还在、**点了没反应**，而这不报错。
-     是既有那条「对数状态要进 URL」的断言抓出来的。
-     ★ 只**重画**，不重新取数 —— 换的是坐标映射，数据一个字没变。 */
-  if ($('#klogt')) $('#klogt').onclick = ev => {
-    ev.preventDefault();
-    KLOG = !KLOG;
-    nav({log: KLOG ? '1' : ''});
-    ev.currentTarget.classList.toggle('on', KLOG);
-    geo = redraw();
-  };
-  const ck = $('#evck');
-  if (ck) ck.onchange = () => { SHOWEV = ck.checked; geo = redraw(); };
-  /* ---- 左右移动 ---- */
-  $$('.kpan').forEach(a => a.onclick = ev => {
-    ev.preventDefault();
-    const d = +a.dataset.pan;
-    /* 半屏一步：整屏跳的话左右两页**没有重叠**，接不上形态。 */
-    const stepN = Math.ceil(N / 2);
-    const was = KOFF;
-    KOFF = d === 0 ? 0 : Math.max(0, KOFF + (d < 0 ? stepN : -stepN));
-    if (KTOTAL) KOFF = Math.min(KOFF, Math.max(0, KTOTAL - N));
-    if (KOFF === was) return;           /* 到头了：不白打一次接口 */
-    KSEL = null;                        /* 换了时间段，旧选区不再成立 */
-    load();
-  });
   geo = redraw();
   const cv = $('#kcv');
   if (!cv) return;
@@ -954,21 +942,35 @@ function renderSel() {
        工具条上只剩「+ 副图」与「⚙ 参数」，而参数在**弹窗**里改。
    ★ 下拉框浮在画布上（不是画在画布里）：canvas 里画不出可点的控件，
      而"每个副图自己选"要求它就在那个副图的左上角。 */
-function kPickHtml() {
-  /* 🔴 这里**不放「+ 副图」、也不放提示文字**。
-     用户 2026-09-15 反馈："最多 4 个副图 —— 先去掉一个主图，这个没看懂，
-     主图的数量和副图的数量会冲突吗？" —— 两者不冲突，是**两段文字挨在
-     一起被读成了一句**：提示排在「主图 [均线][布林带]」前面，屏幕上就是
-     "…先去掉一个｜主图 均线 布林带"。
-     ★ 所以提示要跟着**它说的那个按钮**走（挪到图下面那一行），
-       而不是挤在工具条里跟别的标签做邻居。 */
-  /* ★ 叫「设置」不叫「参数」：用户 2026-09-16 反馈"现在找不到指标广场的
-       入口了……个股页面里加个设置按钮（齿轮），可以在里面进入指标广场"。
-     入口一直在这个弹窗里，但它叫「参数」、而广场入口又排在最底下跟
-     「恢复默认参数」挤一起 —— **一个叫"参数"的按钮，没人会指望里面有
-     "都支持哪些指标"**。现在弹窗第一行就是广场入口。 */
-  return `<a href="#" class="lvtag" id="kparam"
-      title="指标设置：改参数、看全部指标说明（弹窗，不动布局）">⚙ 设置</a>`;
+/* 🔴🔴 工具条只留**三样**：翻页、区间、一个「⚙ 设置」。
+   用户 2026-09-16："添加主图的方式仍然不够友好，可以打开一个浮窗，在里面
+   勾选，最多勾选 3 个这样，不然排版总是感觉太挤。前复权/后复权/不复权、
+   对数/线性图也一样，全部变成主图的设置选项。"
+   —— 原来这一行塞着四组东西（翻页 3 个 + 区间 6 个 + 复权 3 个 + 主图
+   chip + 「+主图」+ 对数 + 事件），窄一点就绕成两排。
+   ★ 留下的这两组是**看的时候一直在调**的（翻页、看多久）；
+     其余都是"设一次就不动"的，属于设置。
+   ★ 按钮上带一句当前状态（`⚙ 设置 · 前复权`）：全收进浮窗之后，
+     "现在是哪种口径"在屏幕上就没有别的地方能看到了。 */
+function kToolHtml() {
+  const atNew = KOFF <= 0, atOld = KTOTAL && (KOFF + N >= KTOTAL);
+  const fqName = {bfq: '不复权', qfq: '前复权', hfq: '后复权'}[FQ] || '';
+  return `日 K
+    <a href="#" class="lvtag kpan${atOld ? ' off' : ''}" data-pan="-1"
+      title="${atOld ? '已经到最早的一根了' : '往前看半屏（' + Math.ceil(N / 2) + ' 根）'}">‹ 早</a>
+    <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="1"
+      title="${atNew ? '已经是最新的一页' : '往后看半屏'}">晚 ›</a>
+    <a href="#" class="lvtag kpan${atNew ? ' off' : ''}" data-pan="0"
+      title="回到最新">最新</a>
+    <span style="flex:1"></span>
+    ${RANGES.map(([n, t]) => `<a href="#" class="lvtag rg${N === n ? ' on' : ''}"
+       data-n="${n}">${t}</a>`).join('')}
+    <span class="lvwhy">|</span>
+    <a href="#" class="lvtag" id="kparam" title="主图叠加 / 复权口径 / 坐标 / \
+指标参数 —— 都在这里改（弹窗，不动布局）">⚙ 设置${
+      fqName ? ' <span class="lvwhy">' + fqName + (KLOG ? ' · 对数' : '') + '</span>' : ''}</a>
+    <span class="lvwhy" id="ktmsg"></span>
+  `;
 }
 
 /* 「+ 副图」那一行：**贴在最后一个副图下面**（用户："添加副图的按钮应该
@@ -985,50 +987,33 @@ function kAddRowHtml() {
     <span class="lvwhy" id="kimsg"></span>`;
 }
 
-/* 主图那两个（均线 / 布林带）：它们**不是槽位** —— 直接叠在 K 线上，
-   而且就这么两个，做成下拉反而绕。 */
-/* 🔴🔴 主图叠加也**不能平铺全部、不能无限叠**（2026-09-16 用户："主图选择
-   的方式也改一下，如果后续主图的数量增多，都要显示不下了。要限制叠加主图
-   的数量，不能无限制叠加"）。这与副图当初那三版演进是**同一个问题**：
-   平铺 -> 数量一上去就绕成几排。
-
-   形态取「**已选的 chip（各带一个 ×）+ 一个「+ 主图」挑**」，与实盘业绩页
-   的自定义基准同一套（`.chipw/.chipx`，样式也是同一份）——
-   ★ 主图与副图形态**刻意不同**：副图是**槽位**（一个位置放一个，有上下
-     顺序），主图是**集合**（都叠在同一张 K 线上，没有位置可言）。
-     硬把主图也做成槽位的话，"第 2 个主图"这种说法本身就讲不通。
-   ★ 上限 `KMAIN_MAX = 3`：均线自己就是 4 条线、BOLL 2 条，叠到第 4 个
-     主图时 K 线上已经十来条线，形态全糊了 —— 限制的理由是**看得清**，
-     不是"放不下"。 */
+/* 主图叠加：**浮窗里勾选**，最多 `KMAIN_MAX` 个。
+   用户 2026-09-16："添加主图的方式仍然不够友好，可以打开一个浮窗，
+   在里面勾选，最多勾选 3 个这样，不然排版总是感觉太挤。"
+   ★ 形态第五次变了（工具条独立开关 -> 面板那组 -> 工具条两个开关 ->
+     chip + 「+主图」-> 浮窗勾选），而要证的事一次没变：
+     默认关 / 开了画布真的变 / 状态进 URL。
+   ★ 勾选比 chip 好在**一眼看得全**：有哪些可叠、叠了哪几个、还能叠几个，
+     都在同一个列表里；chip 那版要先点「+ 主图」才知道还剩什么。 */
 function kMainHtml() {
   const mains = ((KDEFS || {}).inds || []).filter(x => x.panel === 'main');
-  if (!mains.length) return '';
+  if (!mains.length) return '<div class="none">没有主图指标</div>';
   const on = KMAIN.filter(id => mains.some(d => d.id === id));
   const full = on.length >= KMAIN_MAX;
-  return '<span class="lvwhy">主图</span>'
-    + on.map(id => {
-        const d = mains.find(x => x.id === id) || {};
-        return `<span class="chipw"><a href="#" class="lvtag kmain on"
-          data-i="${id}" title="${esc(d.desc || '')}">${esc(d.short || id)}</a>`
-          + `<a href="#" class="chipx kmainx" data-x="${id}"
-             title="不叠它了">×</a></span>`;
-      }).join('')
-    + (on.length ? '' : '<span class="lvwhy">（没叠）</span>')
-    /* 「+ 主图」：点开列未选的那几个。到上限时**说清怎么腾位置** ——
-       静默不给加的话人只会觉得"点了没反应"（同「+ 副图」那条）。 */
-    + `<a href="#" class="lvtag${full ? ' off' : ''}" id="kmadd"
-         title="${full ? '主图最多叠 ' + KMAIN_MAX + ' 个，先点某个主图 chip 右上角的 × 去掉一个'
-                       : '再叠一个指标到 K 线上'}">+ 主图</a>`
-    + '<span id="kmpick"></span>';
-}
-
-/* 「+ 主图」点开的那份清单：只列**还没叠上去**的。 */
-function kMainPickHtml() {
-  const mains = ((KDEFS || {}).inds || []).filter(
-    x => x.panel === 'main' && KMAIN.indexOf(x.id) < 0);
-  if (!mains.length) return '　<span class="lvwhy">主图指标都叠上了</span>';
-  return '　' + mains.map(d => `<a href="#" class="lvtag kmpicka"
-      data-i="${d.id}" title="${esc(d.desc)}">${esc(d.short)}</a>`).join('');
+  return mains.map(d => {
+    const ck = on.indexOf(d.id) >= 0;
+    /* 到上限时**未勾的那些禁用**，并说清怎么腾位置 —— 静默点不动的话，
+       人只会觉得"点了没反应"（同「+ 副图」到上限那条）。 */
+    const dis = !ck && full;
+    return `<label class="kmchk${dis ? ' off' : ''}"
+       title="${esc(dis ? '最多叠 ' + KMAIN_MAX + ' 个，先去掉一个' : (d.desc || ''))}">
+      <input type="checkbox" class="kmain" data-i="${d.id}"
+        ${ck ? 'checked' : ''}${dis ? ' disabled' : ''}>
+      ${esc(d.short)}<span class="lvwhy">${esc(d.label)}</span></label>`;
+  }).join('')
+    + `<div class="lvwhy" style="margin-top:4px">已叠 <b>${on.length}</b>/${
+        KMAIN_MAX} 个${full ? '（到上限了，去掉一个才能换别的）' : ''}
+       —— 它们画在 K 线上，与下面的副图不冲突。</div>`;
 }
 
 /* 浮在画布上的那一排控件：**一个副图一组**（下拉框 + ⚙ + ×）。
@@ -1138,7 +1123,43 @@ function kModalHtml() {
            title="指标广场：都支持什么、怎么算的、能用在哪">📊 指标广场 ↗</a>
         <span class="lvwhy">看全部指标：怎么算的、长什么样、能不能拿来当买点</span>
       </div>
-      <h4 style="margin:0 0 4px">参数
+      <h4 style="margin:0 0 4px">主图叠加
+        <span class="lvwhy">画在 K 线上，最多 ${KMAIN_MAX} 个</span></h4>
+      <div class="kmgrid">${kMainHtml()}</div>
+
+      <h4 style="margin:10px 0 4px">价格口径
+        <span class="lvwhy">换了它，副图那几个指标也跟着按同一口径重算</span></h4>
+      <div class="lvform" style="gap:6px;flex-wrap:wrap">
+        <a href="#" class="lvtag fq${FQ === 'bfq' ? ' on' : ''}" data-f="bfq"
+          title="券商软件看到的价；open 就是当日集合竞价成交价">不复权</a>
+        <a href="#" class="lvtag fq${FQ === 'qfq' ? ' on' : ''}" data-f="qfq"
+          title="最新那根 = 当前实际价，历史价按分红往下调">前复权</a>
+        <a href="#" class="lvtag fq${FQ === 'hfq' ? ' on' : ''}" data-f="hfq"
+          title="历史不随新事件变，所以回测与特征用的是它">后复权</a>
+        <span class="lvwhy" style="flex:1;min-width:220px">${
+          FQ === 'qfq'
+            ? '前复权：跨除权日没有假跌幅，纵轴上的数还能和券商对得上。'
+              + '🔴 基准是"今天" —— 每来一次分红整条历史重算一遍，'
+              + '所以它只适合看，<b>不能拿去做特征或回测</b>。'
+            : (FQ === 'hfq'
+               ? '后复权：历史不随新事件变，回测与区间涨幅用的就是它；'
+                 + '代价是纵轴上的数与券商看到的现价对不上。'
+               : '不复权：与券商软件一致，<code>open</code> 就是当日集合竞价'
+                 + '成交价；代价是跨除权日会有<b>假跌幅</b>。')}</span>
+      </div>
+
+      <h4 style="margin:10px 0 4px">坐标与标记</h4>
+      <div class="lvform" style="gap:6px;flex-wrap:wrap">
+        <a href="#" class="lvtag${KLOG ? '' : ' on'}" id="klin">线性</a>
+        <a href="#" class="lvtag${KLOG ? ' on' : ''}" id="klogt"
+          title="等百分比涨幅 = 等高度。看几年的走势用它才可比 —— \
+线性轴会把低价那一段的波动压平">对数</a>
+        <label class="kmchk"><input type="checkbox" id="evck"
+          ${SHOWEV ? 'checked' : ''}> 事件三角<span class="lvwhy">除权除息 / \
+财报 / 解禁 / 股本变动</span></label>
+      </div>
+
+      <h4 style="margin:10px 0 4px">指标参数
         <span class="lvwhy">改完立刻生效 · 存在本机、不进 URL</span></h4>
       <div class="lvwhy">这里只列<b>当前用着的</b>指标。参数是"我习惯看几日"
         的个人设置，所以存 localStorage 而不进 URL（URL 是拿去分享的）。</div>
@@ -1148,6 +1169,44 @@ function kModalHtml() {
         <a href="#" class="lvtag" id="kprst">恢复默认参数</a>
       </div>
     </div></div>`;
+}
+
+/* 🔴🔴 **换区间 / 换复权 / 翻页只重取 K 线，不走整页 `load()`。**
+   `load()` 会把整个 `#body` 换掉 —— ① 页面跳一下（用户报过三次的那个）；
+   ② 更要命的是：设置浮窗**就在 `#body` 里**，于是"在浮窗里点后复权，
+   浮窗自己没了"，而那正是这些开关现在待的地方。
+   ★ 这几样只影响 K 线那一块：profile 的 KPI（区间涨幅固定按 250 日后复权）、
+     财务、事件、板块、同行业、我的持仓 —— 一个都不跟着变。
+   ★ 事件（`EVS`）也不用重取：它是全量取回来的，与窗口无关。 */
+async function reloadK() {
+  const seq = ++KSEQ;
+  const msg = $('#ktmsg');
+  if (msg) msg.innerHTML = '　<span class="lvwhy">更新中…</span>';
+  let k;
+  try {
+    k = await j(`/api/stock/kline?n=${N}&fq=${FQ}&off=${KOFF}&code=`
+                + encodeURIComponent(CODE));
+  } catch (e) {
+    /* 取失败**不要把已经画好的图清掉**（同 reloadInd 那条）。 */
+    if (msg) msg.innerHTML = '　<b style="color:var(--warn)">取不到 K 线：'
+      + esc(String(e)) + '</b>';
+    return;
+  }
+  if (seq !== KSEQ || k.error) {
+    if (k && k.error && msg) msg.innerHTML =
+      '　<b style="color:var(--warn)">' + esc(k.error) + '</b>';
+    return;
+  }
+  BARS = k.bars;
+  KTOTAL = k.total || 0;
+  KOFF = k.off || 0;
+  if (k.fq) FQ = k.fq;          /* 服务端可能按类别定了默认口径 */
+  if (msg) msg.innerHTML = '';
+  /* 工具条上"翻页到头没有 / 选中的是哪一档"要跟着变 —— 只重画画布的话
+     按钮状态就停在上一次，而它不报错（点了没反应的那种坏）。 */
+  const bar = $('#ktoolbar');
+  if (bar) bar.innerHTML = kToolHtml();
+  await reloadInd(true);        /* 指标跟着同一个口径重算 */
 }
 
 /* 🔴 只重取【指标那一个接口】并重画 —— 不走整页 `load()`。
@@ -1225,15 +1284,8 @@ function kApplyInd() {
     const h = (nSlot ? 390 + 110 * nSlot : 420) + 'px';
     if (cv.style.height !== h) cv.style.height = h;
   }
-  const box = $('#kpickbox');
-  if (box) {
-    /* ★ 两边都排序再比：`KMAIN` 是**点击顺序**，而 DOM 里按 defs 的顺序渲染
-       —— 不排的话 ['boll','ma'] 与 'ma,boll' 永远不等，等于没有这个判据。 */
-    const domMain = [...box.querySelectorAll('a.kmain.on')]
-      .map(a => a.dataset.i).sort().join(',');
-    if (domMain !== KMAIN.slice().sort().join(','))
-      box.innerHTML = kPickHtml() + kMainHtml();
-  }
+  /* 主图那几个开关**已经搬进浮窗**（`kModalHtml`），工具条上没有了 ——
+     它的重渲染由浮窗那边负责（勾完 `kModal(true)`）。 */
   const sl = $('#kslots');
   if (sl && sl.querySelectorAll('.kslot').length !== nSlot) {
     /* 个数变了才重建 —— 删一个之后 `data-j` 要整体重排，非重建不可。 */
@@ -1297,8 +1349,21 @@ function redraw() {
   });
   return (KGEO = drawKChart(cv, {bars: bars, log: KLOG, events: SHOWEV ? EVS : [],
     subs: kSubs(), hover: HOVER, sel: KSEL,
-    /* 🔴 **不复权时才画买卖点**：成交价是不复权实际价，切到后复权之后
-       标记会整体飘走（同浮层 `spFq` 那条纪律，只是这一页可以切）。 */
-    trades: FQ === 'bfq' ? TRADES : []}));
+    /* 🔴 买卖点要**换算到当前这套坐标**再画。
+       成交价是**不复权实际价**，图切到前/后复权之后整条价格轴都缩放了 ——
+       原样画的话标记会整体飘走（同浮层 `spFq` 那条纪律）。
+       原来的做法是"只在不复权时画"，而 ETF 现在默认前复权 ——
+       那等于**把自己的买卖点藏起来了**，是功能退化不是保护。
+       ★ 换算系数由**服务端**给（每根 bar 的 `fqk` = 当前坐标价 ÷ 不复权价，
+         bfq 恒 1）：前端自己再存一份不复权 bars 去比的话，就是同一份信息
+         两处算，而且翻页、换区间都要各自跟着变（同「均线在服务端算」那条）。
+       ★ 取不到那天的 bar（停牌 / 不在窗口内）就按 1 —— 画不准好过不画，
+         而它本来就只是个位置标记。 */
+    trades: (TRADES || []).map(t => {
+      if (FQ === 'bfq') return t;
+      const b = (BARS || []).find(x => x.date === t.date);
+      const k = (b && b.fqk) ? b.fqk : 1;
+      return k === 1 ? t : Object.assign({}, t, {price: t.price * k});
+    })}));
 }
 </script>

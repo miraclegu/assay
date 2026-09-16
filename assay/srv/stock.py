@@ -62,7 +62,8 @@ def api_stock_kline(q):
     m = _stock()
     return _stock_err(lambda: m.kline(q.get('code') or '',
                                       n=q.get('n') or 250,
-                                      fq=(q.get('fq') or 'bfq'),
+                                      # 不给 fq = 让服务端按标的类别定（ETF 前复权、其余不复权）
+                                      fq=q.get('fq'),
                                       end=q.get('end'),
                                       off=q.get('off') or 0,
                                       root=_root(q)))
@@ -87,7 +88,8 @@ def api_stock_indicators(q):
     m = _stock()
     return _stock_err(lambda: m.indicators(q.get('code') or '',
                                            n=q.get('n') or 250,
-                                           fq=(q.get('fq') or 'bfq'),
+                                           # 不给 fq = 让服务端按标的类别定（ETF 前复权、其余不复权）
+                                      fq=q.get('fq'),
                                            off=q.get('off') or 0,
                                            inds=m.parse_inds(q.get('inds'))))
 
