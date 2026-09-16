@@ -777,6 +777,92 @@ def t_jq():
     return '%d 个聚宽策略关联核对通过（选股参数逐项对照 %d 条）' % (len(ok), n_align)
 
 
+@case('回测详情页「持仓」页签：真的列得出逐日持仓（playwright）', tag='web')
+def t_run_holdings_pane():
+    """🔴 用户 2026-09-16："回测里的持仓页面出现问题了，展示不出持仓的具体
+    列表了。" —— `paneHoldings` 用了 `money()`，而它当时是 `drawDay` 里的一个
+    **局部 const**：跨函数引用未定义的名字，整个页签当场抛
+    `money is not defined`、一行都渲染不出来，**而它只在控制台里报**。
+
+    是 2026-09-14 那次「份额一律展示不复权」把 `fmtN(v,1)` 换成 `money(v)`
+    时带进来的，一直坏到用户点开才发现。
+
+    🔴 为什么既有那条「九个页签逐个渲染」没抓到：它挑的归档
+      `holdings.parquet` 被 `prune_runs.py` 清过 —— 走的是"已清理"那个分支，
+      **表格根本没渲染**。这和当初「持仓不换算」那条第一轮漏掉的是
+      **同一个陷阱**（"我挑的旧归档 rows 是空的 -> 整块空转"）。
+      所以这条用例**先挑一个明细还在的归档**，再断言它真的列出了行。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import glob
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    # ★ 先挑一个 holdings 还在的归档 —— 挑到被清理过的就是空转。
+    _root = os.path.dirname(os.path.abspath(__file__))
+    cands = sorted(d for d in glob.glob(os.path.join(_root, 'runs/*/*/*/'))
+                   if os.path.exists(os.path.join(d, 'holdings.parquet')))
+    if not cands:
+        return '跳过（没有带 holdings 的归档）'
+    rid = os.path.basename(cands[-1].rstrip('/'))
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/run/%s' % (port, rid),
+                    wait_until='networkidle')
+            pg.wait_for_timeout(3000)
+            names = pg.locator('#tabs div').all_inner_texts()
+            i = [k for k, t in enumerate(names) if '持仓' in t]
+            assert i, '详情页没有「持仓」页签：%r' % names
+            pg.locator('#tabs div').nth(i[0]).click()
+            pg.wait_for_timeout(2500)
+            assert not errs, \
+                ('切到持仓页签就抛错了：%r —— 这种错只在控制台里报，'
+                 '页面上只是"什么都没有"' % errs[:2])
+            n = pg.locator('#p4 table tr').count()
+            assert n > 5, \
+                ('持仓页签一行都没列出来（%d 行）—— 接口是通的，'
+                 '坏在渲染那一步' % n)
+            # 🔴 份额要是**真实股数**（整数量级），不是后复权记账单位
+            #   （那种是 774.835189 这样的小数）——「展示层换算回不复权」
+            #   那条纪律的可见后果就在这一列。
+            txt = pg.evaluate(
+                """() => {const h = [...document.querySelectorAll('#p4 table th')]
+                    .map(e => e.textContent.trim());
+                  const j = h.findIndex(t => t.indexOf('份额') >= 0);
+                  const tr = [...document.querySelectorAll('#p4 table tr')]
+                    .filter(r => r.children.length > 3).slice(0, 5);
+                  return {j: j, v: tr.map(r => (r.children[j] || {}).innerText)};}""")
+            assert txt['j'] >= 0, '持仓表没有「份额」这一列'
+            vals = [v for v in txt['v'] if v and v.strip() not in ('—', '')]
+            assert vals, '份额那一列是空的'
+            assert not any('.' in v for v in vals), \
+                ('份额列出现了小数 %r —— 那是**后复权记账单位**，'
+                 '券商对账单上没有这种数（展示层要换算回真实股数）' % vals[:2])
+            # 分页条要说清总量（这一页会很长，服务端分页）
+            _pg = pg.evaluate(
+                "()=>document.querySelector('#p4 .pg')?.innerText || ''")
+            assert '页' in _pg and '条' in _pg, '持仓页没有分页条：%r' % _pg[:60]
+            assert 'NaN' not in _pg, '分页条出现 NaN：%r' % _pg[:60]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '持仓页签列出 %d 行（%s），份额是真实股数、分页条正常' % (n, rid)
+
+
 @case('网页看板真实渲染（playwright）', tag='web')
 def t_ui():
     """★ JS 语法检查过不代表能渲染 —— 运行时错误在终端里看不到。

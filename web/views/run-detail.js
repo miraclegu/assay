@@ -107,6 +107,18 @@ function paneOverview(){
    ★ 仍是裸的顶层函数（本项目不引模块系统），shared/ 在
      views/ 之前加载，所以这里的调用一个字都不用改。 */
 
+/* 整数金额/份额的显示。🔴 **模块级**：原来它是 `drawDay` 里的一个局部
+   const，而 `paneHoldings`（持仓页签）也在用 —— 跨函数引用未定义的名字，
+   **整个持仓页签当场抛 `money is not defined`、一行都渲染不出来**，
+   而它只在控制台里报（用户 2026-09-16："回测里的持仓页面出现问题了，
+   展示不出持仓的具体列表了"）。
+   ★ 是 2026-09-14 那次「份额一律展示不复权」把 `fmtN(v,1)` 换成
+     `money(v)` 时带进来的 —— 那一轮的判据只验到了**接口**与下钻页那条路，
+     持仓页签本身从没被真正渲染过（同「持仓不换算那条第一轮漏了，
+     因为我挑的归档 rows 是空的」那次，只是这回漏在另一条路上）。 */
+const money = v => v == null ? '—'
+  : (+v).toLocaleString('en', {maximumFractionDigits: 0});
+
 let EQLOG=true;
 let EQR={a:null,b:null};      // 权益曲线的显示区间（null = 全程）
 
@@ -353,7 +365,6 @@ async function drawDay(S){
   /* ★ 与别处同一种排布（名称 + 小字代码），不再是"代码 名称"的纯文本 ——
      同一个页面里两种排法，眼睛每换一张表就要重新找一次。 */
   const nm=r=>cnCell(r.code, r.name, {date:d, run:CUR});
-  const money=v=>v==null?'—':(+v).toLocaleString('en',{maximumFractionDigits:0});
   const px=v=>v==null?'—':(+v).toFixed(3);
   box.innerHTML=`<h3 class="sec">${d} · 当日明细</h3>
     <div class="cards">
