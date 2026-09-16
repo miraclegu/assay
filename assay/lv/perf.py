@@ -4,6 +4,7 @@
   当日现金流按【区间】取，不是"正好落在那天"（入金落在周末会被漏掉，
   而漏掉的入金会被当成收益）。"""
 import datetime
+import io
 import os
 import re
 from ..feed import PanelFeed
@@ -472,43 +473,186 @@ BENCHMARKS = [
 ]
 
 
+# ---- 自定义基准：名称/代码手填 ----------------------------------------
+# 🔴 用户 2026-09-16："实盘策略中的基准除了预设的这些，还可以自己手填
+#   名称/代码比对，比如填某个红利 ETF 作为基准比对。"
+#
+# 本地凑得齐这件事，而且**全是 parquet**（不碰 tdx.db 的写锁）：
+#     raw/tdx/kline/{index,etf,stock,block}_*.parquet   日线
+#     raw/tdx/adjust_factor.parquet                     后复权因子
+#     raw/tdx/snapshots/symbol_name_*.parquet           名称 + 类别
+#
+# 🔴🔴 **必须用后复权**。红利 ETF 的 hfq_factor 从 1.0 涨到 1.81
+#   （sh510880，2007~2026）—— 那 81% 全是分红。拿不复权的收盘当基准，
+#   等于把一个年化 ~5% 股息的东西按"股价涨了多少"来比，**系统性低估**，
+#   而它不报错，只是那条线一直偏低。指数没有除权（因子表里没有它的行），
+#   `coalesce(f, 1)` 正好。同「区间涨幅一律用后复权」那条。
+_KIND_FILE = {'index': 'index_*', 'etf': 'etf_*', 'stock': 'stock_*',
+              'block': 'block_*'}
+
+
+def _name_snap(root):
+    """最新那份 symbol_name 快照（PIT 目录里挑 snap_date 最大的）。
+
+    ★ 照 `manifest.csv` 找，不去 glob 目录按文件名猜 —— 文件名是内容哈希，
+      新旧看不出来（同"判据要对上为什么保留"那条）。
+    """
+    import csv
+    mf = os.path.join(root, 'raw/tdx/snapshots/manifest.csv')
+    if not os.path.exists(mf):
+        return None
+    best = None
+    with io.open(mf, encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            if r.get('dataset') != 'symbol_name':
+                continue
+            if best is None or (r.get('snap_date') or '') > (best.get('snap_date') or ''):
+                best = r
+    if not best:
+        return None
+    fp = os.path.join(root, 'raw/tdx/snapshots', best['version_file'])
+    return fp if os.path.exists(fp) else None
+
+
+def bench_meta(codes, datalake=None):
+    """这些 symbol 叫什么、是哪一类 —— {symbol: {'name','kind'}}。
+
+    ★ 页面只存 symbol（一个 localStorage 槽），名字每次由服务端给：
+      存一份名字在前端的话，改过名的票会一直显示旧名，而它不报错。
+    """
+    codes = [c for c in (codes or []) if _SYM_RE.match(c or '')]
+    if not codes:
+        return {}
+    root = _px._lake(datalake)
+    fp = _name_snap(root)
+    if not fp:
+        return {}
+    import duckdb
+    con = duckdb.connect(':memory:')
+    try:
+        rows = con.execute(
+            "SELECT symbol, name, class FROM read_parquet('%s') "
+            "WHERE symbol IN ('%s')" % (fp, "','".join(codes))).fetchall()
+    finally:
+        con.close()
+    return dict((r[0], {'name': r[1], 'kind': r[2]}) for r in rows)
+
+
+def bench_search(q, datalake=None, limit=12):
+    """按**名称或代码**找可以当基准的东西（指数 / ETF / 股票）。
+
+    🔴 **只返回真有日线的**：列出来点了什么都不出来，比不给这个选项更糟
+      （同 backLink 那条）。所以候选先按名字命中，再逐类去 kline 里
+      查一次 max(date) —— 查的是**候选那几个**（≤ limit），不是全表。
+    ★ 板块（block_*）不进候选：它们是通达信的板块指数，口径与这一页
+      要比的"能买到的东西"不是一回事。
+    """
+    q = (q or '').strip()
+    if not q:
+        return []
+    root = _px._lake(datalake)
+    fp = _name_snap(root)
+    if not fp:
+        return []
+    import duckdb
+    con = duckdb.connect(':memory:')
+    out = []
+    try:
+        like = q.replace("'", "").replace('%', '')[:24]
+        rows = con.execute(
+            "SELECT symbol, name, class FROM read_parquet('%s') "
+            "WHERE class IN ('index','etf','stock') "
+            "AND (name LIKE '%%%s%%' OR symbol LIKE '%%%s%%') "
+            "ORDER BY CASE class WHEN 'index' THEN 0 WHEN 'etf' THEN 1 ELSE 2 END, "
+            "symbol LIMIT %d" % (fp, like, like, int(limit))).fetchall()
+        by_kind = {}
+        for sym, name, kind in rows:
+            if not _SYM_RE.match(sym or ''):
+                continue
+            by_kind.setdefault(kind, []).append((sym, name))
+        for kind, items in by_kind.items():
+            pat = _KIND_FILE.get(kind)
+            if not pat:
+                continue
+            got = dict(con.execute(
+                "SELECT symbol, max(date) FROM read_parquet('%s/raw/tdx/kline/%s.parquet') "
+                "WHERE symbol IN ('%s') GROUP BY 1"
+                % (root, pat, "','".join(s for s, _ in items))).fetchall())
+            for sym, name in items:
+                if sym in got:
+                    out.append({'code': sym, 'name': name, 'kind': kind,
+                                'last': str(got[sym])[:10]})
+    finally:
+        con.close()
+    order = {'index': 0, 'etf': 1, 'stock': 2}
+    out.sort(key=lambda x: (order.get(x['kind'], 9), x['code']))
+    return out
+
+
 def bench_curves(dates, codes, datalake=None):
-    """把基准指数对齐到给定的交易日轴 -> {code: [归一化净值]}。
+    """把基准对齐到给定的交易日轴 -> {code: [归一化净值]}。
 
     🔴 **基点取第一天的【前一交易日】收盘**，不是第一天收盘 ——
       与 `feed.benchmark` 同一条纪律：用首日收盘做基点等于把首日的
       涨跌排除在基准之外（实测差 9.5pp）。这里的"第一天"是账户曲线的
       第一天，所以基准与账户从**同一起点**出发，叠加起来才可比。
-    ★ 指数在 raw/tdx/kline/index_*.parquet，不在面板里 —— 面板是
-      「(date, code) 股票宽表」，塞指数进去会让 as-of 语义变浑。
-    ★ 某天指数停牌/缺失时**留 None**（前端断开画），不做前值填充：
+
+    🔴🔴 **一律后复权**（`close × coalesce(hfq_factor, 1)`）。
+      2026-09-16 开放"手填任意代码当基准"之后这条才真正咬人：
+      红利 ETF（sh510880）的因子从 1.0 涨到 1.81，那 81% 全是**分红**。
+      拿不复权收盘当基准，等于把一个年化 ~5% 股息的东西按"股价涨了多少"
+      来比 —— **系统性低估**，而它不报错，只是那条线一直偏低。
+      指数不除权（因子表里没有它的行），`coalesce` 到 1 正好，
+      所以预设那几个指数的曲线**一个数都没变**。
+
+    ★ 数据在 `raw/tdx/kline/{index,etf,stock}_*.parquet`，不在面板里 ——
+      面板是「(date, code) 股票宽表」，塞指数/ETF 进去会让 as-of 语义变浑。
+    ★ 先按**类别**挑文件（`symbol_name` 快照里的 class），挑不中再按
+      index -> etf -> stock 试一遍：股票那组有 1600 万行，无差别全扫既慢
+      又没必要。
+    ★ 某天停牌/缺失时**留 None**（前端断开画），不做前值填充：
       填出来的平线看着像"那几天没动"，而实际是没有数据。
     """
     if not dates or not codes:
         return {}
     import duckdb
     root = _px._lake(datalake)
-    T = "read_parquet('%s/raw/tdx/kline/index_*.parquet')" % root
+    meta = bench_meta(codes, datalake)
+    F = "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % root
     con = duckdb.connect(':memory:')
     out = {}
     try:
         for sym in codes:
             if not _SYM_RE.match(sym or ''):
                 continue                     # 只认 sh/sz + 6 位，防注入
-            base = con.execute(
-                "SELECT close FROM %s WHERE symbol = '%s' AND date < DATE '%s' "
-                "ORDER BY date DESC LIMIT 1" % (T, sym, dates[0])).fetchone()
-            rows = dict(con.execute(
-                "SELECT date, close FROM %s WHERE symbol = '%s' "
-                "AND date BETWEEN DATE '%s' AND DATE '%s'"
-                % (T, sym, dates[0], dates[-1])).fetchall())
-            if not rows:
-                continue
-            b = base[0] if base else rows.get(_base._d(dates[0]))
-            if not b:
-                continue
-            out[sym] = [(round(rows[_base._d(d)] / b, 8)
-                         if _base._d(d) in rows else None) for d in dates]
+            kind = (meta.get(sym) or {}).get('kind')
+            pats = [_KIND_FILE[kind]] if kind in _KIND_FILE else []
+            pats += [v for k, v in (('index', 'index_*'), ('etf', 'etf_*'),
+                                    ('stock', 'stock_*')) if v not in pats]
+            for pat in pats:
+                T = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (root, pat)
+                # 后复权收盘：close × 因子（指数没有因子行 -> 1）
+                PX = ("SELECT k.date AS d, k.close * coalesce(f.hfq_factor, 1) AS c "
+                      "FROM %s k LEFT JOIN %s f "
+                      "ON f.symbol = k.symbol AND f.date = k.date "
+                      "WHERE k.symbol = '%s'" % (T, F, sym))
+                try:
+                    base = con.execute(
+                        "SELECT c FROM (%s) WHERE d < DATE '%s' "
+                        "ORDER BY d DESC LIMIT 1" % (PX, dates[0])).fetchone()
+                    rows = dict(con.execute(
+                        "SELECT d, c FROM (%s) WHERE d BETWEEN DATE '%s' AND DATE '%s'"
+                        % (PX, dates[0], dates[-1])).fetchall())
+                except Exception:                           # noqa: BLE001
+                    continue                 # 这一类没有这个文件/这只票
+                if not rows:
+                    continue
+                b = base[0] if base else rows.get(_base._d(dates[0]))
+                if not b:
+                    continue
+                out[sym] = [(round(rows[_base._d(d)] / b, 8)
+                             if _base._d(d) in rows else None) for d in dates]
+                break
     finally:
         con.close()
     return out

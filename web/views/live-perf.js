@@ -50,6 +50,10 @@ let LPB = (() => {
     return (v === LPB_STRAT || /^(sh|sz)\d{6}$/.test(v)) ? [v] : [];
   } catch (e) { return []; }
 })();
+/* 手填的那个基准（不在预设清单里）的**名字** —— 由服务端给
+   （`equity` 的 `bench_meta`）。页面只存 symbol：名字存前端的话，
+   标的改过名就会一直显示旧名，而它不报错。 */
+let LPB_META = {};
 
 function lpbSet(code){
   LPB = code ? [code] : [];
@@ -65,6 +69,62 @@ const LPB_ALL = ['sh000001','sz399006','sh000688','sh000905','sh000852',
                  'sz399303','sz399101','sz399316','sz399634'].join(',');
 const LPB_COL = ['#7ec8a0','#c88ad0','#d0a05b','#6fa8d8','#d07a7a',
                  '#9db85b','#5bb0b8','#b89d6f','#8f9bd8'];
+/* 手填基准的颜色。🔴 **判据是色距，不是"看着不一样"**：我第一版挑了
+   `#e0a33c`，与**账户线**那个 `#e0b050` 的 RGB 欧氏距离只有 **24** ——
+   屏幕上就是两条一模一样的橙线，"哪条是账户"只能靠猜。这正是策略线
+   那次踩过的坑（它当时与上证撞了），项目里量色距的阈值是 60。
+   这个 `#00a6fb` 与已用的 14 个颜色（账户 / 策略 / 9 个指数 / 涨跌 / 灰）
+   最小距离 113。 */
+const LPB_CUSTOM_COL = '#00a6fb';
+
+/* 手填基准：一个小搜索框 + 候选清单。
+   🔴 用户 2026-09-16："基准除了预设的这些，还可以自己手填名称/代码比对，
+     比如填某个红利 ETF"。预设那九个是**宽基指数**，而人真正想比的往往是
+     "我这个红利策略跑不跑得赢红利 ETF" —— 那不是宽基能回答的。
+   ★ 候选由**服务端**给（/api/live/bench_search）：本地有没有这只票的日线
+     只有服务端知道，列出来点了什么都不出来比不给更糟。 */
+function lpbFind(aid){
+  const box = $('#lp_bfind');
+  if(!box) return;
+  box.innerHTML = `<input id="lp_bq" placeholder="名称或代码，如 红利ETF / 510880"
+      style="width:200px;margin-left:6px"><span class="lvwhy" id="lp_bhit"></span>`;
+  const q = $('#lp_bq');
+  q.focus();
+  let t = null;
+  q.oninput = () => {
+    clearTimeout(t);
+    /* ★ 防抖：每敲一个字打一次接口的话，输入过程就是一串请求。 */
+    t = setTimeout(async () => {
+      const kw = q.value.trim();
+      const hit = $('#lp_bhit');
+      if(kw.length < 2){ hit.innerHTML = ''; return; }
+      let r;
+      try { r = await j('/api/live/bench_search?q=' + encodeURIComponent(kw)); }
+      catch(e){ hit.innerHTML = '　<b>搜不了：' + esc(String(e)) + '</b>'; return; }
+      const it = (r.items || []);
+      if(!it.length){ hit.innerHTML = '　没找到（本地没有它的日线）'; return; }
+      const K = {index: '指数', etf: 'ETF', stock: '股票'};
+      hit.innerHTML = '　' + it.slice(0, 8).map(x =>
+        `<a href="#" class="lpb lpbhit" data-b="${esc(x.code)}"
+           title="${esc(x.code)} · 数据到 ${esc(x.last)}">${esc(x.name)}
+           <span class="lvwhy">${K[x.kind] || x.kind}</span></a>`).join('');
+      $$('#lp_bhit .lpbhit').forEach(a => a.onclick = ev => {
+        ev.preventDefault();
+        lpbSet(a.dataset.b);
+        lpbReload(aid);
+      });
+    }, 260);
+  };
+}
+
+/* 选了个手填的基准 -> 重新取一次权益（带上它）。
+   ★ 预设那几个仍然是**零请求**切换（进页面时一次全取回来了）。 */
+function lpbReload(aid){
+  const extra = (LPB.length && LPB[0] !== LPB_STRAT) ? ',' + LPB[0] : '';
+  j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL + extra)
+    .then(o => { LPD = o; LPB_META = o.bench_meta || {}; renderPerf(aid); })
+    .catch(() => renderChart(aid));
+}
 
 function showPerf(aid){
   const b = $('#main');
@@ -87,8 +147,12 @@ function showPerf(aid){
        所以两支都要调，各自判自己依赖的数据齐没齐。 */
     if(LPD){ renderChart(aid); renderExec(aid); }
   });
-  j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL).then(o => {
-    LPD = o; renderPerf(aid);
+  /* ★ 手填的那个（如果上次选了）**一起带上** —— 不带的话进页面看到的是
+     "选中了却没有线"，而它不报错。 */
+  const extra = (LPB.length && LPB[0] !== LPB_STRAT
+                 && LPB_ALL.indexOf(LPB[0]) < 0) ? ',' + LPB[0] : '';
+  j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL + extra).then(o => {
+    LPD = o; LPB_META = o.bench_meta || {}; renderPerf(aid);
   }).catch(e => { b.innerHTML = '<div class="none">' + esc(e) + '</div>'; });
 }
 
@@ -271,18 +335,60 @@ function lprSlice(o){
      "起点是前一交易日"同一条纪律：用区间首日自己做基点会把首日
      的涨跌排除在这段收益之外。区间从第一天开始时用 1.0（开户起点）。 */
   const nb = i0 > 0 ? o.nav[i0 - 1] : 1.0;
+  /* 🔴 **i0 === 0 时基点是 1，不是"区间内第一个值"。**
+     服务端给的基准序列**已经**以 dates[0] 的前一交易日收盘为基点归一化过了
+     （`bench_curves`，与 feed.benchmark 同一条纪律）。再除以区间首日自己
+     等于把首日涨跌从基准里抹掉 —— 而账户那条线用的是 1.0（开户本金，
+     **含**首日）。两条线口径就此分家，**且不报错**：图上只看到基准
+     第一天平平地落在 0%。
+     实测（2026-09-16 用户报）：红利 ETF 首日显示 0.00%，实际 −0.29%。
+     ★ 这正是本文件 448 行注释里写着的那条纪律 —— 代码在和自己的注释打架
+       （同 `ddGap` 那次）。
+   ★ 前一天可能是 null（那天基准停牌/还没上市）：往前找最近的非空，
+     找不到才退回 1 —— 直接用 null 会让 `bb ? … : v` 静默跳过归一化，
+     于是区间内的基准还用着**全程**基点，与账户不同轴。 */
+  const pbase = arr => {
+    for(let j = i0 - 1; j >= 0; j--) if(arr[j] != null) return arr[j];
+    return 1;
+  };
   const bench = {};
   for(const k in (o.bench || {})){
     const v = cut(o.bench[k]);
-    const bb = i0 > 0 ? o.bench[k][i0 - 1] : (v.find(x => x != null) || 1);
+    const bb = pbase(o.bench[k] || []);
     bench[k] = bb ? v.map(x => (x == null ? null : x / bb)) : v;
   }
+  /* 「策略」曲线同样要按区间起点重新归一化。它不在 `o.bench` 里
+     （另一个接口、另一条日期轴），所以基点在这里算好带出去 ——
+     不归一化的话它的基点仍是**本金**，而账户线是区间起点前一天，
+     选「近一月」时两条线从不同的地方出发，看着像执行差异突然变大。 */
+  const sb = (() => {
+    if(i0 <= 0 || !LPBCH || LPBCH.error || !LPBCH.dates) return 1;
+    const m = {};
+    LPBCH.dates.forEach((d, i) => { m[d] = LPBCH.nav[i]; });
+    for(let j = i0 - 1; j >= 0; j--) if(m[o.dates[j]] != null) return m[o.dates[j]];
+    return 1;
+  })();
   return {dates: dates, equity: cut(o.equity),
           nav: nb ? nav.map(x => x / nb) : nav,
           day_rets: cut(o.day_rets), day_pnls: cut(o.day_pnls),
           bench: bench, benchmarks: o.benchmarks, stats: o.stats,
-          i0: i0, i1: i1, span: [dates[0], dates[dates.length - 1]],
+          i0: i0, i1: i1, sb: sb, span: [dates[0], dates[dates.length - 1]],
           full: o.dates.length};
+}
+
+/* 策略曲线对齐到账户的日期轴，并按区间基点归一化。
+   🔴 **对齐用日期不是下标**：两边交易日可能不等长（策略曲线从开户日起算，
+     而权益曲线盘中会多补今天那一点）—— 按下标并的话错一位就整条线平移，
+     而它不报错。
+   🔴 归一化与"算基点"分开成两个可测的纯函数：判据只钉 `lprSlice` 算出的
+     `sb` 时，把这里改成恒用 1 **照样全绿**（变异实测）——
+     判据比要证的事窄，生产端对了不等于消费端用了。 */
+function lprStratSeries(dates, sb){
+  if(!LPBCH || LPBCH.error || !LPBCH.dates) return null;
+  const m = {};
+  LPBCH.dates.forEach((d, i) => { m[d] = LPBCH.nav[i]; });
+  const b = sb || 1;
+  return dates.map(d => m[d] == null ? null : m[d] / b);
 }
 
 function lprBar(o, aid){
@@ -397,10 +503,8 @@ function renderChart(aid){
     const stratOn = LPB.indexOf(LPB_STRAT) >= 0;
     if(!stratOn) LPBCH_NOTE = '';
     if(stratOn && LPBCH && !LPBCH.error && LPBCH.dates){
-      const m = {};
-      LPBCH.dates.forEach((d, i) => { m[d] = LPBCH.nav[i]; });
-      const sv = o.dates.map(d => m[d] == null ? null : m[d]);
-      if(sv.some(v => v != null))
+      const sv = lprStratSeries(o.dates, o.sb || 1);
+      if(sv && sv.some(v => v != null))
         /* 🔴 颜色**不能用 LPB_COL[0]**（`#7ec8a0`）—— 那是上证的色，
            两条线一模一样时"哪条是策略"只能靠猜。这里用一个不在 LPB_COL
            里的紫色，且比指数线粗一档（它不是外部基准，是"我本来该有的"）。 */
@@ -412,8 +516,12 @@ function renderChart(aid){
       /* ★ 这段说明只在**选中策略**时给：它解释的是那条线，没画线还留着
          一段话，读的人会去找那条不存在的线。 */
       LPBCH_NOTE = (() => {
-        const last = o.dates[o.dates.length - 1];
-        const miss = m[last] == null;
+        /* 🔴 "最后一天策略有没有值"要问 **sv**（已对齐到 o.dates 的那份），
+           不要另建一份 date->nav 的 map —— 抽出 `lprStratSeries` 时我把
+           那个 map 删了，而这里还在用，于是整段抛 `m is not defined`：
+           **策略线 push 进去了、图却只画出账户那一条**（异常发生在
+           lineChart 之前），而它只在控制台里报。 */
+        const miss = sv[sv.length - 1] == null;
         const d0 = (o.nav[0] != null && sv[0] != null)
           ? (o.nav[0] - sv[0]) * 100 : null;
         return `<b style="color:#7ec8a0">策略</b>：按绑定版本 ${
@@ -427,12 +535,19 @@ function renderChart(aid){
       })();
     }
     picks.forEach((c, i) => {
-      const b = BM.find(x => x.code === c) || {code: c, name: c};
+      /* 🔴 手填的那个**不在 BM 里**：名字要用服务端给的 `bench_meta`，
+         否则图例上是一串 `sh510880`；而颜色也不能按 `LPB_ALL` 的下标取
+         —— 那会算出 -1，`LPB_COL[-1]` 是 undefined，线就**没有颜色**
+         （画得出来但看不见，且不报错）。 */
+      const b = BM.find(x => x.code === c)
+        || {code: c, name: (LPB_META[c] || {}).name || c};
       /* ★ 基准只进 `series` —— lineChart 的 tooltip 会自动列出所有
          series，再放进 `extra` 就是**同一行读数出现两次**（实测踩到）。
          `extra` 只放不共轴的那个量（累计金额）。 */
-      series.push({n: b.name, v: BD[c], c: LPB_COL[LPB_ALL.split(',').indexOf(c)
-                   % LPB_COL.length], w: 1.2});
+      const ci = LPB_ALL.split(',').indexOf(c);
+      series.push({n: b.name, v: BD[c],
+                   c: ci >= 0 ? LPB_COL[ci % LPB_COL.length] : LPB_CUSTOM_COL,
+                   w: 1.2});
     });
     /* 基准选择器。★ 每个选项标出**本地数据从哪年开始** —— 科创50 只有
        2019-12 之后，选了它却发现前面是空的话，人会以为图画坏了。
@@ -452,6 +567,21 @@ function renderChart(aid){
           data-b="${b.code}" title="${esc(b.code)}${
             b.from ? '　本地数据自 ' + esc(b.from) : ''}${
             b.note ? '\n' + esc(b.note) : ''}">${esc(b.name)}</a>`).join('')
+      /* 手填的那个：不在预设里，单独挂一个 chip（选中态）。
+         🔴 **取不到数据就不挂**（`BD[LPB[0]]`）—— localStorage 里可能是
+           手改的垃圾或退市的代码（`sh999999` 形状合法、本地没有它的日线）。
+           照挂的话 chip 亮着、图上却没有线，正是「点了什么都不出来比不给
+           更糟」那条（同「拿不到策略曲线时不列这个选项」）。
+         ★ 状态**不清掉**：数据晚到一天的票不该被永久丢掉，而"不比"
+           那个按钮仍然在，人随时能自己清。 */
+      + (LPB.length && LPB[0] !== LPB_STRAT && BD[LPB[0]]
+         && !BM.some(b => b.code === LPB[0])
+         ? `<span class="lvwhy">|</span><a href="#" class="lpb on"
+              data-b="${esc(LPB[0])}" title="手填的基准 ${esc(LPB[0])}"
+              >${esc((LPB_META[LPB[0]] || {}).name || LPB[0])}</a>` : '')
+      + `<span class="lvwhy">|</span><a href="#" class="lpb" id="lp_bmore"
+           title="手填一个：指数 / ETF / 个股都行，按名称或代码搜">+ 自定义</a>`
+      + '<span id="lp_bfind"></span>'
       + (LPB.length ? '<a href="#" class="lpb" id="lp_bclr">不比</a>' : '')
       + '</div>';
     lineChart(el, series,
@@ -472,10 +602,15 @@ function renderChart(aid){
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
     el.querySelectorAll('a.lpb').forEach(a => a.onclick = ev => {
       ev.preventDefault();
+      if(a.id === 'lp_bmore'){ lpbFind(aid); return; }
       /* 单选：点新的换掉旧的，点已选中的取消。★ 不做"多选 + 清空按钮" ——
          同时看多个基准反而看不清（见 LPB 的注释）。 */
       lpbSet(a.id === 'lp_bclr' ? '' : (LPB[0] === a.dataset.b ? '' : a.dataset.b));
-      renderChart(aid);
+      /* 🔴 手填的那个**不在预加载的那批里**，得重新取一次权益（它要带上
+         这个 code 去算基准曲线）。预设那几个仍然零请求切换。 */
+      if(LPB.length && LPB[0] !== LPB_STRAT && !BM.some(b => b.code === LPB[0])) {
+        lpbReload(aid);
+      } else renderChart(aid);
     });
   }
   renderDD(aid, o, st);

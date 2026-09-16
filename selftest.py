@@ -13257,6 +13257,235 @@ def t_strat_bench():
             '可取消 · 解释跟着选中走' % (sc, len(cols)))
 
 
+@case('基准可以【手填】：搜得到 / 名字服务端给 / 不撞色 / 记得住（playwright）',
+       tag='web')
+def t_bench_custom_web():
+    """用户 2026-09-16："实盘策略中的基准除了预设的这些，还可以自己手填
+    名称/代码比对，比如填某个红利 ETF 作为基准比对。"
+
+    四条判据，每条对着一种**不报错**的坏法：
+      ① 候选**由服务端给** —— 本地有没有这只票的日线只有服务端知道，
+         前端硬编码清单会列出"点了什么都不出来"的死选项（同 backLink 那条）
+      ② **名字来自 `bench_meta`，前端一个字都不认识** —— 页面自己存名字的话，
+         标的改过名就一直显示旧名，而它不报错
+      ③ 🔴 **不撞色**：我第一版挑的 `#e0a33c` 与账户线 `#e0b050` 的 RGB
+         欧氏距离只有 **24** —— 屏幕上两条一模一样的橙线，"哪条是账户"
+         只能靠猜（同「策略线与上证撞色」那次）。判据是**色距**不是"看着不一样"
+      ④ 选了之后**刷新还在**，且曲线真画得出来 —— 只验"chip 亮着"的话，
+         重取权益那条路（手填的不在预加载那批里）断了也发现不了
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import io as _io
+    import re as _re
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    notes = []
+
+    # ---- ③ 静态：色距 ----
+    src = _io.open('web/views/live-perf.js', encoding='utf-8').read()
+    def _rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    def _dist(a, b):
+        return sum((x - y) ** 2 for x, y in zip(_rgb(a), _rgb(b))) ** 0.5
+    mc = _re.search(r"const LPB_CUSTOM_COL = '(#[0-9a-fA-F]{6})'", src)
+    assert mc, '找不到 LPB_CUSTOM_COL'
+    cc = mc.group(1)
+    # 🔴 只认**真的十六进制**：`#\w{6}` 会把 `'#lp_bmore'` 这种选择器也抓进来
+    used = _re.findall(r"'(#[0-9a-fA-F]{6})'", src)
+    used = [c for c in used if c.lower() != cc.lower()]
+    assert len(used) >= 10, '页面里只找到 %d 个颜色，判据怕是没扫到' % len(used)
+    near = min((_dist(cc, c), c) for c in used)
+    assert near[0] >= 60, \
+        ('手填基准的颜色 %s 与 %s 的色距只有 %.0f（阈值 60）—— '
+         '屏幕上就是两条一样的线，"哪条是账户"只能靠猜' % (cc, near[1], near[0]))
+    notes.append('色距 %.0f（最近的是 %s，共比 %d 个）' % (near[0], near[1], len(used)))
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/' % port)
+            pg.evaluate("() => localStorage.removeItem('lvbench')")
+            pg.goto('http://127.0.0.1:%d/#/live/froec/perf' % port)
+            pg.wait_for_selector('#lp_bmore', timeout=25000)
+            pg.wait_for_timeout(1800)
+
+            SNAP = """() => {
+              const el = document.getElementById('lp_chart');
+              const ps = [...el.querySelectorAll('svg path[d]')];
+              return {n: ps.length,
+                      cols: ps.map(x => (x.getAttribute('stroke')||'').toLowerCase()),
+                      picked: [...document.querySelectorAll('#lp_bm a.on')]
+                              .map(a => a.textContent.trim()),
+                      meta: (typeof LPB_META === 'object' ? LPB_META : {}),
+                      lpb: (typeof LPB !== 'undefined' ? LPB : [])};
+            }"""
+            a0 = pg.evaluate(SNAP)
+            assert a0['n'] == 1 and not a0['picked'], \
+                '默认就画了基准：%d 条线 / 选中 %r' % (a0['n'], a0['picked'])
+
+            # ---- ① 搜：候选由服务端给 ----
+            pg.click('#lp_bmore')
+            pg.wait_for_selector('#lp_bq', timeout=6000)
+            pg.fill('#lp_bq', '红利ETF')
+            pg.wait_for_selector('#lp_bhit .lpbhit', timeout=8000)
+            hits = pg.evaluate("""() => [...document.querySelectorAll('#lp_bhit .lpbhit')]
+                .map(a => ({code: a.dataset.b, txt: a.textContent.trim()}))""")
+            assert hits, '搜"红利ETF"一个候选都没有'
+            codes = [h['code'] for h in hits]
+            assert 'sh510880' in codes, '候选里没有 sh510880：%r' % codes[:5]
+            # 🔴 候选必须是**服务端**认过"本地真有日线"的那批。判据：
+            #   同一个关键词直接打接口，页面列的必须是它的子集 ——
+            #   前端自己拼一份清单的话这条立刻挂。
+            import json as _json
+            import urllib.request as _u
+            api = _json.loads(_u.urlopen(
+                'http://127.0.0.1:%d/api/live/bench_search?q=%s'
+                % (port, _u.quote('红利ETF'))).read().decode('utf-8'))
+            acodes = [x['code'] for x in api.get('items', [])]
+            assert acodes, '/api/live/bench_search 返回空'
+            assert set(codes) <= set(acodes), \
+                ('页面列了服务端没给的候选 %r —— 本地有没有日线只有服务端知道，'
+                 '前端拼清单会列出点了什么都不出来的死选项'
+                 % list(set(codes) - set(acodes)))
+            notes.append('搜到 %d 个候选（全部来自服务端）' % len(hits))
+
+            # ---- 选中 ----
+            want = [h for h in hits if h['code'] == 'sh510880'][0]
+            pg.evaluate("""() => [...document.querySelectorAll('#lp_bhit .lpbhit')]
+                .find(a => a.dataset.b === 'sh510880').click()""")
+            pg.wait_for_timeout(3000)
+            a1 = pg.evaluate(SNAP)
+            assert a1['n'] == 2, \
+                ('选了手填基准却有 %d 条线 —— 它不在预加载那批里，'
+                 '必须重新取一次权益' % a1['n'])
+            assert cc.lower() in a1['cols'], \
+                '手填基准的线没用 %s：%r' % (cc, a1['cols'])
+            # ---- ② 名字是服务端给的 ----
+            nm = (a1['meta'].get('sh510880') or {}).get('name')
+            assert nm, 'bench_meta 里没有 sh510880 的名字 —— 那 chip 上只会是一串代码'
+            assert a1['picked'] == [nm], \
+                ('chip 上写的是 %r，而服务端给的名字是 %r —— '
+                 '名字必须来自 bench_meta，页面自己存的话改名后一直显示旧名'
+                 % (a1['picked'], nm))
+            assert nm not in src, \
+                '名字 %r 被写死在 live-perf.js 里了' % nm
+            notes.append('名字「%s」由服务端给' % nm)
+
+            # ---- ④ 刷新还在，且曲线还画得出 ----
+            pg.reload()
+            pg.wait_for_selector('#lp_bmore', timeout=25000)
+            pg.wait_for_timeout(3000)
+            a2 = pg.evaluate(SNAP)
+            assert a2['lpb'] == ['sh510880'], '刷新后没记住：%r' % a2['lpb']
+            assert a2['picked'] == [nm], '刷新后 chip 不对：%r' % a2['picked']
+            assert a2['n'] == 2 and cc.lower() in a2['cols'], \
+                ('刷新后曲线没画出来（%d 条：%r）—— 首次加载那条路没带上'
+                 '记住的手填 code' % (a2['n'], a2['cols']))
+            # ---- ⑤🔴 首日的涨跌**不许被抹掉** ----
+            # 用户 2026-09-16："选择的 ETF 第一天收益是 0，这个不正常，
+            #   第一天的涨跌幅也要算进去。"
+            # 服务端给的序列**已经**以 dates[0] 的前一交易日收盘为基点
+            # （`bench_curves`，同 feed.benchmark 那条纪律）。前端按区间
+            # 重新归一化时若拿"区间内第一个值"当基点，就把首日涨跌又抹了
+            # 一遍 —— 而账户那条线用的是 1.0（开户本金，**含**首日）。
+            # 两条线口径分家，**且不报错**：图上只看到基准第一天平平落在 0%。
+            sl = pg.evaluate("""() => ({
+                i0: LPS && LPS.i0,
+                cut: (LPS && LPS.bench && LPS.bench['sh510880'] || []).slice(0, 3),
+                raw: (LPD && LPD.bench && LPD.bench['sh510880'] || []).slice(0, 3),
+                nav0: (LPS && LPS.nav || [])[0]})""")
+            assert sl['i0'] == 0, '这份数据的区间起点不是第一天（i0=%r），下面几条测不到' % sl['i0']
+            # 🔴 反向自证：那天基准真的动过。恰好平盘的话除不除都一样，
+            #   这条断言就成了空转。
+            assert sl['raw'] and abs(sl['raw'][0] - 1) > 1e-6, \
+                '基准首日恰好平盘（%r），这条判据是空转的' % (sl['raw'][:1])
+            assert abs(sl['cut'][0] - sl['raw'][0]) < 1e-12, \
+                ('基准首日被重新归一化成 %.6f，而服务端算的是 %.6f —— '
+                 '首日涨跌被抹掉了（账户那条线是含首日的 %.6f，两条口径分家）'
+                 % (sl['cut'][0], sl['raw'][0], sl['nav0']))
+            assert abs(sl['nav0'] - 1) > 1e-9, \
+                '账户线首日也是 1，那"两条口径一致"这件事没测到'
+            notes.append('首日 %+.2f%% 照实画（没被归一化抹掉）'
+                         % ((sl['raw'][0] - 1) * 100))
+
+            # ---- ⑥ 区间不是全程时，基准与策略都按【区间起点前一天】归一化 ----
+            # 真实账户只有十几天，所有档都落在全程（i0 恒为 0）—— 这条
+            # 在真实数据上是**空转**的，必须构造。直接验纯函数 `lprSlice`。
+            fx = pg.evaluate("""() => {
+              const D = [], nav = [], b1 = [], b2 = [];
+              for(let i = 0; i < 40; i++){
+                const d = new Date(Date.UTC(2024, 0, 1 + i));
+                D.push(d.toISOString().slice(0, 10));
+                nav.push(1 + i * 0.01); b1.push(1 + i * 0.02);
+                b2.push(i === 19 ? null : 1 + i * 0.03);   // 前一天缺数据
+              }
+              const keep = LPR, keepB = LPBCH;
+              LPR = {k: 'cus', a: D[20], b: D[39]};
+              LPBCH = {dates: D, nav: D.map((_, i) => 1 + i * 0.005)};
+              const r = lprSlice({dates: D, nav: nav, equity: nav,
+                                  day_rets: nav, day_pnls: nav,
+                                  bench: {a: b1, b: b2}, benchmarks: [], stats: {}});
+              LPR = keep; LPBCH = keepB;
+              return {i0: r.i0, a0: r.bench.a[0], b0: r.bench.b[0],
+                      nav0: r.nav[0], sb: r.sb,
+                      wantA: b1[20] / b1[19], wantB: b2[20] / b2[18],
+                      wantSb: 1 + 19 * 0.005};
+            }""")
+            assert fx['i0'] == 20, '构造没生效（i0=%r）' % fx['i0']
+            assert abs(fx['a0'] - fx['wantA']) < 1e-12, \
+                ('区间基准的基点不是"区间起点前一天"：算出 %.6f，应为 %.6f'
+                 % (fx['a0'], fx['wantA']))
+            assert abs(fx['b0'] - fx['wantB']) < 1e-12, \
+                ('前一天是 null 时没往前找最近的非空：算出 %.6f，应为 %.6f —— '
+                 '直接用 null 会静默跳过归一化，区间内的基准还用着全程基点'
+                 % (fx['b0'], fx['wantB']))
+            assert abs(fx['sb'] - fx['wantSb']) < 1e-12, \
+                ('策略曲线的区间基点不对：%.6f vs %.6f —— 不归一化的话它的'
+                 '基点仍是本金，与账户线从不同的地方出发' % (fx['sb'], fx['wantSb']))
+            # 🔴 上面那条只证了**算出**基点；还要证**用上了** ——
+            #   把消费端改成恒用 1，只钉 `sb` 的话照样全绿（变异实测）。
+            fy = pg.evaluate("""() => {
+              const keepB = LPBCH;
+              const D = ['2024-03-01', '2024-03-04', '2024-03-05'];
+              LPBCH = {dates: D, nav: [2, 3, 4]};
+              const a = lprStratSeries(D, 2);
+              const b = lprStratSeries(['2024-03-01', '2024-03-06'], 1);
+              LPBCH = keepB;
+              return {a: a, b: b};
+            }""")
+            assert fy['a'] == [1, 1.5, 2], \
+                ('策略曲线没按给定基点归一化：%r（基点 2 时 [2,3,4] 应为 [1,1.5,2]）'
+                 % (fy['a'],))
+            assert fy['b'] == [2, None], \
+                ('策略曲线没有**按日期**对齐：%r —— 两边交易日不等长，'
+                 '按下标并的话错一位就整条线平移，而它不报错' % (fy['b'],))
+            notes.append('区间基点取前一天（缺数据往前找）· 策略线按日期对齐且同轴')
+
+            # 取消
+            pg.evaluate("""() => document.getElementById('lp_bclr').click()""")
+            pg.wait_for_timeout(2000)
+            a3 = pg.evaluate(SNAP)
+            assert a3['n'] == 1 and not a3['picked'], \
+                '点「不比」没取消掉：%d 条 / %r' % (a3['n'], a3['picked'])
+            assert not errs, 'JS 错误：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('持仓表排序：六列可点 / 升降切换 / 点了不跳动（playwright）', tag='web')
 def t_pos_sort():
     """用户："需要支持点击当日、当日盈亏、市值、浮盈、幅度、仓位从大到小、
@@ -14737,6 +14966,128 @@ def t_indicator_plaza():
             br.close()
     finally:
         httpd.shutdown()
+    return '；'.join(notes)
+
+
+@case('自定义基准：手填名称/代码 · 一律后复权（分红要算进去）', tag='fast')
+def t_bench_custom():
+    """🔴 用户 2026-09-16："基准除了预设的这些，还可以自己手填名称/代码
+    比对，比如填某个红利 ETF 作为基准比对。"
+
+    预设那九个都是**宽基指数**，而人真正想问的往往是"我这个红利策略
+    跑不跑得赢红利 ETF" —— 那不是宽基能回答的。
+
+    🔴🔴 **这个功能真正的坑在复权。** 红利 ETF（sh510880）的 hfq_factor
+      从 1.0 涨到 1.81，那 81% 全是分红。拿不复权收盘当基准，等于把一个
+      年化 ~5% 股息的东西按"股价涨了多少"来比：**实测 2016 年至今
+      不复权 +24.0% / 后复权 +93.4%，差 69 个百分点** —— 而它不报错，
+      只是那条基准线一直偏低、策略看着凭空超额。
+    """
+    import duckdb
+    from assay.lv import perf as _p
+    import run as _run
+    notes = []
+    root = _run.default_lake()
+
+    # ---- ① 搜得到、且只给**本地真有日线**的 ----
+    hit = _p.bench_search('红利ETF')
+    assert hit, '搜不到红利 ETF'
+    assert any(x['code'] == 'sh510880' for x in hit), \
+        '没搜到 sh510880（红利ETF华泰柏瑞）：%r' % hit[:3]
+    for x in hit:
+        assert x.get('last'), '%s 没给数据截止日 —— 列出来点了什么都不出来' % x
+    assert _p.bench_search('zzz不存在的东西') == [], '搜不到时该给空清单'
+    # 代码也能搜
+    assert [x['code'] for x in _p.bench_search('510880')] == ['sh510880']
+    notes.append('按名称/代码都搜得到（%d 个红利 ETF 候选）' % len(hit))
+
+    # ---- ①b🔴 **本地没有日线的一律不给** ----
+    # 名称快照里有 166 只 ETF / 352 只股票在 kline 里根本没有行（退市、
+    # 未上市、北交所新股…）。列出来的话点了什么都不出来 —— 比不给更糟。
+    # ★ 判据**不写死某个代码**：现挑一个"名字在快照里、日线里没有"的，
+    #   拿它的名字去搜，它必须不在结果里。写死的话数据一变这条就空转。
+    import run as _r
+    _root0 = _r.default_lake()
+    _fp = _p._name_snap(_root0)
+    _c0 = duckdb.connect(':memory:')
+    ghost = _c0.execute(
+        "SELECT s.symbol, s.name FROM read_parquet('%s') s WHERE s.class='etf' "
+        "AND length(s.name) >= 3 AND NOT EXISTS (SELECT 1 FROM read_parquet("
+        "'%s/raw/tdx/kline/etf_*.parquet') k WHERE k.symbol = s.symbol) LIMIT 1"
+        % (_fp, _root0)).fetchone()
+    _c0.close()
+    assert ghost, '快照里找不到"没有日线"的样本 —— 这条判据成了空转'
+    gsym, gname = ghost
+    assert gsym not in [x['code'] for x in _p.bench_search(gname)], \
+        ('%s（%s）本地没有日线，却被列进候选 —— 点了什么都不出来'
+         % (gsym, gname))
+    notes.append('没日线的不给（拿 %s 验的）' % gname)
+
+    # ---- ② 名字由服务端给 ----
+    meta = _p.bench_meta(['sh510880', 'sh000001'])
+    assert meta.get('sh510880', {}).get('name', '').startswith('红利ETF'), \
+        'bench_meta 没给出名字：%r' % meta
+    assert meta['sh510880']['kind'] == 'etf' and meta['sh000001']['kind'] == 'index'
+
+    # ---- ③🔴 一律【后复权】：分红必须算进去 ----
+    con = duckdb.connect(':memory:')
+    K = "read_parquet('%s/raw/tdx/kline/etf_*.parquet')" % root
+    F = "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % root
+    ds = [str(r[0]) for r in con.execute(
+        "SELECT date FROM %s WHERE symbol = 'sh510880' "
+        "AND date >= DATE '2016-01-01' ORDER BY date" % K).fetchall()]
+    assert len(ds) > 1000, '取不到红利 ETF 的日线'
+    cur = _p.bench_curves([ds[0], ds[-1]], ['sh510880'])['sh510880']
+    got = cur[-1] / cur[0] - 1
+    raw = con.execute(
+        "SELECT (SELECT close FROM %s WHERE symbol='sh510880' AND date=DATE '%s')"
+        " / (SELECT close FROM %s WHERE symbol='sh510880' AND date=DATE '%s') - 1"
+        % (K, ds[-1], K, ds[0])).fetchone()[0]
+    hfq = con.execute(
+        "WITH px AS (SELECT k.date d, k.close*coalesce(f.hfq_factor,1) c FROM %s k "
+        "LEFT JOIN %s f ON f.symbol=k.symbol AND f.date=k.date "
+        "WHERE k.symbol='sh510880') "
+        "SELECT (SELECT c FROM px WHERE d=DATE '%s')/(SELECT c FROM px WHERE d=DATE '%s') - 1"
+        % (K, F, ds[-1], ds[0])).fetchone()[0]
+    assert abs(got - hfq) < 1e-6, \
+        ('基准不是后复权的：算出 %+.2f%%，后复权应为 %+.2f%%（不复权 %+.2f%%）'
+         '—— 红利 ETF 的分红占了 %.0f 个百分点，漏掉就是策略凭空超额'
+         % (got * 100, hfq * 100, raw * 100, (hfq - raw) * 100))
+    assert hfq - raw > 0.3, \
+        '这只票的复权差只有 %.1fpp，测不出"必须复权"这件事' % ((hfq - raw) * 100)
+    notes.append('后复权（%s~%s：不复权 %+.1f%% / 后复权 %+.1f%%，差 %.0fpp）'
+                 % (ds[0], ds[-1], raw * 100, hfq * 100, (hfq - raw) * 100))
+
+    # ---- ④ 预设那几个指数**一个数都没变**（指数不除权）----
+    # 🔴 开放任意代码 + 加复权是**改了公共路径**，必须证明老的那几条曲线
+    #   没被顺带改掉 —— 拿"只读 index_*、不带因子"的老算法对一遍。
+    dates = [str(r[0]) for r in con.execute(
+        "SELECT DISTINCT date FROM read_parquet('%s/raw/tdx/kline/index_*.parquet') "
+        "WHERE symbol='sh000001' AND date >= DATE '2026-06-01' ORDER BY date" % root
+    ).fetchall()]
+    new = _p.bench_curves(dates, ['sh000001', 'sz399006'])
+    for sym in ('sh000001', 'sz399006'):
+        T = "read_parquet('%s/raw/tdx/kline/index_*.parquet')" % root
+        b = con.execute("SELECT close FROM %s WHERE symbol='%s' AND date < DATE '%s' "
+                        "ORDER BY date DESC LIMIT 1" % (T, sym, dates[0])).fetchone()[0]
+        old = {str(r[0]): r[1] for r in con.execute(
+            "SELECT date, close FROM %s WHERE symbol='%s' AND date BETWEEN DATE '%s' "
+            "AND DATE '%s'" % (T, sym, dates[0], dates[-1])).fetchall()}
+        want = [round(old[d] / b, 8) for d in dates]
+        assert new[sym] == want, \
+            '%s 的曲线被改动带偏了（前 3 个 %r vs %r）' % (sym, new[sym][:3], want[:3])
+    con.close()
+    notes.append('预设指数逐位未变（sh000001 / sz399006 共 %d 天）' % len(dates))
+
+    # ---- ⑤ 防注入那道白名单还在 ----
+    # 🔴 payload 要选**去掉白名单就真能拿到数据**的那种：
+    #   `'; DROP TABLE x; --` 会被 duckdb 直接拒掉，而那句 SQL 外面有
+    #   try/except（"这一类没有这个文件"是正常情形）—— 于是它被静默吞掉、
+    #   结果照样是空，断言看着通过其实什么都没证（变异实测）。
+    inj = "sh000001' OR k.symbol = 'sz399006"
+    bad = _p.bench_curves(dates, [inj])
+    assert bad == {}, '非法 symbol 没被白名单挡住：%r' % list(bad)
+    notes.append('symbol 白名单仍然生效')
     return '；'.join(notes)
 
 

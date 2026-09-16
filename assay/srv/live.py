@@ -295,6 +295,10 @@ def api_live_equity(q):
         out['benchmarks'] = _perf.BENCHMARKS
         if codes and out.get('dates'):
             out['bench'] = _perf.bench_curves(out['dates'], codes)
+            # ★ 自定义基准的**名字由服务端给**：页面只存一个 symbol
+            #   （一个 localStorage 槽），名字存在前端的话，改过名的标的
+            #   会一直显示旧名，而它不报错。
+            out['bench_meta'] = _perf.bench_meta(codes)
         return out
     return _live_err(_go)
 
@@ -853,6 +857,17 @@ def api_live_trades_of(q):
         return {'code': m.normalize_code(code), 'trades': m.trades_of(code)}
     except Exception as e:                                  # noqa: BLE001
         return {'error': '%s: %s' % (type(e).__name__, e)}
+
+def api_live_bench_search(q):
+    """GET /api/live/bench_search?q= —— 手填基准时按**名称或代码**找。
+
+    🔴 只返回**真有日线的**：列出来点了什么都不出来，比不给这个选项更糟
+      （同 backLink 那条）。范围是指数 / ETF / 股票 —— 都是"能拿来比"的
+      东西；通达信板块不进候选（它不是能买到的标的）。
+    """
+    from ..lv import perf as _p
+    return {'items': _p.bench_search(q.get('q') or '', limit=12)}
+
 
 def api_live_bench(q):
     """GET /api/live/bench?id=[&force=1] —— 绑定策略的理论曲线。

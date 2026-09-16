@@ -71,6 +71,7 @@ ROUTES = {
     '/api/live/intraday': live.api_live_intraday,
     '/api/live/trades_of': live.api_live_trades_of,
     '/api/live/bench': live.api_live_bench,
+    '/api/live/bench_search': live.api_live_bench_search,
     '/api/live/exec_diff': live.api_live_exec_diff,
     '/api/live/fills': live.api_live_fills,
     '/api/sync': sync.api_sync,
