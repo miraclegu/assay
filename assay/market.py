@@ -325,6 +325,11 @@ def stock_sectors(code, root=None):
       看着像这只票不存在。
     """
     from assay import stock as stk
+    # ETF / 指数不属于任何申万行业或通达信板块 —— **明说**，不要返回一个
+    # 静默的空（空会被读成"数据没取到"，同 `_na` 那条）。
+    alt = stk.alt_kind(code, root)
+    if alt:
+        return stk._na(alt, {'sw': None, 'blocks': []})
     jc = stk.norm_code(code)
     if not jc:
         raise MarketError('认不出代码：%r' % code)

@@ -203,7 +203,13 @@ function head(p, lk) {
     ${starHtml(p.jq_code, starred)}
     <h2 style="font-size:20px">${esc(p.sec_name || p.jq_code)}</h2>
     <span class="lvtag">${esc(p.jq_code)}</span>
-    <span class="lvtag" style="color:${bc};border-color:${bc}">${bt}</span>
+    ${p.asset_kind
+      /* 🔴 **一眼看得出这不是股票**：这一页所有数字（涨跌、区间涨幅、指标）
+         长得和股票一模一样，而 ETF 与指数在口径上差着一截（指数没有成交
+         对手、ETF 有折溢价与管理费损耗）。不标的话，把指数当股票读只是
+         时间问题（同模拟盘那个紫色「模拟盘」标签的理由）。 */
+      ? `<span class="lvtag on">${p.asset_kind === 'etf' ? 'ETF' : '指数'}</span>`
+      : `<span class="lvtag" style="color:${bc};border-color:${bc}">${bt}</span>`}
     ${p.is_st ? '<span class="stale">ST</span>' : ''}
     ${p.public_status && p.public_status !== '正常上市'
       ? `<span class="stale">${esc(p.public_status)}</span>` : ''}
@@ -369,6 +375,15 @@ function linkBox(lk) {
   </div>`;
 }
 
+/* 🔴 **"本来就没有"与"没取到"必须分得出来。** ETF / 指数没有财务、
+   没有行业、不属于任何板块 —— 服务端给 `not_applicable` + `why`，
+   页面就照实说一句；沿用原来那句"没有财务数据"的话，人会以为是数据坏了
+   （同 `prune_runs` 那条：删了要留痕，否则"空"与"本来就没有"分不出来）。 */
+function naNote(o) {
+  return (o && o.not_applicable)
+    ? `<div class="none">${esc(o.why || '这一项不适用')}</div>` : null;
+}
+
 function sectorBox(sc, pe) {
   const blocks = (sc && !sc.error) ? (sc.blocks || []) : [];
   const peers = (pe && !pe.error) ? (pe.rows || []) : [];
@@ -380,7 +395,7 @@ function sectorBox(sc, pe) {
         `<a class="chip" href="${sectorHref(x.code, x.kind)}"
            title="${esc(x.kind_name)}　${x.n} 只成分">${esc(x.name)}
            <span class="lvwhy">${x.n}</span></a>`).join('')
-        : '<div class="none">没有板块归属</div>'}
+        : (naNote(sc) || '<div class="none">没有板块归属</div>')}
       <div class="lvwhy" style="margin-top:6px">
         🔴 用的是 <code>tdx.db</code> 的板块（每日同步 + PIT 快照），
         <b>不是</b> <code>raw/hf/</code> 那份同花顺概念 —— 后者
@@ -404,7 +419,7 @@ function sectorBox(sc, pe) {
           <td class="rt">${fmtN(x.pe_ttm)}</td>
           <td class="rt">${fmtN(x.pb)}</td>
           <td class="rt">${ratv(x.roe_ttm)}</td></tr>`).join('')}
-      </table></div>` : '<div class="none">没有同业数据</div>'}
+      </table></div>` : (naNote(pe) || '<div class="none">没有同业数据</div>')}
     </div>
   </div>`;
 }
@@ -441,7 +456,7 @@ function tables(p, f, ev) {
       <div class="lvwhy" style="margin-top:4px">
         股本单位是<b>万股</b>（已换算成股显示）；解禁比例常为空，显示"—"而不是 0%
         —— 那不是"占比很小"，是根本没有这个数。
-      </div>` : '<div class="none">没有事件</div>'}
+      </div>` : (naNote(ev) || '<div class="none">没有事件</div>')}
     </div>
     <div class="lvsec wide"><h3>财务（按报告期）</h3>
       ${fr.length ? `<div class="pw"><table class="pkt">
@@ -463,7 +478,7 @@ function tables(p, f, ev) {
       <div class="lvwhy" style="margin-top:4px">
         🔴 <b>报告期 ≠ 公告日</b>。防未来函数一律用<b>公告日</b>做可见性判断
         —— 用报告期当可见日就是未来函数（回测会凭空领先一两个月）。
-      </div>` : '<div class="none">没有财务数据</div>'}
+      </div>` : (naNote(f) || '<div class="none">没有财务数据</div>')}
     </div>
   </div>`;
 }

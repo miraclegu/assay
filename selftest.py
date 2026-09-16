@@ -14444,6 +14444,182 @@ def t_indicators():
     return '；'.join(notes)
 
 
+@case('个股页支持 ETF / 指数：搜得到 / K 线与指标照画 / 没有的块明说', tag='fast')
+def t_etf_index():
+    """🔴 用户 2026-09-16："个股功能应该也要支持 ETF、指数。"
+
+    面板（`mart/panel_daily`）是**股票宽表** —— ETF 与指数一行都没有。
+    它们的日线在 `raw/tdx/kline/{index,etf}_*.parquet`（与实盘业绩页那个
+    自定义基准同一份数据源）。做法是拼一个**与面板同形**的子查询，
+    下游（K 线、全部指标、翻页、复权）一个字都不用改。
+
+    判据五条，每条对着一种不报错的坏法：
+      ① **搜得到** —— 搜不到就等于没这个功能（入口即功能）
+      ② 完整 symbol **精确命中优先**：`sh000001` 要给上证指数，
+         而那 6 位数字同时是平安银行
+      ③ **股票优先**：搜"银行"要银行股，而"银行ETF银华"是名称前缀命中、
+         "招商银行"只是包含 —— 光按 score 排，一屏全是 ETF
+      ④ K 线 / 指标照常算，且**后复权**（ETF 会分红）
+      ⑤ 财务 / 同行业 / 板块要**明说"本来就没有"**，不是静默的空
+    """
+    from assay import market as mk
+    from assay import stock as st
+    notes = []
+
+    # ---- ① 搜得到 ----
+    for q, want in (('红利ETF', 'etf'), ('上证指数', 'index')):
+        r = st.search(q)['results']
+        assert r and r[0]['kind'] == want, \
+            '搜「%s」第一条不是 %s：%r' % (q, want, [(x['name'], x['kind']) for x in r[:3]])
+    # ---- ② 完整 symbol 精确命中优先（那 6 位同时是平安银行）----
+    r = st.search('sh000001')['results']
+    assert r and r[0]['code'] == 'sh000001', \
+        ('搜 sh000001 第一条是 %r —— 完整代码精确命中要排最前，'
+         '而 000001 同时是平安银行' % (r[0] if r else None))
+    assert st.search('000001')['results'][0]['kind'] == 'stock', \
+        '打纯数字 000001 该先给股票（平安银行）'
+    # ---- ③ 股票优先（"银行ETF银华"是前缀命中、"招商银行"只是包含）----
+    rb = st.search('银行')['results']
+    assert rb[0]['kind'] == 'stock', \
+        ('搜"银行"第一条是 %s「%s」—— 人要的是银行股；ETF 名字以"银行"开头'
+         '（前缀命中）会盖过"招商银行"（包含命中）'
+         % (rb[0]['kind'], rb[0]['name']))
+    notes.append('搜得到（精确命中优先 / 同名时股票优先）')
+
+    # ---- ④ K 线与指标：照常算 + 后复权 ----
+    for sym, kind in (('sh510880', 'etf'), ('sh000001', 'index')):
+        assert st.alt_kind(sym) == (kind, sym), '%s 没被认成 %s' % (sym, kind)
+        k = st.kline(sym, n=60)
+        assert len(k['bars']) >= 50 and k['total'] > 1000, \
+            '%s 的 K 线取不全：%d 根 / 共 %d' % (sym, len(k['bars']), k['total'])
+        b = k['bars'][-1]
+        for f in ('open', 'high', 'low', 'close', 'volume', 'preclose',
+                  'change_pct', 'ma5', 'ma20'):
+            assert b.get(f) is not None, '%s 的 K 线少了 %s' % (sym, f)
+        # 🔴 涨跌幅要自洽 —— 它是我们自己用 lag() 算出来的，算错了不报错
+        assert abs(b['change_pct'] - (b['close'] / b['preclose'] - 1) * 100) < 1e-6, \
+            '%s 的 change_pct 与 close/preclose 对不上' % sym
+        ind = st.indicators(sym, n=60, inds='macd,kdj,boll')
+        assert len(ind['rows']) == 60 and ind['rows'][-1].get('dif') is not None \
+            and ind['rows'][-1].get('k') is not None, \
+            '%s 算不出指标' % sym
+    # 🔴 **ETF 要后复权**：红利 ETF 的因子 1.0 -> 1.81，那 81% 全是分红；
+    #   不复权跨除权日有假跌幅（同「对比页一律后复权」那条）。
+    hb = st.kline('sh510880', n=30, fq='hfq')['bars'][-1]['close']
+    bb = st.kline('sh510880', n=30, fq='bfq')['bars'][-1]['close']
+    assert hb > bb * 1.5, \
+        ('红利 ETF 的后复权收盘 %.3f 与不复权 %.3f 差得太少 —— 复权没生效，'
+         '而它不报错，只是那条线一直偏低' % (hb, bb))
+    # 指数不除权：两者必须相等（`coalesce(hfq_factor, 1)` 正好）
+    ih = st.kline('sh000001', n=30, fq='hfq')['bars'][-1]['close']
+    ib = st.kline('sh000001', n=30, fq='bfq')['bars'][-1]['close']
+    assert abs(ih - ib) < 1e-9, \
+        '指数被复权了（%.4f vs %.4f）—— 它不除权，因子表里没有它的行' % (ih, ib)
+    notes.append('K 线与指标照画（ETF 后复权 %.2f vs %.2f / 指数不复权）' % (hb, bb))
+
+    # ---- ⑤ 没有的块要**明说**，不是静默的空 ----
+    for fn, nm in ((st.finance, '财务'), (st.events, '事件'), (st.peers, '同行业'),
+                   (mk.stock_sectors, '所属板块')):
+        for sym in ('sh510880', 'sh000001'):
+            r = fn(sym)
+            assert r.get('not_applicable') and r.get('why'), \
+                ('%s 对 %s 返回了一个**静默的空** —— "本来就没有"与'
+                 '"没取到"必须分得出来，否则页面上那张空表会被读成数据坏了'
+                 % (nm, sym))
+    # 🔴 `links` 反过来：**ETF 是能买的**（项目里就有 ETF 轮动策略），
+    #   实盘持有过、回测选过它都讲得通；指数才买不了。
+    assert not st.links('sh510880').get('not_applicable'), \
+        'ETF 是能买的，「我的持仓与回测」这一块对它有意义'
+    assert st.links('sh000001').get('not_applicable'), \
+        '指数买不了，查"我持有多少上证指数"本身就没有意义'
+    # 股票那条路一个字都不许变
+    for fn in (st.finance, st.events, st.peers):
+        assert not fn('601857.XSHG').get('not_applicable'), \
+            '股票被误判成了 ETF/指数'
+    notes.append('财务/同行业/板块明说"没有这项"·ETF 保留实盘与回测联动')
+    return '；'.join(notes)
+
+
+@case('个股页支持 ETF / 指数：页面真能打开且标出是什么（playwright）', tag='web')
+def t_etf_index_web():
+    """接口通不等于页面能用 —— 这一页有十个接口并发，任何一个对 ETF/指数
+    抛异常都会让整页打不开，而"打不开"与"这只票没数据"在屏幕上长得一样。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            for sym, tag, nm in (('sh510880', 'ETF', '红利ETF华泰柏瑞'),
+                                 ('sh000001', '指数', '上证指数')):
+                pg.goto(base + '/stock.html?code=' + sym, wait_until='networkidle')
+                pg.wait_for_selector('#kcv', timeout=40000)
+                pg.wait_for_timeout(1500)
+                assert nm in (pg.locator('.lvhead h2').inner_text() or ''), \
+                    '%s 的标题不是它的名字' % sym
+                # 🔴 **一眼看得出这不是股票**：这一页所有数字长得和股票一样，
+                #   而 ETF 有折溢价与管理费损耗、指数根本没有成交对手 ——
+                #   不标的话把指数当股票读只是时间问题（同模拟盘那个紫标签）。
+                tags = [x.strip() for x in
+                        pg.locator('.lvhead .lvtag').all_inner_texts()]
+                assert tag in tags, \
+                    '%s 页面上没标出它是 %s：%r' % (sym, tag, tags)
+                # 画布真的画了（画崩了就是一张空白画布，而它不报错）
+                px = pg.evaluate("""() => {const cv = document.getElementById('kcv');
+                    const g = cv.getContext('2d');
+                    const d = g.getImageData(0, 0, cv.width, cv.height).data;
+                    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+                    return n;}""")
+                assert px > 30000, '%s 的 K 线没画出来（%d 个像素）' % (sym, px)
+                # 不适用的块要**说一句**，不是空白
+                for t in ('所属板块', '同行业', '财务'):
+                    txt = pg.evaluate("""(t) => {
+                        const h = [...document.querySelectorAll('.lvsec h3')]
+                          .find(x => x.textContent.indexOf(t) >= 0);
+                        if (!h) return null;
+                        const n = h.parentElement.querySelector('.none');
+                        return n ? n.textContent.trim() : '(有内容)';}""", t)
+                    assert txt and ('不是股票' in txt), \
+                        ('%s 的「%s」那块写的是 %r —— 要明说"本来就没有"，'
+                         '空着会被读成数据没取到' % (sym, t, txt))
+            # 搜索入口：从股票页搜 ETF -> 选中 -> 真的跳过去
+            pg.goto(base + '/stock.html?code=601857.XSHG', wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(1200)
+            pg.fill('#sbox .skq', '红利ETF华泰柏瑞')
+            pg.wait_for_timeout(1000)
+            pg.keyboard.press('ArrowDown')
+            pg.keyboard.press('Enter')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(1500)
+            assert 'sh510880' in pg.url, \
+                '搜索里选中 ETF 没跳过去：%s' % pg.url
+            assert not errs, 'JS 报错：%r' % errs[:3]
+            notes.append('ETF 与指数页面都打得开（标出是什么 / 图真画了 / '
+                         '不适用的块明说）· 搜索选中能跳过去')
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('个股页：副图是【槽位】/ 左上角下拉框选指标 / 参数在弹窗里（playwright）',
       tag='web')
 def t_stock_multi_sub():
