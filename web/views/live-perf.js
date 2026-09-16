@@ -56,6 +56,7 @@ let LPB = [], LPB_AID = null;
 function lpbKey(aid){ return 'lvbench:' + (aid || ''); }
 function lpbLoad(aid){
   LPB_AID = aid;
+  lpcLoad(aid);
   let v = '';
   try {
     /* ★ 读不到账户自己的键时**退回那个全局旧键**（只读不写）：
@@ -70,6 +71,15 @@ function lpbLoad(aid){
    （`equity` 的 `bench_meta`）。页面只存 symbol：名字存前端的话，
    标的改过名就会一直显示旧名，而它不报错。 */
 let LPB_META = {};
+
+/* 拼进请求的自定义 code（清单 ∪ 当前选中的那个）。
+   ★ 并上"当前选中的"是为了兜住一种情形：清单被删空了但 `lvbench` 还指着
+     它（别的页签删的），不带的话那条线画不出来而页面上还亮着。 */
+function lpcExtra(){
+  const cs = LPCUS.slice();
+  if (LPB.length && LPB[0] !== LPB_STRAT && cs.indexOf(LPB[0]) < 0) cs.push(LPB[0]);
+  return cs.length ? ',' + cs.join(',') : '';
+}
 
 function lpbSet(code){
   LPB = code ? [code] : [];
@@ -96,6 +106,50 @@ const LPB_COL = ['#7ec8a0','#c88ad0','#d0a05b','#6fa8d8','#d07a7a',
    这个 `#00a6fb` 与已用的 14 个颜色（账户 / 策略 / 9 个指数 / 涨跌 / 灰）
    最小距离 113。 */
 const LPB_CUSTOM_COL = '#00a6fb';
+
+/* 🔴🔴 手填的基准是一份**保存下来的清单**（最多 3 个），不是"当前选中的
+   那一个"。用户 2026-09-16："自定义基准应该最多能保存 3 个，超出三个则
+   必须先删除（右上角 X 掉）才能新建自定义。**不要一点击其他的基准，
+   已选中过的自定义基准框就消失了**。"
+   —— 原来 chip 的渲染条件是"`LPB[0]` 恰好是它"，于是切去看一眼上证，
+   辛苦搜出来的那只票就**没了**，想再比还得重新搜一遍。
+   ★ 清单与"当前选中哪个"是**两件事**：清单是"我常拿来比的那几个"，
+     选中仍然是同一个单选槽（三条线以上就看不清了）。
+   ★ 上限 3 个：预设已有 9 个指数 + 策略，再无限加下去那一行会绕成几排。
+     满了要**说清怎么腾位置**，不许静默不给加（同「到上限要说一句」那条）。
+   ★ 名字不存前端，仍然只存 symbol（见 `LPB_META`）。 */
+const LPCUS_MAX = 3;
+let LPCUS = [];
+function lpcKey(aid){ return 'lvbenchcus:' + (aid || ''); }
+function lpcLoad(aid){
+  let v = [];
+  try { v = JSON.parse(localStorage.getItem(lpcKey(aid)) || '[]'); }
+  catch (e) { v = []; }
+  /* 存进来的东西**要校验再用**（同 `lvbench` 那条）：localStorage 里可能是
+     上个版本留下的、或手改的。多余的截掉，别让一个坏值把整页拖下水。 */
+  LPCUS = (Array.isArray(v) ? v : [])
+    .filter(x => typeof x === 'string' && /^(sh|sz)\d{6}$/.test(x))
+    .filter((x, i, a) => a.indexOf(x) === i)
+    .slice(0, LPCUS_MAX);
+}
+function lpcSave(){
+  try { localStorage.setItem(lpcKey(LPB_AID), JSON.stringify(LPCUS)); }
+  catch (e) { /* 隐私模式下写不了 —— 不该因此打挂整页 */ }
+}
+function lpcAdd(code){
+  if (!code || LPCUS.indexOf(code) >= 0) return true;
+  if (LPCUS.length >= LPCUS_MAX) return false;
+  LPCUS.push(code); lpcSave();
+  return true;
+}
+function lpcDel(code){
+  const i = LPCUS.indexOf(code);
+  if (i < 0) return;
+  LPCUS.splice(i, 1); lpcSave();
+  /* 删掉的正是当前选中的那个 -> 顺手取消选中。否则图上还画着一条清单里
+     已经没有的线，而"这条是谁"再也点不出来。 */
+  if (LPB[0] === code) lpbSet('');
+}
 
 /* 手填基准：一个小搜索框 + 候选清单。
    🔴 用户 2026-09-16："基准除了预设的这些，还可以自己手填名称/代码比对，
@@ -130,6 +184,15 @@ function lpbFind(aid){
            <span class="lvwhy">${K[x.kind] || x.kind}</span></a>`).join('');
       $$('#lp_bhit .lpbhit').forEach(a => a.onclick = ev => {
         ev.preventDefault();
+        /* 选中的同时**存进清单**（最多 3 个）—— 这样切去看别的基准再回来，
+           它还在那儿（用户原话："不要一点击其他的基准，已选中过的自定义
+           基准框就消失了"）。 */
+        if(!lpcAdd(a.dataset.b)){
+          const h = $('#lp_bhit');
+          if(h) h.innerHTML = '　<b>自定义基准最多存 ' + LPCUS_MAX
+            + ' 个</b>，先点某个自定义 chip 右上角的 × 去掉一个再加';
+          return;
+        }
         lpbSet(a.dataset.b);
         lpbReload(aid);
       });
@@ -140,7 +203,10 @@ function lpbFind(aid){
 /* 选了个手填的基准 -> 重新取一次权益（带上它）。
    ★ 预设那几个仍然是**零请求**切换（进页面时一次全取回来了）。 */
 function lpbReload(aid){
-  const extra = (LPB.length && LPB[0] !== LPB_STRAT) ? ',' + LPB[0] : '';
+  /* 🔴 带上**清单里的全部**，不只是当前选中的那个 —— 这样在几个自定义
+     之间切换是**零请求**（同预设那 9 个）。只带选中的话每切一次都要
+     重放整条权益曲线（几秒），而切换是随手点的动作。 */
+  const extra = lpcExtra();
   j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL + extra)
     .then(o => { LPD = o; LPB_META = o.bench_meta || {}; renderPerf(aid); })
     .catch(() => renderChart(aid));
@@ -168,10 +234,10 @@ function showPerf(aid){
        所以两支都要调，各自判自己依赖的数据齐没齐。 */
     if(LPD){ renderChart(aid); renderExec(aid); }
   });
-  /* ★ 手填的那个（如果上次选了）**一起带上** —— 不带的话进页面看到的是
-     "选中了却没有线"，而它不报错。 */
-  const extra = (LPB.length && LPB[0] !== LPB_STRAT
-                 && LPB_ALL.indexOf(LPB[0]) < 0) ? ',' + LPB[0] : '';
+  /* ★ 手填的那几个**一起带上** —— 不带的话进页面看到的是"选中了却没有
+     线"，而它不报错。带**全部**而不只是选中的那个：chip 是常驻的，
+     人点哪个都该当场出来（零请求）。 */
+  const extra = lpcExtra();
   j('/api/live/equity?id=' + encodeURIComponent(aid) + '&bench=' + LPB_ALL + extra).then(o => {
     LPD = o; LPB_META = o.bench_meta || {}; renderPerf(aid);
   }).catch(e => { b.innerHTML = '<div class="none">' + esc(e) + '</div>'; });
@@ -595,13 +661,25 @@ function renderChart(aid){
            更糟」那条（同「拿不到策略曲线时不列这个选项」）。
          ★ 状态**不清掉**：数据晚到一天的票不该被永久丢掉，而"不比"
            那个按钮仍然在，人随时能自己清。 */
-      + (LPB.length && LPB[0] !== LPB_STRAT && BD[LPB[0]]
-         && !BM.some(b => b.code === LPB[0])
-         ? `<span class="lvwhy">|</span><a href="#" class="lpb on"
-              data-b="${esc(LPB[0])}" title="手填的基准 ${esc(LPB[0])}"
-              >${esc((LPB_META[LPB[0]] || {}).name || LPB[0])}</a>` : '')
-      + `<span class="lvwhy">|</span><a href="#" class="lpb" id="lp_bmore"
-           title="手填一个：指数 / ETF / 个股都行，按名称或代码搜">+ 自定义</a>`
+      /* 手填的那几个：**常驻**（不再是"选中才显示"），各带一个 × 删掉。
+         🔴 **取不到数据的不挂**（`BD[c]`）—— localStorage 里可能是手改的
+           垃圾或退市的代码（`sh999999` 形状合法、本地没有它的日线）。
+           照挂的话 chip 亮着、图上却没有线，正是「点了什么都不出来比不给
+           更糟」那条（同「拿不到策略曲线时不列这个选项」）。
+         ★ 清单里的**不删**：数据晚到一天的票不该被永久丢掉，只是这一次
+           不显示；人想清掉随时能点它的 ×（等它有数据了再点）。 */
+      + (LPCUS.some(c => BD[c]) ? '<span class="lvwhy">|</span>' : '')
+      + LPCUS.filter(c => BD[c]).map(c => `<span class="lpbcus${
+            LPB.indexOf(c) >= 0 ? ' on' : ''}"><a href="#" class="lpb lpbcusa${
+            LPB.indexOf(c) >= 0 ? ' on' : ''}" data-b="${esc(c)}"
+            title="手填的基准 ${esc(c)}">${
+            esc((LPB_META[c] || {}).name || c)}</a><a href="#" class="lpbcusx"
+            data-x="${esc(c)}" title="从清单里去掉它">×</a></span>`).join('')
+      + `<span class="lvwhy">|</span><a href="#" class="lpb${
+           LPCUS.length >= LPCUS_MAX ? ' off' : ''}" id="lp_bmore"
+           title="${LPCUS.length >= LPCUS_MAX
+             ? '自定义基准最多存 ' + LPCUS_MAX + ' 个，先点某个右上角的 × 去掉一个'
+             : '手填一个：指数 / ETF / 个股都行，按名称或代码搜'}">+ 自定义</a>`
       + '<span id="lp_bfind"></span>'
       + (LPB.length ? '<a href="#" class="lpb" id="lp_bclr">不比</a>' : '')
       + '</div>';
@@ -621,15 +699,35 @@ function renderChart(aid){
           + '</div>'});
     /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
+    /* 自定义 chip 上那个 × —— 从**清单**里去掉它（不是取消选中）。
+       ★ 它是 `a.lpbcusx` 不是 `a.lpb`，所以单独绑一遍。 */
+    el.querySelectorAll('a.lpbcusx').forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      ev.stopPropagation();          /* 别顺带触发它旁边那个 chip 的选中 */
+      lpcDel(a.dataset.x);
+      renderChart(aid);              /* 清单变了要重画选择器（零请求） */
+    });
     el.querySelectorAll('a.lpb').forEach(a => a.onclick = ev => {
       ev.preventDefault();
-      if(a.id === 'lp_bmore'){ lpbFind(aid); return; }
+      if(a.id === 'lp_bmore'){
+        /* 🔴 满了要**说清怎么腾位置**，不许静默不给加（同「+ 副图」到上限
+           那条：提示要自己说得完整，不能只写"先去掉一个"）。 */
+        if(LPCUS.length >= LPCUS_MAX){
+          const h = $('#lp_bhit') || $('#lp_bfind');
+          if(h) h.innerHTML = '　<b>自定义基准最多存 ' + LPCUS_MAX
+            + ' 个</b>，先点某个自定义 chip 右上角的 × 去掉一个再加';
+          return;
+        }
+        lpbFind(aid); return;
+      }
       /* 单选：点新的换掉旧的，点已选中的取消。★ 不做"多选 + 清空按钮" ——
          同时看多个基准反而看不清（见 LPB 的注释）。 */
       lpbSet(a.id === 'lp_bclr' ? '' : (LPB[0] === a.dataset.b ? '' : a.dataset.b));
-      /* 🔴 手填的那个**不在预加载的那批里**，得重新取一次权益（它要带上
-         这个 code 去算基准曲线）。预设那几个仍然零请求切换。 */
-      if(LPB.length && LPB[0] !== LPB_STRAT && !BM.some(b => b.code === LPB[0])) {
+      /* ★ 现在**一个请求都不用打**：清单里那几个自定义在进页面时就随
+         `lpcExtra()` 一起取回来了（同个股页"一次全取"那条）。
+         只有清单里没有的 code（比如别处刚存的）才要重取。 */
+      const c = LPB[0];
+      if(c && c !== LPB_STRAT && !BM.some(b => b.code === c) && !BD[c]) {
         lpbReload(aid);
       } else renderChart(aid);
     });

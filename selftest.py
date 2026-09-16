@@ -13400,6 +13400,105 @@ def t_bench_custom_web():
             assert a2['n'] == 2 and cc.lower() in a2['cols'], \
                 ('刷新后曲线没画出来（%d 条：%r）—— 首次加载那条路没带上'
                  '记住的手填 code' % (a2['n'], a2['cols']))
+            # ---- ④b🔴 自定义基准是一份【清单】，最多 3 个，点别的不消失 ----
+            # 用户 2026-09-16："自定义基准应该最多能保存 3 个，超出三个则
+            #   必须先删除（右上角 X 掉）才能新建自定义。**不要一点击其他
+            #   的基准，已选中过的自定义基准框就消失了**。"
+            # 原来 chip 的渲染条件是"`LPB[0]` 恰好是它" —— 切去看一眼上证，
+            # 辛苦搜出来的那只票就没了，想再比还得重新搜一遍。
+            def _add_cus(kw, code):
+                pg.click('#lp_bmore')
+                pg.wait_for_selector('#lp_bq', timeout=6000)
+                pg.fill('#lp_bq', kw)
+                pg.wait_for_selector('#lp_bhit .lpbhit', timeout=9000)
+                pg.evaluate("(c)=>[...document.querySelectorAll('#lp_bhit .lpbhit')]"
+                            ".find(a=>a.dataset.b===c).click()", code)
+                pg.wait_for_timeout(2500)
+            _cus = lambda: pg.evaluate(
+                "()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+                ".map(a=>a.dataset.b)")
+            for _kw, _c in (('上证50', 'sh000016'), ('沪深300', 'sh000300')):
+                _add_cus(_kw, _c)
+            assert _cus() == ['sh510880', 'sh000016', 'sh000300'], \
+                '三个自定义 chip 没都留着：%r' % (_cus(),)
+            # 🔴 满了：不给开搜索框，而且要**说清怎么腾位置**
+            pg.click('#lp_bmore')
+            pg.wait_for_timeout(500)
+            assert pg.locator('#lp_bq').count() == 0, \
+                '已经 3 个了还让接着加 —— 上限形同虚设'
+            _msg = pg.evaluate("()=>{const e=document.querySelector('#lp_bfind');"
+                               " return e ? e.innerText.trim() : ''}")
+            assert '3' in _msg and '×' in _msg, \
+                ('到上限只是静默不动（提示 %r）—— 要说清怎么腾位置，'
+                 '不然人只会觉得"点了没反应"（同「+ 副图」到上限那条）' % _msg)
+            # 🔴 上限有**两道**：按钮那道（上面刚验）与数据那道（`lpcAdd`）。
+            #   只点按钮的话，数据那道**在 UI 上不可达** —— 去掉它照样全绿
+            #   （变异实测）。所以直接调它一次。
+            assert pg.evaluate("()=>lpcAdd('sh000905')") is False, \
+                '满了之后 lpcAdd 还返回成功 —— 数据层那道上限形同虚设'
+            assert len(pg.evaluate('()=>LPCUS')) == 3, \
+                'lpcAdd 被拒了却还是把它塞进了清单：%r' % pg.evaluate('()=>LPCUS')
+            # localStorage 里被塞多了也只认前 3 个（上个版本 / 手改的）
+            assert pg.evaluate(
+                "()=>{const k='lvbenchcus:froec', old=localStorage.getItem(k);"
+                " localStorage.setItem(k, JSON.stringify(['sh000001','sh000016',"
+                "'sh000300','sh000905','zzz']));"
+                " lpcLoad('froec'); const r = LPCUS.slice();"
+                " localStorage.setItem(k, old); lpcLoad('froec'); return r;}") \
+                == ['sh000001', 'sh000016', 'sh000300'], \
+                '读回来时没截断 / 没挡掉非法值 —— localStorage 里的东西要校验再用'
+            # 🔴🔴 点别的基准，chip **一个都不许消失**（用户报的就是这条）
+            reqs2 = []
+            pg.on('request', lambda r: reqs2.append(r.url)
+                  if '/api/live/equity' in r.url else None)
+            pg.evaluate("()=>[...document.querySelectorAll('#lp_bm a.lpb')]"
+                        ".find(a=>a.dataset.b==='sh000001').click()")
+            pg.wait_for_timeout(1500)
+            assert _cus() == ['sh510880', 'sh000016', 'sh000300'], \
+                ('点了上证之后自定义 chip 没了：%r —— 清单与"当前选中哪个"'
+                 '是两件事，切去看别的不该把搜出来的票弄丢' % (_cus(),))
+            # 在几个自定义之间切换：**零请求**（进页面时已一次全取）
+            pg.evaluate("()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+                        ".find(a=>a.dataset.b==='sh000300').click()")
+            pg.wait_for_timeout(1500)
+            assert pg.evaluate('()=>LPB') == ['sh000300'], '切不过去'
+            assert pg.evaluate(
+                "()=>document.querySelectorAll('#lp_chart svg path[d]').length") == 2, \
+                '切到另一个自定义基准之后线没画出来'
+            assert not reqs2, \
+                ('在几个自定义之间切换还去重放了 %d 次权益曲线 —— 清单里那几个'
+                 '进页面时就该一次全取（同个股页"一次全取"那条）' % len(reqs2))
+            # × 删掉一个之后又能加
+            pg.evaluate("()=>document.querySelector"
+                        "('.lpbcusx[data-x=sh000016]').click()")
+            pg.wait_for_timeout(1200)
+            assert _cus() == ['sh510880', 'sh000300'], \
+                '点 × 没从清单里去掉：%r' % (_cus(),)
+            pg.click('#lp_bmore')
+            pg.wait_for_timeout(500)
+            assert pg.locator('#lp_bq').count() == 1, \
+                '删掉一个之后仍然加不了新的 —— 上限没跟着清单走'
+            pg.keyboard.press('Escape')
+            # 刷新后清单与选中都还在，且**按账户**存
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#lp_bmore', timeout=25000)
+            pg.wait_for_timeout(2500)
+            assert _cus() == ['sh510880', 'sh000300'], \
+                '刷新后自定义清单没了：%r' % (_cus(),)
+            assert pg.evaluate("()=>Object.keys(localStorage)"
+                               ".filter(k=>k.indexOf('lvbenchcus')===0)") \
+                == ['lvbenchcus:froec'], \
+                '自定义清单没按账户存 —— 两个账户会互相覆盖（同 lvbench 那条）'
+            notes.append('自定义清单最多 %d 个 · 点别的基准不消失 · 切换零请求'
+                         ' · × 删得掉且删完能再加' % 3)
+            # 收拾回只剩一个，后面几条按原样跑
+            pg.evaluate("()=>document.querySelector"
+                        "('.lpbcusx[data-x=sh000300]').click()")
+            pg.wait_for_timeout(1000)
+            pg.evaluate("()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+                        ".find(a=>a.dataset.b==='sh510880').click()")
+            pg.wait_for_timeout(1500)
+
             # ---- ⑤🔴 首日的涨跌**不许被抹掉** ----
             # 用户 2026-09-16："选择的 ETF 第一天收益是 0，这个不正常，
             #   第一天的涨跌幅也要算进去。"
