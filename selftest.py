@@ -14615,14 +14615,15 @@ def t_etf_index():
         bad = [i for i, (x, y) in enumerate(zip(b0, q))
                if abs(x['close'] * y['fqk'] - y['close']) > 0.01]
         assert not bad, '%s 有 %d 根的 fqk 换算对不上' % (sym, len(bad))
-    # ---- ④c ETF 默认就是前复权，其余仍是不复权（默认由**服务端**定）----
-    assert st.kline('sh510880', n=20)['fq'] == 'qfq', \
-        'ETF 的默认口径不是前复权'
-    for sym in ('601857.XSHG', 'sh000001'):
-        assert st.kline(sym, n=20)['fq'] == 'bfq', \
-            '%s 的默认口径被一起改掉了 —— 股票那条是这一页原有的决定' % sym
+    # ---- ④c 默认**一律前复权**（由服务端定）----
+    # 用户 2026-09-16 分两次定下来的：先"ETF 应该默认前复权"，
+    #   再"股票也要默认前复权" —— 理由同一条：主流行情软件的默认就是它。
+    for sym in ('sh510880', '601857.XSHG', 'sh000001', '000001.XSHE'):
+        assert st.kline(sym, n=20)['fq'] == 'qfq', \
+            '%s 的默认口径不是前复权' % sym
     assert st.kline('sh510880', n=20, fq='bfq')['fq'] == 'bfq', \
         '显式指定的口径被默认值盖掉了'
+    # ★ 指数走这条也无妨：它不除权，qfq 与 bfq **逐位相同**（上面已验）。
     # 🔴 指标必须**跟着 K 线同一个口径** —— 两边不一致的话，
     #   图上是前复权的价、副图是不复权算的 MACD，而它不报错。
     for sym in ('sh510880', '601857.XSHG'):
@@ -14711,11 +14712,10 @@ def t_etf_index_web():
                 on = pg.evaluate(
                     "()=>[...document.querySelectorAll('#kmwrap .fq.on')]"
                     ".map(a=>a.dataset.f)")
-                want = 'qfq' if sym == 'sh510880' else 'bfq'
-                assert on == [want], \
-                    ('%s 默认高亮的是 %r，应当是 %r —— 默认口径由服务端定，'
+                assert on == ['qfq'], \
+                    ('%s 默认高亮的是 %r，应当是前复权 —— 默认口径由服务端定，'
                      '页面要把它读回来，否则三个按钮一个都不亮、'
-                     '人看不出现在是哪种口径' % (sym, on, want))
+                     '人看不出现在是哪种口径' % (sym, on))
                 _kset(pg, False)
                 # 不适用的块要**说一句**，不是空白
                 for t in ('所属板块', '同行业', '财务'):
