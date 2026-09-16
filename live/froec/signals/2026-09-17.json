@@ -1,6 +1,6 @@
 {
  "account": "froec",
- "built_at": "2026-09-16T17:00:14",
+ "built_at": "2026-09-16T18:00:15",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
  "cash": 9405.04,
@@ -196,7 +196,8 @@
  },
  "recomputed": false,
  "recomputed_at": [
-  "2026-09-16T17:00:14"
+  "2026-09-16T17:00:14",
+  "2026-09-16T18:00:15"
  ],
  "revisions": [],
  "sell": [],
