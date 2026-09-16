@@ -47,6 +47,20 @@ let KMODAL = false;
    加一个指标要改两处，而漏改那处的表现是**新指标在页面上根本不出现**：
    不报错，只是没人知道它存在（同「可选基准由服务端给」那条）。 */
 let KDEFS = null, KPANELS = [];
+/* 🔴 **并发保护**：`load()` 与 `reloadInd()` 都是 async，而工具条上
+   「区间 / 复权 / 指标」几个按钮挨在一起 —— 连点两下就有两次渲染在飞。
+   回来晚的那次会往**已经被换掉**的节点上写，浏览器抛
+   `The node to be removed is no longer a child of this node`，
+   而它**只在控制台里报**：页面看着像渲染了一半（同 live-perf.js 那条
+   "异步回调在人已经走开之后往 null 写"）。
+   做法与那条一致：发号，回来晚了就**安静放弃这一次**。
+   🔴 **两个号各管各的**：`reloadInd` 只重画图、不重建 `#body`，让它去把
+     飞行中的 `load()` 作废的话，首屏就停在"加载中…"再也不动了（实测：
+     页面加载时 load 在飞，用例一点下拉框就把它废了，40 秒超时）。
+     所以 `reloadInd` 记下**开始时那一代** `KSEQ`，回来后只在"`load` 期间
+     重建过 `#body`"时才放弃。 */
+let KSEQ = 0, KISEQ = 0;
+
 /* 对数坐标：线性轴上「涨 1 块」在 10 元和 100 元处占同样高度，于是长
    区间里低价那一段的波动被压平 —— 翻倍的行情看着像条平线。默认关
    （对着券商软件看的是线性），存进 URL 所以能加书签。 */
@@ -97,9 +111,31 @@ mountSearch($('#sbox'), {onPick: r => { location.href = stockHref(r.code); }});
 if (CODE) load(); else $('#body').innerHTML =
   '<div class="none">搜代码或名称开始 —— 支持 601857 / 601857.SH / sh601857 / 中国石油</div>';
 
+
 async function load() {
+  const seq = ++KSEQ;
   const b = $('#body');
-  b.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  /* 🔴🔴 **已经有内容时不要清空**。原来一进来就把 `#body` 换成「加载中…」
+     —— 高度**先塌陷再撑开**，那就是用户说的"跳动一下"（实盘页早就为这条
+     改过：`loadLive` 的 `livePatch`，CLAUDE.md 里记着"刷新只换数字，
+     不许重建 DOM"）。而「区间 / 复权」这几个按钮就挨着副图的下拉框，
+     点它们同样会整页塌陷一次。
+     ★ 顺带修掉一个只在控制台里报的错：清空时那个 `<select>` 可能正聚焦，
+       把它从文档里摘掉会触发 blur，浏览器抛
+       `The node to be removed is no longer a child of this node.
+        Perhaps it was moved in a 'blur' event handler?`
+       —— 页面看着像渲染了一半。
+     ★ 首屏（还没有画布）仍然给「加载中…」：那时下面是空的，
+       不说一句的话看着像页面坏了。 */
+  const first = !b.querySelector('#kcv');
+  if (first) {
+    b.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  } else {
+    /* 不清内容，只在那一行常驻的提示位上说一句 —— 它本来就在工具条下面，
+       写字不会改变任何元素的高度。 */
+    const m = $('#kimsg');
+    if (m) m.innerHTML = '　<span class="lvwhy">更新中…</span>';
+  }
   const one = u => j(u).catch(e => ({error: String(e)}));
   /* 指标清单取一次就够（它在进程内不变）——每次进页面重取是同一份数据取 N 遍。
      ★ 取不到不能让整页打不开：退回空清单，那时工具条上没有指标可选，
@@ -131,9 +167,22 @@ async function load() {
   TRADES = ((tr || {}).trades) || [];
   /* 翻页用：总根数（还能不能往左翻）+ 服务端实际落到的 off（钳过的） */
   if (!k.error) { KTOTAL = k.total || 0; KOFF = k.off || 0; }
+  if (seq !== KSEQ) return;      /* 有更新的一次在飞，这一份已经作废 */
   IND = (ind && !ind.error) ? ind.rows : null;
   KPANELS = (ind && !ind.error) ? (ind.panels || []) : [];
+  /* 🔴 首屏这一份也要**进缓存** —— 它不经过 `reloadInd`，不存的话
+     "第一次切换"必然 miss，于是每次打开页面的头一回切换都要等一个请求
+     （实测 59ms，而之后是 8ms）。同「签名从 DOM 读」那条的教训：
+     首屏那条路和交互那条路要在同一个状态上会合。 */
+  KIND_CACHE = IND ? {key: kIndKey(), rows: IND, panels: KPANELS} : {key: null};
   EVS = (ev && !ev.error) ? ev.events : [];
+  /* 🔴 整块替换之前先**主动 blur**：`#body` 里那个副图下拉框可能正聚焦
+     （换完指标接着点「后复权」就是这个序列），把聚焦元素从文档里摘掉会
+     触发 blur，浏览器直接让这次赋值**失败**：
+     `Failed to set the 'innerHTML' property … Perhaps it was moved in a
+      'blur' event handler?` —— 而它只在控制台里报，页面停在旧内容上。 */
+  try { if (b.contains(document.activeElement)) document.activeElement.blur(); }
+  catch (e) { /* 某些环境下 activeElement 可能为 null */ }
   b.innerHTML = head(p, lk) + kpiBox(p) + chartBox(k, ind)
     + linkBox(lk) + sectorBox(sc, pe) + tables(p, f, ev);
   wire();
@@ -437,11 +486,25 @@ function kDef(id) { return ((KDEFS || {}).inds || []).find(x => x.id === id) || 
    而这一页本来就并发拉着十个接口。 */
 /* ★ 成交量**不进这个清单**：那一块画的是 bars 自带的 volume，
    不用服务端再算一遍（同一份数据取两遍）。 */
+/* 🔴🔴 **一次把所有指标都取回来**，不是只取当前选中的那几个。
+   用户 2026-09-16（第三次反馈）："切换附图时还是会明显感觉跳动一下。"
+   逐帧量过：DOM 一个元素都没动、整页 242 帧位置零变化、屏幕帧的像素差
+   也只落在副图那一块 —— **布局层面确实没有跳动**。剩下的就是那几百毫秒：
+   点完下拉框，旧图还杵在那儿，等接口回来才"啪"地换成新图。
+   那个突变就是"跳动一下"的来源。
+
+   实测一次取全部 10 个副图 + 主图共 **47.6 KB / 29ms**，而只取 2 个是
+   13.4 KB / 28ms —— **几乎一样快**（开销在建面板，不在算哪几个指标）。
+   所以一次全取、缓存住，切换时**零请求、零延迟**，图当场就换。
+   ★ 这与指标广场那条「分页只取当前页」**不冲突**：那边是上百个指标的
+     场景，这边副图统共十来个。判据不同是因为量级不同。 */
 function kWant() {
-  /* ★ 同一个指标放进两个槽位是合法的（比如两个不同参数的 MACD 暂时还
-     不支持，但重复选不该把请求打两遍）—— 去重。 */
-  return KINDS.concat(KMAIN.filter(x => x !== 'ma'))
-    .filter((x, i, a) => a.indexOf(x) === i);
+  const all = ((KDEFS || {}).inds || []).map(x => x.id)
+    .filter(x => x !== 'ma');          /* ma 跟着 kline 一起回来，不用算 */
+  /* KDEFS 还没到（首屏那一次）时退回"只要当前用着的"——它至少画得出来。 */
+  return all.length ? all
+    : KINDS.concat(KMAIN.filter(x => x !== 'ma'))
+        .filter((x, i, a) => a.indexOf(x) === i);
 }
 function kIndsParam() {
   const ids = kWant();
@@ -549,14 +612,33 @@ function wire() {
   }
   const mbox = $('#kmodal');
   if (mbox) {
+    /* 🔴 「正在程序化重置」的门闩。销毁 / blur 一个改过值的 `<input>` 时，
+       浏览器会**补发一次 change**（值是那一刻框里的），于是「恢复默认参数」
+       刚把 `KP` 删空，这一发 change 又按框里的旧值写了回去 ——
+       按钮点了看着没反应，而控制台一个字都不报。
+       实测日志：`RST after KP={}` → 1.6 秒后 KP 又是 `{kdj:{n:19}}`。
+       ★ 门闩表达的正是"这一次是程序在重置，不是人在输入"。 */
+    let krst = false;
     mbox.onclick = async ev => {
       const a = ev.target.closest('a');
       if (a && a.id === 'kmore') return;      /* 去指标广场：真跳走 */
       if (a) ev.preventDefault();
       if (a && a.id === 'kmclose') { kModal(false); return; }
       if (a && a.id === 'kprst') {
+        krst = true;
+        try {
         KMAIN.concat(KINDS).forEach(id => delete KP[id]);
         kpSave(); await reloadInd();
+        /* 🔴 这一处**必须显式重渲染弹窗**：`kApplyInd` 会跳过"焦点在弹窗
+           里"的那次（防止改参数时把正在编辑的输入框换掉），而点这个按钮
+           时焦点正落在它自己身上 —— 不补这一下的话框里还是旧数字，
+           看着就是"点了没反应"。
+           ★ 重渲染前先把焦点挪开：销毁聚焦元素会让 innerHTML 赋值直接
+             失败（`Perhaps it was moved in a 'blur' event handler?`）。 */
+        try { if (mbox.contains(document.activeElement)) document.activeElement.blur(); }
+        catch (e2) { /* activeElement 可能为 null */ }
+        kModal(true);
+        } finally { krst = false; }
         return;
       }
       /* 点遮罩关掉（点框里不关）—— 同浮层那套 */
@@ -565,6 +647,13 @@ function wire() {
     mbox.onchange = async ev => {
       const e = ev.target;
       if (!e.classList || !e.classList.contains('kpi')) return;
+      /* 🔴 **已经脱离文档的输入框补发的 change 一律忽略。**
+         重渲染弹窗时会销毁正聚焦的那个 `<input>`，浏览器为它**补发一次
+         change**（值是销毁那一刻的）—— 于是「恢复默认参数」刚把 `KP`
+         删空，这一发 change 又按框里的旧值把它写了回去：
+         按钮点了看着没反应，而控制台一个字都不报。
+         实测日志：`RST after KP={}` → 1.6 秒后 KP 又是 `{kdj:{n:19}}`。 */
+      if (!e.isConnected || krst) return;
       const id = e.dataset.id, k = e.dataset.k, v = parseInt(e.value, 10);
       const d = kDef(id), a2 = d && d.params.find(x => x.key === k);
       /* 🔴 越界**当场拒**并说清范围 —— 让它发到服务端只会换来一句报错，
@@ -581,6 +670,16 @@ function wire() {
         e.value = (KP[id] || {})[k] != null ? KP[id][k] : (a2 ? a2.default : '');
         return;
       }
+      /* 🔴🔴 **值没变就什么都不做。** 浏览器在输入框失焦 / 被销毁时会
+         **补发一次 change**（只看"自 focus 以来被改过"，不看值是不是真的
+         变了）。于是点「恢复默认参数」的那一下：先 blur 补发一发 change
+         把旧值又写进 `KP`，**然后**才轮到 click handler 去删它 ——
+         顺序反着，按钮点了看着没反应，而控制台一个字都不报。
+         实测日志：`KPWRITE t=5776 v=19` 出现在 `RST START` **之前**。
+         ★ 所以门闩（krst）拦不住它 —— 那一发在 handler 之外。
+           幂等守卫才是对的：这一发的值与 `KP` 里已有的完全相同。 */
+      const _cur = (KP[id] || {})[k];
+      if (v === a2.default ? _cur == null : _cur === v) return;
       const _ok = $('#kmmsg');
       if (_ok) { _ok.className = 'lvmsg'; _ok.textContent = ''; }
       KP[id] = Object.assign({}, KP[id]); KP[id][k] = v;
@@ -962,9 +1061,27 @@ function kModalHtml() {
 /* 🔴 只重取【指标那一个接口】并重画 —— 不走整页 `load()`。
    走 load() 的话十个接口全重打、整块 #body 重渲染，页面会跳一下，
    而选指标是随手点的动作（同实盘页 `livePatch` 那条）。 */
-async function reloadInd() {
+/* 指标数据的缓存。键里必须含**所有会改变数值的东西** —— 少一项就会
+   拿着上一只票 / 上一个区间的数字画图，而它不报错。 */
+let KIND_CACHE = {key: null, rows: null, panels: null};
+function kIndKey() {
+  return [CODE, N, FQ, KOFF, kIndsParam()].join('|');
+}
+
+async function reloadInd(force) {
   const q = kIndsParam();
+  const key = kIndKey();
+  /* 🔴 **命中缓存就一个请求都不打**：切副图是随手点的动作，那几百毫秒的
+     "旧图停一下再换成新图"就是用户说的"跳动一下"。数据早就在手上了
+     （一次全取，见 kWant），没有任何理由再去问一遍。 */
+  if (!force && KIND_CACHE.key === key && KIND_CACHE.rows) {
+    IND = KIND_CACHE.rows;
+    KPANELS = KIND_CACHE.panels;
+    kApplyInd();
+    return;
+  }
   let ind = {rows: [], panels: []};
+  const gen = KSEQ, iseq = ++KISEQ;
   if (q) {
     try {
       ind = await j(`/api/stock/indicators?n=${N}&fq=${FQ}&off=${KOFF}`
@@ -978,8 +1095,20 @@ async function reloadInd() {
       return;
     }
   }
+  /* 缓存**照存**（数据是好的，与谁先谁后无关），但**不渲染** ——
+     渲染那一步才是会踩到别人 DOM 的地方。 */
+  if (!ind.error) KIND_CACHE = {key: key, rows: ind.rows,
+                                panels: ind.panels || []};
+  if (gen !== KSEQ || iseq !== KISEQ) return;
   IND = ind.error ? null : ind.rows;
   KPANELS = ind.error ? [] : (ind.panels || []);
+  kApplyInd();
+}
+
+/* 把手上这份指标数据画出来 + 把该重建的那块重建。
+   ★ 抽成一个函数是因为它有**两个入口**（缓存命中 / 请求回来），
+     两处各抄一份的话迟早只改一边（同「格子内容一处定义」那条）。 */
+function kApplyInd() {
   /* 🔴 **只重建真的变了的那一块**（同实盘页 `livePatch` / `lvSig` 那条）。
      用户 2026-09-16："切换副图时整个页面会闪一下。这种局部切换图、数据的
      都不应该刷新整个页面。"
@@ -1029,8 +1158,18 @@ async function reloadInd() {
       if (g && g.dataset.i !== id) g.dataset.i = id;
     });
   }
-  /* 弹窗**开着才重渲染**：关着时它是空的，渲染进去等于把它打开 */
-  if (KMODAL) kModal(true);
+  /* 弹窗**开着才重渲染**：关着时它是空的，渲染进去等于把它打开。
+     🔴 **但人正在里面敲字时不能重渲染**（`contains(activeElement)`）：
+       改一个参数就整块换掉，用户正编辑的那个 `<input>` 被从文档里摘走 ——
+       ① 浏览器直接让这次赋值**失败**（`Failed to set the 'innerHTML'
+          property … Perhaps it was moved in a 'blur' event handler?`），
+          而它只在控制台里报；
+       ② 就算成功，也会**失焦 + 光标位置丢失**，想连着改两个参数得重新点。
+     ★ 而这时本来也没什么要更新的：框里的值就是他刚敲进去的。
+       加 / 删副图那种（焦点在别处）仍然重渲染 —— 弹窗只列"当前用着的"
+       指标，不更新的话新加的那个不出现。 */
+  const mb = $('#kmodal');
+  if (KMODAL && mb && !mb.contains(document.activeElement)) kModal(true);
   KGEO = redraw();
   kSlotPos();
 }

@@ -14450,8 +14450,40 @@ def t_stock_multi_sub():
             assert pg.evaluate(
                 "() => document.querySelector('#kcv').dataset.mark") == 'keep', \
                 '换指标把 #body 整块重建了（画布都换了新的）—— 页面会跳一下'
-            assert len([u for u in reqs if '/api/stock/indicators' in u]) == 1, \
-                '应该只重取【指标那一个】接口'
+            # 🔴🔴 换指标**一个请求都不该打**。用户 2026-09-16 第三次反馈
+            #   "切换附图时还是会明显感觉跳动一下" —— 逐帧量过：DOM 零变化、
+            #   整页 242 帧位置不动、屏幕帧的像素差也只落在副图那一块。
+            #   剩下的就是那几百毫秒：点完下拉框，旧图还杵在那儿，等接口
+            #   回来才"啪"地换成新图。**那个突变就是跳动感的来源**。
+            #   实测一次取全部 10 个副图 47.6KB/29ms、只取 2 个 13.4KB/28ms
+            #   —— 几乎一样快，所以一次全取、缓存住，切换零请求。
+            assert not [u for u in reqs if '/api/stock/indicators' in u], \
+                ('换个副图指标还去打了一次指标接口 —— 数据早就在手上了'
+                 '（一次全取），那几百毫秒的"旧图停一下再换新图"正是'
+                 '用户说的跳动')
+            # 🔴 **反向自证缓存键**：换复权 / 换区间 / 翻页必须重取。
+            #   只钉"零请求"的话，把缓存写成"永远命中"也全绿 ——
+            #   而那会拿着不复权的数字去画后复权的图，且不报错。
+            for _lbl, _sel in (('复权', '#body .fq[data-f="hfq"]'),
+                               ('区间', '#body .rg[data-n="60"]')):
+                reqs.clear()
+                pg.locator(_sel).click()
+                pg.wait_for_timeout(1600)
+                assert [u for u in reqs if '/api/stock/indicators' in u], \
+                    ('换%s之后没重取指标 —— 缓存键里少了它，'
+                     '画出来的是上一个口径的数字而不报错' % _lbl)
+            pg.locator('#body .fq[data-f="bfq"]').click()
+            pg.wait_for_timeout(1400)
+            pg.locator('#body .rg[data-n="250"]').click()
+            pg.wait_for_timeout(1600)
+            # 回到默认之后再验一次：换指标仍然零请求
+            reqs.clear()
+            pg.locator('#kslots .kssel[data-j="1"]').select_option('rsi')
+            pg.wait_for_timeout(1400)
+            assert not [u for u in reqs if '/api/stock/' in u], \
+                '换回默认口径之后，换指标又开始打接口了：%r' % reqs[:3]
+            pg.locator('#kslots .kssel[data-j="1"]').select_option('kdj')
+            pg.wait_for_timeout(1200)
             assert pg.evaluate('() => KINDS') == ['vol', 'kdj'], \
                 '下拉框换的不是【那个槽位】：%r' % pg.evaluate('() => KINDS')
             # 换完之后那个副图画的真是 KDJ（拦 fillText 看图例）
@@ -14503,6 +14535,41 @@ def t_stock_multi_sub():
             pg.wait_for_timeout(1200)
             pg.locator('#kpickbox a.kmain[data-i="boll"]').click()
             pg.wait_for_timeout(1200)
+
+            # ---- ③c🔴 换区间 / 复权时**不许把已经画好的内容清掉** ----
+            # 用户 2026-09-16（第三次）："切换附图时还是会明显感觉跳动一下。"
+            #   `load()` 原来一进来就把 `#body` 换成「加载中…」——
+            #   **高度先塌陷再撑开**，那就是跳动（实盘页早为这条改过，
+            #   见 CLAUDE.md「刷新只换数字，不许重建 DOM」）。而「区间 /
+            #   复权」这几个按钮就挨着副图的下拉框，点它们同样整页塌陷。
+            # ★ 判据要在**请求还没回来的那一刻**看，所以把接口拖慢。
+            _h_before = pg.evaluate("() => document.body.scrollHeight")
+            # ★ 把**一个**接口扣住不放行，就能停在"还没回来"的那一刻。
+            #   🔴 扣住的请求**必须自己放回去**（`continue_`）：留着不管的话
+            #     这一页的连接一直挂着，`networkidle` 永远不到，后面的用例
+            #     跟着一起超时（全量跑时实测挂了 4 条，而单独跑都绿 ——
+            #     "单跑通过、全量失败"这次不是缓存，是我没收拾干净）。
+            #   ★ route handler 里**不要调页面 API**（`pg.wait_for_timeout`
+            #     之类）—— 它跑在事件回调里，会把自己锁死。
+            _held = []
+            pg.route('**/api/stock/finance*', lambda r: _held.append(r))
+            pg.locator('#body .rg[data-n="60"]').click()
+            pg.wait_for_timeout(700)
+            assert pg.locator('#kcv').count() == 1, \
+                ('换区间时把画布清掉了（换成了「加载中…」）—— 高度先塌陷'
+                 '再撑开就是用户说的"跳动一下"；已经有内容时该留着旧的，'
+                 '新数据到了一次性换')
+            _h_mid = pg.evaluate("() => document.body.scrollHeight")
+            assert abs(_h_mid - _h_before) < 4, \
+                '换区间的加载过程中页面高度变了 %d -> %d' % (_h_before, _h_mid)
+            for _r in _held:
+                try: _r.continue_()
+                except Exception: pass            # noqa: BLE001
+            pg.unroute('**/api/stock/finance*')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#kcv', timeout=40000)
+            pg.wait_for_timeout(1200)
+            notes.append('换区间/复权不清空已画好的内容（不塌陷）')
 
             # ---- ④ 加 / 删槽位，到上限要说一句 ----
             for _ in range(3):
@@ -14581,6 +14648,17 @@ def t_stock_multi_sub():
             assert _h0 == _h2, '改完参数页面布局变了：%r -> %r' % (_h0, _h2)
             assert pg.locator('#kmwrap .stbox').is_visible(), \
                 '改完一个参数弹窗就自己关了 —— 要改第二个还得重新点开'
+            # 🔴 改完一个参数，**光标还在那个框里**。原来 `kApplyInd` 会把
+            #   整个弹窗重渲染一遍 —— 输入框被换掉，失焦 + 光标位置丢失，
+            #   想连着改两个参数得重新点一次；而且销毁正聚焦的元素会让那次
+            #   `innerHTML` 赋值**直接失败**（`Perhaps it was moved in a
+            #   'blur' event handler?`），只在控制台里报。
+            assert pg.evaluate(
+                "() => { const a = document.activeElement;"
+                " return !!(a && a.classList && a.classList.contains('kpi')"
+                " && a.dataset.id === 'kdj'); }"), \
+                ('改完参数焦点跑了 —— 弹窗被整块重渲染，'
+                 '想接着改第二个参数还得重新点进那个框')
             box.fill('9999')
             box.dispatch_event('change')
             pg.wait_for_timeout(500)
