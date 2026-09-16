@@ -15828,6 +15828,45 @@ def t_indicator_plaza():
                 '再点一次没收回去'
             notes.append('长文本收起可展开（%s 被截断，展开 %.0f→%.0f px）'
                          % ('/'.join(hit), h0, h1))
+
+            # ---- ⑦🔴 三种复权都能切，**默认前复权** ----
+            # 用户 2026-09-16："指标广场里也加上前复权的选项。短期指标用前
+            #   复权差异不大，主流的软件默认都是展示前复权，只是在做回测的
+            #   时候使用后复权。"
+            assert pg.evaluate('()=>FQ') == 'qfq', \
+                ('广场默认不是前复权（%r）—— 主流行情软件的默认就是它，'
+                 '而不复权跨除权日有假跌幅，MACD/KDJ 会在那天凭空拐一下'
+                 % pg.evaluate('()=>FQ'))
+            fqs = pg.evaluate(
+                "()=>[...document.querySelectorAll('.ifq')].map(a=>a.dataset.f)")
+            assert fqs == ['bfq', 'qfq', 'hfq'], '三种口径没给全：%r' % fqs
+            assert pg.evaluate(
+                "()=>[...document.querySelectorAll('.ifq.on')]"
+                ".map(a=>a.dataset.f)") == ['qfq'], '默认那个没点亮'
+            # 🔴 **取数真的按这个口径**（只看按钮高亮的话，改了显示没改请求
+            #   也全绿 —— 而那时图和线是两套口径算的，且不报错）。
+            _rq = []
+            pg.on('request', lambda r: _rq.append(r.url)
+                  if '/api/stock/' in r.url else None)
+            pg.evaluate("()=>document.querySelector('.ifq[data-f=hfq]').click()")
+            pg.wait_for_timeout(3000)
+            _got = sorted(set(u.split('fq=')[1].split('&')[0]
+                              for u in _rq if 'fq=' in u))
+            assert _got == ['hfq'], \
+                '切了后复权，请求里带的还是 %r' % _got
+            assert 'fq=hfq' in pg.url, '复权口径没进 URL（分享/刷新就丢）'
+            assert [u for u in _rq if 'kline' in u], \
+                ('切复权没重取 K 线 —— 缓存键里少了它，图还是上一套口径的，'
+                 '而指标是按新口径算的：两者对不上且不报错')
+            # ★ 那段"什么时候用哪种"要**跟着切换变** —— 摆三个按钮而不说
+            #   区别的话，这一页就没回答它该回答的问题。
+            _why = pg.evaluate("()=>document.querySelectorAll('#pg>.lvwhy')[0]"
+                               "?.innerText || ''")
+            assert '后复权' in _why and ('回测' in _why or '特征' in _why), \
+                '切到后复权之后那段说明没跟着变：%r' % _why[:60]
+            pg.evaluate("()=>document.querySelector('.ifq[data-f=qfq]').click()")
+            pg.wait_for_timeout(2500)
+            notes.append('三种复权可切 · 默认前复权 · 取数与说明都跟着走')
             assert not errs, 'JS 报错：%r' % errs[:3]
             br.close()
     finally:

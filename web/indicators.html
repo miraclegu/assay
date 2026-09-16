@@ -45,6 +45,12 @@ let PAGE = Math.max(1, +(qs('page') || 1));
    才测得到分页（真实只有十来个指标，不压小的话那段永远是"第 1/1 页"）。 */
 let PER = Math.min(60, Math.max(1, +(qs('per') || 9)));
 let Q = qs('q') || '';
+/* 复权口径。🔴 **默认前复权**（用户 2026-09-16："短期指标用前复权差异不大，
+   主流的软件默认都是展示前复权，只是在做回测的时候使用后复权"）——
+   这一页是**看指标长什么样**的，与券商软件对着看才自然；而不复权跨除权日
+   有假跌幅，会让 MACD/KDJ 在那一天凭空拐一下，人还以为是指标的形态。
+   ★ 三种都能切：同一个指标在三种口径下差多少，本来就是这一页该能回答的。 */
+let FQ = qs('fq') || 'qfq';
 let D = null, BARS = null, ROWS = null, PANELS = [];
 /* 上一次取 K 线用的 (code, n) —— 换页签/翻页/搜索时**不重取 K 线**，
    它跟指标无关（同一段行情）。 */
@@ -59,6 +65,7 @@ function nav() {
   u.searchParams.set('tab', TAB);
   if (PAGE > 1) u.searchParams.set('page', PAGE); else u.searchParams.delete('page');
   if (Q) u.searchParams.set('q', Q); else u.searchParams.delete('q');
+  if (FQ !== 'qfq') u.searchParams.set('fq', FQ); else u.searchParams.delete('fq');
   history.replaceState(null, '', u);
 }
 
@@ -93,13 +100,19 @@ async function load() {
   }
   const items = pageItems();
   const ids = items.map(x => x.id).join(',');
-  const bkey = CODE + '|' + N;
+  /* 缓存键含 `FQ`。★ 在"切换时 `BKEY = null`"的前提下**它是冗余的**
+     （去掉照样对，变异测试抓不到）—— 保留它防的是**别的入口**：
+     换票、翻页、换页签走的是同一个 `load()`，哪天有人在那些路径上忘了
+     清 `BKEY`，键里有 FQ 就还能兜住。别把这两条的分工记反
+     （同 `realtime` 那条：锁是根本修复，唯一 tmp 名防的是跨进程）。 */
+  const bkey = CODE + '|' + N + '|' + FQ;
   /* 🔴 **只要这一页那几个指标**。一次要全部的话，上百个指标就是一个
      几兆的响应 + 一百次计算，而屏幕上同时也就看得见十来张卡。 */
   const [k, ind] = await Promise.all([
     (BARS && BKEY === bkey) ? Promise.resolve(null)
-      : one('/api/stock/kline?fq=bfq&n=' + N + '&code=' + encodeURIComponent(CODE)),
-    ids ? one('/api/stock/indicators?fq=bfq&n=' + N + '&inds=' + ids
+      : one('/api/stock/kline?fq=' + FQ + '&n=' + N + '&code='
+            + encodeURIComponent(CODE)),
+    ids ? one('/api/stock/indicators?fq=' + FQ + '&n=' + N + '&inds=' + ids
               + '&code=' + encodeURIComponent(CODE))
         : Promise.resolve({rows: [], panels: []}),
   ]);
@@ -130,6 +143,25 @@ function head(k, ind) {
     + '<label class="lvwhy">示例用哪只票'
     + '<input id="icode" value="' + esc(CODE) + '" style="width:130px">'
     + '</label><a href="#" class="lvtag" id="igo">换</a>'
+    /* 复权口径：这一页的每张小图都按它画、指标也按它算。 */
+    + '<span class="lvwhy">|</span>'
+    + [['bfq', '不复权'], ['qfq', '前复权'], ['hfq', '后复权']].map(
+        ([k, t]) => '<a href="#" class="lvtag ifq' + (FQ === k ? ' on' : '')
+          + '" data-f="' + k + '">' + t + '</a>').join('')
+    + '</div>'
+    /* 🔴 **把"什么时候用哪种"说出来**，不要只摆三个按钮：这一页的读者正是
+       来搞清楚指标怎么回事的人，而"同一个 MACD 在三种口径下不一样"是他
+       迟早会撞上的事（用户 2026-09-16："短期指标用前复权差异不大，主流的
+       软件默认都是展示前复权，只是在做回测的时候使用后复权"）。 */
+    + '<div class="lvwhy" style="margin:2px 0 6px">'
+    + '<b>' + ({bfq: '不复权', qfq: '前复权', hfq: '后复权'}[FQ] || '') + '</b>：'
+    + ({bfq: '与券商软件的价一致，但跨除权日有<b>假跌幅</b> —— '
+             + 'MACD/KDJ 会在那一天凭空拐一下，看着像指标的形态。',
+        qfq: '主流行情软件的默认口径，也是这一页的默认。'
+             + '短周期指标（MACD/KDJ/RSI 这些只看最近几十根的）'
+             + '<b>三种口径差别很小</b>，而它最新那根还等于当前实际价。',
+        hfq: '历史不随新事件变 —— <b>回测与特征用的是它</b>；'
+             + '代价是纵轴上的数与券商看到的价对不上。'}[FQ] || '')
     + '</div>'
     + (err ? '<div class="lvmsg bad">示例图取不到：' + esc(err)
              + '（指标定义仍然照常列出）</div>' : '')
@@ -321,6 +353,12 @@ function wire() {
     CODE = v; BKEY = null; nav(); load();
   };
   if ($('#igo')) $('#igo').onclick = ev => { ev.preventDefault(); go(); };
+  $$('.ifq').forEach(a => a.onclick = ev => {
+    ev.preventDefault();
+    if (FQ === a.dataset.f) return;
+    FQ = a.dataset.f; BKEY = null;      /* K 线要按新口径重取 */
+    nav(); load();
+  });
   if ($('#icode')) $('#icode').onkeydown = ev => {
     if (ev.key === 'Enter') go();
   };
