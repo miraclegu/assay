@@ -832,20 +832,19 @@ a.spl.accent{color:var(--accent)}
 .iclamp.on{display:block;-webkit-line-clamp:unset;overflow:visible}
 .imore{font-size:11px;padding-top:2px}
 
-/* 自定义基准 chip：名字 + 右上角一个 ×（从清单里去掉它）。
-   🔴 用户 2026-09-16："自定义基准应该最多能保存 3 个，超出三个则必须先
-     删除（右上角 X 掉）才能新建自定义。不要一点击其他的基准，已选中过的
-     自定义基准框就消失了。"
+/* **chip + 右上角一个 ×**：一份"已经选进来的东西"的清单，× 是把它去掉。
+   🔴 **两处共用一套**（实盘业绩页的自定义基准、个股页叠在主图上的指标）——
+     各写一份的话两边会慢慢长得不一样（同「列定义写一处」那条）。
    ★ × 贴在右上角而不是并排：并排的话两个可点的东西挨着，想选中却点成了
-     删除（而删除是不可撤销的那种）。 */
-.lpbcus{position:relative;display:inline-block;margin-right:2px}
-.lpbcus>a.lpb{margin-right:0}
-.lpbcusx{position:absolute;top:-6px;right:-5px;width:14px;height:14px;
-         line-height:13px;text-align:center;font-size:11px;border-radius:50%;
-         background:var(--panel2);color:var(--dim);border:1px solid var(--line);
-         text-decoration:none;opacity:0;transition:opacity .12s}
-.lpbcus:hover .lpbcusx{opacity:1}
-.lpbcusx:hover{color:var(--warn);border-color:var(--warn)}
+     删除，而删除是不可撤销的那种。 */
+.chipw{position:relative;display:inline-block;margin-right:2px}
+.chipw>a{margin-right:0}
+.chipx{position:absolute;top:-6px;right:-5px;width:14px;height:14px;
+       line-height:13px;text-align:center;font-size:11px;border-radius:50%;
+       background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+       text-decoration:none;opacity:0;transition:opacity .12s}
+.chipw:hover .chipx{opacity:1}
+.chipx:hover{color:var(--warn);border-color:var(--warn)}
 /* ★ 触摸屏没有 hover —— 那里就一直显示，否则删不掉（同「看不出能点的
    入口 = 没有入口」那条）。 */
-@media (hover:none){ .lpbcusx{opacity:1} }
+@media (hover:none){ .chipx{opacity:1} }

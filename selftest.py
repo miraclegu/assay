@@ -4605,6 +4605,28 @@ def t_live_perf_tabs():
     return '；'.join(notes)
 
 
+def _kmain(pg, ind, on=True):
+    """个股页：把某个**主图**指标叠上去 / 拿下来。
+
+    🔴 这个入口**变过三次**（工具条独立开关 -> 指标面板里那组 ->
+      工具条两个开关 -> 现在的「已选 chip + 「+ 主图」挑」），而要证的事
+      一次没变：默认关 / 开了画布真的变 / 状态进 URL。
+      所以把"怎么点"收进这一个函数 —— 散在各条用例里的话，
+      入口再变一次就要改 N 处（同 `_via_pop` / `_lp_tab` 那两个）。
+    """
+    chip = pg.locator('#kpickbox .chipw a.kmain[data-i="%s"]' % ind)
+    has = chip.count() > 0
+    if on == has:
+        return
+    if on:
+        pg.click('#kmadd')
+        pg.wait_for_selector('#kmpick .kmpicka[data-i="%s"]' % ind, timeout=6000)
+        pg.locator('#kmpick .kmpicka[data-i="%s"]' % ind).click()
+    else:
+        pg.locator('#kpickbox .chipx[data-x="%s"]' % ind).click()
+    pg.wait_for_timeout(1300)
+
+
 def _lp_tab(pg, name, timeout=90000):
     """业绩页：切到某个页签并等它可见。
 
@@ -7084,10 +7106,13 @@ def t_stock_ui():
             #   （副图改成槽位之后，面板整个没了，主图那两个本来就只有两个、
             #   做成下拉反而绕）。要证的仍是那三件事：
             #   默认关 / 开了画布真的变 / 状态进 URL（刷新不丢）。
-            _bt = pg.locator('#kpickbox .kmain[data-i="boll"]')
-            assert _bt.count() == 1, '工具条上没有 BOLL 这个主图开关'
-            assert 'on' not in (_bt.get_attribute('class') or ''), \
-                'BOLL 默认应该是关的'
+            #   第四次：现在是「已选的 chip（各带一个 ×）+ 一个「+ 主图」挑」
+            #   —— 平铺全部的话，主图指标一多那一行就绕成几排
+            #   （用户 2026-09-16："如果后续主图的数量增多，都要显示不下了"）。
+            assert pg.locator('#kmadd').count() == 1, \
+                '工具条上没有「+ 主图」这个入口'
+            assert pg.locator('#kpickbox .chipw a.kmain[data-i="boll"]').count() == 0, \
+                'BOLL 默认就叠上去了（默认该只有均线）'
             assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
                 'BOLL 状态位不对'
             # ★ 先把光标移开画布再量基线 —— 十字光标本身就画了几百个像素
@@ -7096,18 +7121,15 @@ def t_stock_ui():
             pg.mouse.move(bb['x'] + bb['width'] / 2, bb['y'] - 40)
             pg.wait_for_timeout(400)
             _no = pg.evaluate(NZ)
-            pg.locator('#kpickbox .kmain[data-i="boll"]').click()
-            pg.wait_for_timeout(1300)
+            _kmain(pg, 'boll', True)
             _yes = pg.evaluate(NZ)
             assert _yes > _no, \
                 '开了 BOLL 画布像素没变多（%d -> %d）' % (_no, _yes)
-            assert 'on' in (pg.locator('#kpickbox .kmain[data-i="boll"]')
-                            .get_attribute('class') or ''), \
-                'BOLL 开了但那个标签没点亮'
+            assert pg.locator('#kpickbox .chipw a.kmain[data-i="boll"]').count() == 1, \
+                'BOLL 叠上去了却没有它的 chip —— 那就没法再把它拿下来'
             assert 'main=ma%2Cboll' in pg.url or 'main=ma,boll' in pg.url, \
                 'BOLL 状态没进 URL（刷新就丢）：%s' % pg.url
-            pg.locator('#kpickbox .kmain[data-i="boll"]').click()
-            pg.wait_for_timeout(1300)
+            _kmain(pg, 'boll', False)
             assert abs(pg.evaluate(NZ) - _no) < 300, \
                 '关掉 BOLL 后画布没回到原样'
 
@@ -13415,7 +13437,7 @@ def t_bench_custom_web():
                             ".find(a=>a.dataset.b===c).click()", code)
                 pg.wait_for_timeout(2500)
             _cus = lambda: pg.evaluate(
-                "()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+                "()=>[...document.querySelectorAll('.chipw a.lpb')]"
                 ".map(a=>a.dataset.b)")
             for _kw, _c in (('上证50', 'sh000016'), ('沪深300', 'sh000300')):
                 _add_cus(_kw, _c)
@@ -13458,7 +13480,7 @@ def t_bench_custom_web():
                 ('点了上证之后自定义 chip 没了：%r —— 清单与"当前选中哪个"'
                  '是两件事，切去看别的不该把搜出来的票弄丢' % (_cus(),))
             # 在几个自定义之间切换：**零请求**（进页面时已一次全取）
-            pg.evaluate("()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+            pg.evaluate("()=>[...document.querySelectorAll('.chipw a.lpb')]"
                         ".find(a=>a.dataset.b==='sh000300').click()")
             pg.wait_for_timeout(1500)
             assert pg.evaluate('()=>LPB') == ['sh000300'], '切不过去'
@@ -13470,7 +13492,7 @@ def t_bench_custom_web():
                  '进页面时就该一次全取（同个股页"一次全取"那条）' % len(reqs2))
             # × 删掉一个之后又能加
             pg.evaluate("()=>document.querySelector"
-                        "('.lpbcusx[data-x=sh000016]').click()")
+                        "('.chipx[data-x=sh000016]').click()")
             pg.wait_for_timeout(1200)
             assert _cus() == ['sh510880', 'sh000300'], \
                 '点 × 没从清单里去掉：%r' % (_cus(),)
@@ -13493,9 +13515,9 @@ def t_bench_custom_web():
                          ' · × 删得掉且删完能再加' % 3)
             # 收拾回只剩一个，后面几条按原样跑
             pg.evaluate("()=>document.querySelector"
-                        "('.lpbcusx[data-x=sh000300]').click()")
+                        "('.chipx[data-x=sh000300]').click()")
             pg.wait_for_timeout(1000)
-            pg.evaluate("()=>[...document.querySelectorAll('.lpbcus a.lpb')]"
+            pg.evaluate("()=>[...document.querySelectorAll('.chipw a.lpb')]"
                         ".find(a=>a.dataset.b==='sh510880').click()")
             pg.wait_for_timeout(1500)
 
@@ -14606,8 +14628,7 @@ def t_stock_multi_sub():
             #   只钉"换指标不重建"的话，把判据写成"永远不重建"也全绿，
             #   而那会让加/删副图之后 `data-j` 不重排（换错槽位且不报错）。
             pg.evaluate(MARK)
-            pg.locator('#kpickbox a.kmain[data-i="boll"]').click()
-            pg.wait_for_timeout(1400)
+            _kmain(pg, 'boll', True)
             _mk2 = pg.evaluate(CHK)
             _tool = pg.evaluate("""() => [...document.querySelectorAll('#kpickbox a')]
                 .map(e => e.dataset.mk || 'NEW')""")
@@ -14629,11 +14650,56 @@ def t_stock_multi_sub():
             assert 'NEW' not in _tool2, \
                 '加副图把工具条也重建了：%r —— 主图那两个开关没有变' % _tool2
             notes.append('主图开关只动工具条 · 加副图只动槽位层')
+
+            # ---- ③d🔴 主图叠加**有上限**，到了要说清怎么腾位置 ----
+            # 用户 2026-09-16："主图选择的方式也改一下，如果后续主图的数量
+            #   增多，都要显示不下了。要限制叠加主图的数量，不能无限制叠加。"
+            # 🔴 本地主图指标统共两个（均线 / BOLL），**凑不出默认的 3 个**
+            #   —— 这条在真实数据上是空转的，必须把上限压下来才测得到
+            #   （同指标广场用 `?per=` 把每页个数压到 3 才测得到分页）。
+            _kmain(pg, 'boll', False)
+            _real_max = pg.evaluate('() => KMAIN_MAX')
+            assert _real_max >= 2, '上限 %r 太小，正常使用都会被挡' % _real_max
+            pg.evaluate("() => { KMAIN_MAX = 1; }")
+            try:
+                pg.evaluate("() => { const b = document.querySelector('#kpickbox');"
+                            " b.innerHTML = kPickHtml() + kMainHtml(); }")
+                assert 'off' in (pg.locator('#kmadd').get_attribute('class') or ''), \
+                    '已经到上限了，「+ 主图」还是可点的样子'
+                pg.click('#kmadd')
+                pg.wait_for_timeout(400)
+                assert pg.locator('#kmpick .kmpicka').count() == 0, \
+                    '到上限还让接着叠 —— 上限形同虚设'
+                _m = pg.evaluate("() => { const e = document.querySelector('#kmpick');"
+                                 " return e ? e.innerText.trim() : ''; }")
+                assert '1' in _m and '×' in _m, \
+                    ('到上限只是静默不动（提示 %r）—— 要说清怎么腾位置'
+                     '（同「+ 副图」那条）' % _m)
+                # 🔴 数据那道也要有：URL 里手写 `main=a,b,c,d` 绕得过按钮
+                assert pg.evaluate("() => kToggleMain('boll')") is False, \
+                    '到上限了 kToggleMain 还返回成功 —— 数据层那道上限没有'
+                assert pg.evaluate("() => KMAIN.indexOf('boll') < 0"), \
+                    '被拒了却还是叠上去了'
+            finally:
+                pg.evaluate("(v) => { KMAIN_MAX = v; }", _real_max)
+                pg.evaluate("() => { const b = document.querySelector('#kpickbox');"
+                            " b.innerHTML = kPickHtml() + kMainHtml(); }")
+            # URL 那条路也截断（手写超限时只认前 N 个）
+            assert pg.evaluate(
+                "() => { const u = new URL(location.href);"
+                " u.searchParams.set('main', 'ma,boll,ma,boll');"
+                " history.replaceState(null, '', u);"
+                " const r = mainFromUrl().length;"
+                " u.searchParams.set('main', KMAIN.join(',') || '0');"
+                " history.replaceState(null, '', u); return r; }") == _real_max, \
+                ('URL 里手写超限的 `main=` 没被截到 %d 个 —— 绕过按钮之后'
+                 'K 线上十来条线全糊在一起，而它不报错' % _real_max)
+            notes.append('主图叠加有上限（%d 个）· 到了说清怎么腾位置 · '
+                         'URL 那条路也截断' % _real_max)
             # 收拾回原样，后面的断言照旧从两个槽位起步
             pg.locator('#kslots .ksdel[data-j="2"]').click()
             pg.wait_for_timeout(1200)
-            pg.locator('#kpickbox a.kmain[data-i="boll"]').click()
-            pg.wait_for_timeout(1200)
+            _kmain(pg, 'boll', False)
 
             # ---- ③c🔴 换区间 / 复权时**不许把已经画好的内容清掉** ----
             # 用户 2026-09-16（第三次）："切换附图时还是会明显感觉跳动一下。"

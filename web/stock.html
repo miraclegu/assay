@@ -46,6 +46,14 @@ let KMODAL = false;
    （/api/indicators/defs，正本在 assay/indicators.py）。页面硬编码一份的话，
    加一个指标要改两处，而漏改那处的表现是**新指标在页面上根本不出现**：
    不报错，只是没人知道它存在（同「可选基准由服务端给」那条）。 */
+/* 主图最多叠几个。
+   ★ 定义放这儿是因为 `mainFromUrl()` 在文件很靠前的地方就被调用
+     （放后面是 TDZ，踩过一次）。
+   🔴 写成 `let` 是为了**可测**：本地主图指标统共两个（均线 / BOLL），
+     凑不出 3 个，上限那条判据在真实数据上是**空转**的。selftest 把它临时
+     压到 1 再验（同指标广场把每页个数做成 `?per=` 的理由：
+     **真实数据触发不到的上限，判据必须能构造出来**）。 */
+let KMAIN_MAX = 3;
 let KDEFS = null, KPANELS = [];
 /* 🔴 **并发保护**：`load()` 与 `reloadInd()` 都是 async，而工具条上
    「区间 / 复权 / 指标」几个按钮挨在一起 —— 连点两下就有两次渲染在飞。
@@ -465,7 +473,9 @@ function mainFromUrl() {
   const raw = qs('main');
   if (raw === null) return qs('boll') === '1' ? ['ma', 'boll'] : ['ma'];
   if (raw === '0') return [];
-  return raw.split(',').map(x => x.trim()).filter(Boolean);
+  /* 🔴 URL 这条路也要**截到上限**：手写 `main=a,b,c,d` 会绕过按钮那道，
+     而绕过之后 K 线上十来条线全糊在一起，且不报错（同 `sub=` 那条）。 */
+  return raw.split(',').map(x => x.trim()).filter(Boolean).slice(0, KMAIN_MAX);
 }
 function kindsFromUrl() {
   const raw = qs('sub');
@@ -559,7 +569,29 @@ function wire() {
     if (!a) return;
     ev.preventDefault();
     if (a.id === 'kparam') { kModal(true); return; }
-    if (a.classList.contains('kmain')) {
+    /* 「+ 主图」：到上限就**说清怎么腾位置**，不许静默不动。 */
+    if (a.id === 'kmadd') {
+      const on = KMAIN.filter(id => kDef(id) && kDef(id).panel === 'main');
+      const pk = $('#kmpick');
+      if (on.length >= KMAIN_MAX) {
+        if (pk) pk.innerHTML = `　<b>主图最多叠 ${KMAIN_MAX} 个</b>，`
+          + '先点某个主图 chip 右上角的 × 去掉一个再叠（副图那几个不占名额）';
+        return;
+      }
+      if (pk) pk.innerHTML = pk.innerHTML ? '' : kMainPickHtml();
+      return;
+    }
+    if (a.classList.contains('kmpicka')) {      /* 从清单里挑一个叠上去 */
+      kToggleMain(a.dataset.i);
+      await reloadInd();
+      return;
+    }
+    if (a.classList.contains('kmainx')) {       /* chip 右上角的 × */
+      kToggleMain(a.dataset.x);
+      await reloadInd();
+      return;
+    }
+    if (a.classList.contains('kmain')) {        /* 点 chip 本身 = 也是取消 */
       kToggleMain(a.dataset.i);
       await reloadInd();
     }
@@ -940,12 +972,48 @@ function kAddRowHtml() {
 
 /* 主图那两个（均线 / 布林带）：它们**不是槽位** —— 直接叠在 K 线上，
    而且就这么两个，做成下拉反而绕。 */
+/* 🔴🔴 主图叠加也**不能平铺全部、不能无限叠**（2026-09-16 用户："主图选择
+   的方式也改一下，如果后续主图的数量增多，都要显示不下了。要限制叠加主图
+   的数量，不能无限制叠加"）。这与副图当初那三版演进是**同一个问题**：
+   平铺 -> 数量一上去就绕成几排。
+
+   形态取「**已选的 chip（各带一个 ×）+ 一个「+ 主图」挑**」，与实盘业绩页
+   的自定义基准同一套（`.chipw/.chipx`，样式也是同一份）——
+   ★ 主图与副图形态**刻意不同**：副图是**槽位**（一个位置放一个，有上下
+     顺序），主图是**集合**（都叠在同一张 K 线上，没有位置可言）。
+     硬把主图也做成槽位的话，"第 2 个主图"这种说法本身就讲不通。
+   ★ 上限 `KMAIN_MAX = 3`：均线自己就是 4 条线、BOLL 2 条，叠到第 4 个
+     主图时 K 线上已经十来条线，形态全糊了 —— 限制的理由是**看得清**，
+     不是"放不下"。 */
 function kMainHtml() {
   const mains = ((KDEFS || {}).inds || []).filter(x => x.panel === 'main');
   if (!mains.length) return '';
-  return '<span class="lvwhy">主图</span>' + mains.map(d =>
-    `<a href="#" class="lvtag kmain${KMAIN.indexOf(d.id) >= 0 ? ' on' : ''}"
-       data-i="${d.id}" title="${esc(d.desc)}">${esc(d.short)}</a>`).join('');
+  const on = KMAIN.filter(id => mains.some(d => d.id === id));
+  const full = on.length >= KMAIN_MAX;
+  return '<span class="lvwhy">主图</span>'
+    + on.map(id => {
+        const d = mains.find(x => x.id === id) || {};
+        return `<span class="chipw"><a href="#" class="lvtag kmain on"
+          data-i="${id}" title="${esc(d.desc || '')}">${esc(d.short || id)}</a>`
+          + `<a href="#" class="chipx kmainx" data-x="${id}"
+             title="不叠它了">×</a></span>`;
+      }).join('')
+    + (on.length ? '' : '<span class="lvwhy">（没叠）</span>')
+    /* 「+ 主图」：点开列未选的那几个。到上限时**说清怎么腾位置** ——
+       静默不给加的话人只会觉得"点了没反应"（同「+ 副图」那条）。 */
+    + `<a href="#" class="lvtag${full ? ' off' : ''}" id="kmadd"
+         title="${full ? '主图最多叠 ' + KMAIN_MAX + ' 个，先点某个主图 chip 右上角的 × 去掉一个'
+                       : '再叠一个指标到 K 线上'}">+ 主图</a>`
+    + '<span id="kmpick"></span>';
+}
+
+/* 「+ 主图」点开的那份清单：只列**还没叠上去**的。 */
+function kMainPickHtml() {
+  const mains = ((KDEFS || {}).inds || []).filter(
+    x => x.panel === 'main' && KMAIN.indexOf(x.id) < 0);
+  if (!mains.length) return '　<span class="lvwhy">主图指标都叠上了</span>';
+  return '　' + mains.map(d => `<a href="#" class="lvtag kmpicka"
+      data-i="${d.id}" title="${esc(d.desc)}">${esc(d.short)}</a>`).join('');
 }
 
 /* 浮在画布上的那一排控件：**一个副图一组**（下拉框 + ⚙ + ×）。
@@ -982,10 +1050,19 @@ function kSlotPos() {
 /* 主图那两个是**开关**（叠上去 / 不叠）。 */
 function kToggleMain(id) {
   const at = KMAIN.indexOf(id);
-  if (at >= 0) KMAIN.splice(at, 1); else KMAIN.push(id);
+  if (at >= 0) KMAIN.splice(at, 1);
+  else {
+    /* 🔴 上限也要在**数据这一层**拦一道：按钮那道在 UI 上拦得住，
+       而"URL 里手写 `main=a,b,c,d`"这条路绕过它 —— 而绕过之后 K 线上
+       十来条线全糊在一起，且不报错（同自定义基准那两道上限）。 */
+    const on = KMAIN.filter(x => kDef(x) && kDef(x).panel === 'main');
+    if (on.length >= KMAIN_MAX) return false;
+    KMAIN.push(id);
+  }
   /* 🔴 `main=` 空值会被 nav() 删掉参数、下次打开又回到默认，
      所以"一个都不要"写成 '0'（同 sub 那条）。 */
   nav({main: KMAIN.join(',') || '0', boll: ''});
+  return true;
 }
 
 /* 副图是**槽位**：加一个 / 去掉第 j 个 / 把第 j 个换成别的指标。 */

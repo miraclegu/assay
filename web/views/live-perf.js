@@ -669,11 +669,11 @@ function renderChart(aid){
          ★ 清单里的**不删**：数据晚到一天的票不该被永久丢掉，只是这一次
            不显示；人想清掉随时能点它的 ×（等它有数据了再点）。 */
       + (LPCUS.some(c => BD[c]) ? '<span class="lvwhy">|</span>' : '')
-      + LPCUS.filter(c => BD[c]).map(c => `<span class="lpbcus${
+      + LPCUS.filter(c => BD[c]).map(c => `<span class="chipw${
             LPB.indexOf(c) >= 0 ? ' on' : ''}"><a href="#" class="lpb lpbcusa${
             LPB.indexOf(c) >= 0 ? ' on' : ''}" data-b="${esc(c)}"
             title="手填的基准 ${esc(c)}">${
-            esc((LPB_META[c] || {}).name || c)}</a><a href="#" class="lpbcusx"
+            esc((LPB_META[c] || {}).name || c)}</a><a href="#" class="chipx"
             data-x="${esc(c)}" title="从清单里去掉它">×</a></span>`).join('')
       + `<span class="lvwhy">|</span><a href="#" class="lpb${
            LPCUS.length >= LPCUS_MAX ? ' off' : ''}" id="lp_bmore"
@@ -700,8 +700,8 @@ function renderChart(aid){
     /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
     /* 自定义 chip 上那个 × —— 从**清单**里去掉它（不是取消选中）。
-       ★ 它是 `a.lpbcusx` 不是 `a.lpb`，所以单独绑一遍。 */
-    el.querySelectorAll('a.lpbcusx').forEach(a => a.onclick = ev => {
+       ★ 它是 `a.chipx` 不是 `a.lpb`，所以单独绑一遍。 */
+    el.querySelectorAll('a.chipx').forEach(a => a.onclick = ev => {
       ev.preventDefault();
       ev.stopPropagation();          /* 别顺带触发它旁边那个 chip 的选中 */
       lpcDel(a.dataset.x);
