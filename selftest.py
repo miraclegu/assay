@@ -777,6 +777,38 @@ def t_jq():
     return '%d 个聚宽策略关联核对通过（选股参数逐项对照 %d 条）' % (len(ok), n_align)
 
 
+@case('JS 不许引用未定义的名字（Python 侧那道防线的 JS 版）', tag='fast')
+def t_js_undef():
+    """🔴🔴 2026-09-16 用户报「回测里的持仓页面展示不出列表」，查下来是
+    `paneHoldings` 用了 `money()` —— 而它是 `drawDay` 里的一个**局部 const**。
+    跨函数引用未定义的名字，切到那个页签当场抛 `money is not defined`、
+    一行都渲染不出来，**而它只在控制台里报**（页面上就是"什么都没有"）。
+
+    拆 `srv/` 那次，Python 侧建过同一道防线（"扫每个模块里 Load 但未绑定的
+    名字"，当场抓出 `_JOBS` 那两处）。**JS 侧一直没有** —— 只有
+    ① `node --check`（只查语法）② 跨文件顶层重名。这次的 bug 正落在缺口里。
+
+    ★ 判据**宁可漏报也不误报**（见 `tools/js_undef.py` 的取舍）：
+      一个天天报假警的检查等于没有检查。
+    ★ 反向自证：把 `money` 改回局部，这条必须报出来（变异实测）。
+    """
+    import subprocess
+    root = os.path.dirname(os.path.abspath(__file__))
+    r = subprocess.run([sys.executable, 'tools/js_undef.py', 'web'],
+                       cwd=root, capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, 'js_undef.py 跑挂了：%s' % (r.stderr or '')[-300:]
+    lines = [x for x in r.stdout.splitlines() if x.startswith('  ')]
+    assert not lines, \
+        ('JS 里有 %d 处引用了未定义的名字 —— 这种错**只在控制台里报**，'
+         '页面上只是那一块什么都没有：\n%s' % (len(lines), '\n'.join(lines[:8])))
+    n = 0
+    for x in r.stdout.splitlines():
+        if x.startswith('全局顶层名'):
+            n = int(x.split('扫描 ')[1].split(' ')[0])
+    assert n >= 15, '只扫到 %d 个文件，怕是路径不对（web 下有 20+ 个）' % n
+    return '扫了 %d 个 JS / 内联脚本，0 处未定义引用' % n
+
+
 @case('回测详情页「持仓」页签：真的列得出逐日持仓（playwright）', tag='web')
 def t_run_holdings_pane():
     """🔴 用户 2026-09-16："回测里的持仓页面出现问题了，展示不出持仓的具体
@@ -2982,17 +3014,30 @@ def t_live_core():
         # 不是"正好落在那天"
         lv.add_cashflow('t_seed', '2026-08-16', 200000, 'deposit', '周六入金')
         es2 = lv.equity_curve('t_seed')['stats']
-        #   🔴 判据是**方向**，不是"几乎不变"。
-        #     把入金当成收益的话 TWR 会**变大**（+20万/本金 那一截）；
-        #     而入金之后 TWR **本来就会变小** —— 20 万闲置现金按 0% 计，
-        #     摊薄之后每一段的收益率（CLAUDE.md 明确写着那是正确行为）。
-        #   ★ 原来写的是 `abs(差) < 0.02`，那是一条**随时间必然失效**的断言：
-        #     入金日固定在 2026-08-16，而面板每天在长 -> 之后的交易日越来越多
-        #     -> 摊薄累积越大 -> 某天必然越线（今天就越了：0.0149 -> -0.0063）。
-        #     同「不能无条件断言 15 只」那条：断言不许依赖"今天是哪天"。
-        assert es2['twr'] <= es['twr'] + 1e-9, \
-            ('周末入金被当成收益了：TWR 从 %.4f **升到** %.4f —— '
-             '入金只该摊薄收益率、不该抬高它'
+        #   🔴🔴 判据要**与盈亏方向无关**。这条断言前后错过两次，
+        #     每次都是"判据依赖了写它那天的数据状态"：
+        #       ① 第一版 `abs(差) < 0.02` —— 入金日固定、面板每天在长，
+        #          摊薄累积越来越大，某天必然越线；
+        #       ② 第二版 `es2.twr <= es.twr` —— **写它那天账户是盈利的**，
+        #          摊薄把收益率往 0 拉 = 变小。而账户一转亏（TWR −0.0216），
+        #          同样的摊薄就把它**往上**拉到 −0.0183，断言当场报
+        #          "入金被当成收益了" —— 而那恰恰是正确行为。
+        #     **摊薄的本质是把收益率往 0 拉，不是单调变小。**
+        #   ★ 所以钉**金额口径**：入金不是收益，`pnl_total` 一分不许动，
+        #     而 `net_deposit` 要如实增加。这两条与盈亏符号无关。
+        assert abs(es2['pnl_total'] - es['pnl_total']) < 0.02, \
+            ('周末入金被当成收益了：累计收益金额从 %.2f 变成 %.2f —— '
+             '入金是本金不是利润，`pnl_total = 期末 − 起点 − 净入金`'
+             % (es['pnl_total'], es2['pnl_total']))
+        assert abs((es2['net_deposit'] or 0) - (es['net_deposit'] or 0)
+                   - 200000) < 0.02, \
+            ('周末那笔 20 万没进 net_deposit（%s -> %s）—— 落在非交易日的'
+             '现金流要按**区间**取，不是"正好落在那天"'
+             % (es['net_deposit'], es2['net_deposit']))
+        # ★ 摊薄的方向：收益率被往 **0** 拉（盈亏两种情形都成立）。
+        assert abs(es2['twr']) <= abs(es['twr']) + 1e-9, \
+            ('入金之后 |TWR| 反而变大了（%.4f -> %.4f）—— 20 万闲置现金'
+             '按 0%% 计，只该把收益率往 0 摊薄'
              % (es['twr'], es2['twr']))
 
         # ---- 3i) 「年化拖累」要够长的样本才给 ----
@@ -9238,19 +9283,39 @@ def t_backtest_raw_units():
     from assay.srv import runs as R
 
     # ---- ① 新归档：fills.parquet 必须存在且**全部整手** ----
-    cand = sorted(_g.glob('runs/_fqtest/*/*/fills.parquet'))
-    if not cand:
-        return '跳过（没有带 fills.parquet 的归档，先跑一次回测）'
+    # 🔴🔴 **这条用例从加进来（2026-09-14）就一直在跳过**，报绿、耗时 0.0s，
+    #   一个断言都没执行 —— 因为它找的是 `runs/_fqtest/` 这个**专用测试分组**，
+    #   而那个分组从来没有人去创建过。盘上明明有 8 个带 `fills.parquet` 的
+    #   归档，只是在别的分组下。
+    #   ★ 这正是「持仓页签」那个 bug 的同款陷阱：**判据依赖"盘上恰好有什么"**。
+    #     而跳过比空转更糟 —— 空转至少跑了，跳过连跑都没跑，报告还说它绿了。
+    #   ★ 所以扫**全部归档**，并在一条都没有时**报失败而不是跳过**：
+    #     2026-09-14 起新归档都带 fills.parquet，一个都找不到就说明那条链断了。
+    cand = sorted(_g.glob('runs/*/*/*/fills.parquet'))
+    assert cand, \
+        ('一个带 `fills.parquet` 的归档都没有 —— 2026-09-14 起 broker 会逐笔'
+         '记成交，新归档都该有它。跑一次回测就能生成；'
+         '要是跑了还没有，那就是 broker 那条链断了（而它不报错）')
     d = os.path.dirname(cand[-1])
     rid = os.path.basename(d)
     fl = _pd.read_parquet(cand[-1])
     assert len(fl) > 0, 'fills.parquet 是空的'
     assert {'date', 'code', 'side', 'shares', 'price'} <= set(fl.columns), \
         'fills.parquet 缺字段：%s' % list(fl.columns)
-    bad = fl[(fl['shares'] % 100) != 0]
+    # 🔴 **整手只对【买入】成立。** 这条用例一开始跑就抓到 22 笔"不整手"，
+    #   查下来**全是卖出** —— 持有期间送股 / 转增会产生不足 100 股的零股，
+    #   清仓时连零股一起卖，那是**真实行为不是 bug**（A 股允许零股卖出、
+    #   不允许零股买入）。实测 8 个归档：买入 1071 笔**零例外**全整手，
+    #   卖出 1048 笔里 28 笔带零股。
+    #   ★ 这个错判被"用例一直跳过"藏了三天 —— 它当初要是真跑过，
+    #     作者当场就会发现判据写宽了。
+    buy = fl[fl['side'] == 'buy']
+    assert len(buy) > 0, 'fills 里没有买入'
+    bad = buy[(buy['shares'] % 100) != 0]
     assert bad.empty, \
-        ('fills.parquet 里有 %d 行不是整手 —— 它记的是**撮合当场的真实股数**，'
-         '不该需要任何换算：\n%s' % (len(bad), bad.head(3).to_string()))
+        ('fills.parquet 里有 %d 笔**买入**不是整手 —— 它记的是撮合当场的'
+         '真实股数，而 A 股不允许零股买入：\n%s'
+         % (len(bad), bad.head(3).to_string()))
     assert (fl['side'] == 'buy').any() and (fl['side'] == 'sell').any(), \
         'fills 里买卖必须都有（trades 只在平仓时写行，会丢掉所有买入）'
     notes = ['fills.parquet %d 笔全整手（买 %d / 卖 %d）'
@@ -9262,8 +9327,9 @@ def t_backtest_raw_units():
     assert got and got.get('src') == 'fills', \
         ('有 fills.parquet 却没用它（src=%s）—— 那条路不用换算、而且含'
          '未平仓持仓的买入' % (got or {}).get('src'))
-    assert all(float(r['shares']) % 100 == 0 for r in got['rows']), \
-        '接口回出来的份额不是整手'
+    assert all(float(r['shares']) % 100 == 0
+               for r in got['rows'] if r.get('side') == 'buy'), \
+        '接口回出来的**买入**份额不是整手'
     # 价格必须是**不复权**：拿面板的 close_bfq 量级比一比（后复权会差好几倍）
     root = R._dl_root(rid)
     assert root, '归档没记 datalake 根'

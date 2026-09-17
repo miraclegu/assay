@@ -113,10 +113,14 @@ function paneOverview(){
    而它只在控制台里报（用户 2026-09-16："回测里的持仓页面出现问题了，
    展示不出持仓的具体列表了"）。
    ★ 是 2026-09-14 那次「份额一律展示不复权」把 `fmtN(v,1)` 换成
-     `money(v)` 时带进来的 —— 那一轮的判据只验到了**接口**与下钻页那条路，
+     `rdMoney(v)` 时带进来的 —— 那一轮的判据只验到了**接口**与下钻页那条路，
      持仓页签本身从没被真正渲染过（同「持仓不换算那条第一轮漏了，
-     因为我挑的归档 rows 是空的」那次，只是这回漏在另一条路上）。 */
-const money = v => v == null ? '—'
+     因为我挑的归档 rows 是空的」那次，只是这回漏在另一条路上）。
+   🔴 名字**带 `rd` 前缀**而不是叫 `money`：`live-perf.js` 里有两份局部
+     `money`，其中一份是 `(v>=0?'+':'') + num(v,0) + ' 元'` —— **同名不同义**。
+     顶层占用 `money` 这个名字的话，哪天那边删掉局部那份就会**静默落到
+     这里**，金额少了符号和"元"，而且不报错。 */
+const rdMoney = v => v == null ? '—'
   : (+v).toLocaleString('en', {maximumFractionDigits: 0});
 
 let EQLOG=true;
@@ -369,7 +373,7 @@ async function drawDay(S){
   box.innerHTML=`<h3 class="sec">${d} · 当日明细</h3>
     <div class="cards">
       ${card('当日收益',_sn(S.dr[d],2)+'%',sign(S.dr[d]))}
-      ${card('权益',money(e.equity[i]*(DATA.run.stats.cash||1)))}
+      ${card('权益',rdMoney(e.equity[i]*(DATA.run.stats.cash||1)))}
       ${card('仓位',pct(pos,1))}
       ${card('持仓', o.holdings_pruned ? '—' : o.holdings.length+' 只')}
       ${card('当日买入',o.buys.length+' 笔')}
@@ -378,21 +382,21 @@ async function drawDay(S){
     <div id="d_sell"></div><div id="d_buy"></div><div id="d_hold"></div>`;
   tbl($('#d_sell'),o.sells,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'exit_price',t:'卖出价',f:px},
     {k:'ret',t:'收益率',s:1,f:v=>_sn(v,2)+'%'},
-    {k:'pnl',t:'盈亏',s:1,f:v=>money(v)},
-    {k:'fee',t:'费用',f:v=>money(v)},
+    {k:'pnl',t:'盈亏',s:1,f:v=>rdMoney(v)},
+    {k:'fee',t:'费用',f:v=>rdMoney(v)},
     {k:'reason',t:'原因',l:1,f:v=>({rebalance:'调仓',intraday:'盘中规则',
         stop:'止损',delist:'退市清算'}[v]||v)},
   ],'当日卖出 '+o.sells.length+' 笔'+(o.sells.length?'':'（无）'));
   tbl($('#d_buy'),o.buys,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_price',t:'建仓价',f:px},
-    {k:'gross_amount',t:'成交金额',f:v=>money(v)},
+    {k:'gross_amount',t:'成交金额',f:v=>rdMoney(v)},
     {k:'exit_date',t:'后来平仓于'},
     {k:'ret',t:'该笔最终',s:1,f:v=>_sn(v,2)+'%'},
   ],'当日买入 '+o.buys.length+' 笔'+(o.buys.length?
@@ -403,13 +407,13 @@ async function drawDay(S){
   } else tbl($('#d_hold'),o.holdings,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
     {k:'weight',t:'权重',f:v=>pct(v,1)},
-    {k:'value',t:'市值',f:v=>money(v)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'value',t:'市值',f:v=>rdMoney(v)},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'last_price',t:'现价',f:px},
     {k:'unrealized_ret',t:'浮盈',s:1,f:v=>_sn(v,2)+'%'},
-    {k:'unrealized_pnl',t:'浮盈额',s:1,f:v=>money(v)},
+    {k:'unrealized_pnl',t:'浮盈额',s:1,f:v=>rdMoney(v)},
   ],'收盘持仓 '+o.holdings.length+' 只');
 }
 
@@ -554,7 +558,7 @@ async function paneHoldings(){
   tbl($('#hdt'),h.rows,[
     {k:'code',t:'股票',l:1,f:nmpop},{k:'weight',t:'权重',f:v=>pct(v,2)},
     {k:'value',t:'市值',f:v=>v==null?'—':(+v).toFixed(0)},
-    {k:'shares',t:'份额',f:v=>money(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'last_price',t:'现价',f:v=>fmtN(v,3)},
     {k:'entry_date',t:'建仓日',l:1},{k:'entry_price',t:'建仓价',f:v=>fmtN(v,3)},
     {k:'unrealized_ret',t:'浮动收益',f:v=>pct(v,2),s:1},
