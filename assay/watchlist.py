@@ -209,6 +209,7 @@ def valued(group=None, root=None):
       （思路同 table-data-viewer 的「全局共享行情缓存，跨所有页签复用」。）
     """
     from assay import stock as stk
+    from assay import symbols as _SYM   # 「代码->类别/名称」的唯一正本
     rows = current(group)
     if not rows:
         return {'rows': [], 'groups': groups(), 'date': None,
@@ -223,6 +224,9 @@ def valued(group=None, root=None):
                is_limit_down, is_st, preclose
         FROM %s WHERE date = DATE '%s' AND jq_code IN ('%s')"""
         % (p, d, q)).fetchall()}
+    # ★ 面板里没有的那些，批量问一次正本（循环里逐只查 = N 次往返）
+    alt_nm = _SYM.alt_names(stk._lake(root),
+                            [x['code'] for x in rows if x['code'] not in px])
     rt = {}
     try:
         from assay import realtime as _rt
@@ -241,9 +245,20 @@ def valued(group=None, root=None):
                        'limit_down': bool(r[12]), 'is_st': bool(r[13]),
                        'preclose': r[14]})
         else:
-            # ★ 面板里没有 -> 退市/未上市。**不静默丢掉** ——
-            #   自选里那一行必须还在，并标出来，否则"我加过的票不见了"。
-            it.update({'name': '', 'missing': True})
+            # 🔴 **面板是【股票】宽表，ETF/指数一行都没有**（2026-09-21 修）。
+            #   原来这里一律标 missing、名字留空，于是首页/自选把 ETF 显示成
+            #   一串代码（实测自选里 5 只 ETF 全中）——「实盘持仓自动同步进自选」
+            #   把 ETF 模拟盘的持仓带了进来，而这条路没兜。
+            #   取名走**唯一正本** `assay/symbols.py`，不在这里再写一份。
+            # ★ 只对 ETF/指数回落：股票查不到就是真的查不到（退市/未上市），
+            #   那一行仍然标 missing —— 否则"我加过的票不见了"与"它退市了"
+            #   就分不出来了。
+            k = _SYM.kind_of(x['code'], root)
+            nm = alt_nm.get(x['code']) if k else None
+            if nm:
+                it.update({'name': nm, 'kind': k, 'missing': False})
+            else:
+                it.update({'name': '', 'missing': True})
         q2 = rt.get(x['code'])
         if q2 and q2.get('price'):
             # 涨跌幅按【实时价 / 昨收】重算 —— 面板里那个是收盘的，

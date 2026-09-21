@@ -55,6 +55,9 @@ def _lake(root=None):
     return r
 
 
+from assay import symbols as _SYM          # 「代码->类别/名称」的唯一正本
+
+
 class StockError(Exception):
     pass
 
@@ -107,16 +110,18 @@ def _snap_path(root=None):
 def alt_kind(code, root=None):
     """这个 code 是 ETF / 指数吗？是就返回 `(kind, symbol)`，否则 None。
 
-    ★ 只认 **tdx symbol** 形状（`sh510880`）；别的写法一律当股票走原路。
-    ★ 按**快照里的 class** 判，不按代码前缀猜 —— 前缀规则是会变的
+    🔴 **聚宽口径也要认**（2026-09-21 修）。原来这里写的是"只认 tdx symbol
+      形状（`sh510880`）；别的写法一律当股票走原路" —— 而**实盘账本与自选
+      记的就是聚宽口径** `513120.XSHG`。于是首页点一只 ETF：
+      `alt_kind` 返回 None -> 走股票面板 -> 面板里没有 ETF -> 「取不到日线」，
+      而同一只票在实盘页好好的（那条路有 `to_symbol` 换算）。
+      换算一直都有（`symbols.to_symbol`），**只是这里没调**。
+    ★ 判类别按**快照里的 class**，不按代码前缀猜 —— 前缀规则是会变的
       （科创 688、北交 8 开头都出现过），而快照是事实。
+    ★ 判据与取名统一在 `assay/symbols.py`，本函数只转发（别在这里再写一份）。
     """
-    sym = str(code or '').strip().lower()
-    if not _RE_SYM.match(sym):
-        return None
-    m = _alt_map(root)
-    k = m.get(sym)
-    return (k, sym) if k in _ALT_FILE else None
+    k = _SYM.kind_of(code, root)
+    return (k, _SYM.as_symbol(code)) if k in _ALT_FILE else None
 
 
 def _alt_map(root=None):
@@ -479,13 +484,16 @@ def _na(alt, base):
 
 
 def _alt_name(sym, root=None):
-    fp = _snap_path(root)
-    if not fp:
-        return sym
-    r = con().execute(
-        "SELECT name FROM read_parquet('%s') WHERE symbol = ? LIMIT 1" % fp,
-        [sym]).fetchone()
-    return (r[0] if r and r[0] else sym)
+    """ETF / 指数的中文名。取不到才退回 symbol（页面总得显示点什么）。
+
+    🔴 **清洗只有一处**（`symbols.clean_name`）。原来这里直接返回快照原文，
+      而 tdx 的名称字段是定长 16 字节、截断处会劈开一个汉字 ——
+      实测 `stock._alt_name('sh513120')` 给出 '港股创新药ETF广\ufffd'，
+      而 `lv/tdx.names` 给的是 '港股创新药ETF广'：**同一只票两个名字**。
+    """
+    jq = _SYM.to_jq(sym)
+    got = _SYM.alt_names(_lake(root), [jq]) if jq else {}
+    return got.get(jq) or sym
 
 
 # ---------------------------------------------------------------- K 线
@@ -936,13 +944,14 @@ def compare(codes, n=250, root=None):
 
 
 def _names_map(c, codes, day, root=None):
-    rows = c.execute("""
-        SELECT code, sec_name FROM (
-          SELECT jq_code AS code, sec_name,
-                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
-          FROM %s WHERE jq_code IN ('%s') AND date <= DATE '%s'
-        ) WHERE rn = 1""" % (panel(root), "','".join(codes), day)).fetchall()
-    return {a: b for a, b in rows if b}
+    """代码 -> 名称。🔴 **只转发**给唯一正本 `symbols.names`（2026-09-21）。
+
+    原来这里自己写了一遍「面板取最近非空 sec_name」那套 SQL，而
+    `lv/px.names_of` / `lv/sig._names` 各有一份、`watchlist`/`alerts` 又各有
+    一份 —— 五份实现、三种行为（谁回落 ETF、谁清洗 U+FFFD 都不一样）。
+    ★ `c` 这个连接参数保留：调用点不用改，而正本自己开连接（取名不在热路径上）。
+    """
+    return _SYM.names(codes, day=day, root=_lake(root))
 
 
 # ========================= 与实盘 / 回测联动 =========================

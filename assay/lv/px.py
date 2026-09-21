@@ -8,6 +8,10 @@ import duckdb
 from ..feed import PanelFeed
 
 from . import base as _base
+from . import tdx as _tdx
+
+
+from assay import symbols as _SYM   # 「代码->类别/名称」的唯一正本
 
 
 def _lake(root=None):
@@ -49,6 +53,13 @@ def day_price(code, date, which='open', datalake=None):
         "SELECT %s FROM %s WHERE jq_code = ? AND date = DATE '%s'"
         % (col, panel, d), [code]).fetchone()
     if row is None or row[0] is None:
+        # 🔴 面板是**股票**宽表 —— ETF / 指数不在里面。先回落到 tdx 原始
+        #   日线再决定报不报错，否则「价格留空自动补当日开盘价」这条路
+        #   对 ETF 整个走不通（报的还是"面板里没有这个代码"，
+        #   而人会以为是自己代码写错了）。
+        _alt = _tdx.day_ohlc(_lake(datalake), code, d)
+        if _alt is not None:
+            return round(float(_alt[0] if which == 'open' else _alt[3]), 4)
         # ★ "本地最新数据日"要独立查面板 —— 这一行是给人判断"是不是没同步"
         #   的唯一依据，绝不能出现 None。
         mx = con.execute('SELECT MAX(date) FROM %s' % panel).fetchone()
@@ -162,28 +173,54 @@ def latest_data_day(datalake=None):
 
 
 
+def daily_close_map(feed, codes, since):
+    """{(code, date): 不复权收盘} —— 权益曲线与每日持仓**共用这一处**。
+
+    🔴🔴 **抽出来是因为它本来是抄了两份的**（`perf.equity_curve` 与
+      `hist._feed` 里逐字相同的两段）。CLAUDE.md 里写着"两者用同一套日期轴
+      与取价"，而实现其实是两份 —— 于是 2026-09-18 给 ETF 加回落时只改了
+      一处，另一处照旧，**两页对同一天给出不同的总资产**。
+      同「两处实现必然分叉」那条，这次分叉是我自己制造的。
+
+    🔴 **ETF / 指数不在面板里**，查不到就回落到 tdx 原始日线 ——
+      不回落的话它们的市值**全程是 0**，权益曲线只剩现金：
+      实测 a3 的 TWR 报 **−18.36%**，而那正好等于 `现金/本金 − 1`
+      （100,000 -> 81,639.59）。用户看到的是"单天 +41.8%、累计 −18%"，
+      而真实是 +2.5% —— **而它不报错**。
+    """
+    codes = list(codes or [])
+    if not codes:
+        return {}
+    q = "','".join(codes)
+    out = {}
+    for c, dd, p in feed.con.execute("""
+        SELECT jq_code, date, close_bfq
+        FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+        WHERE jq_code IN ('%s') AND date >= DATE '%s'
+    """ % (feed.root, q, since)).fetchall():
+        out[(c, dd)] = p
+    miss = [c for c in codes if not any(k[0] == c for k in out)]
+    if miss:
+        out.update(_tdx.daily_close(feed.root, miss, since))
+    return out
+
+
 def names_of(codes, day=None, datalake=None):
     """代码 -> 名称。批量粘贴的成交没有名称，流水页要靠这个补。
 
-    ★ 取 <= day 的最后一个非空 sec_name（400 天内）：退市/改名的票也能显示，
-      而不是留个空白让人对着代码猜。
+    🔴 **实现已收到唯一正本** `assay/symbols.names`（2026-09-21）——
+      此前「代码->名称」有五份实现、三种行为（`stock._names_map` 不回落、
+      `watchlist`/`alerts` 只查股票面板、清洗只有两处做了）。本函数保留
+      名字与签名（调用方一个都不用改），只转发。
+    ★ 正本的规矩没变：取 <= day 的最后一个非空 `sec_name`（400 天内），
+      面板查不到的回落到 ETF/指数名称快照，统一清洗 U+FFFD。
     """
     codes = sorted({_base.normalize_code(c) for c in (codes or [])})
     if not codes:
         return {}
     d = _base._d(day) if day else (latest_data_day(datalake) or
                              datetime.date.today().isoformat())
-    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
-    rows = duckdb.connect(':memory:').execute("""
-        SELECT code, sec_name FROM (
-          SELECT jq_code AS code, sec_name,
-                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
-          FROM %s
-          WHERE jq_code IN ('%s') AND date <= DATE '%s'
-            AND date > DATE '%s' - INTERVAL 400 DAY
-        ) WHERE rn = 1""" % (panel, "','".join(codes), d, d)).fetchall()
-    return {c: n for c, n in rows if n}
-
+    return _SYM.names(codes, day=d, root=_lake(datalake))
 
 
 def day_range(code, date, datalake=None):
@@ -194,7 +231,14 @@ def day_range(code, date, datalake=None):
         "SELECT low, high FROM %s WHERE jq_code = ? AND date = DATE '%s'"
         % (panel, d), [_base.normalize_code(code)]).fetchone()
     if not row or row[0] is None or row[1] is None:
-        return None
+        # 🔴 回落到 tdx —— 不回落的话这道校验对 ETF **静默放行**：
+        #   小数点点错、误填后复权价全都拦不住，而它一声不吭
+        #   （同「空结果一律当失败」那条的反面：这里的空结果被当成了"没有
+        #   这个校验"）。
+        _alt = _tdx.day_ohlc(_lake(datalake), code, d)
+        if _alt is None or _alt[1] is None or _alt[2] is None:
+            return None
+        return (round(float(_alt[2]), 3), round(float(_alt[1]), 3))
     return (round(float(row[0]), 3), round(float(row[1]), 3))
 
 

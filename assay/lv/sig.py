@@ -16,6 +16,7 @@ from ..engine import Engine
 from ..feed import PanelFeed
 
 from . import base as _base
+from . import tdx as _tdx
 from . import explain as _explain
 from . import pos as _pos
 from . import ver as _ver
@@ -305,8 +306,17 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
     rows0 = _base.fills(aid)
 
     end = _base._d(asof).isoformat() if asof else datetime.date.today().isoformat()
+    # 🔴🔴 **策略声明的数据源要在建 feed 之前解析。**
+    #   ETF 策略声明 `DATALAKE='etf_lake'`，而这里一直用主面板 ——
+    #   实测 `make_signal('a3')` 直接崩在 `etf_master.parquet` 不存在，
+    #   而 `tick` 对**所有绑了策略的账户**（含模拟盘）都跑，
+    #   于是下一个交易日起**每小时报一次**。
+    #   ★ 更糟的是 `etf_trend_momentum` 那种：在股票面板上候选池恒空 ->
+    #     信号里"今天什么都不用做"，**一声不吭**。
+    mod, full_sha = _load_snapshot(aid, sha)
+    _root = _base.resolve_strategy_lake(mod, datalake)
     feed = PanelFeed(acct.get('warmup_start') or _base.DEFAULT_WARMUP_START,
-                     end, root=datalake)
+                     end, root=_root)
     t1 = feed.trading_days[-1]                    # 最新数据日
     t0 = feed.prev_trading_day(t1)
     t = _base.next_trading_day(t1)                      # 下一个交易日；拿不到就报错
@@ -319,7 +329,6 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
         book = _pos.fifo_lots(rows0)
         money = _pos.cash(aid)
 
-    mod, full_sha = _load_snapshot(aid, sha)
     eng = Engine(mod, feed, cash=money, cost=Cost(),
                  params=(acct.get('params') if params is None else params) or {})
     rb = RecordingBroker(eng.pf, feed, eng.cost)
@@ -519,18 +528,13 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
 
 
 def _names(feed, codes, day):
+    """代码 -> 名称。🔴 **实现已收到唯一正本** `assay/symbols.names`
+    （2026-09-21）—— 面板优先、ETF/指数回落、统一清洗，五处实现收成一份。
+    """
     if not codes:
         return {}
-    q = "','".join(codes)
-    rows = feed.con.execute("""
-        SELECT code, sec_name FROM (
-          SELECT jq_code AS code, sec_name,
-                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
-          FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
-          WHERE jq_code IN ('%s') AND date <= DATE '%s'
-            AND date > DATE '%s' - INTERVAL 400 DAY
-        ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
-    return dict(rows)
+    from assay import symbols as _SYM
+    return _SYM.names(codes, day=day, root=feed.root)
 
 
 # ============================ 落盘 / 定时 ============================

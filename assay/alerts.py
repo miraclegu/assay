@@ -763,6 +763,10 @@ def valued(root=None):
                is_st, public_status
         FROM %s WHERE date = DATE '%s' AND jq_code IN ('%s')"""
         % (p, d, q)).fetchall()}
+    # ★ 面板里没有的那些，批量问一次正本（循环里逐只查 = N 次往返）
+    from assay import symbols as _SYM     # 「代码->类别/名称」的唯一正本
+    alt_nm = _SYM.alt_names(_SYM.default_root(root),
+                            [x['code'] for x in rows if x['code'] not in px])
     rt = {}
     try:
         from assay import realtime as _rt
@@ -778,9 +782,20 @@ def valued(root=None):
                        'pe_ttm': r[4], 'pb': r[5], 'industry': r[6],
                        'is_st': bool(r[7]), 'status': r[8]})
         else:
-            # 面板里查不到 -> 代码填错 / 退市 / 未上市。**不静默丢掉**，
-            # 那一行留着并标出来 —— 用户那张表里就有写错的代码。
-            it.update({'name': '', 'price': None, 'missing': True})
+            # 🔴 ETF/指数**本来就不在面板里**（面板是股票宽表）——
+            #   买点清单加 ETF 是讲得通的（项目里就有 ETF 轮动策略），
+            #   不兜的话那一行会显示成代码并被误标成"查不到"
+            #   （2026-09-21 与自选那处是同一个根因，一起修）。
+            #   取名走**唯一正本** `assay/symbols.py`。
+            # ★ 只对 ETF/指数回落：股票查不到就是真的查不到（用户那张表里
+            #   就有写错的代码，那一行必须仍然标 missing）。
+            k = _SYM.kind_of(x['code'], root)
+            nm = alt_nm.get(x['code']) if k else None
+            if nm:
+                it.update({'name': nm, 'kind': k, 'price': None,
+                           'missing': False})
+            else:
+                it.update({'name': '', 'price': None, 'missing': True})
         q2 = rt.get(x['code'])
         if q2 and q2.get('price'):
             pc = q2.get('preclose') or (r[2] if r else None)
