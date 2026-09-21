@@ -307,3 +307,37 @@ def _lv_new_account(pg, name, cash, zone='live', timeout=8000):
     pg.fill(sel + ' .nn', name)
     pg.fill(sel + ' .nc', str(cash))
     pg.click(sel + ' .nb')
+
+
+def _defining_file(name, sub='assay'):
+    """`assay/` 下**哪个文件**定义了这个顶层名字 -> `(路径, 源码)`。
+
+    🔴 守卫里别把实现文件写死。`stock.py` 拆成 `stk/` 之后，两条钉着
+      `assay/stock.py` 的守卫当场变红 —— **失败的是断言不是产品**，
+      而它们要保的东西一个都没坏（同「判据要跟着代码一起搬，
+      不然它只是看着还在」那条）。现找就不会有这个问题。
+    """
+    import ast as _a
+    import glob as _g
+    hits = []
+    for f in sorted(_g.glob(os.path.join(REPO, sub, '**', '*.py'),
+                            recursive=True)):
+        if '__pycache__' in f:
+            continue
+        src = io_open_text(f)
+        try:
+            tree = _a.parse(src)
+        except SyntaxError:
+            continue
+        for n in tree.body:
+            ok = (isinstance(n, (_a.FunctionDef, _a.ClassDef)) and n.name == name)
+            if not ok and isinstance(n, _a.Assign):
+                ok = any(isinstance(t, _a.Name) and t.id == name for t in n.targets)
+            if ok:
+                hits.append((os.path.relpath(f, REPO), src))
+                break
+    assert len(hits) == 1, (
+        '`%s` 在 %d 个文件里有顶层定义：%r —— 要么是又抄了一份，'
+        '要么这个名字太泛，判据得说清是哪一个'
+        % (name, len(hits), [h[0] for h in hits]))
+    return hits[0]

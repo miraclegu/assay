@@ -7,6 +7,7 @@
 """
 from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
+                         _defining_file, io_open_text,
                          _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop,
                          _all_case_src)
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime
@@ -3631,32 +3632,40 @@ def t_alt_layer_in_symbols():
       所以这一轮没动它 —— 记在这里，别下次又当成"漏了"。
     """
     import ast as _ast
-    src = io.open(os.path.join(REPO, 'assay/stock.py'), encoding='utf-8').read()
-    tree = _ast.parse(src)
+    import glob as _g
+    # 🔴 **不写死实现在哪个文件** —— `stock.py` 2026-09-21 拆成了 `stk/`，
+    #   而这条守卫原来钉着 `assay/stock.py`，当场变红（**失败的是断言不是
+    #   产品**，它要保的东西一个没坏）。同「判据要跟着代码一起搬」那条。
+    files = [f for f in _g.glob(os.path.join(REPO, 'assay/stk/*.py'))
+             ] + [os.path.join(REPO, 'assay/stock.py')]
 
     # ① 死代码不许回来
-    top = {n.name for n in tree.body if isinstance(n, _ast.FunctionDef)}
-    top |= {t.id for n in tree.body if isinstance(n, _ast.Assign)
-            for t in n.targets if isinstance(t, _ast.Name)}
-    for dead in ('_alt_map', '_ALT', '_ALT_FILE'):
-        assert dead not in top, \
-            'stock.py 又长出 %s —— 它与 symbols 里那份是逐字相同的两份' % dead
+    for f in files:
+        tree = _ast.parse(io_open_text(f))
+        top = {n.name for n in tree.body if isinstance(n, _ast.FunctionDef)}
+        top |= {t.id for n in tree.body if isinstance(n, _ast.Assign)
+                for t in n.targets if isinstance(t, _ast.Name)}
+        for dead in ('_alt_map', '_ALT', '_ALT_FILE'):
+            assert dead not in top, '%s 又长出 %s —— 它与 symbols 里那份' \
+                '是逐字相同的两份' % (os.path.relpath(f, REPO), dead)
 
-    # ② 不许再自己拼 tdx 日线的路径（判据落在字符串字面量上）
-    bad = [n.lineno for n in _ast.walk(tree)
-           if isinstance(n, _ast.Constant) and isinstance(n.value, str)
-           and 'raw/tdx/kline/' in n.value and 'read_parquet' in n.value]
-    assert not bad, 'stock.py:%r 又自己读 tdx 日线 —— 走 symbols.alt_panel' % bad
+        # ② 不许再自己拼 tdx 日线的路径（判据落在字符串字面量上）
+        bad = [n.lineno for n in _ast.walk(tree)
+               if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+               and 'raw/tdx/kline/' in n.value and 'read_parquet' in n.value]
+        assert not bad, '%s:%r 又自己读 tdx 日线 —— 走 symbols.alt_panel' % (
+            os.path.relpath(f, REPO), bad)
 
-    # ③ 四个入口必须是【转发】
-    fns = {n.name: n for n in tree.body if isinstance(n, _ast.FunctionDef)}
+    # ③ 四个入口必须是【转发】（现找它定义在哪个域文件里）
     for nm, want in (('_snap_path', 'name_snap'), ('alt_panel', 'alt_panel'),
                      ('_alt_index', 'alt_rows'), ('_alt_name', 'alt_name')):
-        assert nm in fns, 'stock.%s 没了（对外契约）' % nm
-        hit = [c for c in _ast.walk(fns[nm])
+        rel, fsrc = _defining_file(nm, 'assay/stk')
+        fn = next(n for n in _ast.parse(fsrc).body
+                  if isinstance(n, _ast.FunctionDef) and n.name == nm)
+        hit = [c for c in _ast.walk(fn)
                if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)
                and c.func.attr == want]
-        assert hit, 'stock.%s 没有转发给 symbols.%s' % (nm, want)
+        assert hit, '%s 里的 %s 没有转发给 symbols.%s' % (rel, nm, want)
 
     # ④ 反向自证：转发过去之后**结果还对**（否则 ③ 只是"调了一下"）
     from assay import stock as _S, symbols as _Y
@@ -3726,12 +3735,120 @@ def t_search_deterministic():
 
     # 排序键里确实带了代码那一层（结构判据，防"只是这批数据碰巧稳定"）
     import ast as _ast
-    src = io.open(os.path.join(REPO, 'assay/stock.py'), encoding='utf-8').read()
+    # 🔴 现找 `search` 定义在哪 —— 写死 `assay/stock.py` 的话，拆成 `stk/`
+    #   之后这条会 StopIteration（2026-09-21 实测）。
+    rel, src = _defining_file('search', 'assay/stk')
     fn = next(n for n in _ast.parse(src).body
               if isinstance(n, _ast.FunctionDef) and n.name == 'search')
     seg = _ast.get_source_segment(src, fn) or ''
     assert "r['code']" in seg and 'x[:5]' in seg, \
-        'search 的排序键里没有按代码的 tie-break 了'
+        '%s 里 search 的排序键没有按代码的 tie-break 了' % rel
+
+
+@case('stock.py 拆成 stk/：门面一个名字不少 / 相对导入 / 依赖是 DAG', 'fast')
+def t_stk_split():
+    """🔴 2026-09-21：`stock.py` 1069 行混了 6 件事，按产品域拆成
+    `assay/stk/{base,find,quote,ind,ctx,link}.py` + 门面。
+
+    这条钉的是**拆 `srv/` 时记过的那三个坑**，它们全都不报错：
+
+    | 坑 | 表现 |
+    |---|---|
+    | 相对导入的 `.` 也跟着变 | 搬进 `stk/` 后 `.` 是 `assay.stk`。**这次真踩了**：`link._runs_with` 里 `from . import registry` -> ImportError，而外面那层 try/except 把它记成 `runs_error`、`runs` 返回 `[]` —— 页面上就是「这个版本从没回测过」，**一个静默的错答案**（等价性对数抓到的：83 项里 links 那 4 项变了） |
+    | `__file__` 深了一层 | 这次天然躲过了（路径早已收进 `paths.py`），但不能指望下一个人也躲过 |
+    | 留在别处的名字 | Load 但没绑定 —— import 能过、只在那条分支真跑到时才炸 |
+
+    ★ 依赖必须是单向 DAG：`find/quote/ctx/link -> base`、`ind -> quote`。
+    ★ 门面是**普通 re-export**（查过：外部没有任何一处【写】`stock.X`，
+      那才是 `lv.LIVE` 必须做成 ModuleType 子类的理由）。
+    """
+    import ast as _ast
+    import glob as _g
+    STK = os.path.join(REPO, 'assay', 'stk')
+    mods = {}
+    for f in sorted(_g.glob(os.path.join(STK, '*.py'))):
+        n = os.path.basename(f)[:-3]
+        if n == '__init__':
+            continue
+        mods[n] = (f, io.open(f, encoding='utf-8').read())
+    assert set(mods) == {'base', 'find', 'quote', 'ind', 'ctx', 'link'}, sorted(mods)
+
+    # ① 相对导入只许指向【同级的域模块】。写 `from . import registry` 的话
+    #    `.` 是 assay.stk，拿到的是子包 —— 而它不报错。
+    for n, (f, src) in mods.items():
+        for x in _ast.walk(_ast.parse(src)):
+            if isinstance(x, _ast.ImportFrom) and x.level:
+                assert x.level == 1 and x.module in mods, (
+                    'assay/stk/%s.py:%d 的相对导入 `%s%s` 指不到域模块 —— '
+                    '搬进子目录后 `.` 是 assay.stk，要用绝对导入 '
+                    '(from assay import X)' % (n, x.lineno, '.' * x.level,
+                                               x.module or ''))
+
+    # ② `__file__` 不许在 stk/ 里用来推路径（层数会跟着文件位置变）
+    for n, (f, src) in mods.items():
+        assert '__file__' not in src, \
+            'assay/stk/%s.py 用了 __file__ —— 路径一律走 assay/paths.py' % n
+
+    # ③ 依赖是单向 DAG，且方向正确
+    dep = {n: {x.module for x in _ast.walk(_ast.parse(s))
+               if isinstance(x, _ast.ImportFrom) and x.level == 1}
+           for n, (f, s) in mods.items()}
+    assert dep['base'] == set(), 'base 不许依赖别的域（它是被依赖的那个）：%r' % dep['base']
+    for n in ('find', 'quote', 'ctx', 'link'):
+        assert dep[n] <= {'base'}, '%s 多了依赖 %r' % (n, dep[n] - {'base'})
+    assert dep['ind'] <= {'base', 'quote'}, dep['ind']
+
+    # ④ Load 但没绑定的名字（"留在别处的引用"）—— import 过了不代表没漏
+    import builtins as _bi
+    for n, (f, src) in mods.items():
+        tree = _ast.parse(src)
+        bound = set(dir(_bi)) | {'__name__', '__doc__'}
+        for x in _ast.walk(tree):
+            if isinstance(x, (_ast.Import, _ast.ImportFrom)):
+                bound |= {(a.asname or a.name).split('.')[0] for a in x.names}
+            elif isinstance(x, (_ast.FunctionDef, _ast.ClassDef)):
+                bound.add(x.name)
+                ar = getattr(x, 'args', None)      # ClassDef 没有 args
+                if ar is not None:
+                    bound |= {a.arg for a in list(ar.args) + list(ar.kwonlyargs)
+                              + list(getattr(ar, 'posonlyargs', []))}
+                    for v in (ar.vararg, ar.kwarg):
+                        if v:
+                            bound.add(v.arg)
+            elif isinstance(x, _ast.Name) and isinstance(x.ctx, _ast.Store):
+                bound.add(x.id)
+            elif isinstance(x, (_ast.comprehension,)):
+                for t in _ast.walk(x.target):
+                    if isinstance(t, _ast.Name):
+                        bound.add(t.id)
+            elif isinstance(x, _ast.ExceptHandler) and x.name:
+                bound.add(x.name)
+            elif isinstance(x, _ast.Global):
+                bound |= set(x.names)
+        miss = sorted({x.id for x in _ast.walk(tree)
+                       if isinstance(x, _ast.Name) and isinstance(x.ctx, _ast.Load)
+                       and x.id not in bound})
+        assert not miss, 'assay/stk/%s.py 引用了没绑定的名字：%r' % (n, miss)
+
+    # ⑤ 门面一个名字都不许少（对外契约）——【反向自证】：真的有那么多
+    from assay import stock as _S
+    from assay.stk import base as _B
+    WANT = ['FIELD_UNIT', 'StockError', '_lake', 'panel', 'con', 'norm_code',
+            'alt_kind', 'alt_panel', '_snap_path', '_na', '_alt_name',
+            '_index', '_alt_index', 'search', 'profile', '_alt_profile',
+            'kline', 'finance', '_ma', '_r3', '_wan', 'parse_inds',
+            'indicators', 'events', 'peers', 'compare', '_names_map',
+            'links', '_runs_with', 'IND_WARM', 'IND_DEFAULT']
+    assert len(WANT) >= 30, '反向自证：清单本身要够长'
+    miss = [n for n in WANT if not hasattr(_S, n)]
+    assert not miss, 'assay.stock 门面少了这些名字（对外契约）：%r' % miss
+
+    # ⑥ 真跑一遍：links 那条路必须**真的拿到归档**，不许落进 runs_error
+    #    —— 这正是相对导入那个坑的可观察后果（它不抛错，只是返回空）
+    lk = _S.links('601857.XSHG')
+    assert not lk.get('runs_error'), 'links 报错了：%r' % lk['runs_error']
+    assert lk.get('runs'), \
+        'links 一条回测都没找到 —— 多半是 registry 又被相对导入拿错了'
 
 
 @case('取价唯一正本', 'fast')
