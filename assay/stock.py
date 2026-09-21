@@ -87,22 +87,12 @@ def con():
 #   规则写的（"00 开头的是深市股票，而标记写的是沪市，有一个是错的"），
 #   而上证指数恰好是 `sh000001`。那条规则对股票是对的（市场决定过户费），
 #   对指数根本不适用。所以这一层按 symbol 认，**不去动 normalize_code**。
-_ALT_FILE = {'index': 'index_*', 'etf': 'etf_*'}
 _RE_SYM = re.compile(r'^(sh|sz)\d{6}$')
-_ALT = {'at': None, 'map': None}
 
 
 def _snap_path(root=None):
-    """`symbol_name` 快照里 snap_date 最大的那一份。
-
-    🔴 **正本在 `lv/perf.py` 的 `_name_snap`**（自定义基准也要按名字搜，
-      用的就是它）—— 这里 import 而不是再写一遍：我第一版自己解析
-      `manifest.csv`，**把列序记反了**（第 0 列是 snap_date 不是文件名），
-      于是一条都匹配不上、ETF/指数全都认不出来，而它不报错，
-      只是"搜什么都没有"（同「同一件事两处实现必然分叉」那条）。
-    """
-    from assay.lv.perf import _name_snap
-    return _name_snap(_lake(root))
+    """`symbol_name` 快照里 snap_date 最大的那一份。**只转发**给正本。"""
+    return _SYM.name_snap(_lake(root))
 
 
 def alt_kind(code, root=None):
@@ -119,51 +109,12 @@ def alt_kind(code, root=None):
     ★ 判据与取名统一在 `assay/symbols.py`，本函数只转发（别在这里再写一份）。
     """
     k = _SYM.kind_of(code, root)
-    return (k, _SYM.as_symbol(code)) if k in _ALT_FILE else None
-
-
-def _alt_map(root=None):
-    """{symbol: class} —— 只收 ETF / 指数，按快照文件缓存。"""
-    fp = _snap_path(root)
-    if not fp:
-        return {}
-    if _ALT['at'] == fp and _ALT['map'] is not None:
-        return _ALT['map']
-    rows = con().execute(
-        "SELECT symbol, class FROM read_parquet('%s') "
-        "WHERE class IN ('index','etf')" % fp).fetchall()
-    m = {r[0]: r[1] for r in rows}
-    _ALT.update(at=fp, map=m)
-    return m
+    return (k, _SYM.as_symbol(code)) if k in _SYM.KIND_FILE else None
 
 
 def alt_panel(kind, root=None):
-    """把 ETF / 指数的日线**拼成与面板同形**的表（列名一字不差）。
-
-    🔴 **一律给出后复权列**（`close × coalesce(hfq_factor, 1)`）：
-      ETF 会分红（红利 ETF 的因子 1.0 -> 1.81，那 81% 全是分红），
-      不复权跨除权日有假跌幅 —— 与「对比页一律后复权」同一条纪律。
-      指数不除权（因子表里没有它的行），`coalesce` 到 1 正好。
-    ★ 面板有而这里没有的（换手率、涨跌停价、估值、财务）一律 NULL ——
-      **不猜一个数填上去**。页面那几格会显示"—"，并另有一句话说明
-      "ETF / 指数没有这项"（空着会被读成"数据没取到"）。
-    """
-    lake = _lake(root)
-    K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, _ALT_FILE[kind])
-    F = "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % lake
-    return ("""(SELECT k.symbol AS jq_code, k.symbol AS symbol, k.date,
-        k.open, k.high, k.low,
-        k.close AS close_bfq,
-        k.close * coalesce(f.hfq_factor, 1) AS close_hfq,
-        coalesce(f.hfq_factor, 1) AS hfq_factor,
-        k.volume AS volume_shares, k.amount,
-        (k.close / lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date)
-         - 1) * 100 AS change_pct,
-        CAST(NULL AS DOUBLE) AS turnover,
-        false AS is_limit_up, false AS is_limit_down,
-        lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date) AS preclose
-      FROM %s k LEFT JOIN %s f
-        ON f.symbol = k.symbol AND f.date = k.date)""" % (K, F))
+    """ETF / 指数的日线拼成与面板同形的子查询。**只转发**给正本。"""
+    return _SYM.alt_panel(kind, _lake(root))
 
 
 # ---------------------------------------------------------------- 代码归一
@@ -243,45 +194,8 @@ def _index(root=None):
 
 
 def _alt_index(c, root=None):
-    """ETF / 指数也进这张搜索表 —— 否则个股页**搜都搜不到**它们。
-
-    🔴 **只收本地真有日线的**：名称快照里有 166 只 ETF / 352 只股票在 kline
-      里根本没有行（退市、未上市、北交所新股）。列出来点了什么都不出来，
-      比不给这个选项更糟（同自定义基准那条 `bench_search`）。
-      —— 做法是拿 kline 与快照 **INNER JOIN**，没有日线的天然进不来。
-    ★ `floatmv` 给 None：ETF / 指数没有流通市值。搜索排序里它是
-      "同分再按市值降序"的那一档，None 当 0 —— 于是同分时股票排在前面，
-      而人搜 6 位数字时要的通常就是股票。
-    """
-    fp = _snap_path(root)
-    if not fp:
-        return []
-    lake = _lake(root)
-    out = []
-    for kind, pat in (('index', 'index_*'), ('etf', 'etf_*')):
-        K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, pat)
-        try:
-            rows = c.execute("""
-                WITH last AS (
-                  SELECT symbol, max(date) AS d FROM %s GROUP BY 1),
-                px AS (
-                  SELECT k.symbol, k.close, k.date,
-                         lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date) AS pc
-                  FROM %s k)
-                SELECT s.symbol, s.name, px.close,
-                       CASE WHEN px.pc IS NULL OR px.pc = 0 THEN NULL
-                            ELSE (px.close / px.pc - 1) * 100 END
-                FROM read_parquet('%s') s
-                JOIN last ON last.symbol = s.symbol
-                JOIN px ON px.symbol = s.symbol AND px.date = last.d
-                WHERE s.class = '%s'""" % (K, K, fp, kind)).fetchall()
-        except Exception:                                   # noqa: BLE001
-            continue          # 这一类的文件不在 -> 就当没有，别拖垮搜索
-        out += [{'code': r[0], 'symbol': r[0], 'name': r[1] or '',
-                 'industry': '', 'status': '正常上市', 'is_st': False,
-                 'close': r[2], 'change_pct': r[3], 'floatmv': None,
-                 'kind': kind} for r in rows]
-    return out
+    """ETF / 指数也进搜索表。**只转发**给正本（`symbols.alt_rows`）。"""
+    return _SYM.alt_rows(c, _lake(root))
 
 
 def search(q, limit=20, root=None):
@@ -482,16 +396,8 @@ def _na(alt, base):
 
 
 def _alt_name(sym, root=None):
-    """ETF / 指数的中文名。取不到才退回 symbol（页面总得显示点什么）。
-
-    🔴 **清洗只有一处**（`symbols.clean_name`）。原来这里直接返回快照原文，
-      而 tdx 的名称字段是定长 16 字节、截断处会劈开一个汉字 ——
-      实测 `stock._alt_name('sh513120')` 给出 '港股创新药ETF广\ufffd'，
-      而 `lv/tdx.names` 给的是 '港股创新药ETF广'：**同一只票两个名字**。
-    """
-    jq = _SYM.to_jq(sym)
-    got = _SYM.alt_names(_lake(root), [jq]) if jq else {}
-    return got.get(jq) or sym
+    """ETF / 指数的中文名。**只转发**给正本（名称清洗也在那边）。"""
+    return _SYM.alt_name(sym, _lake(root))
 
 
 # ---------------------------------------------------------------- K 线

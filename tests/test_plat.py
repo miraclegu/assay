@@ -3614,6 +3614,62 @@ def t_datalake_root_single_source():
 
 
 
+@case('「面板之外的标的」那一层只许 symbols.py 有（stock.py 只转发）', 'fast')
+def t_alt_layer_in_symbols():
+    """🔴 2026-09-21：这一层此前**一半在 `symbols.py`、一半在 `stock.py`**
+    （`kind_of` / `alt_names` / `name_snap` 在那边，`alt_panel` / `_alt_index` /
+    `_alt_name` / `_ALT_FILE` / `_alt_map` 在这边），而 `stock._alt_map` 与
+    `symbols._kind_map` 是**逐字相同的两份**。
+
+    并的时候才发现 `_alt_map` + `_ALT` 已经**没人调了** —— 那是上一轮把
+    `alt_kind` 改成转发 `_SYM.kind_of` 时留下的尸体。
+    「留一个没人用的定义，下次有人会以为它是正本」，所以删掉。
+
+    ⚠ **还没收干净的**：`feed.benchmark` 与 `lv/perf.bench_curves` /
+      `bench_search` 也读 `raw/tdx/kline/*`。那是**基准曲线**那条链，
+      与这里是两件事（一个要后复权比收益率、一个要不复权算市值），
+      所以这一轮没动它 —— 记在这里，别下次又当成"漏了"。
+    """
+    import ast as _ast
+    src = io.open(os.path.join(REPO, 'assay/stock.py'), encoding='utf-8').read()
+    tree = _ast.parse(src)
+
+    # ① 死代码不许回来
+    top = {n.name for n in tree.body if isinstance(n, _ast.FunctionDef)}
+    top |= {t.id for n in tree.body if isinstance(n, _ast.Assign)
+            for t in n.targets if isinstance(t, _ast.Name)}
+    for dead in ('_alt_map', '_ALT', '_ALT_FILE'):
+        assert dead not in top, \
+            'stock.py 又长出 %s —— 它与 symbols 里那份是逐字相同的两份' % dead
+
+    # ② 不许再自己拼 tdx 日线的路径（判据落在字符串字面量上）
+    bad = [n.lineno for n in _ast.walk(tree)
+           if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+           and 'raw/tdx/kline/' in n.value and 'read_parquet' in n.value]
+    assert not bad, 'stock.py:%r 又自己读 tdx 日线 —— 走 symbols.alt_panel' % bad
+
+    # ③ 四个入口必须是【转发】
+    fns = {n.name: n for n in tree.body if isinstance(n, _ast.FunctionDef)}
+    for nm, want in (('_snap_path', 'name_snap'), ('alt_panel', 'alt_panel'),
+                     ('_alt_index', 'alt_rows'), ('_alt_name', 'alt_name')):
+        assert nm in fns, 'stock.%s 没了（对外契约）' % nm
+        hit = [c for c in _ast.walk(fns[nm])
+               if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)
+               and c.func.attr == want]
+        assert hit, 'stock.%s 没有转发给 symbols.%s' % (nm, want)
+
+    # ④ 反向自证：转发过去之后**结果还对**（否则 ③ 只是"调了一下"）
+    from assay import stock as _S, symbols as _Y
+    assert _S.alt_kind('513120.XSHG') == ('etf', 'sh513120'), _S.alt_kind('513120.XSHG')
+    assert _S.alt_kind('000001.XSHG') == ('index', 'sh000001'), \
+        '上证指数认成了 %r' % (_S.alt_kind('000001.XSHG'),)
+    assert _S.alt_kind('601857.XSHG') is None, '股票不许走这条路'
+    assert '\ufffd' not in _S._alt_name('sh513120'), '名称清洗没生效'
+    assert 'jq_code' in _S.alt_panel('etf') and \
+        'hfq_factor' in _S.alt_panel('etf'), 'alt_panel 不再与面板同形'
+    assert _Y.KIND_FILE == {'etf': 'etf_*', 'index': 'index_*'}, _Y.KIND_FILE
+
+
 @case('取价唯一正本', 'fast')
 def t_symbols_price_single_source():
     """🔴 「查面板 -> 查不到就回落 tdx」这个模式，此前在【四个取价函数】里

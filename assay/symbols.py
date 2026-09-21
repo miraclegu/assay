@@ -471,3 +471,96 @@ def day_hl(root, code, date, con=None):
     if alt is None or alt[1] is None or alt[2] is None:
         return None
     return (round(float(alt[2]), 3), round(float(alt[1]), 3))
+
+
+# ======================= 面板之外的标的：拼成面板的样子 =======================
+# 🔴 这一层 2026-09-21 从 `stock.py` **并过来**。此前它一半在这里
+#   （`kind_of` / `alt_names` / `name_snap`）、一半在那边（`alt_panel` /
+#   `_alt_index` / `_alt_name` / `_ALT_FILE` / `_alt_map`），而 `_alt_map`
+#   与这里的 `_kind_map` 是**逐字相同的两份**（并完才发现它已经没人调了 ——
+#   上一轮把 `alt_kind` 改成转发时留下的尸体）。
+
+
+def kind_map(root=None):
+    """{symbol: class}，只收 etf / index。按快照文件缓存。"""
+    return _kind_map(root)
+
+
+def alt_name(sym, root=None):
+    """ETF / 指数的中文名。取不到才退回 symbol（页面总得显示点什么）。"""
+    jq = to_jq(sym)
+    got = alt_names(default_root(root), [jq]) if jq else {}
+    return got.get(jq) or sym
+
+
+def alt_panel(kind, root=None):
+    """把 ETF / 指数的日线**拼成与面板同形**的子查询（列名一字不差）。
+
+    ★ 同形是关键：于是 K 线 / 全部指标 / 翻页 / 复权 / 框选**一个字都不用改**
+      （另写一套的话，「同一个指标在股票上和在 ETF 上算出来不一样」迟早发生，
+      而它不报错）。
+    🔴 **一律给出后复权列**（`close × coalesce(hfq_factor, 1)`）：
+      ETF 会分红（红利 ETF 的因子 1.0 -> 1.81，那 81% 全是分红），
+      不复权跨除权日有假跌幅 —— 与「对比页一律后复权」同一条纪律。
+      指数不除权（因子表里没有它的行），`coalesce` 到 1 正好。
+    ★ 面板有而这里没有的（换手率、涨跌停价、估值、财务）一律 NULL ——
+      **不猜一个数填上去**。
+    """
+    lake = default_root(root)
+    K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, KIND_FILE[kind])
+    F = "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % lake
+    return ("""(SELECT k.symbol AS jq_code, k.symbol AS symbol, k.date,
+        k.open, k.high, k.low,
+        k.close AS close_bfq,
+        k.close * coalesce(f.hfq_factor, 1) AS close_hfq,
+        coalesce(f.hfq_factor, 1) AS hfq_factor,
+        k.volume AS volume_shares, k.amount,
+        (k.close / lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date)
+         - 1) * 100 AS change_pct,
+        CAST(NULL AS DOUBLE) AS turnover,
+        false AS is_limit_up, false AS is_limit_down,
+        lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date) AS preclose
+      FROM %s k LEFT JOIN %s f
+        ON f.symbol = k.symbol AND f.date = k.date)""" % (K, F))
+
+
+def alt_rows(con, root=None):
+    """本地**真有日线**的 ETF / 指数，带名称与最新价 —— 给搜索用。
+
+    🔴 **只收本地真有日线的**：名称快照里有 166 只 ETF / 352 只股票在 kline
+      里根本没有行（退市、未上市、北交所新股）。列出来点了什么都不出来，
+      比不给这个选项更糟（同 backLink 那条）。做法是拿 kline 与快照
+      **INNER JOIN**，没有日线的天然进不来。
+    ★ `floatmv` 给 None：ETF / 指数没有流通市值。搜索排序里它是"同分再按
+      市值降序"的那一档，None 当 0 —— 于是同分时股票排在前面，
+      而人搜 6 位数字时要的通常就是股票。
+    """
+    fp = name_snap(default_root(root))
+    if not fp:
+        return []
+    lake = default_root(root)
+    out = []
+    for kind, pat in (('index', KIND_FILE['index']), ('etf', KIND_FILE['etf'])):
+        K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, pat)
+        try:
+            rows = con.execute("""
+                WITH last AS (
+                  SELECT symbol, max(date) AS d FROM %s GROUP BY 1),
+                px AS (
+                  SELECT k.symbol, k.close, k.date,
+                         lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date) AS pc
+                  FROM %s k)
+                SELECT s.symbol, s.name, px.close,
+                       CASE WHEN px.pc IS NULL OR px.pc = 0 THEN NULL
+                            ELSE (px.close / px.pc - 1) * 100 END
+                FROM read_parquet('%s') s
+                JOIN last ON last.symbol = s.symbol
+                JOIN px ON px.symbol = s.symbol AND px.date = last.d
+                WHERE s.class = '%s'""" % (K, K, fp, kind)).fetchall()
+        except Exception:                                   # noqa: BLE001
+            continue          # 这一类的文件不在 -> 就当没有，别拖垮搜索
+        out += [{'code': r[0], 'symbol': r[0], 'name': r[1] or '',
+                 'industry': '', 'status': '正常上市', 'is_st': False,
+                 'close': r[2], 'change_pct': r[3], 'floatmv': None,
+                 'kind': kind} for r in rows]
+    return out
