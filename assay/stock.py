@@ -46,16 +46,14 @@ _PANEL = None
 
 
 def _lake(root=None):
-    r = root or os.environ.get('ASSAY_DATALAKE') or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        '..', 'datalake')
-    r = os.path.normpath(r)
+    r = _paths.datalake(root)
     if not os.path.isdir(r):
         raise StockError('找不到 datalake：%s（用 ASSAY_DATALAKE 指定）' % r)
     return r
 
 
 from assay import symbols as _SYM          # 「代码->类别/名称」的唯一正本
+from assay import paths as _paths   # datalake 根的唯一解析
 
 
 class StockError(Exception):

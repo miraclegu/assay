@@ -22,6 +22,7 @@ import threading
 import time
 
 from .. import registry
+from assay import paths as _paths   # datalake 根的唯一解析
 
 
 # 🔴 `__file__` 现在在 `srv/` 里，比原来深一层 —— HERE 必须**仍指 assay 包目录**。
@@ -295,8 +296,7 @@ def _datalake_dir():
       后定义的直接覆盖前面的，于是 api_equity/trades/holdings/rejects
       四个调用点全部 TypeError -> 500。实测就是这么炸的。
     """
-    return os.environ.get('ASSAY_DATALAKE') or \
-        os.path.join(os.path.dirname(registry.ROOT), 'datalake')
+    return _paths.datalake()
 
 
 

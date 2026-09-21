@@ -38,6 +38,7 @@ import csv
 import io
 import os
 import re
+from assay import paths as _paths   # datalake 根的唯一解析
 
 # ★ 与 `lv/perf.py` 的 `_KIND_FILE` 同一份含义；这里只列会用到的两类。
 KIND_FILE = {'etf': 'etf_*', 'index': 'index_*'}
@@ -213,9 +214,7 @@ _KMAP = {'at': None, 'map': None}
 
 def default_root(root=None):
     """datalake 根目录。与 `lv/px._lake` / `stock._lake` 同一套规则。"""
-    return root or os.environ.get('ASSAY_DATALAKE') or os.path.normpath(
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     '..', 'datalake'))
+    return _paths.datalake(root)
 
 
 def clean_name(s):

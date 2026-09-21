@@ -20,6 +20,7 @@ import datetime
 import os
 
 import duckdb
+from assay import paths as _paths   # datalake 根的唯一解析
 
 
 class MarketError(Exception):
@@ -27,10 +28,7 @@ class MarketError(Exception):
 
 
 def _root(root=None):
-    r = root or os.environ.get('ASSAY_DATALAKE') or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        '..', 'datalake')
-    r = os.path.normpath(r)
+    r = _paths.datalake(root)
     if not os.path.isdir(r):
         raise MarketError('找不到 datalake：%s' % r)
     return r

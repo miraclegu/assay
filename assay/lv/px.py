@@ -11,16 +11,14 @@ from . import tdx as _tdx
 
 
 from assay import symbols as _SYM   # 「代码->类别/名称」的唯一正本
+from assay import paths as _paths   # datalake 根的唯一解析
 
 
 def _lake(root=None):
     """datalake 根目录。与 PanelFeed 同一套解析规则（含 ASSAY_DATALAKE）。"""
-    r = root or os.environ.get('ASSAY_DATALAKE') or os.path.join(
-        # 🔴 `__file__` 在 `lv/` 里比原来深一层，所以要多剥一层 dirname：
-        #   assay/assay/lv/px.py -> assay/assay -> assay -> finacial -> datalake
-        os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), '..', 'datalake')
-    r = os.path.normpath(r)
+    # 🔴 **不在这里数 dirname**：层数跟着"文件放在哪"变，搬一次就要改一次，
+    #   而改漏了不报错（拆 srv/ 时踩过）。`paths.py` 位置固定，只数那一处。
+    r = _paths.datalake(root)
     if not os.path.isdir(r):
         raise _base.LiveError('找不到 datalake：%s（用 ASSAY_DATALAKE 指定）' % r)
     return r

@@ -31,6 +31,7 @@ from assay.broker import Cost             # noqa: E402
 from assay.engine import Engine           # noqa: E402
 from assay.feed import PanelFeed          # noqa: E402
 from assay.metrics import report          # noqa: E402
+from assay import paths as _paths      # noqa: E402  datalake 根的唯一解析
 
 
 class _Tee:
@@ -58,8 +59,7 @@ def load(path):
 
 def default_lake():
     """PanelFeed 不传 root 时会用的那个根 —— 声明的相对路径以它为基准。"""
-    return os.environ.get('ASSAY_DATALAKE') or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', 'datalake')
+    return _paths.datalake()
 
 
 def resolve_lake(mod, cli):

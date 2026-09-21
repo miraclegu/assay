@@ -3365,6 +3365,98 @@ def t_no_markdown_stars():
     return '扫了 web 下全部 .js，0 处；扫描器自证可用'
 
 
+@case('datalake 根只许解析一次（paths.py）', 'fast')
+def t_datalake_root_single_source():
+    """🔴 「datalake 根在哪」此前在 **8 处**各写了一遍，而每一处都**自己数
+    `dirname` 层数** —— 层数是跟着「这个文件放在哪」变的。
+
+    `lv/px.py` 里那句注释就是物证：「`__file__` 在 `lv/` 里比原来深一层，
+    所以要多剥一层 dirname」。也就是说**搬一次文件就要改一次**，
+    而改漏了**不报错** —— 只是那个模块从此解到一个不存在的路径。
+    拆 `srv/` 时实测踩过：`/api/marks` 返回 `{}`、7 个实盘接口 500。
+
+    2026-09-21 收敛到 `assay/paths.py`（零依赖，位置固定，只数一次）。
+    ★ **异常没有收进去**：CLI 要 `SystemExit`、HTTP 要 `LiveError`、
+      看盘要 `StockError` —— 那是各自的 UX，混成一个反而让报错指不到地方。
+      正本只回答"路径是哪个"。
+    """
+    import ast as _ast
+    import subprocess as _sp
+
+    # ① 除正本外，谁都不许再【读那个环境变量】。
+    #   判据落在 `os.environ` 的**读取**上，不是"提到过这个名字" ——
+    #   报错措辞里就有「用 ASSAY_DATALAKE 指定」，查字符串必然误伤。
+    files = [os.path.join(REPO, f) for f in ('run.py', 'sweep.py')]
+    for base_, _ds, fs in os.walk(os.path.join(REPO, 'assay')):
+        if '__pycache__' in base_:
+            continue
+        files += [os.path.join(base_, f) for f in fs if f.endswith('.py')]
+    canon = os.path.join(REPO, 'assay', 'paths.py')
+    assert os.path.isfile(canon), 'assay/paths.py 没了 —— 正本搬走了？'
+    bad = []
+    for f in files:
+        if os.path.abspath(f) == canon or not os.path.isfile(f):
+            continue
+        for n in _ast.walk(_ast.parse(io.open(f, encoding='utf-8').read())):
+            hit = False
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute) \
+                    and n.func.attr == 'get' \
+                    and 'environ' in _ast.dump(n.func.value):
+                hit = any(isinstance(a, _ast.Constant)
+                          and a.value == 'ASSAY_DATALAKE' for a in n.args)
+            elif isinstance(n, _ast.Subscript) and 'environ' in _ast.dump(n.value):
+                hit = (isinstance(n.slice, _ast.Constant)
+                       and n.slice.value == 'ASSAY_DATALAKE'
+                       and isinstance(n.ctx, _ast.Load))
+            if hit:
+                bad.append('%s:%d' % (os.path.relpath(f, REPO), n.lineno))
+    assert not bad, ('这几处又自己解了一遍 datalake 根：%s —— '
+                     '一律走 assay/paths.datalake()（8 处各数一遍 dirname，'
+                     '搬一次文件就错一处，而它不报错）' % bad)
+
+    # ② `paths.REPO` 真的是仓库根 —— 这一条才是"层数只数一次"的意义所在。
+    #   🔴 它要排在下面那个子进程【之前】：层数数错时子进程会直接崩，
+    #     报出来是一段 traceback，**指不到真正的原因**（变异实测）。
+    from assay import paths as _P
+    assert os.path.isdir(os.path.join(_P.REPO, 'strategies')) and \
+        os.path.isfile(os.path.join(_P.REPO, 'run.py')), \
+        'paths.REPO 指到了 %s，不是仓库根（dirname 层数数错了）' % _P.REPO
+
+    # ③ 八个入口**解到同一个地方**（反向自证：真的有 8 个，不是空转）
+    src = ('import os, sys\n'
+           "sys.path.insert(0, %r)\n"
+           "os.environ.pop('ASSAY_DATALAKE', None)\n"
+           'from assay import realtime, market, stock, symbols, paths\n'
+           'from assay.lv import px\n'
+           'from assay.srv import base as sb\n'
+           'from assay.feed import PanelFeed\n'
+           'g = [realtime._lake(), market._root(), stock._lake(), px._lake(),\n'
+           '     os.path.normpath(sb._datalake_dir()), symbols.default_root(),\n'
+           "     os.path.normpath(PanelFeed('2026-09-01','2026-09-18').root),\n"
+           '     paths.datalake()]\n'
+           'print(len(g), len(set(g)), g[0])\n') % REPO
+    r = _sp.run([sys.executable, '-c', src], capture_output=True, text=True,
+                cwd=REPO)
+    assert r.returncode == 0, '八处解析跑不起来：%s' % r.stderr[-400:]
+    n, uniq, got = r.stdout.strip().split(' ', 2)
+    assert int(n) == 8, '只量到 %s 个入口（反向自证：应当是 8）' % n
+    assert int(uniq) == 1, '八处解到了 %s 个不同的 datalake 根' % uniq
+    assert os.path.isdir(got), '解出来的根不存在：%s' % got
+
+    # ④ `ASSAY_DATALAKE` 仍然是最高优先（**构造**，本机没设这个变量）
+    _old = os.environ.get('ASSAY_DATALAKE')
+    try:
+        os.environ['ASSAY_DATALAKE'] = '/tmp/_selftest_lake'
+        assert _P.datalake() == '/tmp/_selftest_lake', '环境变量不生效了'
+        assert _P.datalake('/tmp/other') == '/tmp/other', '显式传的应当最高优先'
+    finally:
+        if _old is None:
+            os.environ.pop('ASSAY_DATALAKE', None)
+        else:
+            os.environ['ASSAY_DATALAKE'] = _old
+
+
+
 @case('取价唯一正本', 'fast')
 def t_symbols_price_single_source():
     """🔴 「查面板 -> 查不到就回落 tdx」这个模式，此前在【四个取价函数】里

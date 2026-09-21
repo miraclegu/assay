@@ -22,6 +22,7 @@ import pandas as _pd
 from collections import namedtuple
 
 import duckdb
+from assay import paths as _paths   # datalake 根的唯一解析
 
 # 撮合与风控需要的字段。策略要别的列走 query()/panel()，不必挤在这里。
 Bar = namedtuple('Bar', 'open_hfq close_hfq open_raw factor '
@@ -124,9 +125,7 @@ class PanelFeed:
     """datalake 的 mart/panel_daily 适配器。"""
 
     def __init__(self, start, end, root=None):
-        self.root = root or os.environ.get('ASSAY_DATALAKE') or \
-            os.path.join(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__)))), 'datalake')
+        self.root = _paths.datalake(root)
         if not os.path.isdir(self.root):
             raise SystemExit('找不到 datalake：%s\n用 ASSAY_DATALAKE 指定' % self.root)
         # ★ 面板构建是先写盘后校验的，失败时坏数据已在磁盘上。
