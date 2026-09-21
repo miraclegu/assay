@@ -32,6 +32,7 @@ import os
 from . import base as _base
 from . import pos as _pos
 from . import px as _px
+from assay import paths as _paths   # datalake 根 / 面板读法的唯一解析
 
 # 🔴 从 10:00 起扫 —— 09:30~10:00 那半小时开板/回封频繁，
 #   早于 10:00 报出来的多半会自己回去，而**假告警看多了就不看告警了**。
@@ -61,7 +62,10 @@ def limit_up_holdings(aid, datalake=None):
     import duckdb
     con = duckdb.connect(':memory:')
     try:
-        P = "read_parquet('%s/mart/panel_daily/**/*.parquet')" % root
+        # 🔴 原来这里拼的 glob 是 `**/*.parquet` —— 与别处的
+        #   `panel_*.parquet` **不是同一个**（今天恰好同一批文件，
+        #   所以一直看不出来）。统一走正本，以 PanelFeed 为准。
+        P = _paths.panel_sql(root)
         last = con.execute("SELECT max(date) FROM %s" % P).fetchone()[0]
         #   ★ 面板里 `limit_up` 是**涨停价**、`is_limit_up` 是**布尔**
         #     （还有 `limit_pct` 是那一天的涨跌幅限制 0.10/0.20/0.05）——

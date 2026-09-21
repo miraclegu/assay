@@ -310,7 +310,7 @@ def names(codes, day=None, root=None):
         return {}
     out = {}
     import duckdb
-    pan = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % root
+    pan = _panel_sql(root)
     try:
         con = duckdb.connect(':memory:')
         d = day or con.execute('SELECT max(date) FROM %s' % pan).fetchone()[0]
@@ -351,7 +351,7 @@ def names(codes, day=None, root=None):
 
 
 def _panel_sql(root):
-    return "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % root
+    return _paths.panel_sql(root)
 
 
 def _con(con=None):

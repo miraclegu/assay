@@ -61,7 +61,7 @@ class StockError(Exception):
 
 
 def panel(root=None):
-    return "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(root)
+    return _paths.panel_sql(_lake(root))
 
 
 def con():

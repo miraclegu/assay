@@ -363,7 +363,7 @@ def micro_members(root=None):
     try:
         import duckdb
         lake = _lake(root)
-        P = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % lake
+        P = _paths.panel_sql(lake)
         rows = duckdb.connect().execute(
             "SELECT jq_code FROM %s WHERE date = (SELECT max(date) FROM %s) "
             "AND totalmv > 0 AND public_status IN ('正常上市','ST','*ST') "

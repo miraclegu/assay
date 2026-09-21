@@ -20,6 +20,7 @@ from . import tdx as _tdx
 from . import explain as _explain
 from . import pos as _pos
 from . import ver as _ver
+from assay import paths as _paths   # datalake 根 / 面板读法的唯一解析
 
 
 def _load_snapshot(aid, sha):
@@ -53,10 +54,10 @@ def _asof_factor(feed, codes, day):
         SELECT code, hfq_factor, close_hfq, close_bfq FROM (
           SELECT jq_code AS code, hfq_factor, close_hfq, close_bfq,
                  row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
-          FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
+          FROM %s
           WHERE jq_code IN ('%s') AND date <= DATE '%s'
             AND date > DATE '%s' - INTERVAL 400 DAY
-        ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
+        ) WHERE rn = 1""" % (_paths.panel_sql(feed.root), q, day, day)).fetchall()
     return {r[0]: (r[1], r[2], r[3]) for r in rows}
 
 

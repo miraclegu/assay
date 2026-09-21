@@ -138,7 +138,7 @@ class PanelFeed:
                 'datalake/build/build_panel_daily.py'
                 % open(_mk, encoding='utf-8').read().strip())
         self.start, self.end = str(start), str(end)
-        self.panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % self.root
+        self.panel = _paths.panel_sql(self.root)
         self.con = duckdb.connect(':memory:')
 
         # 物化并按 date 排序：zone map 让「按日取数」变成小范围扫描，
@@ -184,7 +184,11 @@ class PanelFeed:
     #    误报为变了 —— 但这个方向是安全的：宁可误报，不可漏报。
     #    真要逐字节确认时再单独跑内容哈希。
     FINGERPRINT_PARTS = (
-        ('panel', 'mart/panel_daily/panel_*.parquet'),
+        # 🔴 这个 glob 必须与 `paths.panel_sql` 读的那批**是同一批** ——
+        #   指纹盯的文件比实际读的少一个，就会出现「数据变了而指纹没变」，
+        #   于是 tick 判「不用重算」、模拟盘判「不用推进」，**都不报错**。
+        #   所以 glob 用正本导出的那个常量，不在这里再写一遍。
+        ('panel', _paths.PANEL_GLOB),
         ('std',   'std/*.parquet'),
         ('index', 'raw/tdx/kline/index_*.parquet'),
     )

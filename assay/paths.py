@@ -36,3 +36,24 @@ def datalake(root=None):
     return os.path.normpath(
         root or os.environ.get('ASSAY_DATALAKE')
         or os.path.join(os.path.dirname(REPO), 'datalake'))
+
+
+# 面板文件的相对 glob。🔴 `feed.FINGERPRINT_PARTS` 盯的必须是**同一批**
+#   文件 —— 指纹盯的比实际读的少一个，就会出现「数据变了而指纹没变」，
+#   于是 tick 判「不用重算」、模拟盘判「不用推进」，**两个都不报错**。
+PANEL_GLOB = 'mart/panel_daily/panel_*.parquet'
+
+
+def panel_sql(root=None):
+    """面板宽表的 duckdb 读法（一段 `read_parquet(...)`）——**唯一**一处。
+
+    🔴 此前 **7 处**各拼一遍这个字符串，而 `lv/intraday.py` 拼的 glob
+      **是另一个**（`panel_daily/**/*.parquet` 而不是 `panel_*.parquet`）。
+      今天两者恰好是同一批 24 个文件、同 1631 万行（量过），所以看不出来 ——
+      但 `**` 会把 `panel_daily/` 下**任何**子目录里的 parquet 也读进来，
+      哪天那里多出一个中间产物，它读到的就是另一张表，**而它不报错**。
+    ★ 以 `feed.PanelFeed` 为准（它才是引擎那条路的权威），即 `panel_*.parquet`。
+    ★ `root` 可以是已经解析好的绝对路径（`datalake()` 对它是幂等的），
+      也可以不传 —— 归档回放那条路要按 run 自己的 lake 取。
+    """
+    return "read_parquet('%s/%s')" % (datalake(root), PANEL_GLOB)

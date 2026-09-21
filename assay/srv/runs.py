@@ -11,6 +11,7 @@ import pandas as pd
 from .. import registry
 from . import base
 from .base import (MARKS_FILE, MARK_KINDS, MARK_NOTE_MAX, RUN_ID_RE, _cache, _current_fp, _index, _lock, _names, _parse_note, _parse_params, _scan, _staleness, _ver_cache)
+from assay import paths as _paths   # datalake 根 / 面板读法的唯一解析
 
 
 def _load_marks():
@@ -140,10 +141,9 @@ def _factors(root, pairs):
     con = duckdb.connect(':memory:')
     try:
         q = ("SELECT jq_code, CAST(min(date) AS VARCHAR) AS d0, hfq_factor FROM "
-             "read_parquet('%s/mart/panel_daily/panel_*.parquet') "
-             "WHERE jq_code IN ('%s') AND date <= DATE '%s' "
+             "%s WHERE jq_code IN ('%s') AND date <= DATE '%s' "
              "GROUP BY jq_code, hfq_factor ORDER BY jq_code, d0"
-             % (root, "','".join(codes), days[-1]))
+             % (_paths.panel_sql(root), "','".join(codes), days[-1]))
         seg = {}
         for c, d0, f in con.execute(q).fetchall():
             if f:

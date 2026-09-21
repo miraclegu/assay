@@ -35,7 +35,7 @@ def _root(root=None):
 
 
 def panel(root=None):
-    return "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _root(root)
+    return _paths.panel_sql(_root(root))
 
 
 def tdx_db(root=None):

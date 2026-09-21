@@ -3564,7 +3564,43 @@ def t_datalake_root_single_source():
     assert int(uniq) == 1, '八处解到了 %s 个不同的 datalake 根' % uniq
     assert os.path.isdir(got), '解出来的根不存在：%s' % got
 
-    # ④ `ASSAY_DATALAKE` 仍然是最高优先（**构造**，本机没设这个变量）
+    # ④ 面板的 `read_parquet(...)` 同样只许正本拼。
+    #    🔴 判据落在**单个字符串字面量**上 —— 整文件查会被 docstring 里
+    #      提到 `mart/panel_daily` 的那几行误伤（这条为此改过三版）。
+    #    此前 8 处各拼一遍，而 `lv/intraday.py` 拼的是
+    #    `panel_daily/**/*.parquet`（**另一个 glob**）—— 今天恰好同一批
+    #    24 个文件、同 1631 万行（量过），所以一直看不出来。
+    bad2 = []
+    for f in files:
+        if os.path.abspath(f) == canon or not os.path.isfile(f):
+            continue
+        for n in _ast.walk(_ast.parse(io.open(f, encoding='utf-8').read())):
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str) \
+                    and 'mart/panel_daily' in n.value \
+                    and ('read_parquet' in n.value or n.value.endswith('.parquet')):
+                bad2.append('%s:%d' % (os.path.relpath(f, REPO), n.lineno))
+    assert not bad2, ('这几处又自己拼了一条读面板的 SQL / glob：%s —— '
+                      '一律走 assay/paths.panel_sql() 与 paths.PANEL_GLOB'
+                      % bad2)
+
+    # ⑤ 🔴 指纹盯的那批文件必须与**实际读的**是同一批 —— 少盯一个就会出现
+    #    「数据变了而指纹没变」，于是 tick 判「不用重算」、模拟盘判「不用
+    #    推进」，**两个都不报错**。所以两边取同一个常量。
+    from assay.feed import PanelFeed as _PF
+    assert dict(_PF.FINGERPRINT_PARTS)['panel'] == _P.PANEL_GLOB, \
+        '指纹的 panel glob (%r) 与实际读的 (%r) 不是同一批文件' % (
+            dict(_PF.FINGERPRINT_PARTS)['panel'], _P.PANEL_GLOB)
+    assert _P.PANEL_GLOB in _P.panel_sql('/x') and \
+        _P.panel_sql('/x').startswith("read_parquet('/x/"), _P.panel_sql('/x')
+    # 🔴 glob 必须是**平的**，不许用 `**` —— 那会把 `panel_daily/` 下任何
+    #   子目录里的 parquet 也读进来（中间产物、失败重建的残留），
+    #   于是读到的是另一张表，**而它不报错**。`lv/intraday.py` 此前拼的
+    #   就是 `**`，只因今天恰好没有子目录才一直看不出来。
+    assert '**' not in _P.PANEL_GLOB, \
+        'PANEL_GLOB 用了 `**`：%r —— 它会把子目录里的 parquet 一起读进来' \
+        % _P.PANEL_GLOB
+
+    # ⑥ `ASSAY_DATALAKE` 仍然是最高优先（**构造**，本机没设这个变量）
     _old = os.environ.get('ASSAY_DATALAKE')
     try:
         os.environ['ASSAY_DATALAKE'] = '/tmp/_selftest_lake'
@@ -3607,20 +3643,10 @@ def t_symbols_price_single_source():
     for nm in ('last_px', 'daily_close_map', 'day_px', 'day_hl'):
         assert nm in fns, 'assay/symbols.py 里没有 %s —— 正本搬走了？' % nm
 
-    # ② 【核心】除正本外，谁都不许再拼那句「读面板 parquet」的 SQL。
-    #    判据落在**单个字符串字面量**上（整文件查会被 docstring 里提到的
-    #    这个词误伤 —— 这条判据为此改过三版）。
-    PANEL = 'mart/panel_daily'
-    for rel, txt in src.items():
-        if rel == 'assay/symbols.py':
-            continue
-        for node in _ast.walk(_ast.parse(txt)):
-            if isinstance(node, _ast.Constant) and isinstance(node.value, str) \
-                    and PANEL in node.value and 'read_parquet' in node.value:
-                raise AssertionError(
-                    '%s:%d 又自己拼了一条读面板的 SQL —— 取价一律走 '
-                    'assay/symbols.py（四个函数写过四遍，出过两次事）'
-                    % (rel, node.lineno))
+    # ② 「不许再拼一条读面板的 SQL」这条**挪到了**『datalake 根只许解析
+    #    一次』那个用例里（2026-09-21）：它后来发现拼这句的不止取价这几处，
+    #    一共 8 处、而且 `lv/intraday.py` 拼的 glob 还是另一个。
+    #    规则只有一份，守卫也就只该有一处（同「两处实现必然分叉」）。
 
     # ③ 四个调用点确实【转发】到正本，不是各留一份
     import assay.symbols as _S
