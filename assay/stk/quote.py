@@ -189,8 +189,12 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
         if not jc:
             raise StockError('认不出代码：%r' % code)
         p = panel(root)
-    # 多取 60 根用来预热均线，返回时切掉 —— 否则头 60 根的 ma60 是空的
-    warm = 60
+    # 多取 max(MA) 根用来预热均线，返回时切掉 —— 否则头几根的长均线是空的。
+    # 🔴 **不许写死**（原来是 `warm = 60`）：2026-09-21 加 MA120 时，
+    #   写死 60 会让 MA120 在**每个窗口的头 60 根**都是 null，
+    #   而它不报错 —— 图上只是那条线短了一截，没人会注意。
+    #   浮层默认只取 120 根，那条线会整条为空。跟着 `MA_PERIODS` 走就对了。
+    warm = max(MA_PERIODS)
     where = 'jq_code = ?'
     args = [jc]
     if end:
@@ -252,7 +256,7 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
             'fqk': (round(f / qf, 8) if fq == 'qfq'
                     else (round(f, 8) if fq == 'hfq' else 1.0)),
         })
-    for w in (5, 10, 20, 60):
+    for w in MA_PERIODS:
         _ma(out, w)
     # 这只票总共有多少根 —— 前端据此知道还能不能往左翻（到头了要说，
     # 不能让「←」点了没反应：同「给一个点了没反应的按钮比不给更糟」）。
@@ -261,6 +265,15 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
     return {'code': jc, 'fq': fq, 'bars': out[-n:], 'n': min(len(out), n),
             'off': off, 'total': int(total),
             'warmup_dropped': max(0, len(out) - n)}
+
+# 主图均线的周期。🔴 **预热（`warm`）跟着它走**，别再写死一个数。
+# ⚠ 这一份与 `assay/indicators.py` 的 `ma` Spec 是**两份实现** ——
+#   主图均线由 `kline` 直接算、配色与画法在 `kchart.js` 里也写死一份，
+#   而 CLAUDE.md 说的「加一个指标 = 一条 Spec，全在一处声明」对 MA
+#   **并不成立**。2026-09-21 加 40/120 时发现，记在这儿；
+#   把它并进 Spec 是另一轮的事，这一轮只按用户要的加两条。
+MA_PERIODS = (5, 10, 20, 40, 60, 120)
+
 
 def _r3(x):
     return None if x is None else round(float(x), 3)

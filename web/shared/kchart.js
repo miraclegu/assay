@@ -13,9 +13,19 @@
      · 四条均线的 hex 与四种事件三角【完全相同】，底部图例写着
        "▲除权除息 ▲财报公告…" 用的正是均线那四个色
    判据不靠眼睛：selftest 里按 RGB 欧氏距离量，任意两条 < 60 就算撞色。 */
+/* 🔴 卖出标记**不用跌色** —— 与 K 线的阴线同色，密的时候分不出来
+   （用户 2026-09-21：「S、B 两个图标的颜色和 K 线颜色太接近」）。
+   ★ 买入保留涨色（用户选的：只换一个），卖出换成亮蓝：
+     它与页面上已用的 14 个颜色最小色距 92，与涨色/跌色都拉得开。 */
+const MK_SELL = '#00e0ff';
+/* 六条均线的配色：两两色距 ≥ 73（含与涨跌色、BOLL、买卖标记比）。
+   ma40 / ma120 是 2026-09-21 按用户要求加的。 */
 const MA_COLOR = {ma5: '#f5d33f', ma10: '#3d8bfd', ma20: '#c264e8',
-                  ma60: '#2fd6a8'};
-const MA_LABEL = {ma5: 'MA5', ma10: 'MA10', ma20: 'MA20', ma60: 'MA60'};
+                  ma40: '#8de35d', ma60: '#2fd6a8', ma120: '#ff5fa2'};
+const MA_LABEL = {ma5: 'MA5', ma10: 'MA10', ma20: 'MA20',
+                  ma40: 'MA40', ma60: 'MA60', ma120: 'MA120'};
+/* 画序：**长的先画、短的压在上面** —— 短均线才是人要读的那条。 */
+const MA_KEYS = ['ma120', 'ma60', 'ma40', 'ma20', 'ma10', 'ma5'];
 /* 事件三角另成一族（与均线不共享任何色）。 */
 const EV_COLOR = {xr: '#ff8fb1', fin: '#8ea9ff', unlock: '#ffb066',
                   share: '#9ad1ff'};
@@ -64,7 +74,7 @@ function drawKChart(cv, opts) {
   bars.forEach(b => {
     if (b.low != null) lo = Math.min(lo, b.low);
     if (b.high != null) hi = Math.max(hi, b.high);
-    ['ma5', 'ma10', 'ma20', 'ma60', 'ub', 'lb'].forEach(k => {
+    MA_KEYS.concat(['ub', 'lb']).forEach(k => {
       if (b[k] != null) { lo = Math.min(lo, b[k]); hi = Math.max(hi, b[k]); }
     });
   });
@@ -166,7 +176,7 @@ function drawKChart(cv, opts) {
     }
   });
   /* 均线：由长到短画 —— 短均线最活跃、要压在上层不被遮住。 */
-  ['ma60', 'ma20', 'ma10', 'ma5'].forEach(k => {
+  MA_KEYS.forEach(k => {
     if (bars[0] && bars[0][k] === undefined) return;
     g.strokeStyle = MA_COLOR[k];
     g.lineWidth = (k === 'ma5' ? 1.5 : 1.1);
@@ -206,38 +216,51 @@ function drawKChart(cv, opts) {
   if (trs.length) {
     const at = {};
     bars.forEach((bb, i) => { at[bb.date] = i; });
-    const bySlot = {};
-    g.save();
-    g.font = 'bold 10px ui-sans-serif,system-ui,sans-serif';
-    g.textAlign = 'center';
-    g.textBaseline = 'middle';
+    /* 🔴 **同一天同方向只画一个标记**（用户 2026-09-21：「在同一天发生的
+       多次 S，不需要多个图标，只展示一个 S，只要浮窗里能正确展示卖出
+       价格、数量就可以」）。原来每笔一个、往外错开 8px —— 一天四笔叠成
+       一串，而那一串并不比"这天卖过"多说出什么（笔数与逐笔明细都在浮窗里）。
+       ★ 同日**既有买又有卖**仍然是两个（一个 B 一个 S）—— 那是两件事。 */
+    const grp = {};
     trs.forEach(t => {
       const i = at[t.date];
-      if (i == null || t.price == null) return;
+      if (i == null) return;
       const k = i + '|' + t.side;
-      bySlot[k] = (bySlot[k] || 0) + 1;
-      const dup = bySlot[k] - 1;               /* 同日同向的第 n 笔，往外错开 */
-      const buy = t.side === 'buy';
-      const x = X(i), py = Y(+t.price);
-      const R = 7.5;
-      const cy = buy ? py + R + 5 + dup * (R * 2 + 2)
-                     : py - R - 5 - dup * (R * 2 + 2);
-      /* ① 从圆心到**成交价那一点**的细引线 + 一个小点：圆本身有半径，
-         光靠圆的位置说不出"到底是哪个价" —— 引线的端点才是确切价位。 */
-      g.strokeStyle = buy ? UP : DN;
-      g.lineWidth = 1;
-      g.globalAlpha = .75;
-      g.beginPath(); g.moveTo(x, py); g.lineTo(x, cy + (buy ? -R : R)); g.stroke();
-      g.globalAlpha = 1;
-      g.beginPath(); g.arc(x, py, 1.6, 0, 6.2832); g.fill();
-      /* ② B / S 圆点。★ 描一圈背景色的边：K 线密的时候圆压在影线上，
+      (grp[k] = grp[k] || {i: i, side: t.side, list: []}).list.push(t);
+    });
+    Object.keys(grp).forEach(key => {
+      const gp = grp[key], i = gp.i, bb = bars[i], buy = gp.side === 'buy';
+      if (!bb || bb.high == null || bb.low == null) return;
+      /* 🔴 **贴在那根 K 线的上下方，不再按成交价定位**（用户 2026-09-21）。
+         原来画在 `Y(成交价)` 上，位置本身表达"我在哪个价位进出" ——
+         代价是**口径一错就整体飘走，而它不报错**：实测回测那条链
+         21/106 只票的标记飘出 K 线区间、最多差 4 倍
+         （根因是 `_to_raw` 拿不到 `code` 就静默不换算）。
+         现在 y 只说"这一天有买/卖"，**价位与数量到浮窗里看** ——
+         判据也跟着从"y 与价格成比例"换成"必须贴着那根 K 线"。 */
+      const R = 7.5, x = X(i);
+      const cy = buy ? Y(bb.low) + R + 5 : Y(bb.high) - R - 5;
+      const col = buy ? UP : MK_SELL;
+      /* B / S 圆点。★ 描一圈背景色的边：K 线密的时候圆压在影线上，
          没有这圈边就糊成一团（同均线配色要互相拉开那条）。 */
       g.beginPath(); g.arc(x, cy, R, 0, 6.2832);
-      g.fillStyle = buy ? UP : DN; g.fill();
+      g.fillStyle = col; g.fill();
       g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = 1.4; g.stroke();
       g.fillStyle = '#fff';
+      g.font = 'bold 10px ui-sans-serif,system-ui,sans-serif';
       g.fillText(buy ? 'B' : 'S', x, cy + .5);
-      trHits.push({x: x, y: cy, r: R + 3, t: t});
+      /* ★ 多笔时在角上标个数字：合并之后"这天有几笔"在图上就看不见了，
+         不标的话只能靠 hover 才知道（同「挪走可以，藏没了不行」）。 */
+      if (gp.list.length > 1) {
+        const bx = x + R - 1, by = cy - R + 1;
+        g.beginPath(); g.arc(bx, by, 5.2, 0, 6.2832);
+        g.fillStyle = col; g.fill();
+        g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = 1.2; g.stroke();
+        g.fillStyle = '#fff';
+        g.font = 'bold 7px ui-sans-serif,system-ui,sans-serif';
+        g.fillText(gp.list.length > 9 ? '9+' : String(gp.list.length), bx, by + .5);
+      }
+      trHits.push({x: x, y: cy, r: R + 3, ts: gp.list});
     });
     g.restore();
   }

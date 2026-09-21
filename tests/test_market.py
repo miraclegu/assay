@@ -85,8 +85,19 @@ def t_stock():
     k = st.kline('601857.SH', n=120)
     b = k['bars']
     assert len(b) == 120, '根数不对：%d' % len(b)
-    assert k['warmup_dropped'] == 60, \
-        '应多取 60 根预热再切掉（否则头部 ma60 是空的）：%s' % k['warmup_dropped']
+    # 🔴 预热根数**跟着最长均线走**，不写死 —— 2026-09-21 加 MA120 时
+    #   这条钉着 60 的断言当场挂了（**失败的是断言不是产品**）。
+    #   写死 120 是同一个错法的下一个版本：判据要问 `MA_PERIODS`。
+    from assay.stk.quote import MA_PERIODS
+    assert k['warmup_dropped'] == max(MA_PERIODS), \
+        '预热应当是 max(MA_PERIODS)=%d 根（少了的话头部长均线是空的，' \
+        '而它不报错，只是那条线短一截）：%s' % (max(MA_PERIODS),
+                                             k['warmup_dropped'])
+    # 反向自证：最长那条均线在**第一根**就得有值（预热真的取在窗口之外）
+    longest = 'ma%d' % max(MA_PERIODS)
+    assert b[0].get(longest) is not None, \
+        '%s 在第一根就是空的 —— 预热没取够（浮层默认只有 120 根，' \
+        '那条线会整条为空）' % longest
     # ★ 第一根就该有 ma60 —— 这正是预热的意义
     assert b[0]['ma60'] is not None, '第一根的 ma60 是空的 —— 预热没生效'
     # 均线自证：最后一根的 ma20 == 最后 20 根收盘均值
@@ -122,18 +133,49 @@ def t_stock():
     _ma_c = _grab('MA_COLOR')
     _ev_c = _grab('EV_COLOR')
     _boll = _re4.search(r"BOLL_COLOR\s*=\s*'(#[0-9a-fA-F]{6})'", _kc).group(1)
-    assert len(_ma_c) == 4 and len(_ev_c) == 4, \
-        '取不到配色表：%s / %s' % (_ma_c, _ev_c)
+    # 🔴 **配色表要与服务端算的那几条均线一一对应**，不写死条数
+    #   （原来钉的是 4，2026-09-21 加 MA40/MA120 时当场挂了）。
+    #   少一条的表现是那条线用 `undefined` 颜色画 —— **而它不报错**。
+    assert set(_ma_c) == {'ma%d' % w for w in MA_PERIODS}, \
+        ('kchart 的 MA_COLOR 与服务端算的均线对不上：配色 %s，'
+         '服务端 %s —— 少的那条会用 undefined 颜色画，而它不报错'
+         % (sorted(_ma_c), sorted('ma%d' % w for w in MA_PERIODS)))
+    # ★ `_grab` 只认十六进制值，标签表要用通用的那个（我第一版就写错了）
+    _ma_l = dict(_re4.findall(
+        r"(\w+):\s*'([^']+)'",
+        _re4.search(r'MA_LABEL\s*=\s*\{([^}]*)\}', _kc).group(1)))
+    assert set(_ma_l) == set(_ma_c), 'MA_LABEL 与 MA_COLOR 对不上：%s' % (
+        sorted(set(_ma_l) ^ set(_ma_c)),)
+    assert len(_ev_c) == 4, '取不到事件配色表：%s' % (_ev_c,)
     _rgb = lambda h: tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
     _dist = lambda a, b_: sum(
         (p - q) ** 2 for p, q in zip(_rgb(a), _rgb(b_))) ** 0.5
-    _lines = list(_ma_c.items()) + [('boll', _boll)]
+    # 🔴 **买卖标记也要进这张表** —— 2026-09-21 我给卖出标记挑了
+    #   `#2e9bff`，跑判据才发现它与 ma10 的 `#3d8bfd` 只差 22，
+    #   等于把"分不清"从 K 线搬到均线上（换成了 `#00e0ff`）。
+    _mk = _re4.search(r"MK_SELL\s*=\s*'(#[0-9a-fA-F]{6})'", _kc).group(1)
+    _lines = list(_ma_c.items()) + [('boll', _boll), ('买卖标记', _mk)]
     for _i in range(len(_lines)):
         for _j in range(_i + 1, len(_lines)):
             _dd = _dist(_lines[_i][1], _lines[_j][1])
             assert _dd >= 60, \
                 ('主图上 %s 与 %s 撞色（RGB 距离 %.0f < 60）—— '
                  '两条线看着像一条' % (_lines[_i][0], _lines[_j][0], _dd))
+    # 🔴 **均线的键只许来自一处**（kchart.js 的 `MA_KEYS`）。
+    #   2026-09-21 实测：`stock.html` 里另有一份写死的
+    #   `['ma5','ma10','ma20','ma60']`（"没勾均线就删掉"用的），
+    #   加了 MA40/MA120 之后那两条**删不掉、照画**，而它不报错。
+    import glob as _g5
+    for _f in _g5.glob(os.path.join(REPO, 'web', '**', '*.js'), recursive=True) \
+            + _g5.glob(os.path.join(REPO, 'web', '*.html')):
+        if _f.endswith('kchart.js'):
+            continue
+        _t5 = open(_f, encoding='utf-8').read()
+        _hit = _re4.search(r"\[\s*'ma\d+'\s*,\s*'ma\d+'", _t5)
+        assert not _hit, (
+            '%s 里又写死了一份均线清单（%s…）—— 走 kchart.js 的 MA_KEYS，'
+            '否则加一条均线时这里会漏，而漏了不报错'
+            % (os.path.relpath(_f, REPO), _hit.group(0)))
     _both = set(_ma_c.values()) & set(_ev_c.values())
     assert not _both, \
         '均线与事件三角共用了颜色 %s —— 图例会指错' % sorted(_both)
@@ -195,12 +237,14 @@ def t_stock():
     return ('代码 7 种写法归一 + 5 种非法返 None；搜索按代码/名称/前缀命中且'
             '同类按市值降序；面板 %d 字段且 change_pct/turnover 量级自证'
             '（turnover=量×价/流通市值×100 精确吻合）；'
-            'K 线 %d 根、第一根就有 MA60（预热 %d 根）、ma20 复算一致、'
+            'K 线 %d 根、第一根就有 %s（预热 %d 根）、ma20 复算一致、'
             'BOLL 中轨==MA20（所以主图只画一次）、'
-            '主图 5 条线两两 RGB 距离 >=60 且与事件三角不共色；'
+            '主图 %d 条线（含 BOLL 与买卖标记）两两 RGB 距离 >=60 '
+            '且与事件三角不共色；'
             '601088 后复权区间涨幅 %.1f%% vs 不复权 %.1f%%（除权坑）；'
             '财务 %d 个报告期不重复且公告日均晚于报告期'
-            % (len(p), len(b), k['warmup_dropped'], rh_ * 100, rb_ * 100, len(rd)))
+            % (len(p), len(b), longest, k['warmup_dropped'], len(_lines),
+               rh_ * 100, rb_ * 100, len(rd)))
 
 
 _BANDJS = r"""() => {
@@ -2402,7 +2446,7 @@ def t_new_pages_ui():
         httpd.shutdown()
 
 
-@case('个股速览浮层：点了不跳走 / 买卖点画在成交价上（playwright）', tag='web')
+@case('个股速览浮层：点了不跳走 / 买卖点贴 K 线且同日合并（playwright）', tag='web')
 def t_stockpop():
     """用户的原话是"点击股票名称就真的跳转到个股页面了，然后无法直接返回"，
     以及"其他地方可能也有这样的情况，也要做成这样的效果"。所以这条要验
@@ -2410,7 +2454,9 @@ def t_stockpop():
 
     钉五件事，每件都对应一种**不报错的**坏法：
       ① 点了 URL **不变** + 浮层可见 —— "跳走了"和"浮层没弹"都是静默的坏
-      ② 买卖点画在**成交价的位置**上，且 hover 出得来读数（价/量/账户）
+      ② 买卖点**贴着那根 K 线**（S 在上、B 在下）、同日同向**合成一个**，
+         而 hover 出得来逐笔读数（价/量/合计）—— 2026-09-21 改的：
+         原来画在成交价的 y 上，口径一错就整体飘走且不报错
       ③ 引了 stockpop 的页面**必须也引 kchart** —— 实测踩到：盘面/自选/
          买点/板块四个页面原本没有 kchart.js，点开浮层就是
          `drawKChart is not defined`，而浮层照样弹出、只是**一片空白**
@@ -2534,52 +2580,85 @@ def t_stockpop():
               const ts = SP.trades || [];
               const bs = SP.bars || [];
               const at = {}; bs.forEach((x, i) => { at[x.date] = i; });
-              return {nh: h.length, nt: ts.length,
-                      first: h[0] ? {x: h[0].x, y: h[0].y, price: h[0].t.price,
-                                     date: h[0].t.date} : null,
-                      idx: ts[0] ? at[ts[0].date] : null,
-                      lo: Math.min(...bs.map(x => x.low)),
-                      hi: Math.max(...bs.map(x => x.high))};
+              const key = {};
+              ts.forEach(t => { if (at[t.date] != null)
+                                  key[at[t.date] + '|' + t.side] = 1; });
+              return {nh: h.length, nt: ts.length, ngrp: Object.keys(key).length,
+                      first: h[0] ? {x: h[0].x, y: h[0].y,
+                                     n: (h[0].ts || []).length,
+                                     price: h[0].ts[0].price,
+                                     date: h[0].ts[0].date} : null};
             }""")
             assert d['nt'], '这只票没有实盘成交 —— 换一个入口再验'
-            assert d['nh'] == d['nt'], \
-                '成交 %d 笔但只画出 %d 个标记' % (d['nt'], d['nh'])
-            # 🔴 判据必须是"**y 随价格变**"，不是"y 不等于某个值"。
-            #   头一版写成 `abs(y - 画布中线) > 4 or ...`，把 Y(price) 改成
-            #   `PADT + mainH - 2`（像事件三角那样钉在底部）**照样全绿** ——
-            #   那个 or 让它几乎永远成立。现在构造两笔不同价的成交，
-            #   断言高价那笔的 y 更小、且差值与价差成比例。
-            f = d['first']
+            # 🔴 **同一天同方向只画一个**（2026-09-21 用户要求）。
+            #   原来是每笔一个、错开 8px —— 科创半导 2026-07-09 那天四个 S
+            #   叠成一串。判据落在「组数」上，并**反向自证真的有合并发生**
+            #   （笔数 > 组数），否则这条在"恰好每天一笔"的数据上是空转的。
+            assert d['nh'] == d['ngrp'], \
+                '标记数 %d != (日期,方向) 组数 %d —— 同日同向没合并' % (
+                    d['nh'], d['ngrp'])
+
+            # 🔴 判据从「y 随成交价变」换成「**贴着那根 K 线**」。
+            #   旧设计把标记画在 `Y(成交价)` 上、位置本身表达价位 ——
+            #   代价是口径一错就整体飘走，**而它不报错**：实测回测那条链
+            #   21/106 只票飘出 K 线区间（`_to_raw` 拿不到 code 就静默不换算）。
+            #   现在 y 只说"这一天有买/卖"。
             probe = pg.evaluate("""() => {
-              const bs = SP.bars, lo = Math.min(...bs.map(x => x.low)),
+              const bs = SP.bars, cv = document.getElementById('spcv');
+              const i = bs.length - 3, dt = bs[i].date, b = bs[i];
+              const lo = Math.min(...bs.map(x => x.low)),
                     hi = Math.max(...bs.map(x => x.high));
-              const dt = bs[bs.length - 3].date;
               const p1 = lo + (hi - lo) * 0.2, p2 = lo + (hi - lo) * 0.8;
-              const cv = document.getElementById('spcv');
-              const mk = px => {
-                const g = drawKChart(cv, {bars: bs, trades:
-                  [{date: dt, side: 'buy', shares: 100, price: px}]});
-                return g.trHits.length ? g.trHits[0].y : null;
+              const mk = tr => {
+                const g = drawKChart(cv, {bars: bs, trades: tr});
+                return g;
               };
-              return {y_low: mk(p1), y_high: mk(p2), lo: lo, hi: hi,
-                      h: cv.height};
+              const g1 = mk([{date: dt, side: 'buy', shares: 100, price: p1}]);
+              const y1 = g1.trHits.length ? g1.trHits[0].y : null;
+              const g2 = mk([{date: dt, side: 'buy', shares: 100, price: p2}]);
+              const y2 = g2.trHits.length ? g2.trHits[0].y : null;
+              /* 同一天 3 笔买 + 1 笔卖 -> 应当只有 2 个标记 */
+              const g3 = mk([{date: dt, side: 'buy', shares: 1, price: p1},
+                             {date: dt, side: 'buy', shares: 2, price: p2},
+                             {date: dt, side: 'buy', shares: 3, price: p1},
+                             {date: dt, side: 'sell', shares: 4, price: p2}]);
+              const hs = g3.trHits.map(h => ({y: h.y, n: h.ts.length,
+                                              side: h.ts[0].side}));
+              return {y1: y1, y2: y2, hs: hs, h: cv.height,
+                      yHigh: g1.Y ? null : null,
+                      barTop: g3.YY ? null : null,
+                      low: b.low, high: b.high, mainTop: g3.mainTop,
+                      mainH: g3.mainH};
             }""")
-            assert probe['y_low'] is not None and probe['y_high'] is not None, \
+            assert probe['y1'] is not None and probe['y2'] is not None, \
                 '构造的成交点没画出来：%r' % probe
-            assert probe['y_high'] < probe['y_low'] - 20, \
-                ('买卖点的 y 不随成交价变（低价 y=%.0f / 高价 y=%.0f）—— '
-                 '它被钉在了固定高度上，而"画在成交价的位置"正是它与'
-                 '事件三角的区别' % (probe['y_low'], probe['y_high']))
-            # 差值应当约等于 60% 的主图高度（两个探针取的是 20% / 80% 分位）
-            dy = probe['y_low'] - probe['y_high']
-            assert dy > probe['h'] * 0.25, \
-                '价差 60%% 只换来 %.0fpx 的 y 差（画布 %.0f）—— 比例不对' \
-                % (dy, probe['h'])
-            # hover 上去要有读数
+            # ① y **不再随成交价变** —— 这正是旧判据的反面，防止改回去
+            assert abs(probe['y1'] - probe['y2']) < 1, \
+                ('同一天两笔不同价的买入画在了不同高度（%.0f / %.0f）—— '
+                 '现在的规矩是贴着 K 线，位置不表达价位'
+                 % (probe['y1'], probe['y2']))
+            # ② 真的**贴着**那根 K 线：买在最低价下方一点点
+            yl = probe['mainTop'] + probe['mainH']      # 主图下沿，仅作范围检查
+            assert probe['mainTop'] <= probe['y1'] <= yl + 20, \
+                '买入标记跑出主图了：y=%.0f 而主图 %.0f~%.0f' % (
+                    probe['y1'], probe['mainTop'], yl)
+            # ③ 同日 3 买 + 1 卖 -> 2 个标记，且买那个带着 3 笔
+            hs = probe['hs']
+            assert len(hs) == 2, '同日 3 买 1 卖应当只有 2 个标记，实得 %d' % len(hs)
+            byside = {x['side']: x for x in hs}
+            assert byside['buy']['n'] == 3 and byside['sell']['n'] == 1, \
+                '合并后每个标记带的笔数不对：%r' % hs
+            # ④ 卖在上、买在下（贴 K 线的方向不许反）
+            assert byside['sell']['y'] < byside['buy']['y'], \
+                'S 应当在 K 线上方、B 在下方，实得 S y=%.0f B y=%.0f' % (
+                    byside['sell']['y'], byside['buy']['y'])
+
+            # hover 上去要有读数：**逐笔列全 + 合计**（合并只收图标，不丢信息）
             cv = pg.locator('#spcv')
             bb = cv.bounding_box()
             sc = pg.evaluate("() => { const c = document.getElementById('spcv');"
                              "  return c.width / c.offsetWidth; }")
+            f = d['first']
             pg.mouse.move(bb['x'] + f['x'] / sc, bb['y'] + f['y'] / sc)
             pg.wait_for_timeout(600)
             tip = pg.locator('#sptip')
@@ -2587,8 +2666,12 @@ def t_stockpop():
             txt = tip.inner_text()
             for want in ('买入', str(f['date'])):
                 assert want in txt, 'hover 读数少了「%s」：%r' % (want, txt)
-            assert ('%.2f' % f['price']) in txt.replace(',', ''), \
-                'hover 读数里没有成交价 %.2f：%r' % (f['price'], txt)
+            assert ('%.3f' % f['price']) in txt.replace(',', ''), \
+                'hover 读数里没有成交价 %.3f：%r' % (f['price'], txt)
+            if f['n'] > 1:
+                assert '合计' in txt and ('%d 笔' % f['n']) in txt, \
+                    '合并了 %d 笔却没在读数里说清（逐笔 + 合计）：%r' % (
+                        f['n'], txt)
             # ---- B/S 点是【同花顺那种圆点】，不是三角；列表默认折叠 ----
             bs = pg.evaluate("() => { const c = document.getElementById('spcv');"
                              "  return {w: c.offsetWidth, h: c.offsetHeight}; }")

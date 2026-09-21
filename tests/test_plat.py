@@ -719,6 +719,30 @@ def _():
                 assert pg.locator('#pk .card2').count() == 0, \
                     '还在用卡片横排 —— 应该是对比表'
                 assert not pg.is_visible('#cat'), '进索引页后目录页应隐藏'
+                # 🔴 **取消选中就在这一页上**（用户 2026-09-21：「选中的规则
+                #   无法直接在上面取消，还要到下面找到对应的规则再取消」）。
+                #   这一页列的就是选中的那些 —— 取消的入口不在这儿，等于
+                #   让人回归档目录、展开那棵树、再找到那一行。
+                nst = pg.locator('#pk tr.rw .st[data-mk]').count()
+                assert nst == ncard, \
+                    '索引页 %d 行却只有 %d 个 ★ —— 取消入口不全' % (ncard, nst)
+                _one = pg.locator('#pk tr.rw .st[data-mk]').first
+                _rid = _one.get_attribute('data-mk')
+                assert _rid in sv._load_marks(), \
+                    '构造不对：这一行本来就没被标星，下面那条是空转的'
+                _one.click()
+                pg.wait_for_function(
+                    'n => document.querySelectorAll("#pk tr.rw").length === n',
+                    arg=ncard - 1, timeout=15000)
+                assert _rid not in sv._load_marks(), \
+                    '页面上取消了，标记文件里还留着 %s' % _rid
+                # 🔴 取消之后那一行要**当场消失** —— 留着一行已经不选中的在
+                #   这一页上，人会以为没点动（同「点了没反应是最难查的那种坏」）
+                assert pg.locator('#pk tr.rw .st[data-mk="%s"]' % _rid).count() == 0, \
+                    '取消之后那一行还在这一页上'
+                # 恢复（这条用例后面还要按 after 算行数）
+                sv.api_mark({}, {'run_id': _rid, 'mark': 'star', 'note': 'selftest'})
+                pg.reload(wait_until='networkidle'); pg.wait_for_timeout(700)
                 txt = pg.locator('#pk').inner_text()
                 assert '滑点' in txt, '索引页没有列出成本口径（滑点）'
                 # 🔴 表头列数必须等于每行的单元格数 —— 表头 8 列配 9 个数据

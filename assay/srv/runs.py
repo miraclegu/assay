@@ -203,6 +203,17 @@ def _to_raw(rows, root, specs):
             d = str(r.get(dk) or '')[:10]
             if d and r.get('code'):
                 pairs.add((r['code'], d))
+    # 🔴🔴 **调用方忘了带 `code` 的话要当场炸，不许静默返回。**
+    #   原来这里是 `if not fac: return` —— 于是 `api_run_trades_of`
+    #   （它构造的行里就没有 `code`）**一个字都没换**，而接口照样标
+    #   `'fq': 'bfq'`。表现是买卖点整体飘走、甚至飘出画布，
+    #   **而它不报错**（2026-09-21 实测 21/106 只票，最多差 4 倍）。
+    #   ★ 判据分得清两件事：**有行却一对都凑不出** = 调用方的 bug；
+    #     **凑得出但查不到因子** = 数据里本来就没有（合法，保持原样）。
+    assert not (rows and not pairs), (
+        '_to_raw 拿到 %d 行却一个 (code, 日期) 都凑不出 —— '
+        '调用方八成忘了在行里带 `code`（少了它换算会静默跳过，'
+        '而页面上的买卖点会整体飘走）' % len(rows))
     fac = _factors(root, pairs)
     if not fac:
         return
@@ -540,11 +551,18 @@ def api_run_trades_of(q):
     if not df.empty:
         sub = df[df['code'] == code]
         for i, r in enumerate(sub.itertuples(index=False)):
-            out.append({'account': rid, 'account_name': '回测',
+            # 🔴 **`code` 一定要带上** —— `_to_raw` 是按 `(code, date)` 取
+            #   复权因子的，少了它 `pairs` 就是空集、`fac` 也是空的，于是
+            #   那句 `if not fac: return` **一个字都不换就返回了**，
+            #   而下面照样标着 `'fq': 'bfq'` ——**接口在说谎**。
+            #   实测（2026-09-21 用户报的）：etf_p1_maskpos 那次回测
+            #   106 只 ETF 里 **21 只**的买卖点飘出 K 线区间，最多差 4 倍，
+            #   159516 半导体设备ETF国泰 22/22 笔全飘。
+            out.append({'account': rid, 'account_name': '回测', 'code': code,
                         'date': str(r.entry_date)[:10], 'side': 'buy',
                         'shares': float(r.shares), 'price': float(r.entry_price),
                         'fee': None, 'note': '', 'seq': i * 2})
-            out.append({'account': rid, 'account_name': '回测',
+            out.append({'account': rid, 'account_name': '回测', 'code': code,
                         'date': str(r.exit_date)[:10], 'side': 'sell',
                         'shares': float(r.shares), 'price': float(r.exit_price),
                         'fee': float(r.fee) if r.fee == r.fee else None,

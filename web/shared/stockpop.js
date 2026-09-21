@@ -134,7 +134,11 @@ async function spOpen(code, name, opt){
      两套价，人会以为其中一个错了。 */
   document.getElementById('spsub').textContent = code
     + (SP.center ? '  ·  定位 ' + SP.center : '')
-    + (SP.run ? '  ·  回测口径（后复权）' : '');
+    /* 🔴 这里原来写的是「回测口径（后复权）」—— 那是 2026-09-14 改成
+       "一律不复权"之前留下的标签，而图早就是不复权了：**标签与图相反**
+       （用户 2026-09-21 报的）。更糟的是同一天发现接口那边其实也没换算
+       （`_to_raw` 拿不到 `code` 就静默返回），两半是同一次没做完的改动。 */
+    + '  ·  价格与份额一律【不复权】（与券商对账单同口径）';
   document.getElementById('spfull').href = spHref(code);
   document.getElementById('spkpi').innerHTML = '<span class="spdim">载入中…</span>';
   document.getElementById('spmine').innerHTML = '';
@@ -344,13 +348,25 @@ function spBindHover(cv){
     const hit = (geo.trHits || []).find(h =>
       Math.abs(h.x - x) < h.r && Math.abs(h.y - y) < h.r);
     if(hit){
-      const t = hit.t, buy = t.side === 'buy';
+      /* 🔴 同日同向已经**合并成一个标记**了（2026-09-21），所以这里要
+         把那几笔**逐笔列全**再给一行合计 —— 合并只是把图上的图标收成
+         一个，信息不许跟着丢（同「挪走可以，藏没了不行」）。
+         ★ 价格用 3 位小数：ETF 最小变动是 0.001，2 位会把 1.0915 显示成
+           1.09 —— 而这一格问的正是"我到底成交在哪个价"。 */
+      const ts = hit.ts || [hit.t], buy = ts[0].side === 'buy';
+      const tot = ts.reduce((a, t) => a + (+t.shares || 0), 0);
+      const amt = ts.reduce((a, t) => a + (+t.shares || 0) * (+t.price || 0), 0);
+      const fee = ts.reduce((a, t) => a + (+t.fee || 0), 0);
+      const many = ts.length > 1;
       tip.innerHTML = `<b class="${buy ? 'up' : 'dn'}">${buy ? '买入' : '卖出'}</b>
-        ${esc(t.date)}<br>${num(t.shares, 0)} 股 @ <b>${num(t.price, 2)}</b>
-        <br>金额 ${num((+t.shares || 0) * (+t.price || 0), 2)}${
-          t.fee == null ? '' : ' · 费用 ' + num(t.fee, 2)}
-        <br><span class="spdim">${esc(t.account_name || t.account || '')}${
-          t.note ? ' · ' + esc(t.note) : ''}</span>`;
+        ${esc(ts[0].date)}${many ? `<span class="spdim"> · ${ts.length} 笔</span>` : ''}
+        <br>${ts.map(t => `${num(t.shares, 0)} 股 @ <b>${num(t.price, 3)}</b>`)
+               .join('<br>')}
+        ${many ? `<br><span class="spdim">合计 ${num(tot, 0)} 股 · 均价 ${
+          num(amt / (tot || 1), 4)}</span>` : ''}
+        <br>金额 ${num(amt, 2)}${fee ? ' · 费用 ' + num(fee, 2) : ''}
+        <br><span class="spdim">${esc(ts[0].account_name || ts[0].account || '')}${
+          ts[0].note ? ' · ' + esc(ts[0].note) : ''}</span>`;
       _tipAt(tip, e.clientX, e.clientY);
       return;
     }

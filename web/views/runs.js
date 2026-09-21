@@ -274,7 +274,7 @@ function showPicks(){
     {k:'n_trades',      t:'交易',   f:r=>r.n_trades??'—'},
     {k:'win_rate',      t:'胜率',   f:r=>pct(r.win_rate,1)},
   ];
-  const NCOL=3+COLS.length;   /* +1 = 比对勾选列 */
+  const NCOL=4+COLS.length;   /* 比对勾选 + ★ + 策略参数 + 区间 */
   /* 成本口径那一【列】按要求去掉了（太挤），但保护不能丢：本项目两次因为
      "拿滑点 0 的数字去比含滑点的基准"得出错误结论（FROEC 与 v0b 各一次）。
      改成只给【与多数行不同】的那几行挂一个「口径不同」标记 + 顶部那条总提示；
@@ -306,6 +306,7 @@ function showPicks(){
     <div class="lvtags" id="delbar"></div>
     <div class="pw"><table class="pkt">
       <tr><th class="cmpck" title="勾选 2~${CMP_MAX} 行做比对">⚖</th>
+        <th title="点它取消选中 —— 这一页就是选中的那些，取消应当就在这里">★</th>
         ${th('name','策略 · 参数','tx nmc')}<th class="tx">区间</th>
         ${COLS.map(c=>th(c.k,c.t)).join('')}</tr>
       ${Object.keys(by).sort().map(g=>{
@@ -322,6 +323,8 @@ function showPicks(){
             title="${esc(r.run_id)}　本金 ${(+r.cash).toLocaleString()}　${esc(costTxt(r))}">
             <td class="cmpck"><input type="checkbox" data-cmp="${esc(r.run_id)}"${
               CMPSEL.indexOf(r.run_id)>=0?' checked':''}></td>
+            <td><span class="st on" data-mk="${esc(r.run_id)}"
+              title="已选中${r.mark_note?'：'+esc(r.mark_note):''}（点击取消）">★</span></td>
             <td class="tx nmc"><span class="nm2">${esc(r._st)}</span>${
               odd(r)?`<span class="stale" title="这一行的成本口径与多数行不同：${esc(costTxt(r))}　跨行比年化前先看清">口径不同</span>`:''}
               ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
@@ -338,6 +341,11 @@ function showPicks(){
     e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
   cmpWire();          /* ⚖ 比对的勾选与工具条，与归档目录页共用 */
   delWire();          /* 🗑 管理（两页共用，同 cmpWire）*/
+  /* ★ 取消选中就在这一页上 —— 这一页列的就是选中的那些，
+     而原来要回归档目录、展开那棵树、找到那一行才取消得掉
+     （用户 2026-09-21 报的）。与目录页**共用同一个 `wireStars`**，
+     各写一份的话"取消"与"打星"的行为迟早分叉。 */
+  wireStars();
   document.querySelectorAll('#pk th[data-sk]').forEach(e=>
     e.onclick=()=>{
       const k=e.dataset.sk;
@@ -397,6 +405,10 @@ function wireStars(){
       if(o.error){ alert('打标记失败：'+o.error); e.style.opacity=''; return; }
       await loadRuns0();                                // 重取，别只改本地状态
       if(location.hash==='#/runs') renderCatalog();   /* 归档目录的 hash 从 '' 变成了 #/runs */
+      /* 🔴 在「★ 选中的规则」页上取消，那一行必须**当场消失** ——
+         这一页列的就是选中的那些，留着一行已经不选中的在那儿，
+         人会以为没点动（同「点了没反应是最难查的那种坏」）。 */
+      else if(location.hash==='#/picks') showPicks();
     }catch(err){ alert('打标记失败：'+err); e.style.opacity=''; }
   });
   document.querySelectorAll('#pick tr[data-go]').forEach(e=>

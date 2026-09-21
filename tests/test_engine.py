@@ -969,6 +969,108 @@ def t_hongli_sleeve():
     return out
 
 
+@case('回测浮层的买卖点必须落在【不复权】K 线上（接口不许说谎）', 'fast')
+def t_run_trades_of_bfq():
+    """🔴🔴 2026-09-21 用户："点击名称展示 K 线，上面写的口径是后复权，
+    但是看图是不复权的……买卖点的位置发生了漂移，都看不到对应的买卖点了。"
+
+    根因不是"口径选错"，是**换算根本没执行**：`api_run_trades_of` 构造的
+    每一行**没有 `code` 字段**，而 `_to_raw` 是按 `(code, date)` 取复权因子
+    的 —— 于是 `pairs` 是空集、`fac` 是空的，那句 `if not fac: return`
+    **一个字都不换就返回了**，而接口照样标着 `'fq': 'bfq'`。
+    **接口在说谎，而它不报错** —— 图上只是标记飘走，飘得远了干脆出画布。
+
+    判据取**可证的事实**：每一笔的价格必须落在那天**不复权** K 线的
+    `[low, high]` 里（留 0.5% 容差给舍入与"因子里有、分红表里没有"那点偏差）。
+
+    🔴🔴 **反向自证不可省**：得先确认这批票里**真有因子 != 1 的**。
+      我第一次手查挑到 159131（因子恰好 1），价格当然落在区间内 ——
+      看起来一切正常。换一批才露出 21/106 只飘、最多差 4 倍。
+      没有这条自证，这个用例在"恰好都没分红"的归档上是**空转**的。
+    """
+    import glob as _g
+    import json as _j
+    import assay.srv.runs as _R
+    import assay.srv.base as _B
+    from assay import stock as _S, registry as _reg
+    _B._scan()
+
+    # 找一个**成交里含因子 != 1 的票**的归档 —— 没有的话这条就是空转
+    picked = None
+    for m in sorted(_g.glob(os.path.join(_reg.RUNS, '*/*/*/meta.json')),
+                    reverse=True)[:40]:
+        rid = os.path.basename(os.path.dirname(m))
+        df = _R._read(rid, 'trades')
+        if df is None or df.empty:
+            continue
+        codes = sorted(set(df['code']))[:40]
+        root = _R._dl_root(rid)
+        if not root:
+            continue
+        pairs = {(c, str(d)[:10]) for c, d in
+                 zip(df['code'], df['entry_date'])}
+        fac = _R._factors(root, pairs)
+        nz = [k for k, v in (fac or {}).items() if v and abs(v - 1) > 1e-6]
+        if nz:
+            picked = (rid, codes, len(nz))
+            break
+    if not picked:
+        return '跳过（近 40 个归档里没有因子 != 1 的成交 —— 这条会是空转）'
+    rid, codes, nnz = picked
+
+    bad, checked, seen_nz = [], 0, 0
+    for c in codes:
+        out = _R.api_run_trades_of({'id': rid, 'code': c})
+        trs = (out or {}).get('trades') or []
+        if not trs:
+            continue
+        assert out.get('fq') == 'bfq', \
+            '接口标的口径不是 bfq：%r' % out.get('fq')
+        try:
+            k = _S.kline(c, 600, 'bfq')
+        except Exception:                                   # noqa: BLE001
+            continue
+        bars = {b['date']: b for b in k['bars']}
+        for t in trs:
+            b = bars.get(t['date'])
+            if not b or b['low'] is None:
+                continue
+            checked += 1
+            if t.get('price_hfq') is not None and \
+                    abs(float(t['price_hfq']) - float(t['price'])) > 1e-9:
+                seen_nz += 1          # 这一笔确实换算过（因子 != 1）
+            if not (b['low'] * 0.995 <= t['price'] <= b['high'] * 1.005):
+                bad.append('%s %s %s 价 %.4f 而当日 %.3f~%.3f'
+                           % (c, t['date'], t['side'], t['price'],
+                              b['low'], b['high']))
+    assert checked >= 30, '只核到 %d 笔，样本太少' % checked
+    # 反向自证：真的有换算发生，否则上面的"全都落在区间内"什么都没证
+    assert seen_nz > 0, \
+        ('这 %d 笔里没有一笔的因子 != 1 —— 判据是空转的'
+         '（第一次手查就是这么被骗过去的）' % checked)
+    assert not bad, \
+        ('回测浮层的买卖点飘出【不复权】K 线区间 %d/%d 笔 —— '
+         '多半是 `api_run_trades_of` 的行里又没带 `code`，'
+         '`_to_raw` 静默不换算：\n  %s'
+         % (len(bad), checked, '\n  '.join(bad[:5])))
+    # 🔴 另一头：`_to_raw` **不许静默跳过**。上面那条验的是"现在对不对"，
+    #   这条验的是"下一个调用方忘了带 `code` 时会不会又悄悄不换算" ——
+    #   原来那句 `if not fac: return` 正是这个 bug 藏这么久的原因。
+    #   ★ 两条的分工说得清才都留：一条是行为、一条是**将来**的防线。
+    _fired = False
+    try:
+        _R._to_raw([{'date': '2026-09-18', 'shares': 1.0, 'price': 1.0}],
+                   _R._dl_root(rid), [('date', 'shares', ('price',))])
+    except AssertionError as _e:
+        _fired = '忘了在行里带' in str(_e)
+    assert _fired, \
+        '_to_raw 拿到没有 code 的行却没炸 —— 换算会静默跳过，' \
+        '而调用方毫不知情（那正是这次 bug 的成因）'
+
+    return '归档 %s：%d 笔逐笔核对，其中 %d 笔真的换算过（因子 != 1），全部落在不复权 K 线内' % (
+        rid, checked, seen_nz)
+
+
 @case('回测的份额与价格展示【不复权】：真实股数必须是整手', tag='slow')
 def t_backtest_raw_units():
     """2026-09-14 用户："交易记录的价格为什么是后复权的？展示出来的应该是

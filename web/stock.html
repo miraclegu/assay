@@ -1343,7 +1343,10 @@ function redraw() {
   const wantBoll = KMAIN.indexOf('boll') >= 0;
   const bars = (wantMa && !wantBoll) ? BARS : BARS.map((b, i) => {
     const o = Object.assign({}, b);
-    if (!wantMa) ['ma5', 'ma10', 'ma20', 'ma60'].forEach(k => delete o[k]);
+    /* 🔴 用 `MA_KEYS`（kchart.js 的唯一一份）——写死清单的话，加了
+       MA40/MA120 之后"没勾均线"删不掉它们两条，**照画且不报错**
+       （2026-09-21 加两条均线时差点就这么发出去）。 */
+    if (!wantMa) MA_KEYS.forEach(k => delete o[k]);
     if (wantBoll && IND && IND[i]) { o.ub = IND[i].ub; o.lb = IND[i].lb; }
     return o;
   });
