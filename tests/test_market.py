@@ -4462,3 +4462,307 @@ def t_indicator_plaza():
     return '；'.join(notes)
 
 
+
+
+@case('主要指数常驻带子：每个页面都有 / 清单来自服务端 / 收盘不轮（playwright）',
+      tag='web')
+def t_index_bar():
+    """用户 2026-09-19：「把主要的指数都实时获取，比如上证指数、创业板、
+    科创50、中证500、微盘股等等（始终显示在最上方或最下方，不用特别大和
+    显眼，普通字体大小即可）」。
+
+    🔴 **挂在 `common.js`** —— 6 个独立 .html 与 index.html 都加载它，
+      所以任何页面都看得到（同炸板浮窗那条：挂在某一页的话，
+      人正在看别的页面时就没有了）。这条判据要**逐个页面**验，
+      而且要用 `_pages()` 扫出来的清单、不写死路径
+      （写死的话新页面自动不在保护里 —— 那条纪律的另一半）。
+
+    🔴 **「微盘股」给不了**：万得 8841431.WI 是**万得专有**，
+      腾讯与 tdx 都不提供（2026-09-19 逐个写法试过：`sh932000`
+      中证2000 也取不到）。这里给的是**国证2000** —— 同为"小市值 2000 只"
+      口径但**大一档**，所以名字里**不写"微盘"**，只写它本来的名字
+      （同「不拿 ETF 当指数用」：近似物要叫自己的名字）。
+
+    ★ 判据落在**可量的事实**上：项数 == 服务端清单、字号是普通大小
+      （不是放大的）、真的贴在视口底边、body 留出了等高的白。
+    """
+    import shutil
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import realtime as _rt
+    from assay import server as sv
+
+    # ---- 服务端清单本身 ----
+    assert len(_rt.INDICES) >= 6, '指数清单太短：%d' % len(_rt.INDICES)
+    syms = [c for c, _ in _rt.INDICES]
+    assert len(set(syms)) == len(syms), '清单里有重复代码'
+    for c, short in _rt.INDICES:
+        assert re.match(r'^(sh|sz|bj)\d{6}$', c), '代码形状不对：%r' % c
+        assert short and len(short) <= 8, '短名太长，带子会被撑开：%r' % short
+    # 🔴 **不许出现"微盘"** —— 本地与腾讯都没有那个指数，叫这个名字
+    #   等于把一个近似物冒充成它（同「不拿 ETF 当指数用」那条）。
+    assert not any('微盘' in s for _, s in _rt.INDICES), \
+        ('清单里有叫"微盘"的 —— 万得微盘股是专有指数，腾讯/tdx 都没有，'
+         '给的其实是国证2000 之类的近似物，不能顶着那个名字')
+
+    d = _rt.indices()
+    assert d['items'], '一条指数都没取到（网络？）'
+
+    # ---- 🔴🔴 自建「微盘400」----
+    #   万得微盘股拿不到，而国证2000 **每 5 天就有 1 天把方向说反**
+    #   （2024-01 起 658 个交易日：日差 sd 1.39pp、|差|>1pp 占 38.6%、
+    #   **方向相反占 19.6%**）。所以这一格自己算。
+    mic = next((r for r in d['items']
+                if str(r['symbol']).startswith('micro')), None)
+    assert mic, '带子里没有自建的微盘格'
+    assert '微盘' in mic['short'] and str(_rt.MICRO_N) in mic['short'], \
+        ('名字要自己说清是什么（"微盘400"）—— 它是近似物，'
+         '不能顶着万得那个指数的名字：%r' % mic['short'])
+    # 🔴 **没有点位就不给点位**：等权组合没有"点位"这回事，
+    #   编一个出来就是造了个看着像指数的数。
+    assert mic['price'] is None, \
+        '等权组合不该有点位，却给了 %r' % mic['price']
+    assert mic.get('n', 0) >= _rt.MICRO_N * 0.6, \
+        '只有 %s 只有成交，样本太少不该给这一格' % mic.get('n')
+
+    # 🔴 **最硬的自证：实时链算出来的 == 面板算出来的。**
+    #   两条路完全独立（腾讯快照 vs 本地面板），对得上才说明
+    #   成分与等权那两步都没算错。
+    # 🔴 前提是**两条路落在同一天上**（2026-09-21 修）。原来的门是
+    #   `not d['session']`，注释写着"收盘后跑时两者是同一天" —— 而
+    #   `session=False` 同时命中三种情况，其中两种**跨天**：
+    #       ① 午休 11:31~13:00        实时=今天上午、面板=上一个交易日
+    #       ② 收盘后 ~ 当晚同步完成     同样跨天
+    #       ③ 同步之后 / 非交易日       ← 只有这种才是它想要的
+    #   实测 09-21 周一午休时假失败：实时 +2.15% vs 面板 +0.38%（上周五）。
+    #   **判据该钉"同一天"，不是"收没收盘"。**
+    _micro_xcheck = None
+    import os as _os
+    _root = _os.environ.get('ASSAY_DATALAKE') or \
+        _os.path.join(_os.path.dirname(REPO), 'datalake')
+    import duckdb as _dd
+    _P = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _root
+    _pday = str(_dd.connect().execute(
+        'SELECT max(date) FROM %s' % _P).fetchone()[0] or '').replace('-', '')
+    _rday = str(d.get('asof') or '')[:8]
+    if not d['session'] and _pday and _rday and _pday == _rday:
+        _panel = _dd.connect().execute(
+            "WITH r AS (SELECT change_pct, row_number() OVER "
+            "(ORDER BY totalmv) rk FROM %s WHERE date = "
+            "(SELECT max(date) FROM %s) AND totalmv > 0 AND change_pct IS NOT NULL "
+            "AND public_status IN ('正常上市','ST','*ST')) "
+            "SELECT avg(change_pct) FROM r WHERE rk <= %d"
+            % (_P, _P, _rt.MICRO_N)).fetchone()[0]
+        assert abs(mic['change_pct'] - _panel) < 0.05, \
+            ('实时链算的 %+.2f%% 与面板算的 %+.2f%% 对不上 —— '
+             '成分或等权那一步错了' % (mic['change_pct'], _panel))
+        _micro_xcheck = '实时链 %+.2f%% == 面板 %+.2f%%（同为 %s）' % (
+            mic['change_pct'], _panel, _rday)
+    else:
+        # ★ 跳过要**说出来**，不然"这条自证有没有跑"看不出来（静默跳过
+        #   等于判据悄悄消失）。
+        _micro_xcheck = '跨天/盘中，跳过实时↔面板互证（实时 %s / 面板 %s%s）' % (
+            _rday or '?', _pday or '?', '，盘中' if d['session'] else '')
+
+    # ---- 🔴 停牌/取不到的成分**不许算成 0%** ----
+    #   算成 0 会把一批没交易的票当成"今天平盘"，等权平均被系统性拉向 0。
+    #   ★ 这条**必须构造**：真实 400 只当前全都取得到，那条路平时
+    #     一步都走不到（变异「停牌算 0」第一轮就是这么漏的）。
+    _bak_m = list(_rt._MICRO['syms'])
+    try:
+        _rt._MICRO['syms'] = _bak_m + ['sh999999'] * 20   # 20 个取不到的
+        _rt._IDX_CACHE.update(at=0, rows=[])
+        d3 = _rt.indices(force=True)
+        m3 = next(r for r in d3['items'] if str(r['symbol']).startswith('micro'))
+        assert m3['n'] == mic['n'], \
+            ('塞了 20 个取不到的成分之后样本数从 %s 变成 %s —— '
+             '它们被算进去了' % (mic['n'], m3['n']))
+        assert abs(m3['change_pct'] - mic['change_pct']) < 0.01, \
+            ('塞了 20 个取不到的成分之后涨跌从 %+.2f%% 变成 %+.2f%% —— '
+             '它们被当成 0%% 算进了等权平均'
+             % (mic['change_pct'], m3['change_pct']))
+    finally:
+        _rt._MICRO['syms'] = _bak_m
+        _rt._IDX_CACHE.update(at=0, rows=[])
+
+    # ★ 小市值那一档必须排在**前面**：窄屏上带子会横滚，
+    #   排后面的默认看不见（实测 1280px 只露得出前 8 格）。
+    _order = [r['short'] for r in d['items']]
+    for _k in (mic['short'], '国证2000'):
+        assert _k in _order[:6], \
+            '%s 排在第 %d 位 —— 窄屏上要滚出来才看得见' % (_k, _order.index(_k) + 1)
+    assert len(d['items']) >= len(_rt.INDICES) - 1, \
+        '清单 %d 个，只取到 %d 个' % (len(_rt.INDICES), len(d['items']))
+    assert isinstance(d['session'], bool), 'session 必须由服务端给（前端不判时段）'
+    for r in d['items']:
+        # ★ 分两种：**指数**必须有点位且 >0；**自建的等权组合**没有点位
+        #   （`price is None`）—— 那不是缺失，是它本来就没有这回事。
+        #   两者都不许出现 0（0 会被读成"今天是 0 点"）。
+        if str(r['symbol']).startswith('micro'):
+            assert r['price'] is None, \
+                '等权组合不该有点位，却给了 %r' % r['price']
+        else:
+            assert r['price'] and r['price'] > 0, '%s 价格是 0' % r['short']
+        assert r['change_pct'] is not None, '%s 没有涨跌幅' % r['short']
+
+    # ---- 🔴 取不到的**不许塞 0**，要整格不显示 ----
+    #   （同「空结果一律当失败」「拿不到分红那一格标查不到，不猜一个数」）
+    #   ★ 这条**必须构造**：真实的 9 个指数全都取得到，那条分支平时
+    #     一步都走不到 —— 变异「取不到就塞 0」第一轮就是这么漏的。
+    _bak = list(_rt.INDICES)
+    try:
+        _rt.INDICES.append(('sh999999', '不存在'))
+        _rt._IDX_CACHE.update(at=0, rows=[])     # 绕开 20 秒缓存
+        d2 = _rt.indices(force=True)
+        _got = {r['symbol'] for r in d2['items']}
+        assert 'sh999999' not in _got, \
+            ('取不到的指数被塞了一格（price=%s）—— 屏幕上会出现一个 0.00，'
+             '而那看着像"这个指数今天是 0"'
+             % next((r['price'] for r in d2['items']
+                     if r['symbol'] == 'sh999999'), '?'))
+        assert len(d2['items']) >= len(_bak) - 1, \
+            '加了个取不到的代码之后，别的指数也没了'
+    finally:
+        _rt.INDICES[:] = _bak
+        _rt._IDX_CACHE.update(at=0, rows=[])
+
+    prev = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            # ★ 逐个页面验 —— 清单**扫出来**（同 `_pages()` 那条纪律）
+            pages = ['#/'] + [x for x in _pages()]
+            seen = 0
+            for u in pages:
+                pg.goto(base + u.lstrip('/'), wait_until='networkidle')
+                # 🔴 **不要直接等选择器** —— 带子没挂上时那是一句 25 秒
+                #   超时，**报错指不到原因**（同「报错必须指向真正的原因」）。
+                #   等页面渲染完，再自己判有没有这条带子。
+                pg.wait_for_selector('#top', timeout=20000)
+                try:
+                    pg.wait_for_selector('#idxbar', timeout=8000)
+                except Exception:                           # noqa: BLE001
+                    raise AssertionError(
+                        '%s 上没有指数带子 —— 它挂在 common.js 上，'
+                        '本该**每个页面**都有（同炸板浮窗那条）' % u)
+                pg.wait_for_timeout(250)
+                n = pg.eval_on_selector_all('#idxbar .ix', 'es => es.length')
+                assert n == len(d['items']), \
+                    '%s 上的带子有 %d 项，服务端给了 %d 项' % (u, n, len(d['items']))
+                box = pg.eval_on_selector('#idxbar', """e => {
+                    const r = e.getBoundingClientRect(), c = getComputedStyle(e);
+                    return {bottom: r.bottom, h: r.height,
+                            fs: parseFloat(c.fontSize), pos: c.position}; }""")
+                assert box['pos'] == 'fixed', \
+                    '%s 上的带子不是固定的 —— 滚下去就看不见了' % u
+                assert abs(box['bottom'] - 950) < 2, \
+                    '%s 上的带子没贴住视口底边（bottom=%s）' % (u, box['bottom'])
+                # 「不用特别大和显眼」——普通字号
+                assert 11 <= box['fs'] <= 13, \
+                    '带子字号 %spx，用户要的是普通大小' % box['fs']
+                # 🔴 fixed 会盖住页面底部内容 -> body 必须留出等高的白
+                pb = pg.eval_on_selector(
+                    'body', 'e => parseFloat(getComputedStyle(e).paddingBottom)')
+                assert pb >= box['h'] - 2, \
+                    ('%s 的 body 只留了 %spx，而带子高 %spx —— 会盖住页面'
+                     '最下面那行' % (u, pb, box['h']))
+                seen += 1
+            # 🔴 没有点位的那一格，页面上**不许冒出一个 0.00**
+            #   （`Number(null).toFixed(2)` 就是 '0.00'，而那看着像
+            #   "这个指数今天是 0 点"）。
+            _mtxt = pg.eval_on_selector_all(
+                '#idxbar .ix',
+                "es => es.map(e => e.innerText.replace(/\\s+/g,' ').trim())")
+            _mcell = [x for x in _mtxt if x.startswith(mic['short'])]
+            assert _mcell, '页面上没有微盘那一格：%s' % _mtxt[:3]
+            assert '0.00' not in _mcell[0].split('%')[0], \
+                '微盘那格显示了假点位：%r' % _mcell[0]
+            assert '%' in _mcell[0], '微盘那格没有涨跌幅：%r' % _mcell[0]
+
+            # ---- ⚙ 设置：显示哪些 / 什么顺序 ----
+            bar = lambda: pg.eval_on_selector_all(
+                '#idxbar .ix b', 'es => es.map(e => e.innerText.trim())')
+            base_order = bar()
+            assert pg.query_selector('#idxcfg'), '带子上没有设置入口'
+            pg.click('#idxcfg')
+            pg.wait_for_selector('#idxcfgw table', timeout=10000)
+            n_rows = pg.eval_on_selector_all('#idxcfgw tr', 'es => es.length')
+            assert n_rows == len(d['items']), \
+                '设置面板列了 %d 行，而服务端给了 %d 格' % (n_rows, len(d['items']))
+            # ① 勾掉一个 -> 带子里少一个
+            _off = d['items'][-1]['symbol']
+            pg.uncheck('#idxcfgw input[data-c="%s"]' % _off)
+            pg.wait_for_timeout(300)
+            assert len(bar()) == len(base_order) - 1, '勾掉一个之后带子没少'
+            # ② 上移 -> 顺序真的变
+            _sym, _mv = d['items'][-2]['symbol'], d['items'][-2]['short']
+            for _ in range(4):
+                e = pg.query_selector('#idxcfgw a[data-up="%s"]' % _sym)
+                if not e or not e.is_visible():
+                    break
+                e.click()
+                pg.wait_for_timeout(150)
+            assert bar().index(_mv) < base_order.index(_mv), \
+                '点了上移，带子里的位置没往前：%s' % bar()
+            # ③🔴 **刷新之后还在**（不然设置等于没设）
+            moved = bar()
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#idxbar .ix', timeout=20000)
+            pg.wait_for_timeout(900)
+            assert bar() == moved, '刷新之后设置丢了：%s -> %s' % (moved, bar())
+            # ④🔴 **全关掉时那个齿轮必须还在** —— 否则设置入口自己消失、
+            #    再也打不开（同 backLink 那条：死路比不给更糟）。
+            _all = json.dumps([r['symbol'] for r in d['items']])
+            pg.evaluate("() => localStorage.setItem('idxpref', JSON.stringify("
+                        "{hide: %s, order: []}))" % _all)
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#idxbar', timeout=20000)
+            pg.wait_for_timeout(900)
+            assert not bar(), '全关掉了却还显示着：%s' % bar()
+            assert pg.query_selector('#idxcfg'), \
+                ('全关掉之后设置入口也没了 —— 那就再也打不开这个面板')
+            # ⑤🔴 存的是【隐藏列表】不是显示列表 —— 服务端将来加一个指数时
+            #    它必须**自动出现**（同「加一个指标，广场上自动就有」）。
+            pg.evaluate("() => localStorage.setItem('idxpref', JSON.stringify("
+                        "{hide: ['sh000001'], order: []}))")
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#idxbar .ix', timeout=20000)
+            pg.wait_for_timeout(900)
+            _now = bar()
+            assert len(_now) == len(d['items']) - 1, \
+                ('只藏了 1 个却显示 %d/%d —— 存的怕是"显示列表"，'
+                 '那样新加的指数会静默不出现' % (len(_now), len(d['items'])))
+            pg.evaluate("() => localStorage.removeItem('idxpref')")
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#idxbar .ix', timeout=20000)
+            pg.wait_for_timeout(900)
+
+            txt = pg.inner_text('#idxbar')
+            assert ('实时' in txt or '已收盘' in txt), \
+                ('带子上没说这是实时还是收盘值 —— 两者差一天而屏幕上'
+                 '长得一模一样（同「数据日与报价时间写同一个标签」）')
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            br.close()
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE = prev
+    return ('%d 个页面上都有 %d 个指数（fixed 贴底、%s、body 留白）；'
+            '清单与时段判据都来自服务端；%s'
+            % (seen, len(d['items']), '已收盘' if not d['session'] else '实时',
+               _micro_xcheck))

@@ -7,7 +7,9 @@
 """
 from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
-                         _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop)
+                         _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop,
+                          _lv_open_newform, _lv_new_account,
+                          _lv_bind_strategy)
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
 
 
@@ -1142,7 +1144,21 @@ def t_live_ui():
             base = 'http://127.0.0.1:%d/' % port
             pg.goto(base + '#/live', wait_until='networkidle')
             pg.wait_for_timeout(500)
-            assert '还没有账户' in pg.content(), '空态没显示'
+            # 🔴 空账本时**两个区都要说清它是什么**，不能是一片空白。
+            #   原来这里查的是全局那句「还没有账户」—— 2026-09-17 侧栏改成
+            #   「实盘 / 模拟盘」两区之后那句话没有了，每区各给自己的空态说明。
+            #   **失败的是断言不是产品**，但它原本要保的东西不能丢：
+            #   钉成"两个区都在 + 各自有空态说明"（藏起来的话，从没建过
+            #   模拟盘的人根本不知道有这功能）。
+            _z = pg.evaluate('''() => [...document.querySelectorAll('.dzone')]
+                .map(z => ({zone: z.dataset.zone,
+                            items: z.querySelectorAll('.ditem').length,
+                            hint: (z.querySelector('.dzempty') || {}).textContent || ''}))''')
+            assert [x['zone'] for x in _z] == ['live', 'paper'], \
+                '账户区不是【实盘、模拟盘】两个：%s' % _z
+            for x in _z:
+                assert x['items'] or len(x['hint'].strip()) >= 8, \
+                    '空的「%s」区没说明它是什么 —— 一片空白等于藏起来：%s' % (x['zone'], _z)
             # ★ tdx.raw_holidays 是权威来源，不该弹"日历不权威"告警。
             #   前端曾硬编码 `source !== 'jq...'`，每次打开都弹一条假告警 ——
             #   假告警看多了就不看告警了。
@@ -1156,11 +1172,7 @@ def t_live_ui():
             # 建账户：id 自动，只填名称
             assert pg.locator('#na').count() == 0, '新建表单不该再要用户填 id'
             # 创建账户的表单默认收起（它平时不用），先点「+ 新建账户」
-            pg.click('#lvnew')
-            pg.wait_for_selector('#nn', state='visible', timeout=8000)
-            pg.fill('#nn', 'UI 测试')
-            pg.fill('#nc', '400000')
-            pg.click('#nb')
+            _lv_new_account(pg, 'UI 测试', 400000)
             pg.wait_for_timeout(700)
             assert pg.locator('.ditem.on').count() == 1, '新账户没被选中'
 
@@ -1178,9 +1190,9 @@ def t_live_ui():
             nxt = min(d for d in days if d > t1)
             wk = [d for d in days if d.isocalendar()[:2] == nxt.isocalendar()[:2]]
             wd = wk.index(nxt) + 1
-            pg.fill('#bp', 'strategies/小市值/froec_traded.py')
-            pg.fill('#bj', '{"stop_loss":0.35,"stop_intraday":1,"weekday":%d}' % wd)
-            pg.click('#bb')
+            _lv_bind_strategy(
+                pg, 'strategies/小市值/froec_traded.py',
+                '{"stop_loss":0.35,"stop_intraday":1,"weekday":%d}' % wd)
             pg.wait_for_timeout(1500)
             assert pg.locator('.stbox').count() == 0, '绑定后浮层该关掉'
 
@@ -1519,12 +1531,14 @@ def t_live_ui():
 
             # ---- 侧栏可收起，且收起后仍看得到告警点 ----
             assert pg.locator('#dk .dside').count() == 1, '默认应展开'
-            assert pg.locator('#nform').count() == 1 and \
-                not pg.locator('#nform').is_visible(), \
-                '创建账户的表单应默认收起（点「+ 新建账户」才展开）'
-            pg.click('#lvnew')
-            pg.wait_for_timeout(200)
-            assert pg.locator('#nform').is_visible(), '点「+ 新建账户」应展开'
+            # 建账户表单默认收起（它平时不用），点「+ 新建」才展开。
+            # 🔴 表单现在**长在它所属的那个区里**（`#nf_live` / `#nf_paper`），
+            #   不再是全局一个 `#nform` —— mode 由区决定，表单里没有
+            #   "这是模拟盘吗"这个选项，也就没法填错。
+            assert pg.locator('#nf_live .nform').count() == 0, \
+                '创建账户的表单应默认收起（点「+ 新建」才展开）'
+            _lv_open_newform(pg, 'live')
+            assert pg.locator('#nf_live .nform').is_visible(), '点「+ 新建」应展开'
             pg.click('#lvfold')
             pg.wait_for_timeout(900)
             assert pg.locator('#dk.fold').count() == 1 and \
@@ -3776,8 +3790,28 @@ def t_paper_trading():
         notes.append('对账不一致 -> 报出来且账本一个字节没动')
 
         # ---- ⑦ reset 只删引擎写的那些，不碰手工录的 ----
+        # 🔴 **绑了策略的模拟盘现在【不许】手工录**（2026-09-18 加的规则，
+        #   理由是手工那几笔引擎不会跑出来 -> 下次推进必然 mismatch）。
+        #   于是这一步的老写法当场被拦 —— **失败的是构造不是产品**：
+        #   它要证的是「reset 不碰手工录的那几笔」，而那种记录**真实存在**
+        #   （在绑策略之前录的，或者手工模拟盘后来才绑）。
+        #   所以照那个真实路径构造：先解绑、录一笔、再绑回去。
+        _accs = json.load(open(os.path.join(lv.LIVE, 'accounts.json')))
+        _sha_bak = None
+        for _x in _accs:
+            if _x['id'] == 'sim':
+                _sha_bak = _x.get('code_sha256')
+                _x['code_sha256'] = None
+        json.dump(_accs, open(os.path.join(lv.LIVE, 'accounts.json'), 'w'),
+                  ensure_ascii=False)
         lv.add_fill('sim', '2026-08-05', FR and fills[0]['code'], 'buy', 100,
                     price=10.0, fee=5.0, source='manual', force_price=True)
+        _accs = json.load(open(os.path.join(lv.LIVE, 'accounts.json')))
+        for _x in _accs:
+            if _x['id'] == 'sim':
+                _x['code_sha256'] = _sha_bak
+        json.dump(_accs, open(os.path.join(lv.LIVE, 'accounts.json'), 'w'),
+                  ensure_ascii=False)
         n_manual = len([f for f in lv.fills('sim') if f['source'] == 'manual'])
         assert n_manual == 1
         lv.reset('sim')
@@ -5597,3 +5631,1790 @@ def t_bench_custom():
     return '；'.join(notes)
 
 
+
+
+@case('实盘 / 模拟盘分两个账户区：在哪个区建就是哪种（playwright）', tag='web')
+def t_live_zones():
+    """用户 2026-09-17："希望模拟盘有一个单独的入口……或者说账户区域和实盘的
+    分开也可以，现在左边有一块实盘账号区了，再加一个模拟盘账号区，
+    在里面创建的就是模拟盘。"
+
+    ★ **没做成顶栏第 8 个入口**：模拟盘与实盘是**同一个页面、同一套 hash 路由**
+      （`#/live/<id>`）—— 多一个顶栏入口的话，打开模拟盘账户时那两个该亮哪个？
+      而顶栏高亮本来就是回答"我在哪"的。顶栏是按"今天要做什么"分组的，
+      而模拟盘不是一件独立的事，它是**另一批账户**。
+
+    🔴 **`mode` 从"勾选框"变成"在哪个区里点的新建"** —— `mode` 建好之后
+      **不能改**（同一本账混着真实成交与引擎成交就说不清了），所以那个
+      勾选框是最容易填错、代价又最大的一处。少一个能填错的概念。
+
+    🔴 **判据要落在【账本里存的 mode】上**，不是"按钮上写了什么字" ——
+      后者在 POST 漏传 mode 时照样绿（那时两个区建出来的都是实盘，
+      **而它不报错**，只是模拟盘区里多了个不会自己推进的账户）。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    def _wait_acct(name, secs=20):
+        """轮询**账本**直到这个账户出现 —— 不看 DOM。
+
+        🔴 页面建完立刻 `showLive()` 整页重渲染，成功提示当场就没了；
+          而"模拟盘区里出现了账户"这个条件在「漏传 mode」「不分组」
+          「服务端 paper 恒 False」三种变异下**都不成立** —— 等它就是
+          超时 20 秒，**报错指不到真正的原因**。
+          等账本则三条各自落到自己那句断言上。
+        """
+        import time as _t
+        t0 = _t.time()
+        while _t.time() - t0 < secs:
+            hit = [x for x in lv.load_accounts() if x['name'] == name]
+            if hit:
+                return hit[0]
+            _t.sleep(0.2)
+        raise AssertionError('建了 %s 但账本里一直没出现（%d 秒）' % (name, secs))
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_zone_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')          # 🔴 不许写真账本
+    # 🔴 **「模拟盘区为空」这个前提要【构造】，不能靠"真账本里恰好没有"。**
+    #   2026-09-18 用户在页面上真建了第一个模拟盘，这条当场变红 ——
+    #   而产品是好的（同「断言要在能触发的构造上跑」「判据不许依赖真实
+    #   数据碰巧如此」那两条）。所以拷完之后把 paper 账户全摘掉。
+    _ap = os.path.join(lv.LIVE, 'accounts.json')
+    _keep = [x for x in json.load(open(_ap)) if not lv.is_paper(x)]
+    assert _keep, '构造不对：清掉模拟盘之后一个实盘账户都不剩'
+    json.dump(_keep, open(_ap, 'w'), ensure_ascii=False)
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live' % port, wait_until='networkidle')
+            pg.wait_for_selector('.dzone[data-zone=paper]', timeout=30000)
+
+            # ---- ① 两个区都在，且**空的那个也显示**（藏起来 = 没有这个功能）----
+            zs = pg.evaluate("[...document.querySelectorAll('.dzone')].map(e=>e.dataset.zone)")
+            assert zs == ['live', 'paper'], '账户区不是【实盘、模拟盘】两个：%s' % zs
+            assert pg.eval_on_selector_all('.dzone[data-zone=paper] .ditem', 'a=>a.length') == 0, \
+                '构造不对：临时账本里的模拟盘没清干净'
+            assert pg.query_selector('.dzone[data-zone=paper] .dzempty') is not None, \
+                '空的模拟盘区没显示说明 —— 从没建过的人根本不知道有这功能'
+            # 建账户表单里**不许**再有"这是模拟盘吗"这个选项
+            assert pg.query_selector('#npaper') is None, \
+                '模拟盘还是靠勾选框选的 —— 那是最容易填错、且改不回来的一处'
+
+            # ---- ② 在模拟盘区建 -> 账本里必须是 paper ----
+            _lv_new_account(pg, '判据模拟盘', 100000, zone='paper')
+            _a1 = _wait_acct('判据模拟盘')
+            assert lv.is_paper(_a1), \
+                '模拟盘区建出来的不是 paper：%r' % _a1.get('mode')
+
+            # ---- ③ 反向自证：实盘区建出来的必须【不是】paper ----
+            #   只测一个方向的话，"两个区都建 paper" 照样绿。
+            _lv_new_account(pg, '判据实盘', 100000, zone='live')
+            _a2 = _wait_acct('判据实盘')
+            assert not lv.is_paper(_a2), \
+                '实盘区建出来的成了 paper：%r' % _a2.get('mode')
+
+            # ---- ④ 建完要落进对应的区（分组读的是服务端给的 paper 布尔）----
+            pg.goto('http://127.0.0.1:%d/#/live' % port, wait_until='networkidle')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('.dzone[data-zone=live] .ditem', timeout=20000)
+            names = pg.evaluate("""() => {
+              const pick = z => [...document.querySelectorAll(
+                '.dzone[data-zone=' + z + '] .ditem')].map(e => e.textContent.trim());
+              return {live: pick('live'), paper: pick('paper')};
+            }""")
+            assert any('判据模拟盘' in x for x in names['paper']), \
+                '模拟盘没落进模拟盘区：%s' % names
+            assert any('判据实盘' in x for x in names['live']), \
+                '实盘没落进实盘区：%s' % names
+            assert not any('判据模拟盘' in x for x in names['live']), \
+                '模拟盘同时出现在实盘区：%s' % names
+
+            # ---- ⑤ 展开态与收起态的【顺序必须一致】 ----
+            #   🔴 rail 原来直接用账本原始顺序，而展开态按 real/paper 分组 ——
+            #     "先建模拟盘、后建实盘"的账本上两态就**反着排**，收起再展开
+            #     同一个账户跳到另一个位置，**而它不报错**。
+            #   🔴 **这条必须构造**：真账本里模拟盘本来就排在最后，
+            #     不把它挪到最前面的话两种实现给出同样的顺序，判据空转。
+            import json as _json
+            _ap = os.path.join(lv.LIVE, 'accounts.json')
+            _acc = _json.load(open(_ap))
+            _acc = ([x for x in _acc if lv.is_paper(x)]
+                    + [x for x in _acc if not lv.is_paper(x)])
+            assert lv.is_paper(_acc[0]), '构造不对：账本第一个应是模拟盘'
+            _json.dump(_acc, open(_ap, 'w'), ensure_ascii=False)
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('.dzone[data-zone=paper] .ditem', timeout=20000)
+            _exp = pg.evaluate("[...document.querySelectorAll('.dzone .ditem')]"
+                               ".map(e => e.getAttribute('href'))")
+            pg.evaluate("localStorage.setItem('lvfold','1')")
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('.drail .dchip', timeout=20000)
+            # 轨顶部那个「›」展开按钮的 href 是 '#'，不是账户 —— 过滤掉
+            _rail = pg.evaluate('''() => [...document.querySelectorAll('.drail .dchip')]
+                .map(e => e.getAttribute('href'))
+                .filter(h => h && h.startsWith('#/live/'))''')
+            assert _exp == _rail, \
+                '展开态与收起态账户顺序不一致：\n  展开 %s\n  收起 %s' % (_exp, _rail)
+            assert lv.is_paper(lv.get_account(_exp[-1].rsplit('/', 1)[-1])), \
+                '分组后模拟盘应排在最后：%s' % _exp
+            # 收起态两组之间要有分隔（光靠紫边得先注意到颜色差别）。
+            # 🔴 判据取**可量的视觉事实**（真有高度 + 背景不透明），不是
+            #   "那个元素在不在" —— 后者在 CSS 规则被删掉时照样命中
+            #   （元素还在、只是看不见）。变异实测漏过一次。
+            _sep = pg.evaluate('''() => {
+              const es = [...document.querySelectorAll('.drail .dsep')];
+              if (es.length !== 1) return {n: es.length};
+              const cs = getComputedStyle(es[0]);
+              const r = es[0].getBoundingClientRect();
+              return {n: 1, h: r.height, w: r.width, bg: cs.backgroundColor};
+            }''')
+            assert _sep['n'] == 1, '收起态两组之间应有且只有 1 条分隔：%s' % _sep
+            # 🔴 **宽度也要量**：`.drail` 是 flex 列，块级元素没内容就宽 0 ——
+            #   高 1px、宽 0 与"根本没画"在屏幕上无从分辨，而只量高度照样绿
+            #   （实测踩过，是截图时 wait_for_selector 报 hidden 才发现的）。
+            assert _sep['h'] >= 1 and _sep['w'] >= 8 \
+                and 'rgba(0, 0, 0, 0)' not in _sep['bg'], \
+                '分隔线画了但看不见（%s×%s / 背景 %s）' % (
+                    _sep.get('w'), _sep.get('h'), _sep.get('bg'))
+
+            # ---- ⑥ 收起态也要看得出哪个是模拟盘（轨只有 44px，靠紫色边）----
+            pg.evaluate("localStorage.setItem('lvfold','1')")
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('.drail .dchip', timeout=20000)
+            rail = pg.evaluate("""() => {
+              const cs = [...document.querySelectorAll('.drail .dchip[href]')];
+              const pa = cs.filter(c => c.classList.contains('paper'));
+              return {n: cs.length, paper: pa.length,
+                      border: pa.length ? getComputedStyle(pa[0]).borderTopColor : null,
+                      other: cs.filter(c => !c.classList.contains('paper'))
+                               .map(c => getComputedStyle(c).borderTopColor)[0]};
+            }""")
+            pg.evaluate("localStorage.setItem('lvfold','0')")
+            assert rail['paper'] == 1, '收起态没标出模拟盘：%s' % rail
+            assert rail['border'] != rail['other'], \
+                '收起态模拟盘与实盘边框同色 —— 收起来就分不出了：%s' % rail
+
+            assert not errs, '页面抛了异常：%s' % errs[:2]
+            notes.append('两区各自建出 paper/live（判据落在账本的 mode 上）；'
+                         '空区有说明；没有勾选框；收起态紫边可辨')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('账户说明：填得进、三处看得见、空着不占位（playwright）', tag='web')
+def t_account_note():
+    """用户 2026-09-18："实盘、模拟盘可以对账户增加一些说明信息。"
+
+    🔴 **没有加新字段** —— `broker_note` 早就在模型、`upsert_account` 与
+      POST 接口里了（同「先查有没有，再决定写不写」）。真正的问题是：
+      ① 标签叫**「券商备注」**，而**模拟盘根本没有券商** —— 对它是错的；
+      ② 只在 ⚙ 设置浮层第 5 行能填，**主视图/侧栏一个字都不显示**；
+      ③ 于是四个账户的说明**全是空的** —— 写了也看不见，所以没人写。
+
+    所以这一轮改的是「看得见」和「填得到」，不是加字段：
+      设置浮层 单行 input -> 2 行 textarea，标签改「说明」、例子按账户类型给
+      建账户时 就能填（建完再去设置里找的话多半不会填 —— 空了这么久就是证据）
+      主视图   独占一行（不挤进 `.lvhead`，那排已经有 6 样东西）
+      侧栏     名称**下方的小字**（同盘面榜单把「行业」放名称下方那条）
+
+    🔴 **空着时整块不渲染** —— 留一句"（未填写）"就是常驻噪声
+      （同「常驻一条『一切正常』的横幅等于教人忽略这个位置」）。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    def _goto_acct(pg, base, aid):
+        """打开某个账户页，并**等它真的渲染出来**。
+
+        🔴 `pg.goto('#/live/<别的账户>')` 换的只是 hash，**页面不重新加载**，
+          而 `#lvset` / `.lvhead` 这些选择器**上一个账户页上也有** ——
+          于是 `wait_for_selector` 立刻满足，后面的断言跑在**旧页面**上。
+          实测：这条用例"单跑绿、全量 web 偶发红"，根因就是建完账户之后
+          页面停在**新账户**上，goto 回 tgt 时渲染还没跟上，
+          `#lvset` 点开的是新账户的设置浮层（它的说明当然不等于 NOTE）。
+          机器闲时渲染快、恰好不翻车 —— **偶发红比常红更难查**。
+        ★ 判据要等**标题真的变成这个账户**，不是等一个两个页面都有的选择器。
+        """
+        # 🔴 选择器要限定 `#main` —— **设置浮层（`#stwrap`）里也有 `.lvhead h2`**
+        #   （标题是"账户设置"），不限定的话等到的是浮层的标题，
+        #   而那与"页面切到哪个账户"毫无关系（判据比要证的事宽）。
+        nm = next(x['name'] for x in lv.load_accounts() if x['id'] == aid)
+        pg.goto(base + '#/live/' + aid, wait_until='networkidle')
+        pg.wait_for_function(
+            'n => { const h = document.querySelector("#main .lvhead h2");'
+            '       return h && h.textContent.trim() === n; }',
+            arg=nm, timeout=20000)
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_note_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')          # 🔴 不许写真账本
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        accs = [a for a in lv.load_accounts() if not a.get('archived')]
+        assert accs, '构造不对：临时账本里没有账户'
+        tgt, other = accs[0]['id'], (accs[1]['id'] if len(accs) > 1 else None)
+        NOTE = '银河 · 主账户 · 小市值\n本金 40 万'
+        lv.upsert_account(tgt, broker_note=NOTE)
+        if other:
+            lv.upsert_account(other, broker_note='')   # 空的那个用来验"不占位"
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                      # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            # ★ 收**堆栈**不只收消息 —— "Cannot set properties of null" 这种
+            #   消息本身指不到是哪一处（同「报错必须指向真正的原因」）。
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+            _goto_acct(pg, base, tgt)
+            pg.wait_for_selector('.lvnote', timeout=30000)
+
+            # ---- ① 主视图：原文都在（含换行），且**不在** .lvhead 那一排 ----
+            got = pg.inner_text('.lvnote')
+            assert NOTE.split('\n')[0] in got and NOTE.split('\n')[1] in got, \
+                '主视图说明不全（换行被吃掉？）：%r' % got
+            assert pg.eval_on_selector(
+                '.lvnote', 'e => !e.closest(".lvhead")'), \
+                '说明挤进了 .lvhead —— 那一排已经有名称/标签/数据日/策略/三个按钮'
+            # 换行要真的换行（`white-space` 没设的话两句会挤成一行）
+            _ws = pg.eval_on_selector('.lvnote', 'e => getComputedStyle(e).whiteSpace')
+            assert 'pre' in _ws, '说明没保留换行（white-space=%s）' % _ws
+
+            # ---- ② 侧栏：名称下方的小字，且**全文进 title**（截断不许藏没了）----
+            side = pg.evaluate("""() => [...document.querySelectorAll('.ditem')]
+                .map(e => ({href: e.getAttribute('href'),
+                            note: (e.querySelector('.dnote') || {}).textContent || '',
+                            title: e.getAttribute('title') || ''}))""")
+            mine = [x for x in side if x['href'].endswith('/' + tgt)]
+            assert mine and NOTE.split('\n')[0] in mine[0]['note'], \
+                '侧栏没显示说明：%s' % mine
+            assert NOTE.split('\n')[0] in mine[0]['title'], \
+                '说明被截断了却没进 title —— 挪走可以，藏没了不行：%s' % mine
+            # ---- ③ 空说明的账户**一个空位都不占** ----
+            if other:
+                oth = [x for x in side if x['href'].endswith('/' + other)]
+                assert oth and not oth[0]['note'].strip(), \
+                    '说明为空的账户还渲染了小字（常驻噪声）：%s' % oth
+                # 🔴 `goto` 换 hash **不重新加载页面**，而 `.lvhead` 立刻就
+                #   满足（上一个账户的还在）—— 断言会跑在**旧页面**上，
+                #   把"产品对的"报成失败（实测：切过去 1.5 秒后标题才变）。
+                #   要等**标题真的换成这个账户**（同「看着在验持久化、
+                #   其实在读内存」那条的变体）。
+                _goto_acct(pg, base, other)
+                assert pg.query_selector('.lvnote') is None, \
+                    '说明为空时主视图还留着那一行'
+
+            # ---- ④ 建账户时就能填（建完再找的话没人会填）----
+            pg.goto(base + '#/live', wait_until='networkidle')
+            pg.wait_for_selector('.znew[data-zone=paper]', timeout=20000)
+            _lv_open_newform(pg, 'paper')
+            pg.fill('#nf_paper .nn', '说明判据')
+            pg.fill('#nf_paper .nc', '100000')
+            pg.fill('#nf_paper .nd', '验证不手工干预的表现')
+            pg.click('#nf_paper .nb')
+            import time as _t
+            t0 = _t.time()
+            hit = None
+            while _t.time() - t0 < 20:
+                hit = next((x for x in lv.load_accounts()
+                            if x['name'] == '说明判据'), None)
+                if hit:
+                    break
+                _t.sleep(0.2)
+            assert hit, '建账户失败'
+            # 🔴 判据落在**账本里存的值**上 —— 只查"表单里有那个框"的话，
+            #   POST 漏传 broker_note 时照样绿（而它不报错，只是说明丢了）。
+            assert hit.get('broker_note') == '验证不手工干预的表现', \
+                '建账户时填的说明没存进账本：%r' % hit.get('broker_note')
+
+            # ---- ⑤ 设置浮层：标签不许再叫「券商备注」（模拟盘没有券商）----
+            # 🔴 上一步刚建完账户，页面停在**新账户**上 —— 必须等标题切过来，
+            #   否则 `#lvset` 点开的是那个新账户的设置（偶发红的根因）。
+            _goto_acct(pg, base, tgt)
+            pg.click('#lvset')
+            pg.wait_for_selector('#enote', timeout=20000)
+            assert pg.eval_on_selector('#enote', 'e => e.tagName') == 'TEXTAREA', \
+                '说明还是单行 input —— 一句话说不完"这个账户在干什么"'
+            _got = pg.eval_on_selector('#enote', 'e => e.value')
+            if _got != NOTE:
+                # 🔴 失败时把**现场**打出来，不靠猜（同「该在第一次就把失败
+                #   现场打出来」那条）—— 这条曾"单跑绿、全量红"。
+                _ledger = next((x for x in lv.load_accounts()
+                                if x['id'] == tgt), None)
+                _hdr = pg.inner_text('#main .lvhead h2')
+                raise AssertionError(
+                    '设置浮层里没回填当前说明\n'
+                    '  期望   %r\n  框里   %r\n'
+                    '  账本   %r\n  当前页标题 %r（tgt=%s）\n'
+                    '  lv.LIVE=%s' % (
+                        NOTE, _got, (_ledger or {}).get('broker_note'),
+                        _hdr, tgt, lv.LIVE))
+            _lab = pg.eval_on_selector(
+                '#enote', 'e => e.closest(".frow").querySelector("label").textContent')
+            assert '券商' not in _lab, \
+                '标签还叫「%s」—— 模拟盘根本没有券商，对它是错的' % _lab
+
+            assert not errs, '页面抛了异常：%s' % errs[:2]
+            notes.append('主视图独占一行且保留换行；侧栏小字 + 全文进 title；'
+                         '空说明不占位；建账户时填的值落进账本；标签不再是「券商备注」')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('切账户的两处并发：旧那一发不许盖掉新页面（playwright）', tag='web')
+def t_loadlive_race():
+    """🔴 `loadLive` 的 `b = $('#lvbody')` 取在 **await 之前**，而取数据那
+    几百毫秒里 hash 可能已经切到别的账户 —— 回来时 `#lvbody` 已被换掉，
+    往旧的 `b` 写就是写进一个**脱离文档的节点**，紧接着
+    `$('#lvset').onclick` 是 **null**，抛 `Cannot set properties of null`。
+
+    **只在控制台里报，页面看着正常**（新页面自己会渲染），所以一直没人发现
+    —— 是 2026-09-18「账户说明」那条用例**偶发红**才暴露的，连跑三次才
+    复现一次（同 `renderChart` / `lprBar` 往 null 写那次）。
+
+    🔴 **这个竞态必须构造**：正常点击慢得多，真实使用下几乎撞不上，
+      靠"跑几遍碰运气"等于没测（同「断言要在能触发的构造上跑」）。
+      做法是 `pg.route` 把 `/api/live/account` **压慢**，在它还没回来时
+      切到另一个账户。
+    ★ 判据是 **pageerror 一条都没有** + 切过去的那一页**照常可用**
+      （`#lvset` 点得开）—— 只查"没报错"的话，把整个 `loadLive` 删掉也全绿。
+
+    🔴 **`showLive` 那道守卫这条用例【抓不到】** —— 构造出真并发之后，
+      去掉它页面也没被盖回去（诊断过：旧那发回来时标题没变）。
+      它是**冗余防御**，不是这条用例证明的东西。**如实记下来** ——
+      把冗余说成"抓到了"，下次有人就会以为它被覆盖着
+      （同「对数表里不许留只有数、没有判断的行」）。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_race_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        accs = [a for a in lv.load_accounts() if not a.get('archived')]
+        assert len(accs) >= 2, '构造不对：要两个账户才能切'
+        a1, a2 = accs[0]['id'], accs[1]['id']
+        n2 = accs[1]['name']
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                      # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            # 🔴 把账户接口压慢 —— 构造"await 还没回来就切走"
+            def _slow(route):
+                time.sleep(1.2)
+                route.continue_()
+            pg.route('**/api/live/account?*', _slow)
+
+            pg.goto(base + '#/live/' + a1, wait_until='domcontentloaded')
+            pg.wait_for_timeout(250)          # 第一发还在飞
+            pg.evaluate("location.hash = '#/live/' + %r" % a2)
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=n2, timeout=30000)
+            pg.wait_for_timeout(1500)         # 让被切走那一发也回来
+
+            assert not errs, (
+                'loadLive 在 await 期间被切走时往 null 写了 —— '
+                '**只在控制台里报，页面看着正常**：\n%s' % errs[0][:400])
+            # 反向自证：切过去那一页**照常可用**（不是"什么都没渲染所以不报错"）
+            assert pg.eval_on_selector('#main .lvhead h2', 'e => e.textContent.trim()') == n2, \
+                '切过去之后标题不对'
+            pg.click('#lvset')
+            pg.wait_for_selector('#enote', timeout=20000)
+            assert not errs, '打开设置浮层时抛了：%s' % errs[:1]
+
+            # ---- 🔴 更严重的一半：`showLive` 的并发 ----
+            #   它 await 之后无条件写 `#main`，两发并发时**谁后回来谁赢** ——
+            #   于是「hash 指向账户 A、页面显示账户 B」，`LVSEL` 也被盖掉，
+            #   **而它不报错**。真实场景：在列表里连点两个账户。
+            #   构造：让 `/api/live/accounts` **第一发慢、第二发快**，
+            #   于是旧那发后回来 —— 没有代际判据的话它会把新页面盖回去。
+            # ---- 🔴 更严重的一半：`showLive` 的并发 ----
+            #   它 await 之后无条件写 `#main`，两发并发时**谁后回来谁赢** ——
+            #   「hash 指向账户 A、页面显示账户 B」，`LVSEL` 也被盖掉，
+            #   **而它不报错**。真实场景：在列表里连点两个账户。
+            #
+            # 🔴🔴 **构造不能用 `pg.route` + `time.sleep`**：sync API 的
+            #   route handler 跑在 driver 线程上，sleep **把后续请求也堵住**
+            #   —— 两发被串行化，竞态根本没发生（第一版这么写，
+            #   "去掉 showLive 守卫"那条变异**没抓到**，看着像守卫没用）。
+            #   改成在**浏览器里**把第一发的 promise 延后 resolve：
+            #   真并发，且不碰 driver。
+            pg.unroute('**/api/live/account?*')
+            pg.evaluate("""() => {
+              const _j = window.j; let n = 0;
+              window.j = async (u, ...rest) => {
+                const p = _j(u, ...rest);
+                if (String(u).includes('/api/live/accounts') && ++n === 1) {
+                  const r = await p;
+                  await new Promise(z => setTimeout(z, 1500));
+                  return r;
+                }
+                return p;
+              };
+            }""")
+            _n2 = next(x['name'] for x in lv.load_accounts() if x['id'] == a1)
+            pg.evaluate("location.hash = '#/live/' + %r" % a2)   # 第一发（慢）
+            pg.wait_for_timeout(150)
+            pg.evaluate("location.hash = '#/live/' + %r" % a1)   # 第二发（快）
+            # ★ 先等它**真的渲染出来**，再多等 2 秒让被作废的那一发回来 ——
+            #   它若没被挡住就会把页面盖回上一个账户。
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=_n2, timeout=30000)
+            pg.wait_for_timeout(2000)
+            _final = pg.eval_on_selector('#main .lvhead h2', 'e => e.textContent.trim()')
+            assert _final == _n2, (
+                'showLive 的旧那一发把新页面盖回去了 —— '
+                'hash 指着 %r，页面却显示 %r（而它不报错）' % (_n2, _final))
+            assert not errs, '并发切账户时抛了：%s' % errs[:1]
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '构造出 await 期间切走的竞态：0 个 pageerror，且切过去那页照常可用'
+
+
+@case('模拟盘：可设推演起点；绑了策略就不许手工录（playwright）', tag='web')
+def t_paper_start_and_manual():
+    """用户 2026-09-18："模拟账户功能需要有选择策略、设置参数、设置起始时间
+    这些选项，然后自然推演到最近的日期。模拟账户只有在不设置策略的时候，
+    才能手动操作。"
+
+    三条里**选策略 + 设参数本来就有**（策略浮层实盘模拟盘共用），
+    缺的是起始时间与那条手工约束：
+
+    ① **推演起点 `paper_start`** —— 原来 `lv/bench.py` 写死
+       `a['created'][:10]`（开户日），于是模拟盘只能"从今天起"。
+       🔴 **只对模拟盘生效**：实盘那条「策略曲线」必须从开户日起，
+         才能与实际曲线**对齐起点**（同「两条的基点都必须是本金」）。
+       ★ 为什么不直接改 `created`：`prune_runs.py` 拿**最早的 created**
+         当归档保护的分界日 —— 把它设成 2016 会把全部归档保护起来，
+         等于不清理。而业绩页那条权益曲线的起点是**账本第一笔**，
+         所以加新字段不会与它分家（查过 `perf.equity_curve` 的 `d0`）。
+
+    ② **绑了策略就不许手工录**（`pos.add_fill` 一处判，页面能绕过）。
+       理由不是洁癖：`paper.advance` 每次**从起点重放整段**再与账本逐笔
+       对账，手工那几笔引擎不会跑出来 -> **下次推进必然 mismatch**，
+       而它报的原因是"多半是数据被修正过" —— **指不到真正的原因**。
+       ★ 反过来**没绑策略的模拟盘照常能录** —— 那是"手工模拟盘"。
+
+    ③ 已经推演出成交之后**不许静默改起点**（同样会让整段对不上）。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+    from assay.lv import bench as _bench
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_pstart_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        src = next((a for a in lv.load_accounts() if lv.is_paper(a)
+                    and a.get('code_sha256')), None)
+        if src is None:
+            return '跳过（本机没有绑了策略的模拟盘可借版本快照）'
+        pid = src['id']
+
+        # ---- ① 起点只对模拟盘生效；实盘仍是开户日 ----
+        lv.upsert_account('tps', name='起点判据', init_cash=200000,
+                          mode='paper', paper_start='2025-06-02')
+        shutil.copytree(os.path.join(lv.LIVE, pid, 'code'),
+                        os.path.join(lv.LIVE, 'tps', 'code'), dirs_exist_ok=True)
+        shutil.copy(os.path.join(lv.LIVE, pid, 'versions.jsonl'),
+                    os.path.join(lv.LIVE, 'tps', 'versions.jsonl'))
+        _ap = os.path.join(lv.LIVE, 'accounts.json')
+        _d = json.load(open(_ap))
+        for x in _d:
+            if x['id'] == 'tps':
+                x['code_sha256'] = src['code_sha256']
+                x['strategy_path'] = src['strategy_path']
+        json.dump(_d, open(_ap, 'w'), ensure_ascii=False)
+
+        _eng, meta = _bench.build_engine('tps')
+        assert meta.get('start') == '2025-06-02', \
+            '推演起点没生效：引擎 start=%r（设的是 2025-06-02）' % meta.get('start')
+        # 反向自证：开户日是今天，所以"没生效"与"生效"给出的是两个不同的值
+        assert lv.get_account('tps')['created'][:10] != '2025-06-02', \
+            '构造不对：开户日恰好等于设的起点，这条断言分不出生效没有'
+        # 实盘那条必须还是开户日
+        _lv = next((a for a in lv.load_accounts()
+                    if not lv.is_paper(a) and a.get('code_sha256')), None)
+        if _lv:
+            _, m2 = _bench.build_engine(_lv['id'])
+            assert m2.get('start') == _lv['created'][:10], \
+                '实盘的策略曲线起点被带偏了：%r（应为开户日 %r）' % (
+                    m2.get('start'), _lv['created'][:10])
+        # 🔴 **两道守卫，分工别记反**（上一轮刚吃过把冗余说成"抓到了"的亏）：
+        #   base 那道  **根本修复** —— `upsert_account` 直接拒绝实盘设这个字段
+        #   bench 那道 **冗余防御** —— 即使账本里真被塞进去了也不采信
+        # 实盘账户不许设这个字段（base 那道）
+        try:
+            if _lv:
+                lv.upsert_account(_lv['id'], paper_start='2020-01-01')
+                raise AssertionError('实盘账户竟然能设推演起点')
+        except lv.LiveError:
+            pass
+        # bench 那道：**绕过 base 直接往账本塞**，它仍然不许采信 ——
+        # 不绕过的话实盘根本没有这个字段，"实盘也用 paper_start"那个变异
+        # 是**无效**的（两种实现给出同样的结果，判据空转）。
+        if _lv:
+            _d2 = json.load(open(_ap))
+            for x in _d2:
+                if x['id'] == _lv['id']:
+                    x['paper_start'] = '2020-01-01'
+            json.dump(_d2, open(_ap, 'w'), ensure_ascii=False)
+            _, m3 = _bench.build_engine(_lv['id'])
+            assert m3.get('start') == _lv['created'][:10], \
+                ('账本里被塞了 paper_start，实盘的策略曲线就被带偏到 %r '
+                 '（应仍为开户日 %r）—— 它必须与实际曲线对齐起点'
+                 % (m3.get('start'), _lv['created'][:10]))
+            for x in _d2:
+                if x['id'] == _lv['id']:
+                    x.pop('paper_start', None)
+            json.dump(_d2, open(_ap, 'w'), ensure_ascii=False)
+        notes.append('起点只对模拟盘生效（实盘仍是开户日）')
+
+        # ---- ② 绑了策略 -> 服务端拒绝手工录；解绑 -> 放行 ----
+        try:
+            lv.add_fill('tps', '2026-09-17', '600000.XSHG', 'buy', 100,
+                        price=9.10, fee=5)
+            raise AssertionError('绑了策略的模拟盘竟然能手工录成交')
+        except lv.LiveError as e:
+            assert '解绑' in str(e) or '策略' in str(e), \
+                '拒绝了但没说清怎么办：%s' % e
+        # 引擎那条路（source='paper'）不许被误伤
+        lv.add_fill('tps', '2026-09-17', '600000.XSHG', 'buy', 100,
+                    price=9.10, fee=5, source='paper')
+        # 解绑之后照常能录
+        _d = json.load(open(_ap))
+        for x in _d:
+            if x['id'] == 'tps':
+                x['code_sha256'] = None
+        json.dump(_d, open(_ap, 'w'), ensure_ascii=False)
+        lv.add_fill('tps', '2026-09-17', '600519.XSHG', 'buy', 100,
+                    price=None, fee=5)
+        notes.append('绑了策略拒绝手工录（引擎那条路不误伤）；解绑后放行')
+
+        # ---- ③ 已经推演出成交之后不许静默改起点 ----
+        _d = json.load(open(_ap))
+        for x in _d:
+            if x['id'] == 'tps':
+                x['code_sha256'] = src['code_sha256']
+        json.dump(_d, open(_ap, 'w'), ensure_ascii=False)
+        try:
+            lv.upsert_account('tps', paper_start='2024-01-01')
+            raise AssertionError('已经推演过还能静默改起点 —— '
+                                 '下次推进会整段对不上，而报的原因指不到这里')
+        except lv.LiveError as e:
+            assert '重建' in str(e), '拒绝了但没给下一步：%s' % e
+        notes.append('已推演过就不许静默改起点（提示去重建）')
+
+        # ---- ④ 页面：建的时候能设起点 + 点「记一笔」要说清原因 ----
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            pg.goto(base + '#/live', wait_until='networkidle')
+            pg.wait_for_selector('.znew[data-zone=paper]', timeout=30000)
+            _lv_open_newform(pg, 'paper')
+            assert pg.query_selector('#nf_paper .ns') is not None, \
+                '建模拟盘时没法设起点 —— 建完再改的话，推演过就得先重建'
+            pg.fill('#nf_paper .nn', '起点UI判据')
+            pg.fill('#nf_paper .nc', '200000')
+            pg.fill('#nf_paper .ns', '2025-06-02')
+            pg.click('#nf_paper .nb')
+            t0 = time.time()
+            hit = None
+            while time.time() - t0 < 20:
+                hit = next((x for x in lv.load_accounts()
+                            if x['name'] == '起点UI判据'), None)
+                if hit:
+                    break
+                time.sleep(0.2)
+            assert hit, '建账户失败'
+            # 🔴 判据落在**账本里存的值**上：只查"表单里有那个框"的话，
+            #   POST 漏传 paper_start 时照样绿（而它不报错，起点悄悄变成今天）。
+            assert hit.get('paper_start') == '2025-06-02', \
+                '建的时候填的起点没存进账本：%r' % hit.get('paper_start')
+
+            # 点「记一笔」：**不许 disabled**，点了要说清原因
+            _nm = next(x['name'] for x in lv.load_accounts() if x['id'] == pid)
+            pg.goto(base + '#/live/' + pid, wait_until='networkidle')
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=_nm, timeout=30000)
+            assert pg.eval_on_selector('#lvrec', 'e => !e.disabled'), \
+                '按钮设了 disabled —— 项目纪律：一律不设，' \
+                'disabled 的元素连 title 都不触发'
+            pg.click('#lvrec')
+            pg.wait_for_selector('#stwrap .stbox', timeout=20000)
+            _t = pg.inner_text('#stwrap .stbox')
+            assert '绑了策略' in _t and '解绑' in _t, \
+                '点了没说清为什么不能录、怎么办：%r' % _t[:120]
+            assert pg.query_selector('#rcstrat') is not None, \
+                '没给"去解绑策略"的入口 —— 说了不能做却不给下一步'
+            # 🔴 文案里不许有裸 markdown 星号（HTML 渲染不了，会原样显示）
+            assert '**' not in _t, \
+                '浮层文案里有 markdown 星号，页面上会原样显示：%r' % _t[:150]
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            notes.append('页面：建时可设起点（值落进账本）；'
+                         '记一笔不 disabled、点了说清原因且给解绑入口')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('推进完 0 笔成交必须说出为什么（playwright）', tag='web')
+def t_paper_why_empty():
+    """🔴🔴 2026-09-18 用户报「FROEA-TRADE模拟账户我选了起始时间，也推进了，
+    但是没有任何数据出现」。
+
+    查下来不是推进坏了：`paper_start` 存上了、`advanced_to=2026-09-17`、
+    `ok=True` —— 而 **`init_cash=40`（四十元）**，一手股票要几千元。
+    引擎**已经记了 30 条「资金不足一手」拒单**（`broker.rejects`，
+    那行注释就写着"拒单必须可见，不静默"），而 `advance` **没把它带出来**：
+    页面一片空白，**没有任何地方说原因**。链条在这里断了 ——
+    broker 记了，传不到页面等于没记。
+
+    ★ 判据取**引擎自己给的拒单原因**，不自己猜："本金太小"只是这一次的
+      原因，候选池为空 / 起点之后没有调仓日都会表现成同一个"0 笔"，
+      而它们要做的事完全不同。
+    ★ 用**警告样式**不是 ⓘ：它要人去做事（改本金再重建），
+      而「警告不许进 ⓘ」—— 藏起来等于没有。
+    ★ **有成交时整块不渲染** —— 常驻一条"一切正常"等于教人忽略这个位置。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+    from assay.lv import paper as _paper
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_why_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        src = next((a for a in lv.load_accounts() if lv.is_paper(a)
+                    and a.get('code_sha256')), None)
+        if src is None:
+            return '跳过（本机没有绑了策略的模拟盘）'
+        aid = src['id']
+        _ap = os.path.join(lv.LIVE, 'accounts.json')
+
+        def _set(cash, start):
+            d = json.load(open(_ap))
+            for x in d:
+                if x['id'] == aid:
+                    x['init_cash'] = cash
+                    x['paper_start'] = start
+            json.dump(d, open(_ap, 'w'), ensure_ascii=False)
+
+        # ---- ① 本金太小 -> 0 笔，且原因来自引擎的拒单 ----
+        #   🔴 这个构造是**用户的真实现状**（40 元 / 起点 2026-09-01）。
+        _set(40.0, '2026-09-01')
+        _paper.reset(aid)
+        r = _paper.advance(aid)
+        assert r.get('ok'), '推进本身该成功（它没坏）：%s' % r
+        assert r.get('n_fills') == 0, \
+            '构造不对：40 元竟然买到了 %s 笔' % r.get('n_fills')
+        assert r.get('rejects'), \
+            'advance 没把引擎的拒单带出来 —— broker 记了、传不到就等于没记'
+        assert any('资金不足' in x['why'] for x in r['rejects']), \
+            '拒单原因不对：%s' % r['rejects']
+        assert r.get('why_empty') and '40' in r['why_empty'], \
+            '没说清为什么 0 笔（或没提本金）：%r' % r.get('why_empty')
+        assert '重建' in r['why_empty'], \
+            '说了原因却没给下一步 —— 改本金之后必须重建才生效：%r' % r['why_empty']
+
+        # ---- ② 有成交时不许留这块（常驻警告 = 教人忽略这个位置）----
+        _set(400000.0, '2026-09-01')
+        _paper.reset(aid)
+        r2 = _paper.advance(aid)
+        assert r2.get('n_fills', 0) > 0, \
+            '构造不对：40 万也买不到票？%s' % r2
+        assert not r2.get('why_empty'), \
+            '有成交了还在说"一笔都没有"：%r' % r2.get('why_empty')
+        notes.append('0 笔时给出引擎的拒单原因 + 下一步；有成交时不渲染')
+
+        # ---- ③ 页面：警告可见、说了原因、给了下一步；填小数字当场提示 ----
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+            _nm = next(x['name'] for x in lv.load_accounts() if x['id'] == aid)
+
+            # 有成交的那一版：整块不该出现
+            pg.goto(base + '#/live/' + aid, wait_until='networkidle')
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=_nm, timeout=30000)
+            _w = pg.query_selector_all('#main .lvwarn')
+            assert not any('一笔成交都没有' in e.inner_text() for e in _w), \
+                '有成交时页面还挂着"一笔都没有"的警告'
+
+            # 回到 0 笔那一版
+            _set(40.0, '2026-09-01')
+            _paper.reset(aid)
+            _paper.advance(aid)
+            pg.reload(wait_until='networkidle')
+            # 🔴 **不要等那个选择器** —— 页面不渲染那块时是超时 30 秒，
+            #   **报错指不到原因**（同「报错必须指向真正的原因」）。
+            #   等"页面渲染完"，然后自己判有没有那块。
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=_nm, timeout=30000)
+            pg.wait_for_timeout(400)
+            _box = pg.query_selector('#main .lvwarn')
+            assert _box is not None, (
+                '推进出 0 笔，页面却一个字都不说 —— 那正是用户报的'
+                '「也推进了，但是没有任何数据出现」')
+            _t = pg.inner_text('#main .lvwarn')
+            assert '一笔成交都没有' in _t, '页面没说"0 笔"：%r' % _t[:120]
+            assert '资金不足' in _t, '页面没给引擎的拒单原因：%r' % _t[:150]
+            assert '重建' in _t, '页面没给下一步：%r' % _t[:150]
+            # 🔴 同一句话不许说两遍（标题 + 正文都写"一笔成交都没有"）
+            assert _t.count('一笔成交都没有') == 1, \
+                '"一笔成交都没有"说了 %d 遍' % _t.count('一笔成交都没有')
+
+            # 建账户：资金框要写单位，填小数字当场提示
+            pg.goto(base + '#/live', wait_until='networkidle')
+            pg.wait_for_selector('.znew[data-zone=paper]', timeout=20000)
+            _lv_open_newform(pg, 'paper')
+            _ph = pg.eval_on_selector('#nf_paper .nc', 'e => e.placeholder')
+            assert '元' in _ph, \
+                '资金框没写单位（%r）—— 那正是填成 40 的直接原因' % _ph
+            pg.fill('#nf_paper .nc', '40')
+            pg.wait_for_timeout(250)
+            _hint = pg.inner_text('#nf_paper .ncwhy')
+            assert '买不起一手' in _hint and '400,000' in _hint, \
+                '填 40 没当场提示（或没给"是不是想填 40 万"）：%r' % _hint
+            pg.fill('#nf_paper .nc', '400000')
+            pg.wait_for_timeout(250)
+            assert not pg.inner_text('#nf_paper .ncwhy').strip(), \
+                '填了正常金额还在报警 —— 那就是常驻告警'
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            notes.append('页面：警告可见且不重复、给下一步；'
+                         '资金框带单位、填小数字当场提示')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('说了「重建」就得有重建按钮：两个入口都走得通（playwright）', tag='web')
+def t_paper_rebuild_entry():
+    """🔴🔴 **说了下一步就得给入口。**
+
+    上一条用例（0 笔警告）把话说到了「改大初始资金再**重建**即可」，
+    而查 `grep "act:'reset'" web/views/*.js` —— **前端从来没调过它**。
+    也就是说页面指了一条**不存在的**路：0 笔那条警告与对账不一致那个
+    `alert` 都告诉人去重建，而页面上**一个重建按钮都没有**。
+    那是 backLink 那条的反面（「给一个点了没反应的按钮比不给更糟」）的
+    另一面 —— **说了不能做却不给出路，最后会变成绕过整个入口**
+    （同 `force_price` / `--allow-shrink` 那条：硬拒必须配逃生口）。
+
+    两个入口**走同一条重建链**（`paperRebuild`）—— 各写一份的话
+    confirm 的措辞与 `confirm:true` 这个服务端必传项迟早分叉。
+
+    判据是**走完整条路**，不是"有那个按钮"：
+      ① 0 笔 -> 点「⚙ 改初始资金」真的开到改本金那个框（不是开了个别的浮层）
+      ② 改完 -> 点「↻ 重建」-> **账本里真的有成交了**、警告自己消失
+      ③ 对账不一致 -> 浮层里有「先不动」与「重建」两条路（不是一个
+         只能点确定的 alert），点重建 -> 不一致消失
+      ★ ④ **confirm 里承诺的事要兑现**：手工补录的那几笔重建之后必须还在
+         —— 页面上写着"手工补录的那几笔不会被删"，那就是一句可验证的承诺。
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+    from assay.lv import paper as _paper
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_rebuild_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        src = next((a for a in lv.load_accounts() if lv.is_paper(a)
+                    and a.get('code_sha256')), None)
+        if src is None:
+            return '跳过（本机没有绑了策略的模拟盘）'
+        aid = src['id']
+        _ap = os.path.join(lv.LIVE, 'accounts.json')
+        _fp = os.path.join(lv.LIVE, aid, 'fills.jsonl')
+
+        def _set_cash(cash):
+            d = json.load(open(_ap))
+            for x in d:
+                if x['id'] == aid:
+                    x['init_cash'] = cash
+                    x['paper_start'] = '2026-09-01'
+            json.dump(d, open(_ap, 'w'), ensure_ascii=False)
+
+        def _n_paper():
+            return len([r for r in lv.fills(aid) if r.get('source') == 'paper'])
+
+        # 构造：用户的真实现状 —— 40 元本金，推进出 0 笔
+        _set_cash(40.0)
+        _paper.reset(aid)
+        assert _paper.advance(aid).get('n_fills') == 0, '构造不对：40 元买到票了'
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            pg.on('dialog', lambda d: d.accept())           # confirm 一路答应
+            base = 'http://127.0.0.1:%d/' % port
+            _nm = next(x['name'] for x in lv.load_accounts() if x['id'] == aid)
+
+            def _open():
+                # 🔴 **同一个 hash `goto` 不重新加载页面** —— 已经在这一页时
+                #   要 `reload()`，否则接下来那几条断言读的是**上一段**的
+                #   渲染（本项目为此空转过三条判据）。
+                _url = base + '#/live/' + aid
+                if pg.url.endswith('#/live/' + aid):
+                    pg.reload(wait_until='networkidle')
+                else:
+                    pg.goto(_url, wait_until='networkidle')
+                pg.wait_for_function(
+                    'n => { const h = document.querySelector("#main .lvhead h2");'
+                    '       return h && h.textContent.trim() === n; }',
+                    arg=_nm, timeout=30000)
+
+            # ---- ① 两个入口是【按钮】，且「改初始资金」真的开到那个框 ----
+            _open()
+            pg.wait_for_selector('#lvrb', timeout=20000)
+            for _id, _what in (('#lvrb', '重建'), ('#lvsetc', '改初始资金')):
+                _e = pg.query_selector(_id)
+                assert _e is not None, '0 笔那条警告里没有「%s」入口' % _what
+                # 🔴 判据是**看得出能点**，不是"DOM 里有这个 id"——
+                #   画成一段灰字的话人根本不会去点（同「选股理由」那次）。
+                assert _e.is_visible(), '「%s」不可见' % _what
+                assert pg.eval_on_selector(
+                    _id, 'e => getComputedStyle(e).cursor') == 'pointer', \
+                    '「%s」没有手型光标 —— 看不出能点' % _what
+            pg.click('#lvsetc')
+            # 🔴 **等浮层开了，再自己判里面是什么** —— 直接
+            #   `wait_for_selector('#ecash')` 的话，"开到了别的浮层"
+            #   （比如策略）是一句超时，**报错指不到原因**
+            #   （同「报错必须指向真正的原因」那条）。
+            pg.wait_for_selector('.stmodal', timeout=20000, state='visible')
+            pg.wait_for_timeout(400)
+            assert pg.query_selector('#ecash') is not None, (
+                '「⚙ 改初始资金」开的不是改本金那个浮层（开到了「%s」）'
+                ' —— 点了有反应不等于走得到'
+                % (pg.inner_text('.stmodal h3') if
+                   pg.query_selector('.stmodal h3') else '?'))
+            assert pg.is_visible('#ecash'), '改本金那个框不可见'
+            notes.append('0 笔警告里两个入口都可点，「改初始资金」开到 #ecash')
+
+            # ---- ② 改完 -> 重建 -> 账本里真的有成交 ----
+            pg.fill('#ecash', '400000')
+            pg.click('#esave')
+            pg.wait_for_timeout(1500)
+            assert float(lv.get_account(aid)['init_cash']) == 400000.0, \
+                '本金没存上：%s' % lv.get_account(aid).get('init_cash')
+            _open()
+            pg.wait_for_selector('#lvrb', timeout=20000)
+            pg.click('#lvrb')
+            # 重建要重放整段（几秒），等**账本**而不是等 DOM ——
+            # 等 DOM 的话三种坏法（没绑 handler / 漏传 confirm / 接口失败）
+            # 都是同一个超时，报错指不到原因。
+            _deadline = time.time() + 120
+            while time.time() < _deadline and _n_paper() == 0:
+                pg.wait_for_timeout(500)
+            assert _n_paper() > 0, (
+                '点了「重建」账本里还是 0 笔 —— 页面指的那条路走不通'
+                '（没绑 handler？漏传 confirm？）')
+            pg.wait_for_timeout(1200)
+            assert not any('一笔成交都没有' in e.inner_text()
+                           for e in pg.query_selector_all('#main .lvwarn')), \
+                '重建出成交了，页面还挂着"一笔都没有"的警告'
+            notes.append('重建之后账本 %d 笔、警告自己消失' % _n_paper())
+
+            # ---- ③ 对账不一致：给的是【两条路的浮层】，不是一个 alert ----
+            #   构造：把账本里某一笔的股数改掉（身份就变了）->
+            #   重跑必然对不上。同时补一笔**手工**记录，验 ④ 那句承诺。
+            _rows = [json.loads(x) for x in
+                     open(_fp, encoding='utf-8').read().splitlines() if x.strip()]
+            _hit = next(i for i, r in enumerate(_rows)
+                        if r.get('source') == 'paper')
+            _rows[_hit]['shares'] = int(_rows[_hit]['shares']) + 100
+            _man = dict(_rows[_hit], source='manual', uid='selftestmanual',
+                        note='selftest 手工补录')
+            _rows.append(_man)
+            open(_fp, 'w', encoding='utf-8').write(
+                '\n'.join(json.dumps(r, ensure_ascii=False) for r in _rows) + '\n')
+            _r = _paper.advance(aid)
+            assert _r.get('mismatch'), '构造不对：改了股数竟然还对得上：%s' % _r
+
+            _open()
+            pg.wait_for_selector('#lvadv', timeout=20000)
+            pg.click('#lvadv')
+            pg.wait_for_selector('#mmrb', timeout=30000, state='visible')
+            _mt = pg.inner_text('.stmodal')
+            assert '对不上' in _mt, '浮层没说清对账不一致：%r' % _mt[:150]
+            assert pg.query_selector('#mmno') is not None, \
+                '只给了重建这一条路 —— 「先不动」也得有（账本没被改动，' \
+                '不该逼人现在就删档）'
+            # 两个入口必须是**同一条**重建链
+            _src = open(os.path.join(REPO, 'web/views/live.js'),
+                        encoding='utf-8').read()
+            assert _src.count('paperRebuild(aid)') >= 2 \
+                and _src.count('async function paperRebuild(') == 1, \
+                '两个入口没走同一条重建链 —— confirm 措辞与 confirm:true 会分叉'
+            pg.click('#mmrb')
+            # 🔴 **不能只等 `mismatch` 消失**：`state()` 读不到文件时返回
+            #   `{}`，而「重建」第一步 `reset` 正好把 `_paper.json` 删掉 ——
+            #   于是轮询在**重建刚开始**那一刻就满足了，后面读状态文件直接
+            #   `FileNotFoundError`。要等的是**重建真的做完**：
+            #   状态文件回来了、`advanced_to` 有了、且没有 mismatch。
+            #   （全量跑时才偶发 —— 单跑 `--web` 靠时序运气一直是绿的，
+            #   正是「偶发绿的用例比红的更危险」那条。）
+            _deadline = time.time() + 120
+            while time.time() < _deadline:
+                _st = _paper.state(aid)
+                if _st.get('advanced_to') and not _st.get('mismatch'):
+                    break
+                pg.wait_for_timeout(500)
+            _st = _paper.state(aid)
+            assert _st.get('advanced_to') and not _st.get('mismatch'), \
+                '点了「重建」没重建完（state=%r）' % ({
+                    k: _st.get(k) for k in ('advanced_to', 'n_fills')},)
+            notes.append('对账不一致给的是浮层（两条路），重建后不一致消失')
+
+            # ---- ⑤ 旧状态（没记原因）也不许渲染成一片空白 ----
+            #   🔴 `rejects`/`why_empty` 落在 `_paper.json` 里，而它可能是
+            #     **这个功能之前**写的 —— 那时页面又是一个字都不说，
+            #     **和用户报的症状一模一样**，只是成因不同。
+            #   ★ 那一支**不给「改初始资金」按钮** —— 我们并不知道原因，
+            #     摆一个在那儿就是在暗示"原因是本金"。
+            _sp = os.path.join(lv.LIVE, aid, '_paper.json')
+            _st = json.load(open(_sp))
+            _st.pop('why_empty', None)
+            _st.pop('rejects', None)
+            _st['n_fills'] = 0
+            json.dump(_st, open(_sp, 'w'), ensure_ascii=False)
+            _open()
+            pg.wait_for_timeout(500)
+            _box = pg.query_selector('#main .lvwarn')
+            assert _box is not None, (
+                '旧状态（0 笔、没记原因）页面又是一片空白 —— '
+                '那正是用户报的「也推进了，但是没有任何数据出现」')
+            _t2 = _box.inner_text()
+            assert '旧版本' in _t2 and '推进' in _t2, \
+                '没说清"这份状态没记原因"也没给下一步：%r' % _t2[:140]
+            assert pg.query_selector('#lvsetc') is None, (
+                '旧状态下摆了「改初始资金」—— 那是在暗示原因是本金，'
+                '而我们并不知道（候选池空 / 没有调仓日长得一模一样）')
+            notes.append('旧状态也说得出话，且不暗示原因')
+
+            # ---- ④ confirm 里承诺"手工补录的不会被删" -> 必须兑现 ----
+            _left = [r for r in lv.fills(aid) if r.get('uid') == 'selftestmanual']
+            assert _left, (
+                '重建把手工补录的那笔也删了 —— 而 confirm 里写着"不会被删"，'
+                '那是一句承诺')
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            notes.append('手工补录的那笔重建之后还在')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('绑策略是【选】不是手填路径，清单由服务端给（playwright）', tag='web')
+def t_strategy_picker():
+    """用户 2026-09-18："实盘、模拟盘中绑定策略，需要手动填路径，
+    应该是一个列表的形式用于选择。"
+
+    原来是个裸 `<input placeholder="strategies/…/x.py">` —— 要绑就得
+    **记住路径**，而本地有 28 个策略、目录名还带中文。打错一个字的表现是
+    `策略文件不存在`（还算响亮），但**打成另一个真实存在的策略**就是
+    静默绑错，而实盘信号从此按另一套规则出。
+
+    🔴 **清单由服务端给**（`lv.list_strategies`，同「可选清单由服务端给」）：
+      判据是**有没有顶层 `initialize`** —— 那正是 `run.py` 认的东西，
+      所以共享层 `ETF/_etf_core.py`（自己 docstring 就写着"本文件不是策略"）
+      自动挡在外面，而不是靠 `_` 前缀那种会过期的约定。
+
+    判据是**走完整条路**，不是"有个 select"：
+      ① 控件真的是 select（改回 input 要被抓到）
+      ② option 集合 == 服务端清单，且页面源码里**没有任何策略路径字面量**
+      ③ `_etf_core.py` 不在里面（+ 反向自证它确实在磁盘上，否则空转）
+      ④ 当前绑的那个被选中
+      ⑤ 🔴 绑着一个**磁盘上已经没有**的文件时，它仍在列表里、仍被选中，
+        且页面**说出来** —— 静默消失的话选择器会落到别的策略，
+        一保存就把账户悄悄改绑了
+      ⑥ 选一个别的 -> 绑 -> **账本里真的变了**
+      ⑦ 手填逃生口还在（`bind_version` 本来就接受任意路径）
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_pick_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev_allow = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        # ---- 服务端清单本身 ----
+        d = lv.list_strategies('')
+        items = d['items']
+        assert len(items) >= 10, '清单太短，扫目录那步可能坏了：%d' % len(items)
+        paths = [x['path'] for x in items]
+        core = os.path.join(REPO, 'strategies/ETF/_etf_core.py')
+        assert os.path.isfile(core), \
+            '构造不对：_etf_core.py 不在磁盘上了，③ 那条成了空转'
+        assert not any(x.endswith('_etf_core.py') for x in paths), \
+            '共享层混进了可绑清单 —— 它没有 initialize，绑上去 run.py 直接崩'
+        assert all(x['desc'] for x in items[:5]), \
+            '没给说明：光看 froec_lu_trail5 这种文件名选不出东西'
+        # 🔴 **说明里不许留 markdown 标记**：它会进 `<option>` 的文字与
+        #   `title` 属性，而**属性里连 `<b>` 都用不了** —— 星号原样显示成
+        #   一串 `**`（同 indicators 的 desc 进 title 那条，记过两次了）。
+        #   处理在**展示层**：实测 29 个策略里 8 个的 docstring 首行用了
+        #   markdown，而那本来就是写给人读的 —— 要二十多个作者改写作风格
+        #   是修错了地方。
+        _md = [x['name'] for x in items
+               if '**' in (x['desc'] or '') or '`' in (x['desc'] or '')]
+        assert not _md, '这些策略的说明里留着 markdown 标记：%s' % _md[:5]
+        # 反向自证：源码里**确实有**带 markdown 的首行（否则上面那条空转）
+        _src_md = 0
+        for x in items:
+            try:
+                import ast as _a2
+                _t = _a2.get_docstring(_a2.parse(
+                    open(os.path.join(REPO, x['path']), encoding='utf-8').read()))
+            except Exception:                           # noqa: BLE001
+                _t = None
+            if _t and '**' in _t.strip().splitlines()[0]:
+                _src_md += 1
+        assert _src_md >= 3, \
+            ('构造不对：只有 %d 个策略的 docstring 首行带 markdown，'
+             '"剥标记"那条断言测不到' % _src_md)
+
+        aid = 'froec'
+        src = next((a for a in lv.load_accounts() if a['id'] == aid), None)
+        if src is None or not src.get('strategy_path'):
+            return '跳过（本机没有绑了策略的实盘账户）'
+        _ap = os.path.join(lv.LIVE, 'accounts.json')
+
+        def _set_path(pth):
+            # 🔴 浮层里的"当前绑的是什么"取自**版本行**（append-only 的绑定
+            #   记录），不是 accounts.json —— 后者只是它的镜像。
+            #   只改镜像的话这段构造根本不生效（第一版就是这么空转的）。
+            js = json.load(open(_ap))
+            sha = None
+            for x in js:
+                if x['id'] == aid:
+                    x['strategy_path'] = pth
+                    sha = x.get('code_sha256')
+            json.dump(js, open(_ap, 'w'), ensure_ascii=False)
+            vp = os.path.join(lv.LIVE, aid, 'versions.jsonl')
+            rows = [json.loads(ln) for ln in open(vp, encoding='utf-8')
+                    if ln.strip()]
+            for r in rows:
+                if r.get('code_sha256') == sha:
+                    r['strategy_path'] = pth
+            with open(vp, 'w', encoding='utf-8') as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + '\n')
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            def _open_strat(acc):
+                nm = next(x['name'] for x in lv.load_accounts()
+                          if x['id'] == acc)
+                # 🔴 同一个 hash `goto` 不重载 —— 已经在这一页就 reload
+                if pg.url.endswith('#/live/' + acc):
+                    pg.reload(wait_until='networkidle')
+                else:
+                    pg.goto(base + '#/live/' + acc, wait_until='networkidle')
+                pg.wait_for_function(
+                    'n => { const h = document.querySelector("#main .lvhead h2");'
+                    '       return h && h.textContent.trim() === n; }',
+                    arg=nm, timeout=30000)
+                pg.click('#lvstrat')
+                pg.wait_for_selector('#bp', timeout=20000)
+
+            # ---- ①②③④ ----
+            _open_strat(aid)
+            assert pg.eval_on_selector('#bp', 'e => e.tagName') == 'SELECT', \
+                '绑定策略还是个裸输入框 —— 要绑就得背下 28 条路径'
+            got = pg.eval_on_selector_all(
+                '#bp option', 'es => es.map(e => e.value)')
+            assert [x for x in got if x != '__manual__'] == paths, \
+                ('页面列的与服务端清单对不上 —— 前端自己拼了一份？\n'
+                 '页面 %s\n服务端 %s' % (got[:3], paths[:3]))
+            _gs = pg.eval_on_selector_all('#bp optgroup', 'es => es.map(e => e.label)')
+            assert len(_gs) >= 3, '没有按目录分组：%s' % _gs
+            assert pg.eval_on_selector('#bp', 'e => e.value') \
+                == src['strategy_path'], '当前绑的那个没被选中'
+            # 页面源码里不许有策略路径字面量（清单必须来自服务端）
+            _js = open(os.path.join(REPO, 'web/views/live-strat.js'),
+                       encoding='utf-8').read()
+            _code = re.sub(r'/\*.*?\*/', '', _js, flags=re.S)
+            _code = re.sub(r'(?m)^\s*//.*$', '', _code)
+            for _p in paths[:8]:
+                assert _p not in _code, \
+                    '页面里写死了策略路径 %s —— 加一个策略它不会出现' % _p
+            notes.append('%d 个策略按 %d 组列出，当前项选中，共享层挡在外面'
+                         % (len(paths), len(_gs)))
+
+            # ---- ⑦ 手填逃生口 ----
+            assert not pg.is_visible('#bpm'), '手填框平时不该占地方'
+            pg.select_option('#bp', '__manual__')
+            pg.wait_for_timeout(250)
+            assert pg.is_visible('#bpm'), \
+                '选了「其它」手填框没出来 —— 绑 strategies/ 之外的文件这条路被堵死了'
+            # 🔴 光验"框露出来"是不够的：`bpVal` 仍取 select 的话，
+            #   手填的内容根本没进 POST（绑上去的是字面量 `__manual__`）——
+            #   而那一版照样让框弹出来（变异实测漏过）。判据要**走完**：
+            #   填进去、绑一次、账本里必须是填的那个。
+            _man = next(x for x in paths if x != src['strategy_path'])
+            pg.fill('#bpm', _man)
+            pg.click('#bb')
+            _dl0 = time.time() + 60
+            while time.time() < _dl0 and \
+                    lv.get_account(aid)['strategy_path'] != _man:
+                pg.wait_for_timeout(300)
+            assert lv.get_account(aid)['strategy_path'] == _man, \
+                ('手填了路径、点了绑定，账本里却不是它（%s）—— '
+                 '手填的值没进 POST，那个逃生口是摆设'
+                 % lv.get_account(aid)['strategy_path'])
+            notes.append('手填逃生口真的绑得上')
+            _open_strat(aid)
+
+            # ---- ⑥ 换一个 -> 绑 -> 账本真的变 ----
+            _cur_now = lv.get_account(aid)['strategy_path']
+            _other = next(x for x in paths if x != _cur_now)
+            _lv_bind_strategy(pg, _other)
+            _dl = time.time() + 60
+            while time.time() < _dl and \
+                    lv.get_account(aid)['strategy_path'] != _other:
+                pg.wait_for_timeout(300)
+            assert lv.get_account(aid)['strategy_path'] == _other, \
+                ('选了另一个策略、点了绑定，账本里还是旧的 —— '
+                 '选择器的值没传到 POST？实际 %s'
+                 % lv.get_account(aid)['strategy_path'])
+            notes.append('选另一个 -> 绑定 -> 账本跟着变')
+
+            # ---- ⑤ 绑着一个磁盘上没有的文件 ----
+            _gone = 'strategies/小市值/这个文件不存在_selftest.py'
+            assert not os.path.isfile(os.path.join(REPO, _gone)), \
+                '构造不对：那个"不存在"的文件竟然在'
+            _set_path(_gone)
+            _open_strat(aid)
+            _got2 = pg.eval_on_selector_all(
+                '#bp option', 'es => es.map(e => e.value)')
+            assert _gone in _got2, (
+                '绑着的文件没了，清单里就把它抹掉了 —— '
+                '选择器会落到别的策略，一保存就把账户悄悄改绑了')
+            assert pg.eval_on_selector('#bp', 'e => e.value') == _gone, \
+                '那一项没被选中 —— 等于默默替人选了另一个策略'
+            # 🔴 判据要**限定在警告块里** —— 服务端给那一项的 desc 就写着
+            #   "……不在磁盘上了"，而它渲染在 `<option>` 里，
+            #   查 `.stbox` 全文的话**必然命中**（变异实测：把整块警告
+            #   去掉照样绿，同「判据比要证的事宽」）。
+            # ★ 认准**这一块**（`#bpgone`）：浮层里本来就有另一个
+            #   `.lvwarn`（"网页触发回测没开"），按 class 取会命中它。
+            _w = pg.query_selector('#bpgone')
+            assert _w is not None, \
+                '绑的文件没了，页面上没有任何警告 —— 只有下拉里一行小字'
+            _wt = _w.inner_text()
+            assert '不在磁盘上' in _wt and _gone in _wt, \
+                '警告没说清是哪个文件：%r' % _wt[:200]
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            notes.append('绑的文件没了：仍在列表、仍选中、页面说出来')
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    return '；'.join(notes)
+
+
+@case('模拟盘要认策略声明的数据源与印花税（ETF 那条链）', tag='slow')
+def t_paper_declared_lake():
+    """用户 2026-09-18："ETF轮动模拟，点击推进报错。"
+
+    报的是 `IOException: No files found ... /datalake/std/etf_master.parquet`
+    —— **正是 2026-09-13 记过的那个失效模式**：ETF 策略必须跑在 `etf_lake`
+    上，靠人记得传 `--datalake` 会漏，所以改成策略模块级 `DATALAKE='etf_lake'`
+    + `run.py` 的 `resolve_lake` 解析。
+
+    🔴 **但建引擎的路径不止 run.py 一条。** 模拟盘与业绩页那条「策略曲线」
+      走的是 `lv/bench.build_engine`，而它一直没接上那个声明 ——
+      同一条纪律的另一半漏了整整五天，直到有人真的建了个 ETF 模拟盘。
+      ★ 而**崩掉还算好的**：`etf_trend_momentum` 在股票面板上候选池恒空
+        -> 全程空仓、一条平线、**不报任何错**。
+
+    🔴 印花税同理：`close_tax` 原来被 `locked` 锁死成 'auto'（股票口径），
+      于是 ETF 每笔卖出都被按万5 收 —— 年换手 9 次就是 **0.45%/年**
+      凭空扣掉，**而它不报错**。ETF 无印花税是**事实不是偏好**，
+      所以它写在策略里，这里必须让它生效。
+    ★ 分工要钉住：佣金 / 最低佣金 = 券商的事（用**账户**的，仍然锁）；
+      印花税 = 标的的事（听策略的）。只钉一头的话"全听策略"也能过。
+    """
+    from assay import live as lv
+    # ★ `bench` 不在门面的转发清单里（它不是账本读写的域），直接 import
+    from assay.lv import bench as _bench
+
+    accts = lv.load_accounts()
+    etf = next((a for a in accts
+                if 'etf' in (a.get('strategy_path') or '').lower()
+                and a.get('code_sha256')), None)
+    plain = next((a for a in accts
+                  if a.get('code_sha256')
+                  and 'etf' not in (a.get('strategy_path') or '').lower()), None)
+    if etf is None or plain is None:
+        return '跳过（本机没有 ETF 账户或普通账户）'
+
+    # ---- 声明了 DATALAKE 的：必须解析到那个 lake ----
+    eng, meta = _bench.build_engine(etf['id'])
+    assert eng is not None, '建引擎就失败了：%s' % meta.get('error')
+    assert meta.get('datalake_declared') is True, \
+        '这个策略声明了 DATALAKE，服务端却说没有'
+    assert os.path.basename(meta['datalake']) == 'etf_lake', \
+        ('没按策略声明解析数据源，跑在 %s 上 —— 那是股票面板，'
+         'ETF 策略会崩在 etf_master.parquet（或更糟：候选池恒空、'
+         '全程空仓而不报错）' % meta['datalake'])
+    # feed 真的指向它（只看 meta 的话，"报了但没用上"照样绿）
+    assert os.path.realpath(str(eng.feed.root or '')) \
+        == os.path.realpath(meta['datalake']), \
+        'meta 说 %s，而 feed 实际跑在 %s' % (meta['datalake'], eng.feed.root)
+
+    # ---- 成本分工：印花税听策略、佣金听账户 ----
+    # 🔴 `set_order_cost` 在 `initialize` 里，**boot 之后**才生效 ——
+    #   直接读 `eng.cost` 拿到的是建引擎时的值（同「抬头打印的成本是假的」）。
+    _acct_comm = eng.cost.commission
+    eng.boot()
+    # ★ 先判类型再比值：锁回去时它是字符串 'auto'，`float()` 会抛
+    #   `could not convert string to float` —— 用例是红的，但**报错指不到
+    #   原因**（同「报错必须指向真正的原因」）。
+    assert not isinstance(eng.cost.close_tax, str) \
+        and float(eng.cost.close_tax) == 0.0, \
+        ('ETF 的印花税该是 0（策略自己声明的事实），实际 %r —— '
+         '每笔卖出凭空多扣万5' % (eng.cost.close_tax,))
+    assert eng.cost.commission == _acct_comm, \
+        ('佣金被策略覆盖了（%s -> %s）—— 那是【券商】收多少，'
+         '该用账户配的那档' % (_acct_comm, eng.cost.commission))
+
+    # ---- 反向自证：没声明的策略一切照旧（否则上面两条可能是"全听策略"）----
+    eng2, meta2 = _bench.build_engine(plain['id'])
+    assert eng2 is not None, '建引擎失败：%s' % meta2.get('error')
+    assert meta2.get('datalake_declared') is False, \
+        '这个策略没声明 DATALAKE，服务端却说有'
+    assert os.path.basename(meta2['datalake']) != 'etf_lake', \
+        '没声明的策略被拖到 etf_lake 上了'
+    eng2.boot()
+    assert str(eng2.cost.close_tax) == 'auto', \
+        ('没声明成本的策略，印花税该仍是按日期分段的 auto，实际 %r'
+         % eng2.cost.close_tax)
+    # ---- lake 不存在时要说人话，不能是 500 ----
+    # 🔴 `resolve_lake` 抛的是 **SystemExit（BaseException）**，
+    #   而 `_live_err` 只 `except Exception` —— 不翻译的话请求线程直接死，
+    #   页面看到一个**没有原因**的 500。
+    # ★ 这条**必须构造**：本机 `etf_lake` 真的存在，那条错误路径平时
+    #   一步都走不到（变异实测第一轮就是这么漏的）。
+    import run as _run
+    _orig = _run.resolve_lake
+    try:
+        def _boom(mod, cli):
+            raise SystemExit('策略声明要跑在 /nope（DATALAKE=…），但它不存在。')
+        _run.resolve_lake = _boom
+        try:
+            _bench.build_engine(etf['id'])
+            raise AssertionError('lake 不存在却照跑了')
+        except lv.LiveError as e:
+            assert '不存在' in str(e), '翻译丢了原因：%r' % str(e)
+        except SystemExit:
+            raise AssertionError(
+                'SystemExit 没翻成 LiveError —— 它是 BaseException，'
+                '`_live_err` 抓不到，页面会看到一个没有原因的 500')
+    finally:
+        _run.resolve_lake = _orig
+
+    return ('ETF 账户解析到 etf_lake、印花税 0、佣金仍是账户的；'
+            '未声明的账户走默认 lake 且印花税仍 auto；'
+            'lake 不存在时翻成人话不是 500')
+
+
+@case('ETF / 指数不在面板里：取价与取名要有回落（实盘四处）', tag='slow')
+def t_etf_price_and_name():
+    """🔴🔴 2026-09-18 用户报：ETF 模拟盘「持仓市值 0.00、浮盈 −100%、
+    而且 ETF 持仓都没有中文名」。
+
+    根因一句话：**主面板 `mart/panel_daily/` 是【股票】宽表，ETF 一行都没有**，
+    而实盘模块四处取数全查它 —— 查不到 -> 价格 None -> 市值 0 -> 浮盈 −100%，
+    **而它不报错**，屏幕上看着就像"这个账户把钱亏光了"。
+
+    四处都要回落（`lv/tdx.py`，同一份实现）：
+
+        perf._last_px   持仓估值取价      -> 市值 0、浮盈 −100%
+        sig._names      持仓/待办取名      -> 那一列空着
+        px.day_price    「价格留空自动补」  -> 报"面板里没有这个代码"，整条路走不通
+        px.day_range    「成交价必须在当日区间内」-> **静默放行**，小数点点错拦不住
+
+    ★ 判据落在**可证的事实**上：价必须等于 tdx 原始日线里那天的收盘、
+      名字必须非空、离谱价必须被拦。
+    🔴 **反向自证：股票不许走回落** —— 回落只扫 `etf_*`/`index_*`
+      （`stock_*` 是 1600 万行，拿它兜底既慢又没必要）。只测 ETF 的话，
+      "把所有代码都拖去 tdx"也能全绿，而那会让股票的取价绕开面板。
+    """
+    import shutil
+    import tempfile
+
+    from assay import live as lv
+    from assay.lv import tdx as _tdx
+    from assay.lv import px as _px
+
+    root = _px._lake(None)
+    # ---- 现挑一只【本地真有日线】的 ETF，不写死代码 ----
+    import duckdb
+    import glob as _g
+    pat = os.path.join(root, 'raw/tdx/kline/etf_*.parquet')
+    if not _g.glob(pat):
+        return '跳过（本地没有 ETF 日线）'
+    row = duckdb.connect().execute(
+        "SELECT symbol, date, open, high, low, close FROM read_parquet('%s') "
+        "WHERE close > 0 QUALIFY row_number() OVER "
+        "(PARTITION BY symbol ORDER BY date DESC) = 1 "
+        "ORDER BY date DESC LIMIT 1" % pat).fetchone()
+    assert row, '构造不对：ETF 日线里一行都没有'
+    sym, day, o, hi, lo, cl = row
+    jq = sym[2:] + ('.XSHG' if sym[:2] == 'sh' else '.XSHE')
+    assert _tdx.to_symbol(jq) == sym, \
+        'jq_code <-> symbol 换算错了：%s -> %s（应为 %s）' \
+        % (jq, _tdx.to_symbol(jq), sym)
+
+    # ---- ① 面板里确实没有它（否则整条用例是空转）----
+    n = duckdb.connect().execute(
+        "SELECT count(*) FROM read_parquet('%s/mart/panel_daily/panel_*.parquet') "
+        "WHERE jq_code = '%s'" % (root, jq)).fetchone()[0]
+    assert n == 0, '构造不对：%s 竟然在面板里（%d 行），这条用例测不到回落' % (jq, n)
+
+    # ---- ② 取价 / 取名 / 区间 ----
+    assert abs(lv.day_price(jq, day, 'close') - float(cl)) < 1e-6, \
+        'ETF 取不到当日收盘（%s %s）' % (jq, day)
+    assert abs(lv.day_price(jq, day, 'open') - float(o)) < 1e-6, \
+        'ETF 取不到当日开盘 —— 「价格留空自动补」那条路对 ETF 走不通'
+    rg = lv.day_range(jq, day)
+    assert rg and abs(rg[0] - float(lo)) < 1e-3 and abs(rg[1] - float(hi)) < 1e-3, \
+        'ETF 取不到当日 high/low：%r' % (rg,)
+    try:
+        lv.check_price_in_range(jq, day, float(hi) * 10 + 1)
+        raise AssertionError(
+            '离谱价没被拦 —— 那道校验对 ETF 静默放行了，'
+            '小数点点错、误填后复权价全都拦不住')
+    except lv.LiveError:
+        pass
+    nm = _tdx.names(root, [jq])
+    assert nm.get(jq), 'ETF 取不到名字：%r' % nm
+    # 🔴 「名字里不许有截断乱码」这条要**现挑一个真被截断的**来验 ——
+    #   上面那只是"最新那天的第一只"，名字恰好完整，于是这条断言在它身上
+    #   是**空转**的（变异实测漏过：不去乱码照样绿）。
+    #   tdx 的名称字段定长 16 字节，截断处会劈开一个汉字 -> U+FFFD。
+    _FF = '\ufffd'
+    _snap = _tdx.name_snap(root)
+    _bad = None
+    if _snap:
+        for _sy, _nn in duckdb.connect().execute(
+                "SELECT symbol, name FROM read_parquet('%s') "
+                "WHERE class = 'etf'" % _snap).fetchall():
+            if _nn and _FF in _nn:
+                _bad = _sy
+                break
+    assert _bad, '构造不对：快照里一个被截断的 ETF 名字都没有，这条测不到'
+    _bjq = _bad[2:] + ('.XSHG' if _bad[:2] == 'sh' else '.XSHE')
+    _bn = _tdx.names(root, [_bjq]).get(_bjq)
+    assert _bn and _FF not in _bn, \
+        ('名字里留着截断产生的乱码字符（屏幕上是个方块）：%r' % _bn)
+
+    # ---- ③🔴 反向自证：股票不许走这条回落 ----
+    st = duckdb.connect().execute(
+        "SELECT jq_code, date, close_bfq FROM "
+        "read_parquet('%s/mart/panel_daily/panel_*.parquet') "
+        "WHERE close_bfq > 0 ORDER BY date DESC LIMIT 1" % root).fetchone()
+    assert st, '面板里一行都没有？'
+    assert not _tdx.last_close(root, [st[0]], st[1]), \
+        ('股票被 tdx 回落接管了 —— 它只该扫 etf_*/index_*，'
+         '而 stock_* 是 1600 万行')
+    assert abs(lv.day_price(st[0], st[1], 'close') - float(st[2])) < 1e-6, \
+        '股票的取价被改坏了（应该还走面板）'
+
+    # ---- ④ 端到端：构造一个持有 ETF 的账户，市值不许是 0 ----
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_etfpx_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    try:
+        lv.upsert_account('etfpx', name='ETF估值', init_cash=100000.0)
+        lv.add_fill('etfpx', str(day), jq, 'buy', 1000,
+                    price=float(cl), fee=5.0, source='manual')
+        p = lv.positions_valued('etfpx')
+        it = p['items'][0]
+        assert it['price'], 'ETF 持仓取不到现价 —— 市值会是 0、浮盈 −100%%'
+        assert p['market_value'] > 0, \
+            '持仓市值是 0（用户报的就是这个）：%r' % p['market_value']
+        assert it.get('name'), 'ETF 持仓没有中文名（用户报的第二件事）'
+        assert abs(p['equity'] - (p['cash'] + p['market_value'])) < 0.01, \
+            '总资产 != 现金 + 市值'
+
+        # ---- ⑤🔴 权益曲线 / 每日持仓也要有回落 ----
+        #   用户 2026-09-18 第二次报：「单天 +41.8%、初始 100000、当前
+        #   98432.79，累计收益居然 −18%」。根因同上，只是漏在**另外两处**
+        #   （`equity_curve` 与 `hist._feed` 各抄了一份逐日价格表）——
+        #   ETF 市值全程 0，于是 TWR 恰好等于 `现金/本金 − 1`。
+        e = lv.equity_curve('etfpx')
+        assert e['equity'], '权益曲线是空的'
+        _last = e['equity'][-1]
+        assert abs(_last - p['equity']) < 0.01, \
+            ('权益曲线末值 %.2f 与持仓估值 %.2f 对不上 —— '
+             'ETF 市值在曲线里丢了' % (_last, p['equity']))
+        # 没有外部现金流时 TWR 必须等于 期末/起点 − 1（既有纪律）
+        _twr = e['stats']['twr']
+        _naive = _last / 100000.0 - 1
+        assert abs(_twr - _naive) < 1e-6, \
+            'TWR %.4f%% != 期末/本金−1 %.4f%%' % (_twr * 100, _naive * 100)
+        assert abs(_twr - (p['cash'] / 100000.0 - 1)) > 1e-6, \
+            ('TWR 恰好等于"只算现金"的收益率 —— 那正是 ETF 市值全程为 0 '
+             '的指纹（用户看到的 −18%%）')
+        # 🔴 两页必须逐日相等（既有纪律，而它们原来是**两份**取价实现）
+        _em = {str(d): v for d, v in zip(e['dates'], e['equity'])}
+        _h = lv.daily_holdings('etfpx', limit=500)
+        _n = _bad = 0
+        for _r in _h['rows']:
+            _d = str(_r['date'])
+            if _d in _em:
+                _n += 1
+                if abs(_r['equity'] - _em[_d]) > 0.01:
+                    _bad += 1
+        assert _h['rows'], \
+            ('每日持仓一行都没有 —— 取价那一处如果不是与权益曲线【同一份】'
+             '实现，这里就会空掉（它们原来正是抄的两份）')
+        assert _n > 0, '构造不对：每日持仓与权益曲线没有重叠的日子'
+        assert _bad == 0, \
+            '每日持仓与权益曲线有 %d 天对不上（取价实现分叉了）' % _bad
+    finally:
+        lv.LIVE = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    # ---- ⑥ 三条建引擎的路径都要解析策略声明的数据源 ----
+    #   🔴 2026-09-13 只在 `run.py` 里接了 `resolve_lake`，于是
+    #     `lv/bench.py`（模拟盘 / 策略曲线）与 `lv/sig.py`（出信号）
+    #     **各漏了一次** —— 前者崩在点「推进」，后者会在 tick 里
+    #     **每小时崩一次**（tick 对所有绑了策略的账户跑，含模拟盘）。
+    #   判据用 `ast`：那两处都必须调 `resolve_strategy_lake`，
+    #   **而且在建 `PanelFeed` 之前**（晚了 feed 已经指着主面板了）。
+    import ast as _ast
+    # ★ 用**真实的函数名**：`lv.make_signal` 是门面上的别名，
+    #   `sig.py` 里那个叫 `build_signal`（凭印象猜名字 —— 这个坑记过好几次了）。
+    for fn, func in (('assay/lv/bench.py', 'build_engine'),
+                     ('assay/lv/sig.py', 'build_signal')):
+        src = open(os.path.join(REPO, fn), encoding='utf-8').read()
+        tree = _ast.parse(src)
+        node = next((n for n in _ast.walk(tree)
+                     if isinstance(n, _ast.FunctionDef) and n.name == func), None)
+        assert node is not None, '%s 里没有 %s' % (fn, func)
+        # ★ 比**真实调用的行号**，不比 `ast.dump` 里的字符位置 ——
+        #   函数内还有 `from assay.feed import PanelFeed` 这一句，
+        #   按字符串找会命中那个 import（第一版就这么误报了）。
+        def _first_call(nd, name):
+            ls = [n.lineno for n in _ast.walk(nd)
+                  if isinstance(n, _ast.Call)
+                  and (getattr(n.func, 'id', None) == name
+                       or getattr(n.func, 'attr', None) == name)]
+            return min(ls) if ls else None
+
+        ln_r = _first_call(node, 'resolve_strategy_lake')
+        ln_f = _first_call(node, 'PanelFeed')
+        assert ln_r is not None, \
+            ('%s 的 %s 没解析策略声明的数据源 —— ETF 策略会跑在股票面板上'
+             % (fn, func))
+        assert ln_f is None or ln_r < ln_f, \
+            ('%s 的 %s 在建完 PanelFeed（第 %s 行）之后才解析数据源'
+             '（第 %s 行）—— 太晚了，feed 已经指着主面板了'
+             % (fn, func, ln_f, ln_r))
+    return ('%s(%s) 取价/取名/区间校验都走 tdx 回落；股票仍走面板；'
+            '持有 ETF 的账户市值非 0、有名字、权益曲线与每日持仓逐日一致；'
+            'bench/sig 都在建 feed 前解析 DATALAKE' % (jq, nm[jq]))
+
+
+@case('首页只列真实盘 · 当日盈亏 · 手工账户是一等状态（playwright）', tag='web')
+def t_home_real_only_and_manual():
+    """用户 2026-09-19 两条：
+
+      ①「首页只需要展示真正的实盘，模拟盘不展示，并且能把当日涨跌金额、
+        幅度展示出来，替代掉持仓的浮盈」
+      ②「策略账户增加一种非策略账户，无需绑定策略」
+
+    ★ ② 的做法是**不加字段**：`code_sha256` 的有无已经是这个状态的唯一真值，
+      加一个 `no_strategy` 就是第二份状态，而"标了却绑了策略"之类的组合
+      迟早出现且分叉不报错。要改的是**怎么说它** —— 原来未绑策略的账户
+      待办区显示「还没有信号 —— 点「立即重算」」加一个按钮，
+      而点下去必然报"账户还没绑定策略"：**指向一条走不通的路**。
+
+    判据都落在**可量的事实**上：
+      · 首页列出的账户集合 == 服务端说的非模拟盘账户（不是"少了两行"）
+      · 表头是「当日盈亏」且那一列的值等于服务端的 `pos.pnl_day`
+      · 手工账户页上没有"还没有信号"那句，而有「手工账户」与绑定入口
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_home_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        accs = [a for a in lv.load_accounts() if not a.get('archived')]
+        want = sorted(a['name'] for a in accs if not lv.is_paper(a))
+        papr = [a for a in accs if lv.is_paper(a)]
+        assert want and papr, \
+            '构造不对：要同时有真实盘与模拟盘才测得到（真 %d / 模拟 %d）' \
+            % (len(want), len(papr))
+        manual = next((a for a in accs
+                       if not a.get('code_sha256') and not lv.is_paper(a)), None)
+        assert manual, '构造不对：没有"未绑策略的实盘账户"'
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 950})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            # ---- ① 首页 ----
+            pg.goto(base + '#/', wait_until='networkidle')
+            pg.wait_for_selector('#main table.pkt', timeout=30000)
+            pg.wait_for_timeout(1200)
+            hdr = pg.eval_on_selector_all(
+                '#main table.pkt tr:first-child th',
+                'es => es.map(e => e.innerText.trim())')
+            assert '当日盈亏' in hdr, '首页表头没换成「当日盈亏」：%s' % hdr
+            assert '持仓浮盈' not in hdr, \
+                '「持仓浮盈」还在 —— 用户要的是替代掉它：%s' % hdr
+            got = sorted(pg.eval_on_selector_all(
+                "#main table.pkt a[href^='#/live/']",
+                'es => es.map(e => e.innerText.trim())'))
+            assert got == want, \
+                ('首页列的账户与"非模拟盘"对不上\n  页面 %s\n  该有 %s'
+                 % (got, want))
+            for a in papr:
+                assert a['name'] not in got, \
+                    '模拟盘 %s 出现在首页 —— 它是推演，不是今天要动手的事' % a['name']
+            # 那一列的数必须等于服务端的 pnl_day（不是随手填了个数）
+            _one = next(a for a in accs if not lv.is_paper(a)
+                        and (lv.positions_valued(a['id']).get('pnl_day')
+                             is not None))
+            _pd = lv.positions_valued(_one['id'])['pnl_day']
+            _txt = pg.inner_text('#main table.pkt')
+            assert ('%.2f' % abs(_pd)).replace('.00', '') [:6] in _txt.replace(',', '') \
+                or ('%.2f' % _pd) in _txt.replace(',', ''), \
+                '首页那一列不是服务端的 pnl_day（%.2f）' % _pd
+
+            # ---- ② 手工账户 ----
+            pg.goto(base + '#/live/' + manual['id'], wait_until='networkidle')
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=manual['name'], timeout=30000)
+            t = pg.inner_text('#main')
+            assert '手工账户' in t, \
+                '未绑策略的账户没被当成一等状态（还在催你绑）：%r' % t[:160]
+            assert '还没有信号' not in t, \
+                ('手工账户还显示「还没有信号 —— 点「立即重算」」，'
+                 '而点下去必然报"没绑定策略" —— 指向一条走不通的路')
+            assert pg.query_selector('#lvbind2') is not None, \
+                '手工账户里没有「绑定策略」入口 —— 想绑的人就走不通了'
+            assert pg.query_selector('#lvtick') is None, \
+                '手工账户不该有「立即重算」—— 它点了必然报错'
+            assert not errs, '页面抛了异常：%s' % errs[:1]
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('首页只列 %d 个真实盘（%d 个模拟盘不列）、表头是当日盈亏；'
+            '手工账户不再催你绑策略且入口还在' % (len(want), len(papr)))

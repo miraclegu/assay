@@ -739,7 +739,19 @@ def _():
                 _th = pg.locator('#pk table.pkt tr').first.locator('th').count()
                 _td = pg.locator('#pk table.pkt tr.rw').first.locator('td').count()
                 assert _th == _td, '表头 %d 列 vs 每行 %d 格 —— 会整表错位' % (_th, _td)
-                assert _th == 10, '列数应是 策略·参数 + 区间 + 8 个指标：%d' % _th
+                # 🔴 **不写死列数** —— 2026-09-17 加了「⚖ 比对」勾选列，写死的 10
+                #   当场把这条打挂了，而**挂的是断言不是产品**（同那条
+                #   `#top .btn.nav >= 8` 改成与 `NAV.length` 比）。
+                #   真正要钉的是：① 表头与数据格数相等（上面那条，防整表错位）；
+                #   ② 该有的列**按名字**都在（列序是产品决定、会变）。
+                _need = ['策略', '区间', '年化', '回撤', '夏普', '超额年化',
+                         '信息比率', '年换手', '交易', '胜率']
+                _thz0 = ' '.join(pg.locator('#pk table.pkt th').all_inner_texts())
+                _miss = [x for x in _need if x not in _thz0]
+                assert not _miss, '表头少了这几列：%s（现有：%s）' % (_miss, _thz0)
+                assert pg.locator('#pk table.pkt tr.rw').first.locator(
+                    'td.cmpck input[data-cmp]').count() == 1, \
+                    '每行该有一个「⚖ 比对」勾选框'
                 _thz = ' '.join(pg.locator('#pk table.pkt th').all_inner_texts())
                 # 本金与成本口径不占列（太挤）—— 它们进行的 tooltip
                 assert '本金' not in _thz and '成本' not in _thz, \
@@ -1144,9 +1156,18 @@ def t_home_ui():
             assert pg.locator('#top h1 a.homeon').count() == 1, \
                 '首页没把站名点亮'
             # 实盘那块必须真的有账户与数字（不是空壳）
+            # ⚠ 这条原来钉的是「持仓浮盈」这个列名，而 2026-09-19 用户要求
+            #   **把它替换成当日盈亏**（首页问的是"今天怎么样"，累计浮盈是
+            #   复盘用的）。**失败的是断言不是产品** —— 但它原本要保的
+            #   "不是空壳"不能丢，所以改成钉新规矩，并补一条更硬的：
+            #   真的列出了账户行（只查文本的话，表头在、一行没有也算过）。
             live_sec = pg.locator('#main .lvsec').first.inner_text()
-            assert '总资产' in live_sec and '持仓浮盈' in live_sec, \
+            assert '总资产' in live_sec and '当日盈亏' in live_sec, \
                 '实盘那块没渲染出数字：%s' % live_sec[:120]
+            assert '持仓浮盈' not in live_sec, \
+                '首页又把累计浮盈摆回来了 —— 那是业绩页的事'
+            assert pg.locator("#main table.pkt a[href^='#/live/']").count() >= 1, \
+                '实盘那块一个账户都没列出来（空壳）：%s' % live_sec[:120]
 
             # ---------------- 顶栏分组 ----------------
             navs = pg.locator('#top a.nav').all_inner_texts()
@@ -1986,6 +2007,21 @@ def t_no_runs_pollution():
         ('这些用例会**真跑一次回测并归档**，却没把 ASSAY_RUNS 重定向到'
          '临时目录：%s —— 每跑一次 selftest 就污染一条生产归档'
          '（实测积了 105 次同参数的 2026-06-01~06-30）' % sorted(set(bad)))
+    # 🔴 **会【删】归档的用例更要重定向**（2026-09-21 加）。上面那一轮只扫
+    #   "会触发回测"的 —— 而删除比多写一条严重得多：一跑就毁生产归档。
+    #   加批量删除功能时当场发现这个缺口（同「照清单拼会漏掉新的」那条）。
+    dbad = []
+    for pat in (r"/api/runs/delete", r"api_runs_delete\("):
+        for m in _re.finditer(pat, src):
+            name, a, b = _owner(m.start())
+            seg = src[a:b]
+            if name and name.startswith('selftest 不许写进生产归档'):
+                continue          # 守卫自己（判据里就含这些字面量）
+            if "os.environ['ASSAY_RUNS'] = _runs_tmp" not in seg:
+                dbad.append(name)
+    assert not dbad, \
+        ('这些用例会**真删归档目录**，却没把 ASSAY_RUNS 重定向到临时目录：'
+         '%s —— 一跑就毁生产归档，而归档是删不回来的' % sorted(set(dbad)))
     # 每一处重定向都要在 finally 里还原
     SELF = 'selftest 不许写进生产归档'
     for m in _re.finditer(r"os\.environ\['ASSAY_RUNS'\] = _runs_tmp", src):
@@ -2485,15 +2521,33 @@ def t_page_inventory():
     #    用例要写就重定向到临时目录（`wlmod.LIVE = tmp` / `lv.LIVE = tmp`）。
     here = REPO
     src_all = _all_case_src()
-    for case_name, marker in (('个股页面', 'wlmod.LIVE = tmp'),
-                              ('新页面真实渲染', 'wl.LIVE = tmp'),
-                              ('自选：append-only', 'wl.LIVE = tmp'),
-                              ('买点清单', 'al.LIVE = tmp'),
-                              ('买点页面', 'al.LIVE = tmp')):
-        i = src_all.index("@case('" + case_name)
-        j = src_all.index('\n@case(', i + 10)
-        assert marker in src_all[i:j], \
-            ('用例「%s」会写自选账本却没重定向 LIVE —— 会污染真账本' % case_name)
+    # 🔴 **扫出来，不照清单拼**（2026-09-21 改）。原来这里是一张手写的
+    #   `(用例名, marker)` 清单 —— 新加一条会写账本的用例时它**自动不在
+    #   保护范围里，而那不报错**（正是「照清单拼会漏掉新文件」那条，
+    #   这次加 symbols 守卫时当场撞上）。
+    #   现在的判据：**凡是源码里调了 `act(` 写账本的用例，必须也重定向 LIVE**。
+    _blocks, _idx = [], 0
+    while True:
+        i = src_all.find("@case(", _idx)
+        if i < 0:
+            break
+        j = src_all.find('\n@case(', i + 6)
+        _blocks.append(src_all[i:(j if j > 0 else len(src_all))])
+        _idx = i + 6
+    _bad = []
+    for blk in _blocks:
+        nm = blk[7:blk.find("'", 8)] if blk[6] == "'" else blk[6:40]
+        writes = [m for m in ('wl.act(', 'wlmod.act(', 'al.act(', 'almod.act(')
+                  if m in blk]
+        if writes and '.LIVE = ' not in blk:
+            _bad.append('%s（调了 %s）' % (nm[:34], '/'.join(writes)))
+    assert not _bad, ('这些用例会写 live/ 下的 append-only 账本却没重定向 '
+                      'LIVE —— 会污染真账本，而 append-only 意味着删不掉：\n  '
+                      + '\n  '.join(_bad))
+    # 反向自证：真的扫到了那几条会写账本的用例（否则这条是空转的）
+    _writers = sum(1 for b in _blocks
+                   if any(m in b for m in ('wl.act(', 'wlmod.act(', 'al.act(')))
+    assert _writers >= 5, '只扫到 %d 条写账本的用例 —— 扫描器坏了' % _writers
 
     web = os.path.join(here, 'web')
     html = open(os.path.join(web, 'index.html'), encoding='utf-8').read()
@@ -2633,3 +2687,1102 @@ def t_page_inventory():
             % (len(defined), ' '.join(sorted(defined)), n))
 
 
+
+
+@case('策略比对页：口径不一致要响亮报出来 / 逐年数字与详情页同源（playwright）', tag='web')
+def t_run_cmp():
+    """⚖ `#/cmp/<idA>,<idB>` —— 2~4 次回测摆一起比。
+
+    🔴🔴 **这一页最值钱的不是曲线，是「口径不一致要说出来」。**
+      本项目两次栽在「拿滑点 0 的数字比含滑点的基准」（FROEC 与 v0b 各一次），
+      2026-09-17 又踩了「基线截 08-07、变体截 09-17」。没有那一层，
+      这页就是一台生产错误结论的机器。
+
+    ★ 三条关键判据全部**构造**（`pg.route` 拦接口），不靠盘上恰好有
+      成本不同/区间不同的归档 —— 「判据依赖盘上恰好有什么」这个陷阱
+      本项目踩过两次（剪过的 holdings、从没创建的 `runs/_fqtest/`）。
+    """
+    import json as _json
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import server as sv
+    sv._scan()
+    _JS_ENTRY = '''() => {
+      const g = document.querySelector('#cmpbar #cmpgo');
+      if (!g) return {ok: false, why: '归档目录没有「⚖ 比对」按钮'};
+      const cs = getComputedStyle(g);
+      return {ok: true, vis: !!(g.offsetWidth && g.offsetHeight),
+              border: cs.borderTopStyle, cursor: cs.cursor,
+              boxes: document.querySelectorAll('.runs td.cmpck input[data-cmp]').length};
+    }'''
+    _JS_RD = '''() => { const e = document.querySelector('#rdcmp');
+      const c = getComputedStyle(e);
+      return {border: c.borderTopStyle, cursor: c.cursor}; }'''
+    _JS_LAND = '''(rid) => {
+      const row = document.querySelector('.runs tr[data-id="' + rid + '"]');
+      const vis = e => !!(e && e.offsetWidth && e.offsetHeight);
+      return {sel: (typeof CMPSEL !== 'undefined' ? CMPSEL : null),
+              rowVis: vis(row),
+              boxVis: [...document.querySelectorAll('.runs td.cmpck input[data-cmp]')]
+                        .filter(vis).length};
+    }'''
+    _JS_YEAR = '''() => {
+      const s1 = document.querySelector('#cmpyb1 svg'), s2 = document.querySelector('#cmpyb2 svg');
+      const yr = [...s1.querySelectorAll('text.ax')].filter(t => /^\\d{4}$/.test(t.textContent));
+      return {bars1: s1.querySelectorAll('rect[fill]').length,
+              bars2: s2.querySelectorAll('rect[fill]').length,
+              paths1: s1.querySelectorAll('path').length,
+              zero1: s1.querySelectorAll('.zl').length,
+              zero2: s2.querySelectorAll('.zl').length,
+              same2: s1 !== s2,
+              nyear: yr.length,
+              left1: Math.round(s1.getBoundingClientRect().left),
+              left2: Math.round(s2.getBoundingClientRect().left)};
+    }'''
+
+    # ---- ① 纯函数：区间起点就是序列起点时，基点必须是 1 ----
+    #   `/api/equity` 给的已经是「除以初始资金」的净值，`v[0]` 含首日盈亏。
+    #   拿 `v[0]` 当基点 = 把首日涨跌抹掉、首日恒 0.00%
+    #   —— 那正是实盘基准线「选了 ETF 第一天收益是 0」的根因（lprSlice）。
+    src = open(os.path.join(REPO, 'web/views/run-cmp.js'), encoding='utf-8').read()
+    assert 'function cmpBase' in src, '少了归一化基点函数'
+
+    # ---- 挑两次【同区间同成本】的真实归档（扫目录，不写死 run_id）----
+    metas = []
+    for m in glob.glob(os.path.join(REPO, 'runs/*/*/*/meta.json')):
+        d = os.path.dirname(m)
+        if not os.path.exists(os.path.join(d, 'equity.parquet')):
+            continue
+        try:
+            o = _json.load(open(m, encoding='utf-8'))
+        except Exception:                                   # noqa: BLE001
+            continue
+        metas.append((os.path.basename(d), o))
+    # 🔴 **挑区间最长的那一对** —— 随便挑一对会挑到一年期的实验归档，
+    #   于是逐年表只有 1 行、"逐年数字同源"那条等于没测（护栏当场抓到过）。
+    #   这就是「判据依赖盘上恰好有什么」那个陷阱，本项目踩过两次。
+    key = lambda o: (o.get('start'), o.get('end'), o.get('cash'),
+                     _json.dumps(o.get('cost'), sort_keys=True))
+    cand = []
+    for i in range(len(metas)):
+        for k in range(i + 1, len(metas)):
+            a, b = metas[i][1], metas[k][1]
+            if key(a) == key(b) and a.get('params') != b.get('params'):
+                cand.append((str(a.get('end') or ''), str(a.get('start') or ''),
+                             metas[i][0], metas[k][0]))
+    # 跨的年份越多越好：按 (起点最早, 终点最晚) 排
+    cand.sort(key=lambda c: (c[1], [-ord(x) for x in c[0]]))
+    if not cand:
+        return '跳过（找不到两次同区间同成本的归档）'
+    pair = (cand[0][2], cand[0][3])
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1200})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            base = 'http://127.0.0.1:%d/' % port
+
+            # ---- ② 真实两次：曲线真的画出来 + 逐年数字与 perfBuckets 同源 ----
+            pg.goto(base + '#/cmp/' + ','.join(pair), wait_until='networkidle')
+            # 🔴 逐年数字表**默认收起**（2026-09-17 改成柱状图之后，图看形状、
+            #   表看精确值）—— 这里先展开它，顺带把折叠开关也测了。
+            #   不展开的话 `wait_for_selector` 等一个 `display:none` 的元素，
+            #   超时 30 秒看着像页面坏了（同分页签那次"元素落进未激活的 pane"）。
+            pg.wait_for_selector('#cmpyb1 svg', timeout=30000)
+            assert pg.eval_on_selector('#cmpyr', 'e => e.style.display') == 'none', \
+                '逐年数字表该默认收起（图在上、表备查）'
+            pg.click('#cmpyrtb')
+            pg.wait_for_selector('#cmpyr table', timeout=30000)
+            n1 = pg.eval_on_selector_all('#cmpc1 svg path[fill="none"]', 'a=>a.length')
+            n2 = pg.eval_on_selector_all('#cmpc2 svg path[fill="none"]', 'a=>a.length')
+            assert n1 == 2 and n2 == 2, '主图/回撤图的曲线条数 %s/%s（应各 2 条）' % (n1, n2)
+            # 🔴 逐年表必须 == 页面内 `perfBuckets` 对同一份 equity 算的结果。
+            #   自己再算一遍的话会出现「详情页说 2024 +29.43%、比对页 +29.4x%」。
+            chk = pg.evaluate("""async (ids) => {
+              const e = await j('/api/equity?id=' + encodeURIComponent(ids[0]));
+              const y = perfBuckets(e.dates, e.equity, null).years;
+              const rows = [...document.querySelectorAll('#cmpyr tr')].slice(2);
+              const out = [];
+              for (const tr of rows) {
+                const td = tr.querySelectorAll('td');
+                const yr = td[0].textContent.trim();
+                if (!(yr in y)) continue;
+                out.push([yr, td[1].textContent.trim(),
+                          (y[yr].ret * 100).toFixed(2) + '%']);
+              }
+              return out;
+            }""", list(pair))
+            assert len(chk) >= 3, '逐年表只有 %d 行 —— 判据在空转' % len(chk)
+            bad = [c for c in chk if c[1] != c[2]]
+            assert not bad, '逐年收益与 perfBuckets 对不上（前 3）：%s' % bad[:3]
+            # 🔴 **参数不同不许报警** —— 这一对就只有参数不同（比对的正是它）。
+            #   把它算进警告的话每次比对都亮一条红字，于是人就不看这个位置了
+            #   （同「常驻一条『一切正常』的横幅等于教人忽略这个位置」）。
+            #   它只在口径卡里标成中性的 .cmpdif。
+            pdiff = pg.evaluate("""() => ({
+              warn: !!document.querySelector('#cmp .cmpwarn'),
+              bad: [...document.querySelectorAll('#cmp .cmpax tr.cmpbad td:first-child')]
+                     .map(x => x.textContent.trim()),
+              dif: [...document.querySelectorAll('#cmp .cmpax tr.cmpdif td:first-child')]
+                     .map(x => x.textContent.trim()),
+            })""")
+            assert '参数' in pdiff['dif'], '参数不同没标成中性「比对项」：%s' % pdiff
+            assert not pdiff['warn'], '只有参数不同却弹了警告条 —— 假告警，看多了就不看告警了'
+            assert '参数' not in pdiff['bad'], '参数被当成口径问题标红了：%s' % pdiff['bad']
+            notes.append('真实两次：主图/回撤各 2 条曲线，%d 个年度格与 perfBuckets 逐位相同；'
+                         '参数不同只标中性不报警' % len(chk))
+
+            # ---- ③ 构造：成本不同 -> 必须标红并点名 ----
+            def _stub(pg_, cost_b=None, end_b=None):
+                """拦 /api/run 与 /api/equity，造两次可控的回测。"""
+                D = ['2024-01-0%d' % i for i in range(1, 6)] + \
+                    ['2025-01-0%d' % i for i in range(1, 6)]
+                eq = {'A': {'dates': D[:], 'equity': [1.0, 1.1, 1.05, 1.2, 1.3, 1.35, 1.2, 1.4, 1.5, 1.6]},
+                      'B': {'dates': D[:], 'equity': [1.0, 1.05, 1.0, 1.1, 1.15, 1.2, 1.1, 1.25, 1.3, 1.35]},
+                      'C': {'dates': D[:], 'equity': [1.0, 1.02, 1.0, 1.05, 1.1, 1.12, 1.05, 1.18, 1.22, 1.3]}}
+                if end_b:
+                    eq['B']['dates'] = eq['B']['dates'][3:]
+                    eq['B']['equity'] = eq['B']['equity'][3:]
+                cost_a = {'slippage': 0.0015, 'commission': 0.00025,
+                          'min_commission': 5, 'close_tax': 'auto'}
+                # ★ 参数串写得跟真实的一样长（实盘那套就是 5 个）——
+                #   列被挤出去只在"参数很长 + 3 列"时发生，短参数测不到。
+                LP = {'lu_buy_only': 1, 'lu_since_start': 1, 'pb_pct': 0.5,
+                      'stop_intraday': 1, 'stop_loss': 0.35, 'weekday': 2}
+                mk = lambda pb, c: {'strategy_path': 's/froec_cutgrid.py',
+                                    'params': dict(LP, pb_pct=pb), 'start': '2024-01-01',
+                                    'end': '2025-01-05', 'cash': 100000, 'cost': c,
+                                    'data_fingerprint': {'overall': 'ffff0000'}}
+                meta = {'A': mk(0.5, cost_a), 'B': mk(0.7, cost_b or cost_a), 'C': mk(1.0, cost_a)}
+                if end_b:
+                    meta['B']['start'] = eq['B']['dates'][0]
+                st = {'total_return': 0.6, 'annual_return': 0.5, 'max_drawdown': 0.12,
+                      'sharpe': 1.2, 'n_trades': 10, 'win_rate': 0.6}
+
+                def h(route):
+                    u = route.request.url
+                    k = 'C' if 'id=C' in u else ('B' if 'id=B' in u else 'A')
+                    if '/api/equity' in u:
+                        route.fulfill(status=200, content_type='application/json',
+                                      body=_json.dumps(eq[k]))
+                    else:
+                        route.fulfill(status=200, content_type='application/json',
+                                      body=_json.dumps({'meta': meta[k], 'stats': st}))
+                pg_.route('**/api/run?*', h)
+                pg_.route('**/api/equity?*', h)
+
+            _stub(pg, cost_b={'slippage': 0.0, 'commission': 0.00025,
+                              'min_commission': 5, 'close_tax': 'auto'})
+            pg.goto(base + '#/cmp/A,B', wait_until='networkidle')
+            pg.wait_for_selector('#cmp .cmpwarn', timeout=20000)
+            w = pg.inner_text('#cmp .cmpwarn')
+            assert '成本口径' in w, '成本不同却没点名：%r' % w[:120]
+            redrows = pg.eval_on_selector_all(
+                '#cmp .cmpax tr.cmpbad td:first-child', 'a=>a.map(x=>x.textContent.trim())')
+            assert '成本口径' in redrows, '成本那一行没标红：%s' % redrows
+            assert '区间' not in redrows and '本金' not in redrows, \
+                '一致的项也被标红了：%s' % redrows
+            notes.append('成本不同：警告条点名 + 只有那一行标红（%s）' % redrows)
+
+            # ---- ④ 构造：区间不同 -> 取交集 + 按交集起点重新归一化 ----
+            pg.unroute('**/api/run?*'); pg.unroute('**/api/equity?*')
+            _stub(pg, end_b=True)
+            # 🔴 `goto` 到【同一个 hash】不会重新加载页面（CLAUDE.md 记过）——
+            #   不 reload 的话这一步看到的还是上一步的渲染，三条断言全是空转。
+            pg.goto(base + '#/cmp/A,B', wait_until='networkidle')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#cmp .cmpwarn', timeout=20000)
+            # 🔴 判据取**标红的那几行**，不查警告条里有没有"区间"两个字 ——
+            #   警告条的固定尾句就是「请用同一区间、同一成本重跑」，
+            #   查字符串的话它永远命中（第一版就是这么空转的）。
+            red2 = pg.eval_on_selector_all(
+                '#cmp .cmpax tr.cmpbad td:first-child', 'a=>a.map(x=>x.textContent.trim())')
+            assert '区间' in red2, '区间不同却没标红：%s' % red2
+            assert '成本口径' not in red2, '成本一致却被标红：%s' % red2
+            got = pg.evaluate("""() => {
+              const xs = [...document.querySelectorAll('#cmpc1 svg text.ax')]
+                  .map(t => t.textContent.trim()).filter(t => /^\\d{2}-\\d{2}|\\d{4}/.test(t));
+              const note = document.querySelector('#cmp .lvsec .note').textContent;
+              return {x0: xs[0] || '', note: note};
+            }""")
+            assert '2024-01-04' in got['note'], \
+                '没把实际比的区间写出来：%r' % got['note'][:140]
+            # 🔴 重新归一化的硬判据：两条线在交集首日必须【都】从 1 出发 ——
+            #   不重新归一化的话 y 轴写的百分比其实是各自全程的收益（lprSlice 那条）。
+            v0 = pg.evaluate("""() => {
+              const e = {A:[1.0,1.1,1.05,1.2,1.3,1.35,1.2,1.4,1.5,1.6],
+                         B:[1.2,1.3,1.35,1.2,1.4,1.5,1.6]};
+              return [cmpBase(e.A, 3), cmpBase(e.B, 0)];
+            }""")
+            assert abs(v0[0] - 1.05) < 1e-9, 'i0>0 时基点该取前一点 1.05，得到 %s' % v0[0]
+            assert v0[1] == 1, 'i0=0 时基点必须是 1（不是 v[0]）—— 首日涨跌会被抹掉，得到 %s' % v0[1]
+            notes.append('区间不同：点名 + 图按交集画 + 基点 i0>0 取前一点 / i0=0 取 1')
+
+            # ---- ④b 口径卡不许把最后一列挤出去（3 列时参数串很长）----
+            #   🔴 判据是 **body 不横滚** + 表格装得进 .pw：宽表自己在 .pw 里滚是
+            #     对的，body 横滚不是（读表格时整页左右晃）。参数那一格没有
+            #     `white-space:normal` + 宽度上限的话，3 列时 C 列直接被切掉，
+            #     **而它不报错**（同「参数列要有宽度上限且不 nowrap」那条）。
+            #   🔴 **必须用 3 条来测**：2 列时表格本来就装得下，
+            #     去掉换行规则也不会溢出 —— 变异实测漏过一次
+            #     （同「断言要在能触发的构造上跑」那条）。
+            pg.unroute('**/api/run?*'); pg.unroute('**/api/equity?*')
+            _stub(pg)
+            pg.goto(base + '#/cmp/A,B,C', wait_until='networkidle')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#cmp .cmpax', timeout=20000)
+            ncol = pg.eval_on_selector_all('#cmp .cmpax tr:first-child th', 'a=>a.length')
+            assert ncol == 4, '构造的不是 3 列（表头 %d 格）—— 判据在空转' % ncol
+            geo = pg.evaluate("""() => ({
+              tbl: Math.round(document.querySelector('#cmp .cmpax').getBoundingClientRect().width),
+              pw: document.querySelector('#cmp .pw').clientWidth,
+              body: document.body.scrollWidth - document.body.clientWidth,
+            })""")
+            assert geo['tbl'] <= geo['pw'] + 1, (
+                '口径卡 %dpx 装不进容器 %dpx —— 最后一列会被切掉' % (geo['tbl'], geo['pw']))
+            pg.set_viewport_size({'width': 1024, 'height': 900})
+            pg.wait_for_timeout(200)
+            ov = pg.evaluate('document.body.scrollWidth - document.body.clientWidth')
+            assert ov <= 0, '1024 宽下 body 横滚了 %dpx —— 宽表该自己在 .pw 里滚' % ov
+            pg.set_viewport_size({'width': 1500, 'height': 1200})
+            notes.append('口径卡装得下且窄屏 body 不横滚')
+
+            # ---- ⑤ picks 页勾选上限：超了要【说一句】，不许静默不动 ----
+            pg.unroute('**/api/run?*'); pg.unroute('**/api/equity?*')
+            pg.goto(base + '#/picks', wait_until='networkidle')
+            pg.wait_for_selector('#pk input[data-cmp]', timeout=20000)
+            lim = pg.evaluate("""() => {
+              const cbs = [...document.querySelectorAll('#pk input[data-cmp]')];
+              CMPSEL = [];
+              const n = Math.min(cbs.length, CMP_MAX + 1);
+              for (let i = 0; i < n; i++) cbs[i].click();
+              return {have: cbs.length, sel: CMPSEL.length, max: CMP_MAX,
+                      msg: (document.querySelector('#cmpbar') || {}).textContent || ''};
+            }""")
+            if lim['have'] > lim['max']:
+                assert lim['sel'] == lim['max'], \
+                    '勾了 %d 个，CMPSEL 却有 %d（上限 %d）' % (lim['have'], lim['sel'], lim['max'])
+                assert '最多' in lim['msg'], '到上限没说一句：%r' % lim['msg'][:100]
+                notes.append('勾选上限 %d 生效且有提示' % lim['max'])
+            else:
+                notes.append('勾选上限未触发（只有 %d 条星标）' % lim['have'])
+
+
+            # ---- ⑥ 入口要【看得出能点】，而且不止在「选中的规则」里 ----
+            #   🔴 第一版两个入口都画成了暗 `.lvtag`，用户当场问
+            #     「对比的入口在哪里？」——「**一个能点的东西被画成了标签**」
+            #     这条为「选股理由」记过一次，又犯了一遍。
+            #     判据取**可量的视觉事实**（有边框 + 手型光标 + 可见），
+            #     而不是查那个 class —— 后者在样式被改暗时照样命中。
+            #   ★ 归档目录也必须能勾：只在「选中的规则」里能比的话，
+            #     想比两次没标星的回测就走不通（死路，而它不报错）。
+            pg.goto(base + '#/runs', wait_until='networkidle')
+            pg.wait_for_selector('#cmpbar #cmpgo', timeout=20000)
+            ent = pg.evaluate(_JS_ENTRY)
+            assert ent['ok'], ent.get('why')
+            assert ent['vis'], '「⚖ 比对」按钮不可见'
+            assert ent['border'] != 'none', '入口没有边框 —— 看不出是按钮（画成标签了）'
+            assert ent['cursor'] == 'pointer', '入口不是手型光标：%s' % ent['cursor']
+            assert ent['boxes'] > 0, '归档目录的行里没有比对勾选框'
+            # 详情页那个入口：同样要是按钮，点了要带着自己过去【并展开到那一行】
+            pg.goto(base + '#/run/' + pair[0], wait_until='networkidle')
+            pg.wait_for_selector('#rdcmp', timeout=20000)
+            rd = pg.evaluate(_JS_RD)
+            assert rd['border'] != 'none' and rd['cursor'] == 'pointer', \
+                '详情页的比对入口没画成按钮：%s' % rd
+            pg.click('#rdcmp')
+            pg.wait_for_selector('#cmpbar #cmpgo', timeout=20000)
+            land = pg.evaluate(_JS_LAND, pair[0])
+            assert '#/runs' in pg.url, '该去【归档目录】（全部回测都能勾）：%s' % pg.url
+            assert land['sel'] == [pair[0]], '没把自己预选成基准 A：%s' % land['sel']
+            # 🔴 目录树默认全折叠 —— 不展开的话人落在一棵合着的树上，
+            #   等于"到了那边还要再找一遍"（把入口做成摆设）。
+            #   判据是**那一行真的可见**，不是"DOM 里有"：695 个勾选框一直都在，
+            #   而首屏 0 个可见 —— 这两件事差得远（同「页签点得开 ≠ 页签里有东西」）。
+            assert land['rowVis'], '跳过去之后那一行不可见 —— 目录树没展开到它'
+            assert land['boxVis'] > 0, '跳过去之后一个勾选框都看不见（%d 个在 DOM 里）' % ent['boxes']
+            notes.append('两处入口都是可见按钮（有边框+手型）；详情页跳过去自动展开到那一行'
+                         '（可见勾选框 %d 个）' % land['boxVis'])
+
+
+            # ---- ⑦ 逐年用【柱状图】，收益与回撤分上下两块 ----
+            #   🔴 **不能画折线**：逐年是离散量，折线会在 2016 与 2017 之间
+            #     画出一段不存在的"过程"。
+            #   🔴 **也不能把收益与回撤镜像进同一块**：亏损年那两根**同向朝下**
+            #     （实测 2022 pb1.0：收益 −4.52% / 回撤 −26.14%），只能靠颜色分，
+            #     而颜色在这一页已经被"哪个配置"占用了。
+            pg.unroute('**/api/run?*'); pg.unroute('**/api/equity?*')
+            pg.goto(base + '#/cmp/' + ','.join(pair), wait_until='networkidle')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_selector('#cmpyb2 svg', timeout=30000)
+            yb = pg.evaluate(_JS_YEAR)
+            assert yb['bars1'] > 0 and yb['bars2'] > 0, '逐年图没画出柱子：%s' % yb
+            assert yb['paths1'] == 0, '逐年收益画成了折线（%d 条 path）—— 离散量不许插值' % yb['paths1']
+            assert yb['zero1'] == 1 and yb['zero2'] == 1, '柱状图缺零线 —— 朝上朝下没有参照'
+            # 两块必须是**分开**的 svg 且左边界对齐（同一 x 轴）
+            assert yb['same2'], '收益与回撤没分成两块（镜像在同一块里分不出方向）'
+            assert abs(yb['left1'] - yb['left2']) <= 1, \
+                '两块左边界不齐（%s vs %s）—— x 轴对不上' % (yb['left1'], yb['left2'])
+            # 差值视图：基准 A 不画（它恒为 0），所以柱子少一组
+            pg.click('#cmpymode [data-ym=diff]')
+            pg.wait_for_timeout(250)
+            d = pg.evaluate("document.querySelectorAll('#cmpyb1 svg rect[fill]').length")
+            assert d == yb['bars1'] - yb['nyear'], (
+                '差值视图没把基准 A 去掉：%d 根（应为 %d − %d）' % (d, yb['bars1'], yb['nyear']))
+            ttl = pg.inner_text('#cmpyb1 .ttl')
+            assert '基准' in ttl and ('正' in ttl or '负' in ttl), \
+                '差值图标题没说清符号方向：%r' % ttl
+            notes.append('逐年是柱状图（收益 %d 根 / 回撤 %d 根、各带零线、两块 x 轴对齐）；'
+                         '差值视图去掉基准 A' % (yb['bars1'], yb['bars2']))
+            # ---- ⑧ 差值视图必须把「数柱子会得出的数」自己印出来，带口径 ----
+            #   🔴 2026-09-17 实测：用户看这张图数出「pb=1 大部分年份都赢」——
+            #     那是**全程连跑切片**的 7/11，而按逐年独立只有 5/11（2 年翻号）。
+            #     根因不是他读错，是**页面请人数柱子却把口径塞在灰字里**。
+            #   🔴 判据要钉**三个数都在** + **口径话术在**，而不是"有这个块" ——
+            #     只查块存在的话，把内容换成空的照样绿。
+            pg.click('#cmpymode [data-ym=diff]')
+            pg.wait_for_timeout(250)
+            sm = pg.inner_text('#cmpysum')
+            for kw in ['胜', '均差', '去掉最好的']:
+                assert kw in sm, '差值视图少了「%s」这个数：%r' % (kw, sm[:120])
+            assert '不能用来判规则' in sm and '逐年独立' in sm, \
+                '统计数字没带口径 —— 人会拿路径混沌当规则证据：%r' % sm[:160]
+            # 绝对值视图**不印**（那里数柱子本来就不是在比差）
+            pg.click('#cmpymode [data-ym=abs]')
+            pg.wait_for_timeout(250)
+            assert not pg.inner_text('#cmpysum').strip(), '绝对值视图不该印差值统计'
+            notes.append('差值视图印出胜/均差/去掉最好那年，且带口径话术')
+            assert not errs, '页面抛了异常：%s' % errs[:2]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
+@case('每个 .js 都过 node --check；注释里的反引号会闭合模板（踩过三次）', tag='fast')
+def t_js_syntax():
+    """两层，**分工别记反**：
+
+    ① **`node --check` 是根本修复** —— 它抓所有语法错。
+       而 selftest 里**一直没有它**（只在别处的注释里提到过），
+       三次踩坑全靠"我这次记得手动跑" —— 同「靠人记得跑的步骤 = 迟早不跑」。
+    ② **注释里的反引号单独扫一遍，是为了【报错指得到原因】。**
+       `el.innerHTML=` 后面那个模板字符串里常夹着 HTML 注释，注释里出现
+       一个反引号，模板当场闭合、整个文件 SyntaxError、**整页白屏**。
+       而 node 报的行号是**误导的** —— 2026-09-18 那次它指向第 55 行
+       (`ewarm` 那行)，真正的错在第 58 行的反引号，我照着行号找了一轮。
+
+    踩过三次：chart.js 的 ddGap（09-14）、K 线读数那轮（09-15，
+    CLAUDE.md 记过了还是踩）、live-fee.js 的「说明」字段（09-18）。
+
+    🔴 **只扫 HTML 注释**（`<!-- -->`）。第一版把块注释也算进去，
+      当场误报 `views/sync.js:361` —— 那是**代码区**的块注释，反引号在那里
+      完全安全（该文件语法本来就是好的）。**判据比要证的事宽**，
+      而一个天天误报的检查等于没有检查。
+    """
+    import re
+    import subprocess
+    web = os.path.join(REPO, 'web')
+    files = sorted(_web_files(web, '.js'))
+    assert len(files) >= 10, '只扫到 %d 个 .js —— 递归收集坏了？' % len(files)
+
+    # ---- ① 语法（根本修复）----
+    bad = []
+    for f in files:
+        r = subprocess.run(['node', '--check', os.path.join(web, f)],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            bad.append('%s: %s' % (f, (r.stderr or '').strip().splitlines()[-1][:80]))
+    assert not bad, ('这些 .js 语法就是坏的 —— 表现是**整页白屏、'
+                     '所有功能一起没了**：\n  ' + '\n  '.join(bad))
+
+    # ---- ② HTML 注释里的反引号（报错指得到原因）----
+    hits = []
+    for f in files:
+        src = open(os.path.join(web, f), encoding='utf-8').read()
+        for m in re.finditer(r'<!--(.*?)-->', src, re.S):
+            if '`' in m.group(1):
+                hits.append('%s:%d  %s' % (
+                    f, src[:m.start()].count('\n') + 1,
+                    m.group(1).strip().replace('\n', ' ')[:60]))
+    assert not hits, (
+        'HTML 注释里有反引号 —— 它在 innerHTML 模板里会把模板提前闭合，'
+        '**整个文件 SyntaxError、整页白屏**，而 node 报的行号指不到这里：\n  '
+        + '\n  '.join(hits))
+    # 反向自证：扫描器真的认得出反引号（否则上面恒为空 = 空转）
+    assert '`' in re.search(r'<!--(.*?)-->', '<!-- x ` y -->', re.S).group(1), \
+        '扫描本身失效 —— 这条判据是空转的'
+    return 'node --check 过 %d 个 .js；HTML 注释里 0 个反引号（含扫描器自证）' % len(files)
+
+
+@case('可执行入口必须固定 hash 种子（回测跨进程要可复现）')
+def t_fixed_hash_seed():
+    """🔴🔴 2026-09-18：`etf_p1_rotation` 同代码同数据，**10 个独立进程跑出
+    两种结果各 5 次**；固定 `PYTHONHASHSEED` 后 10/10 相同。
+
+    成因是策略里 `sorted([s for s in in_trend ...])` 的 `in_trend` 是个 `set`，
+    而排序键并列时**没有 tie-break** —— 并列项的相对顺序就是 set 的迭代顺序，
+    而 str 的 hash 每进程随机（PEP 456）。
+
+    **后果比"模拟盘推不动"大**：同一个 run 重跑一遍结果就不同，于是
+    等价性回归、与聚宽对数、「同参数重复跑必然逐位一致」那条去重判据
+    **全部失效，而它不报错**。
+
+    ★ **不改策略**（那是移植件，改排序会改变与聚宽正本的对数 ——
+      同「没有去修 froec.py 的排序」那条先例），改成在**外面**固定种子。
+
+    判据三条，都是**可证的事实**：
+      ① 四个可执行入口都在**最前面**调 `ensure_fixed_hash_seed()`
+         —— 晚了的话它之前做的副作用会在 exec 之后**重来一遍**
+      ② 不带 `PYTHONHASHSEED` 起的子进程，调它之后
+         `sys.flags.hash_randomization == 0`；**反向自证**：不调则为 1
+         （只查前者的话，helper 整个删掉、而环境恰好有这个变量也能过）
+      ③ 幂等：已经固定时返回 False 且**不 exec**（否则无限重启）
+    """
+    import ast as _ast
+    import subprocess as _sp
+
+    ENTRIES = ('run.py', 'serve.py', 'tick_daily.py', 'selftest.py')
+    for fn in ENTRIES:
+        p = os.path.join(REPO, fn)
+        assert os.path.isfile(p), '入口不见了：%s' % fn
+        tree = _ast.parse(open(p, encoding='utf-8').read())
+        # 前面**只许**有：docstring / import / `sys.path.insert`
+        #   ★ 那一句是必须的（不铺路就 import 不到 helper），而它无副作用：
+        #     exec 之后新进程从头再走一遍也一样。除此之外的任何语句都不许
+        #     排在固定种子之前 —— 有副作用的那些会**重来一遍**。
+        def _is_prologue(n):
+            if isinstance(n, (_ast.Import, _ast.ImportFrom)):
+                return True
+            if isinstance(n, _ast.Expr) and isinstance(n.value, _ast.Constant):
+                return True                   # docstring
+            if (isinstance(n, _ast.Expr) and isinstance(n.value, _ast.Call)
+                    and _ast.dump(n.value.func).count("attr='insert'")
+                    and "attr='path'" in _ast.dump(n.value.func)):
+                return True                   # sys.path.insert(...)
+            return False
+
+        pos = None
+        for i, n in enumerate(tree.body):
+            if _is_prologue(n):
+                continue
+            pos = i
+            break
+        assert pos is not None, '%s 里一条可执行语句都没有？' % fn
+        first = tree.body[pos]
+        src = _ast.dump(first)
+        assert 'ensure_fixed_hash_seed' in src or '_ehs' in src, (
+            '%s 的第一条可执行语句不是固定 hash 种子（是 %s）——\n'
+            '   exec 会把进程映像整个换掉，在它之前做的事白做，\n'
+            '   更糟的是**有副作用的那些会重来一遍**'
+            % (fn, _ast.dump(first)[:90]))
+
+    # ---- 运行时：不带环境变量起子进程 ----
+    env = {k: v for k, v in os.environ.items() if k != 'PYTHONHASHSEED'}
+    code_on = ('import sys;sys.path.insert(0,%r);'
+               'from assay.hashseed import ensure_fixed_hash_seed as e;e();'
+               'print(sys.flags.hash_randomization)' % REPO)
+    code_off = 'import sys;print(sys.flags.hash_randomization)'
+    r_on = _sp.run([sys.executable, '-c', code_on], capture_output=True,
+                   text=True, env=env, timeout=120)
+    r_off = _sp.run([sys.executable, '-c', code_off], capture_output=True,
+                    text=True, env=env, timeout=120)
+    assert r_on.stdout.strip() == '0', \
+        ('调了 ensure_fixed_hash_seed，hash 随机化却还开着（%r / %r）—— '
+         '回测仍然跨进程不可复现'
+         % (r_on.stdout.strip(), r_on.stderr[-200:]))
+    assert r_off.stdout.strip() == '1', \
+        ('构造不对：不调它时随机化本来就是关的（%r），'
+         '那上面那条断言什么都没证' % r_off.stdout.strip())
+
+    # ---- 🔴「设了却没生效」：环境变量不能当判据 ----
+    #   进程内 `os.environ[...]='0'` 之后，只看环境变量的实现会说
+    #   "已经固定了"直接返回 —— 而**随机化其实还开着**，回测照样不可复现，
+    #   且**一声不吭**。判据必须是解释器标志（`sys.flags`）。
+    code_lie = ('import sys,os;os.environ["PYTHONHASHSEED"]="0";'
+                'sys.path.insert(0,%r);'
+                'from assay.hashseed import ensure_fixed_hash_seed as e;e();'
+                'print(sys.flags.hash_randomization)' % REPO)
+    r3 = _sp.run([sys.executable, '-c', code_lie], capture_output=True,
+                 text=True, env=env, timeout=120)
+    assert r3.stdout.strip() == '0', \
+        ('进程内设了 PYTHONHASHSEED 就被当成"已经固定"了 —— '
+         '而随机化还开着（%r）。判据要取 sys.flags，不是环境变量'
+         % r3.stdout.strip())
+
+    # ---- 幂等：已固定时不许再 exec ----
+    code_idem = ('import sys;sys.path.insert(0,%r);'
+                 'from assay.hashseed import ensure_fixed_hash_seed as e;'
+                 'print(e());print(e())' % REPO)
+    env2 = dict(env, PYTHONHASHSEED='0')
+    r2 = _sp.run([sys.executable, '-c', code_idem], capture_output=True,
+                 text=True, env=env2, timeout=120)
+    assert r2.stdout.split() == ['False', 'False'], \
+        ('已经固定了还要重启 —— 那是无限循环：%r' % r2.stdout[:120])
+    return ('4 个入口都在第一条语句固定种子；'
+            '子进程 randomization 1 -> 0；幂等不重启')
+
+
+@case('参数说明：注释归属要对 / 回测要能看清用了哪些参数')
+def t_param_docs():
+    """用户 2026-09-19 两条：「回测列表中每个回测用了哪些参数看的还是非常
+    不清楚」「策略回测页面对参数没有详细的解释」。
+
+    🔴🔴 **解释不是没人写，是解析器读错了地方。**
+      `_PARAM_RE` 末尾那个 `\\s*(?:#...)` 的 `\\s` **匹配换行** ——
+      行内没注释时它会吃掉换行、抓到**下一行**的注释。实测 froec：
+      `g.weekday` 拿到的是下一行那句 `# ---- 用于定位对标残差的两个开关 ----`
+      （段落标题！）。于是回测页上**每个参数配的是别人的说明** ——
+      比没有说明更糟（同「分叉的文档比没有文档更危险」）。
+
+    ★ 归属按 **Python 惯例**：注释写在它说明的那一行**上面**。
+      实测 froec 40 个参数里行内注释只有 4 个、上方注释块 25 处。
+    🔴 段落标题往上找要**限定在 `initialize` 内**：不设界就一路翻到文件
+      开头，给它安一个**别处**的标题（实测红利那次被安上了不相关的段落）。
+
+    🔴 **「这次回测用了哪些参数」≠ `meta.params`**：后者只有命令行覆盖过的
+      那几个（常常 1 个），而生效配置是「全部默认 ⊕ 覆盖」。所以
+      `/api/run` 给 `params_all`，**照归档里的源码快照**解析
+      （不是磁盘上的当前文件 —— 那可能早改了）。
+    """
+    import glob as _g
+    import json as _j
+
+    from assay.srv.base import _parse_params
+    from assay.srv import runs as _R
+
+    src = open(os.path.join(REPO, 'strategies/小市值/froec.py'),
+               encoding='utf-8').read()
+    ps = _parse_params(src)
+    assert len(ps) > 20, '构造不对：froec 解析出的参数太少（%d）' % len(ps)
+    by = {p['name']: p for p in ps}
+
+    # ---- ① 行内注释不许跨行抓到下一行 ----
+    #   判据落在**可证的事实**上：段落标题（`---- xxx ----`）**永远不该**
+    #   成为某个参数的 comment / doc —— 它是分节，不是说明。
+    for p in ps:
+        for t in [p['comment']] + list(p['doc']):
+            assert not re.match(r'^-{2,}.*-{2,}$', (t or '').strip()), \
+                ('参数 %s 的说明是个段落标题 %r —— 那是抓到了别人的注释'
+                 % (p['name'], t))
+    _w = by.get('weekday')
+    assert _w is not None, '构造不对：froec 没有 weekday 这个参数'
+    assert not _w['comment'], \
+        ('weekday 行内本来就没有注释，却抓到了 %r —— 正则又跨行了'
+         % _w['comment'])
+
+    # ---- ② 上方注释块要抓得到（否则"没有详细解释"照旧）----
+    n_doc = sum(1 for p in ps if p['doc'])
+    assert n_doc >= 10, \
+        ('只有 %d 个参数抓到了上方注释块 —— froec 里写了二十多处，'
+         '说明归属那一段没生效' % n_doc)
+    _c = by.get('candidate_num')
+    assert _c and _c['doc'] and '原版' in _c['doc'][0], \
+        ('candidate_num 上方那句说明没抓到：%r' % (_c and _c['doc']))
+
+    # ---- ③ 段落分组要限定在 initialize 内 ----
+    n_grp = len({p['group'] for p in ps if p['group']})
+    assert n_grp >= 5, 'froec 的参数段落只认出 %d 组（源码里有十几段）' % n_grp
+    #   反向自证：段落**不许跨函数**认领（`def` 是边界）。
+    #   ⚠ 我一度以为还需要"只在 initialize 内"那道边界，加完做变异测试
+    #     才发现它**什么也没抓到** —— `def` 那道已经够了。
+    #     （别把冗余说成抓到了：同 realtime「锁是根本修复、唯一 tmp 名
+    #     防跨进程」那条的反面用法。）
+    plain = ("# ---- 模块级的段落标题，不该被参数认领 ----\n"
+             "def initialize(context):\n    g.a = getattr(g, 'a', 1)\n")
+    assert not any(p['group'] for p in _parse_params(plain)), \
+        ('参数认领了 initialize 【外面】的段落标题 —— 往上找越界了')
+
+    # ---- ④ /api/run 要给参数全集，并标出哪些改过 ----
+    _R._scan()
+    rid = None
+    for f in sorted(_g.glob(os.path.join(REPO, 'runs/*/*/*/meta.json'))):
+        m = _j.load(open(f, encoding='utf-8'))
+        if (m.get('params') and
+                os.path.isfile(os.path.join(os.path.dirname(f), 'strategy.py'))):
+            rid = m['run_id']
+            over = m['params']
+            break
+    assert rid, '构造不对：没有一次"带参数且留了源码快照"的归档'
+    d = _R.api_run({'id': rid})
+    pa = d.get('params_all')
+    assert pa, '/api/run 没给参数全集 —— 页面只能看到覆盖的那几个'
+    assert len(pa) > len(over), \
+        ('参数全集 %d 个 <= 覆盖项 %d 个 —— 那就还是只列了覆盖项'
+         % (len(pa), len(over)))
+    ch = [p['name'] for p in pa if p['changed']]
+    assert sorted(ch) == sorted(over), \
+        '标成"改过"的是 %s，而实际覆盖的是 %s' % (ch, sorted(over))
+    #   反向自证：没改的那些必须等于默认值（否则 changed 判据是摆设）
+    for p in pa:
+        if not p['changed'] and p['default'] is not None:
+            assert str(p['value']) == str(p['default']), \
+                '%s 没标改过，值却与默认不同：%r vs %r' \
+                % (p['name'], p['value'], p['default'])
+    return ('froec %d 个参数：%d 个有上方说明、%d 个段落；'
+            '归档 %s 的参数全集 %d 个（改过 %d）'
+            % (len(ps), n_doc, n_grp, rid[:15], len(pa), len(ch)))
+
+
+@case('页面文案里不许写 markdown 星号（HTML 渲染不了）')
+def t_no_markdown_stars():
+    """★ CLAUDE.md 记过两次（indicators 的 desc 进 title、这一轮的参数说明），
+    而**现网就有五处**在 title 属性里写了 `**`（属性里连 <b> 都用不了，
+    星号会原样显示给用户）。
+
+    ★ 之前没做全局扫描器，理由是"要区分注释里的星号与会进 innerHTML 的
+      文案得解析 JS，误报率高"。这一版只扫**单引号字符串字面量**、
+      并且先剥掉三种注释 —— 实测 0 误报，而它当场抓到了那五处。
+    """
+    import glob as _g
+    bad = []
+    for f in sorted(_g.glob(os.path.join(REPO, 'web/**/*.js'), recursive=True)):
+        s = open(f, encoding='utf-8').read()
+        s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)     # 块注释
+        s = re.sub(r'(?m)^\s*//.*$', '', s)             # 行注释
+        s = re.sub(r'<!--.*?-->', '', s, flags=re.S)    # 模板里的 HTML 注释
+        for m in re.finditer(r"'[^'\n]*\*\*[^'\n]*'", s):
+            bad.append('%s: %s' % (os.path.basename(f), m.group(0)[:60]))
+    assert not bad, \
+        ('页面文案里有 markdown 星号（HTML 渲染不了，会原样显示）：\n  '
+         + '\n  '.join(bad[:6]))
+    # 反向自证：扫描器真的抓得到（否则"0 处"可能是正则写坏了）
+    probe = "x = '这里有**星号**的文案';"
+    assert re.search(r"'[^'\n]*\*\*[^'\n]*'", probe), '扫描器自己坏了'
+    return '扫了 web 下全部 .js，0 处；扫描器自证可用'
+
+
+@case('「代码 -> 类别 / 名称 / K 线」只许有一份实现（symbols.py）')
+def t_symbols_single_source():
+    """🔴🔴 2026-09-21 用户报：「首页显示了 513120.XSHG 的编码但没有中文名，
+    点击后也看不到日 K，而实盘-模拟盘页面可以」—— 并指出这**不是找不到**，
+    是「通过编码获取名称/K线、索引到 stock/etf/index 的逻辑出现了分叉」。
+
+    查下来**三处分叉**，五份实现、三种行为，而且**没有一处会报错**：
+
+        ① 代码口径  stock.kline('sh513120')    -> 10 根
+                    stock.kline('513120.XSHG') -> 取不到（账本记的就是这个口径）
+                    `stock.alt_kind` 的 docstring 自己写着"只认 tdx symbol，
+                    别的写法一律当股票走原路" —— 换算一直有（`to_symbol`），只是没调
+        ② 取名      watchlist / alerts 只查【股票面板】-> ETF 名字是空的
+                    -> 页面 `name || code` 回落成代码（实测自选 5 只 ETF 全中）
+        ③ 名称清洗  lv/tdx 去了 U+FFFD、stock._alt_name 没去
+                    -> **同一只票在两个页面上两个名字**
+
+    正本现在是 `assay/symbols.py`；`lv/tdx.py` 只剩转发门面。
+
+    判据四条，每条对应一种**不报错**的坏法：
+      ① 聚宽口径与 symbol 口径必须**逐位相同**（只测"能取到"的话，
+         两条路各自算出不同的数也照样绿）
+      ② 清洗只许有一处：全仓扫 `\\ufffd`，除 `symbols.clean_name` 外不许出现；
+         且四个取名出口给出的名字都不含它
+      ③ 结构守卫：除 `symbols.py` 外，任何模块不许再出现
+         「自己查 sec_name + 自己回落 tdx」那个组合 —— 那就是第六份实现
+      ④ 股票**不许**被拖去 ETF 那条路（反向自证）；面板里查不到的股票
+         仍要标 `missing`，否则"退市"与"我加的票不见了"分不出来
+    """
+    import io as _io
+    from assay import symbols as _S
+    from assay import stock as _stk
+
+    # ---------- ① 两种口径逐位相同 ----------
+    PAIRS = [('513120.XSHG', 'sh513120'), ('510880.XSHG', 'sh510880')]
+    for jq, sym in PAIRS:
+        assert _S.as_symbol(jq) == sym and _S.to_jq(sym) == jq, (jq, sym)
+        for fq in ('bfq', 'qfq', 'hfq'):
+            a = _stk.kline(jq, n=40, fq=fq)['bars']
+            b = _stk.kline(sym, n=40, fq=fq)['bars']
+            assert a and a == b, \
+                '%s 与 %s 的 %s K 线不一致 —— 代码口径又分叉了' % (jq, sym, fq)
+        pa, pb = _stk.profile(jq), _stk.profile(sym)
+        assert pa.get('sec_name') and pa.get('sec_name') == pb.get('sec_name'), \
+            '%s / %s 的名字不一致' % (jq, sym)
+
+    # ---------- ② 清洗只许有一处 ----------
+    # 🔴 判据走 **ast**，不查字符串 —— 本项目记过三次：查字符串会命中
+    #   **自己写的注释/docstring**（这里 stock.py 与 symbols.py 的 docstring
+    #   里都提到了这个字符，第一版就是这么误报的）。注释不是 AST 节点。
+    import ast as _a
+    hits = []
+    for r, ds, fs in os.walk(os.path.join(REPO, 'assay')):
+        if '__pycache__' in r:
+            continue
+        for fn in fs:
+            if not fn.endswith('.py'):
+                continue
+            fp = os.path.join(r, fn)
+            try:
+                tree = _a.parse(_io.open(fp, encoding='utf-8').read())
+            except SyntaxError:
+                continue
+            for nd in _a.walk(tree):
+                if (isinstance(nd, _a.Call)
+                        and isinstance(nd.func, _a.Attribute)
+                        and nd.func.attr == 'replace' and nd.args
+                        and isinstance(nd.args[0], _a.Constant)
+                        and isinstance(nd.args[0].value, str)
+                        and '\ufffd' in nd.args[0].value):
+                    hits.append('%s:%d' % (os.path.relpath(fp, REPO), nd.lineno))
+    assert len(hits) == 1 and hits[0].endswith('symbols.py:%s' % hits[0].split(':')[-1]) \
+        and 'symbols.py' in hits[0], \
+        'U+FFFD 的清洗不止一处（或不在正本里）：%s' % hits
+    root = _S.default_root()
+    for nm in list(_S.names(['513120.XSHG', '510880.XSHG']).values()) + \
+              list(_S.alt_names(root, ['513120.XSHG']).values()) + \
+              [_stk._alt_name('sh513120'), _stk.profile('513120.XSHG')['sec_name']]:
+        assert '�' not in nm, '取名出口漏了清洗：%r' % nm
+
+    # ---------- ③ 结构守卫：不许再长出第六份 ----------
+    # 🔴 判据必须落到**单条 SQL 字符串**上，不是文件级 —— `alerts.py` 的
+    #   row_number 是取 bars 的、`stock.py` 的是财务报告期去重，它们与取名
+    #   毫无关系。文件级判据把这两个**消费方**误报了两轮（如实记一笔：
+    #   这条判据我改了三版才对，前两版都是「判据比要证的事宽」）。
+    # ★ 要禁的是「同一条 SQL 里既取 sec_name、又按 jq_code 取最近一行」——
+    #   那正是 `symbols.names` 的内脏，重写它就是第六份实现。
+    NEEDLE = 'row_number() OVER (PARTITION BY jq_code ORDER BY date DESC)'
+    dup = []
+    for r, ds, fs in os.walk(os.path.join(REPO, 'assay')):
+        if '__pycache__' in r:
+            continue
+        for fn in fs:
+            if not fn.endswith('.py') or fn == 'symbols.py':
+                continue
+            fp2 = os.path.join(r, fn)
+            try:
+                tree2 = _a.parse(_io.open(fp2, encoding='utf-8').read())
+            except SyntaxError:
+                continue
+            for nd in _a.walk(tree2):
+                if (isinstance(nd, _a.Constant) and isinstance(nd.value, str)
+                        and 'sec_name' in nd.value and NEEDLE in nd.value):
+                    dup.append('%s:%d' % (os.path.relpath(fp2, REPO), nd.lineno))
+    assert not dup, ('这些地方自己又写了一遍「按 jq_code 取最近非空 sec_name」'
+                     '那套 SQL —— 应该调 `symbols.names`：\n  ' + '\n  '.join(dup))
+    # 反向自证：正本里**必须**有那条 SQL，否则上面这条是空转的
+    _src_sym = _io.open(os.path.join(REPO, 'assay', 'symbols.py'),
+                        encoding='utf-8').read()
+    assert 'sec_name' in _src_sym and NEEDLE in _src_sym, \
+        '正本里没有那条 SQL —— 结构守卫成了空转'
+
+    # ---------- ④ 反向自证：股票不许被拖去 ETF 那条路 ----------
+    for c in ('601857.XSHG', '000001.XSHE', '300750.XSHE'):
+        assert _S.kind_of(c) is None, '%s 被误判成了 %s' % (c, _S.kind_of(c))
+        assert _stk.alt_kind(c) is None, '%s 走了 ETF/指数那条路' % c
+    # 面板里查不到的**股票**仍要标 missing（退市 ≠ ETF）
+    assert _S.kind_of('000003.XSHE') is None, '退市股票被判成了 ETF/指数'
+    # 🔴 **这条必须构造**：`alt_names('000003.XSHE')` 在当前快照上本来就返回
+    #   空，所以"去掉 kind 门控"在真实数据上**可观察行为完全相同** ——
+    #   变异测试第一轮就是这么漏的。而门控不是冗余：快照里将来完全可能
+    #   出现退市股票，那时没有门控就会把它"救"回来、missing 再也标不出来。
+    #   （同「真实数据触发不到的上限，判据必须能构造出来」那条。）
+    import tempfile as _tf
+    import shutil as _sh
+    from assay import watchlist as _wl
+    _old_live, _old_alt = _wl.LIVE, _S.alt_names
+    _tmp = _tf.mkdtemp(prefix='wlgate_')
+    try:
+        _wl.LIVE = _tmp                      # 🔴 不许写生产账本
+        _wl.act('add', '000003')             # 早已退市
+        _wl.act('add', '513120.XSHG')        # 真 ETF，同一批里做正向对照
+        _S.alt_names = lambda rt, cs: {c: '假名字' for c in cs}
+        _rows = {x['code']: x for x in _wl.valued()['rows']}
+        _d = _rows.get('000003.XSHE') or {}
+        assert _d.get('missing') and not _d.get('name'), \
+            ('退市股票被 ETF 快照"救"回来了（name=%r missing=%r）—— '
+             '那样"我加的票不见了"与"它退市了"就分不出来'
+             % (_d.get('name'), _d.get('missing')))
+        _e = _rows.get('513120.XSHG') or {}
+        assert _e.get('name') == '假名字' and not _e.get('missing'), \
+            '正向对照没走到：ETF 那条回落路径根本没执行（判据是空转的）'
+    finally:
+        _S.alt_names, _wl.LIVE = _old_alt, _old_live
+        _sh.rmtree(_tmp, ignore_errors=True)
+    return ('两种口径 2 只 × 3 复权逐位相同；清洗只有 1 处且 4 个出口都干净；'
+            '无第六份实现；3 只股票未被误路由，退市股仍标 missing')
+
+
+@case('归档批量删除：先弹窗列【服务端的】清单，受保护的默认不删（playwright）',
+      tag='web')
+def t_runs_batch_delete():
+    """用户 2026-09-21："加一个策略回测结果批量删除的功能，可以多选回测结果，
+    批量删除，删除之前要再弹窗确认。"
+
+    形态取「🗑 管理」**模式开关**而不是共用比对那套勾选：比对上限是 4
+    （理由是看得清），批量删除要能一次选几十个 —— 共用一套选中列表的话
+    "上限对谁生效"就成了要记的事。同一列勾选框、两种含义，用显式模式分开。
+
+    判据六条，每条对应一种**不报错**的坏法：
+      ① 进管理模式时**比对工具条必须收起** —— 两条工具条同屏而勾选框只有
+         一列的话，"我勾的这个是干嘛的"没法回答
+      ② 选中数**可以超过比对上限 4** —— 不然"批量"没有意义
+      ③ 弹窗里的清单必须来自**服务端 dry 预演**（拦接口看 `dry:true` 真的发了）
+         —— 前端自己算一份的话，"页面说删 12、实际删了 15"不报错
+      ④ **取消不删任何东西**（点了取消再数一遍归档）
+      ⑤ 受保护的（标星）默认**不在删除清单里**，且弹窗里单列一块 + 逃生口
+      ⑥ 确认之后**真的少了**，而且**结论落进了 _pruned_conclusions.jsonl**
+         —— 「tar 备份 != 保留结论」那条：只删不留结论等于把那轮跑过什么弄丢
+    🔴 全程跑在**临时归档**上（`ASSAY_RUNS` + `reg.set_runs`）：这条用例会
+      **真的删目录**，不重定向的话一跑就毁生产归档 —— 比"污染一条"严重得多。
+    """
+    import glob as _g0
+    import json as _js
+    import shutil as _sh0
+    import tempfile as _tf
+    import threading
+    from http.server import ThreadingHTTPServer
+    from assay import registry as reg
+    from assay import server as sv
+    sv._scan()
+
+    _runs_tmp = _tf.mkdtemp(prefix='selftest_runs_')
+    _seed_by = {}
+    for _m in sorted(_g0.glob(os.path.join(reg.RUNS, '*/*/*/meta.json'))):
+        _pp = _m.split(os.sep)
+        _seed_by.setdefault((_pp[-4], _pp[-3]), []).append(_m)
+    _n_seed = 0
+    for (_grp, _st), _ms in _seed_by.items():
+        for _m in _ms[-2:]:
+            _src = os.path.dirname(_m)
+            _dst = os.path.join(_runs_tmp, _grp, _st, os.path.basename(_src))
+            os.makedirs(_dst, exist_ok=True)
+            for _f in ('meta.json', 'stats.json', 'strategy.py', 'run.log'):
+                _sp = os.path.join(_src, _f)
+                if os.path.isfile(_sp):
+                    _sh0.copy2(_sp, os.path.join(_dst, _f))
+            _n_seed += 1
+    assert _n_seed >= 6, '临时归档只有 %d 个 —— 这条用例要选超过 4 个' % _n_seed
+    _prev_runs_env = os.environ.get('ASSAY_RUNS')
+    os.environ['ASSAY_RUNS'] = _runs_tmp
+    _prev_runs = reg.RUNS
+    reg.set_runs(_runs_tmp)
+    sv._scan()
+    # ★ 挑一个种子归档标星，专门用来验"受保护的默认不删"
+    _marks_p = os.path.join(REPO, 'picks.json')
+    _marks_bak = open(_marks_p, encoding='utf-8').read()
+    _all = [os.path.basename(os.path.dirname(x)) for x in
+            sorted(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))]
+    _star = _all[0]
+    _mk = _js.loads(_marks_bak)
+    _mk[_star] = {'mark': 'star', 'note': 'selftest 临时', 'ts': 'x'}
+    open(_marks_p, 'w', encoding='utf-8').write(_js.dumps(_mk, ensure_ascii=False))
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            dry_seen = []
+            pg.on('request', lambda r: dry_seen.append(r.post_data or '')
+                  if r.url.endswith('/api/runs/delete') else None)
+            pg.goto('http://127.0.0.1:%d/#/runs' % port)
+            pg.wait_for_selector('#delbar', timeout=20000)
+            # ---- ① 进管理模式 -> 比对条收起 ----
+            assert pg.eval_on_selector('#cmpbar', 'e => e.offsetParent !== null'), \
+                '一进来比对条就该是可见的'
+            pg.click('#delon')
+            pg.wait_for_selector('#delgo', timeout=10000)
+            assert pg.eval_on_selector('#cmpbar', 'e => e.offsetParent === null'), \
+                '进了管理模式，比对工具条却还在 —— 同一列勾选框两种含义会说不清'
+            # ---- ② 选中数可以超过比对上限 ----
+            got = pg.evaluate("""() => {
+              document.querySelectorAll('.nd[data-k]').forEach(e => e.click());
+              const cbs = [...document.querySelectorAll('input[data-cmp]')]
+                            .filter(e => e.offsetParent);
+              const n = Math.min(cbs.length, 6);
+              for (let i = 0; i < n; i++) cbs[i].click();
+              return {sel: DELSEL.length, cmpmax: (typeof CMP_MAX === 'number' ? CMP_MAX : 4)};
+            }""")
+            assert got['sel'] > got['cmpmax'], \
+                '只选到 %d 个（比对上限 %d）—— 批量删除被上限卡住了' % (got['sel'], got['cmpmax'])
+            n_sel = got['sel']
+            # ---- ③ 弹窗清单来自服务端 dry 预演 ----
+            before = len(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))
+            pg.click('#delgo')
+            pg.wait_for_selector('#delok', timeout=15000)
+            assert any('"dry": true' in d or '"dry":true' in d for d in dry_seen), \
+                '弹窗没先向服务端要预演 —— 清单是前端自己算的，会和真删的对不上'
+            box = pg.inner_text('.stbox')
+            # 🔴 计划里说删几个，就得删几个 —— **判据跟着服务端的计划走**，
+            #   不自己算。第一版我假设"只有我标星的那 1 个受保护"，而种子
+            #   归档是从真归档复制的、里面本来就有标星的，于是实际删 2 个、
+            #   断言期望 5 个（同「断言不许依赖真实数据碰巧如此」那条）。
+            import re as _re2
+            _m = _re2.search(r'确认删除\s*(\d+)\s*次', pg.inner_text('#delok'))
+            assert _m, '确认按钮没写清要删几个：%r' % pg.inner_text('#delok')
+            n_plan = int(_m.group(1))
+            assert 1 <= n_plan < n_sel, \
+                '计划删 %d / 选了 %d —— 要么全删（保护没生效）要么没得删' % (n_plan, n_sel)
+            assert '不可撤销' in box, '弹窗没说清不可撤销'
+            assert '_pruned_conclusions' in box, '弹窗没说结论会留下来'
+            # ---- ⑤ 受保护的单列一块 + 逃生口 ----
+            assert pg.locator('#delforce').count() == 1, \
+                '标星的那条没被单列出来（或没给显式逃生口）'
+            assert pg.eval_on_selector('#delforce', 'e => !e.checked'), \
+                '逃生口默认就是勾上的 —— 那等于没有保护'
+            # ---- ④ 取消不删 ----
+            pg.click('#mclose')
+            pg.wait_for_timeout(300)
+            mid = len(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))
+            assert mid == before, '点了关闭却删掉了 %d 个' % (before - mid)
+            # ---- ⑥ 确认之后真的少了，且结论落盘 ----
+            pg.click('#delgo')
+            pg.wait_for_selector('#delok', timeout=15000)
+            pg.click('#delok')
+            pg.wait_for_function(
+                '() => !document.querySelector("#delok")', timeout=20000)
+            after = len(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))
+            n_del = before - after
+            assert n_del == n_plan, \
+                '弹窗说删 %d 个，实际删了 %d —— 页面与服务端对不上' % (n_plan, n_del)
+            cj = os.path.join(_runs_tmp, '_pruned_conclusions.jsonl')
+            assert os.path.isfile(cj), '删了却没留结论 —— 那轮跑过什么就查无对证了'
+            rows = [_js.loads(l) for l in open(cj, encoding='utf-8')]
+            assert len(rows) == n_del, '结论只留了 %d 条，删了 %d 个' % (len(rows), n_del)
+            blob = _js.dumps(rows, ensure_ascii=False)
+            assert 'annual_return' in blob, \
+                '结论里只有 meta 没有 stats —— 翻出来只知道跑过、不知道结果'
+            assert os.path.isdir(os.path.join(_runs_tmp, *_star.split('|'))) or True
+            assert _star in [os.path.basename(os.path.dirname(x)) for x in
+                             _g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json'))], \
+                '标星的那个被删了 —— 默认不删这条没生效'
+            assert not errs, 'JS 报错 %d 处: %s' % (len(errs), errs[:2])
+    finally:
+        httpd.shutdown()
+        open(_marks_p, 'w', encoding='utf-8').write(_marks_bak)
+        if _prev_runs_env is None:
+            os.environ.pop('ASSAY_RUNS', None)
+        else:
+            os.environ['ASSAY_RUNS'] = _prev_runs_env
+        reg.set_runs(_prev_runs)
+        sv._scan()
+        import shutil as _sh
+        _sh.rmtree(_runs_tmp, ignore_errors=True)
+    return ('管理模式与比对互斥；选 %d 个（>比对上限 %d）；弹窗用服务端 dry 清单；'
+            '取消不删；受保护的默认不删且有逃生口；说删 %d 个就删了 %d 个、'
+            '结论 %d 条含指标' % (n_sel, got['cmpmax'], n_plan, n_del, len(rows)))
+
+
+@case('归档批量删除：服务端那几道闸（confirm / 保护 / 存结论 / 认不出）', tag='fast')
+def t_runs_delete_api():
+    """页面那条 web 用例走的是"人怎么点"，而 UI **永远会传 confirm** ——
+    所以服务端的几道闸只能在这里钉（变异实测：去掉 confirm 门控，
+    web 用例照样绿）。
+
+    判据五条，每条对应一种**不报错**的坏法：
+      ① `dry=True` 一个文件都不许动（预演却把东西删了，最糟）
+      ② 漏 `confirm` 必须**拒**，而且要说清缺什么（不是静默不动）
+      ③ 受保护的（标星 / 账户绑定过）默认不删；给了 `force_protected` 才删
+      ④ 删之前结论必须落进 `_pruned_conclusions.jsonl`，而且**带 stats**
+         —— 只存 meta 的话翻出来只知道"跑过"、不知道结果，等于没留
+      ⑤ 认不出的 run_id 单独报（`unknown`），不静默跳过
+    🔴 全程在**临时归档**上（`ASSAY_RUNS` + `reg.set_runs`）—— 这条会真删目录。
+    """
+    import glob as _g0
+    import json as _js
+    import shutil as _sh0
+    import tempfile as _tf
+    from assay import registry as reg
+    import assay.srv.runs as R
+    import assay.srv.base as B
+
+    _runs_tmp = _tf.mkdtemp(prefix='selftest_runs_')
+    src = sorted(_g0.glob(os.path.join(reg.RUNS, '*/*/*/meta.json')))[:4]
+    assert len(src) >= 4, '归档里样本不够（要 4 个）'
+    made = []
+    for _m in src:
+        d = os.path.dirname(_m)
+        dst = os.path.join(_runs_tmp, os.path.relpath(d, reg.RUNS))
+        os.makedirs(dst, exist_ok=True)
+        for f in ('meta.json', 'stats.json', 'strategy.py', 'run.log'):
+            sp = os.path.join(d, f)
+            if os.path.isfile(sp):
+                _sh0.copy2(sp, dst)
+        made.append(os.path.basename(d))
+    _prev_runs_env = os.environ.get('ASSAY_RUNS')
+    os.environ['ASSAY_RUNS'] = _runs_tmp
+    _prev_runs = reg.RUNS
+    reg.set_runs(_runs_tmp)
+    B._scan()
+    _marks_p = os.path.join(REPO, 'picks.json')
+    _bak = open(_marks_p, encoding='utf-8').read()
+    n_cnt = lambda: len(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))
+    try:
+        # 🔴 **换掉整份 picks**，只留一条 —— 种子是从真归档复制的，里面本来
+        #   就有标星的，不换的话"受保护的恰好有几个"随真数据变（第一版就是
+        #   这么写的，期望 1 个、实际 4 个）。同「断言不许依赖真实数据碰巧如此」。
+        star = made[0]
+        open(_marks_p, 'w', encoding='utf-8').write(
+            _js.dumps({star: {'mark': 'star', 'note': 'selftest', 'ts': 'x'}},
+                      ensure_ascii=False))
+        ids = made + ['20990101-000000-deadbe']          # 掺一个认不出的
+        # ---- ① dry 不动文件 ----
+        n0 = n_cnt()
+        p = R.api_runs_delete({}, {'run_ids': ids, 'dry': True})
+        assert n_cnt() == n0, 'dry 预演动了文件'
+        # ---- ⑤ 认不出的单独报 ----
+        assert p['unknown'] == ['20990101-000000-deadbe'], \
+            '认不出的 run_id 没单独报：%r' % (p['unknown'],)
+        # ---- ③ 受保护的默认不删 ----
+        assert p['n_held'] == 1 and p['held'][0]['run_id'] == star, \
+            '标星的那个没被挡下：held=%r' % [h['run_id'] for h in p['held']]
+        assert p['n_delete'] == len(made) - 1, \
+            '计划删 %d 个，应是 %d' % (p['n_delete'], len(made) - 1)
+        # ---- ② 漏 confirm 必须拒且说清 ----
+        r = R.api_runs_delete({}, {'run_ids': ids})
+        assert 'confirm' in (r.get('error') or ''), \
+            '漏 confirm 却没拒（或没说清缺什么）：%r' % r.get('error')
+        assert n_cnt() == n0, '漏 confirm 却把文件删了'
+        # ---- 真删 ----
+        r = R.api_runs_delete({}, {'run_ids': ids, 'confirm': True})
+        assert n_cnt() == n0 - p['n_delete'], \
+            '说删 %d 个，实际剩 %d（原 %d）' % (p['n_delete'], n_cnt(), n0)
+        assert star in [os.path.basename(os.path.dirname(x))
+                        for x in _g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json'))], \
+            '受保护的被删了'
+        # ---- ④ 结论落盘且带 stats ----
+        cj = os.path.join(_runs_tmp, '_pruned_conclusions.jsonl')
+        assert os.path.isfile(cj), '删了却没留结论'
+        rows = [_js.loads(l) for l in open(cj, encoding='utf-8')]
+        assert len(rows) == p['n_delete'], \
+            '结论 %d 条、删了 %d 个' % (len(rows), p['n_delete'])
+        assert 'annual_return' in _js.dumps(rows, ensure_ascii=False), \
+            '结论里只有 meta 没有 stats —— 翻出来只知道跑过、不知道结果'
+        # ---- ③ 逃生口：给了 force 才删得掉 ----
+        r2 = R.api_runs_delete({}, {'run_ids': [star], 'confirm': True,
+                                    'force_protected': True})
+        assert r2.get('n_deleted') == 1 and n_cnt() == n0 - p['n_delete'] - 1, \
+            '给了 force_protected 仍然删不掉受保护的 —— 硬拒不给出路，' \
+            '最后会变成绕过整个入口'
+        n_left = n_cnt()
+    finally:
+        open(_marks_p, 'w', encoding='utf-8').write(_bak)
+        if _prev_runs_env is None:
+            os.environ.pop('ASSAY_RUNS', None)
+        else:
+            os.environ['ASSAY_RUNS'] = _prev_runs_env
+        reg.set_runs(_prev_runs)
+        B._scan()
+        import shutil as _sh
+        _sh.rmtree(_runs_tmp, ignore_errors=True)
+    return ('dry 不动文件；漏 confirm 被拒；认不出的单独报；标星默认不删、'
+            'force 才删；结论 %d 条含指标；剩 %d 个' % (len(rows), n_left))

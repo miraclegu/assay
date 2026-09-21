@@ -421,6 +421,17 @@ def t_sync():
         assert bad not in code, \
             'sync_daily.sh 不该调 %s —— 它引用的 fast_update_indicators.py 不存在' % bad
     assert 'daily_snapshot.py' in code, 'PIT 快照那步不能少（漏一天永久丢失）'
+    # 🔴 **ETF lake 也要每天建。** 2026-09-18 实测它停在 09-11 而主数据到
+    #   09-17 —— 因为它一直是**手工**跑的（同「靠人记得跑的步骤 = 迟早不跑」）。
+    #   后果是 ETF 模拟盘「推进到最新数据日」只能到 09-11，**而它不报错**。
+    assert 'build_etf_lake.py' in code, \
+        ('sync_daily.sh 里没有 ETF lake 那步 —— 它只能靠人记得手工跑，'
+         '而 ETF 策略/模拟盘全跑在它上面')
+    # 判据落在**顺序**上：它吃的是 load_tdx_kline 的产物（raw/tdx/kline）。
+    #   只查"提到过这个名字"的话，把它挪到最前面照样绿，而那时它读的是
+    #   **昨天**的 raw —— 又是一个不报错的静默错值。
+    assert code.index('load_tdx_kline.py') < code.index('build_etf_lake.py'), \
+        'ETF lake 排在 load_tdx_kline 之前 —— 它会用到昨天的 raw'
     plist = os.path.join(dl, '_manifest', 'com.miraclegu.finacial.sync.plist')
     assert os.path.isfile(plist), '缺 launchd plist'
     r = subprocess.run(['plutil', '-lint', plist], capture_output=True, text=True)
@@ -1791,3 +1802,177 @@ def t_rev_subdir():
             'latest_signal 确实会读到旧版（所以这条断言不是空转）')
 
 
+
+
+@case('ETF 价格精度：正本是 .day，不许再塌成两位小数', tag='fast')
+def t_etf_price_precision():
+    """2026-09-17：用户「收益曲线里选红利低波 ETF，好几个昨天的值都没有任何变化？
+    是数据没有自动同步吗？」—— 不是同步，是 ETF 收盘价被舍到了「分」。
+
+    `tdx2db` 有两条取数路径，坏的是每天那条：
+
+        init（引导历史）  vipdoc/*.day                    ÷1000  ✅ 2019~2025 精度完好
+        cron（每日增量）  products/data/data/g4day/*.zip  ÷10000 再舍到 3 位 ❌
+
+    于是 `1107`（真值 1.107×1000）进库成了 `0.111`：量级小 10 倍、**而且第 3 位
+    小数被舍掉了**。老补丁 `fix_etf_price_scale.py` 的 ×10 只把它抬回 `1.11` ——
+    **补在了错误的层上**，那一位永远回不来。
+
+    后果是"数据看着正常、只是不动了"：红利低波 ETF 单价 1.1 元、一分钱 = 0.9%，
+    而它日内只波动 0.2~0.5% —— 相邻交易日报同一个收盘价。实测持平率
+    3~4% -> 30.9%（红利低波那几只 40%+），而指数 0.19% / 股票 2.44% 没受影响。
+
+    🔴 判据**检测现象，不检测那一次事故的日期**（上一版守卫写死
+      `2026-05-15 ~ 06-05`，于是 09-01 再次发生时报"异常 0"，看着一直是绿的）。
+      阈值也不写死：拿**同一份数据里的历史基线**当尺子 —— 写死一个数的话，
+      市场结构一变它要么天天假报、要么再也报不出来。
+    """
+    import duckdb
+    import run as _run_mod
+    root = _run_mod.default_lake()
+    con = duckdb.connect(':memory:')
+    K = "read_parquet('%s/raw/tdx/kline/etf_*.parquet')" % root
+
+    def pct3(lo, hi):
+        """ETF 收盘价里"带第 3 位小数"的占比 —— 精度还在不在的直接指纹。"""
+        r = con.execute("""
+            SELECT count(*), 100.0 * sum(CASE WHEN close <> round(close, 2) THEN 1 ELSE 0 END)
+                             / nullif(count(*), 0)
+            FROM %s WHERE date BETWEEN DATE '%s' AND DATE '%s'""" % (K, lo, hi)).fetchone()
+        return r[0], (r[1] or 0.0)
+
+    last = con.execute('SELECT max(date) FROM %s' % K).fetchone()[0]
+    d20 = con.execute(
+        'SELECT min(d) FROM (SELECT DISTINCT date d FROM %s ORDER BY d DESC LIMIT 20)' % K).fetchone()[0]
+
+    n_base, p_base = pct3('2024-01-01', '2025-12-31')      # 基线：init 灌的那段
+    n_new, p_new = pct3(d20, last)                          # 最近 20 个交易日
+    assert n_base > 100000, '基线区间只有 %d 行 —— 判据在空转' % n_base
+    assert n_new > 1000, '最近 20 日只有 %d 行 —— 判据在空转' % n_new
+    # 基线实测 76~79%；塌陷时是 0%。取基线的一半当下界 —— 比写死数字耐用
+    assert p_new >= p_base * 0.5, (
+        'ETF 收盘价精度塌了：最近 20 日带第 3 位小数的只占 %.2f%%，'
+        '而 2024~2025 基线是 %.2f%% —— 八成是 tdx2db 的每日路径又在舍位，'
+        '跑 tdx2db/scripts/fix_etf_price_from_dayfile.py' % (p_new, p_base))
+
+    # ② 用户真正看到的那个现象：相邻交易日收盘完全相同
+    def flat(lo, hi):
+        return con.execute("""
+            WITH t AS (SELECT symbol, date, close,
+                              lag(close) OVER (PARTITION BY symbol ORDER BY date) pc
+                       FROM %s WHERE date BETWEEN DATE '%s' AND DATE '%s')
+            SELECT 100.0 * sum(CASE WHEN close = pc THEN 1 ELSE 0 END) / nullif(count(*), 0)
+            FROM t WHERE pc IS NOT NULL""" % (K, lo, hi)).fetchone()[0] or 0.0
+
+    f_base, f_new = flat('2024-01-01', '2025-12-31'), flat(d20, last)
+    assert f_new <= max(3.0, f_base * 3), (
+        'ETF 相邻交易日收盘持平率 %.2f%%，而基线 %.2f%% —— 价格被量化了' % (f_new, f_base))
+
+    # ③ 探测器自证：直接喂构造数据，不靠真实数据碰巧覆盖
+    #    （真实数据修好之后，上面两条在"塌陷探测器坏了"时照样绿）
+    sys.path.insert(0, os.path.join(os.path.dirname(REPO), 'tdx2db', 'scripts'))
+    import importlib
+    fx = importlib.import_module('fix_etf_price_from_dayfile')
+    m = duckdb.connect(':memory:')
+    m.execute('CREATE TABLE raw_symbol_class(symbol VARCHAR, class VARCHAR)')
+    m.execute("INSERT INTO raw_symbol_class VALUES ('sz159525','etf'),('sz159001','etf')")
+    m.execute('CREATE TABLE raw_kline_daily(symbol VARCHAR, date DATE, close DOUBLE)')
+    rows = []
+    for i in range(30):                       # 前 30 天：三位小数（正常）
+        d = '2026-01-%02d' % (i + 1)
+        rows += [('sz159525', d, 1.100 + i * 0.001), ('sz159001', d, 2.200 + i * 0.003)]
+    for i in range(10):                       # 后 10 天：只到分（塌陷）
+        d = '2026-02-%02d' % (i + 1)
+        rows += [('sz159525', d, round(1.13 + i * 0.01, 2)), ('sz159001', d, round(2.50 + i * 0.01, 2))]
+    m.executemany('INSERT INTO raw_kline_daily VALUES (?, ?::DATE, ?)', rows)
+    since, last_ok = fx.collapse_start(m)
+    assert str(since) == '2026-02-01', '塌陷起点算错: %s（应为 2026-02-01）' % since
+    assert str(last_ok) == '2026-01-30', '最后一个正常日算错: %s' % last_ok
+    m.execute("DELETE FROM raw_kline_daily WHERE date >= DATE '2026-02-01'")
+    # 全好时塌陷探测必须给 None（它只负责"往回扩"，不负责日常）
+    assert fx.collapse_start(m)[0] is None, '全是好数据时不该报塌陷'
+
+    # ③b 🔴🔴 日常靠的是【滚动窗口】，不是塌陷探测 —— 这一条防的是
+    #     "只认得那一次事故的指纹"。×10 补丁退役后，cron 新写进来的坏行是
+    #     `0.111`（÷10、**仍带 3 位小数**）：塌陷探测看不见它，必须由
+    #     "最近 N 个交易日无条件与正本比"兜住，否则价格小 10 倍留在库里。
+    import datetime
+
+    def _mk(days, bad_from=None, style=None):
+        q = duckdb.connect(':memory:')
+        q.execute('CREATE TABLE raw_symbol_class(symbol VARCHAR, class VARCHAR)')
+        q.execute("INSERT INTO raw_symbol_class VALUES ('sz159525','etf')")
+        q.execute('CREATE TABLE raw_kline_daily(symbol VARCHAR, date DATE, close DOUBLE)')
+        d0, rs = datetime.date(2026, 1, 1), []
+        for i in range(days):
+            v = 1.100 + i * 0.001
+            if bad_from is not None and i >= bad_from:
+                v = round(v, 2) if style == 'round2' else round(v / 10, 3)
+            rs.append(('sz159525', str(d0 + datetime.timedelta(days=i)), v))
+        q.executemany('INSERT INTO raw_kline_daily VALUES (?, ?::DATE, ?)', rs)
+        return q
+
+    W = fx.WINDOW_DAYS
+    # 🔴 窗口要留够"链条停摆"的余量：机器关着 / 网络失败 / launchd 没跑之后，
+    #   cron 会一次补进好几天，窗口盖不住那几天就漏修。
+    #   （这条下界不能省：上面那个 roll 的期望值是拿 WINDOW_DAYS 自己算的，
+    #   把它改小时期望跟着一起走 —— 变异实测漏过。）
+    assert W >= 20, '滚动窗口只有 %d 个交易日，盖不住链条停摆后的补数' % W
+    roll = str(datetime.date(2026, 1, 1) + datetime.timedelta(days=60 - W))
+    assert str(_mk(60) and fx.plan_since(_mk(60))[0]) == roll, (
+        '全好时起点应落在滚动窗口起点 %s' % roll)
+    # 明天那种坏法：最后一天 ÷10 —— 塌陷探测看不见，滚动窗口必须覆盖它
+    bad = _mk(60, 59, 'div10')
+    assert fx.collapse_start(bad)[0] is None, '构造不对：这种坏法本来就该躲过塌陷探测'
+    since_d, _det, _lk = fx.plan_since(bad)
+    assert since_d is not None and str(since_d) <= roll, (
+        '÷10 的新行没被纳入核对区间（since=%s）—— 价格会小 10 倍留在库里' % since_d)
+    # 历史塌陷比窗口更早时要【往回扩】
+    assert str(fx.plan_since(_mk(60, 10, 'round2'))[0]) == '2026-01-11', (
+        '塌陷在窗口之外时没有往回扩')
+    assert str(fx.plan_since(_mk(60), '2020-01-01')[0]) == '2020-01-01', '命令行起点没生效'
+
+    # ③c 正本比库里落后时（vipdoc 整包约 17:25~17:55 才带上当天，而轮询
+    #     16:00 就开始）：今天那批行核对不了，必须**非零退出**让 5~8 跳过
+    #     —— 返回 0 的话 1/10 的价格会一路进面板，而它不报错。
+    assert fx._lag_stop('2026-09-17', 20260916) != 0, (
+        '正本落后时返回了 0 —— 没核对过的 ETF 行会被放行进面板')
+
+    # ③d HEAD 预检：Last-Modified 要折成【北京日期】才是"正本最多到哪天"。
+    #     轮询 16:00 就开始而正本约 17:25~17:55 才更新，中间十来个点位每轮
+    #     都会走到这里 —— 不预检就是每轮白下 61MB，而**限流是这条链上唯一
+    #     的风险**。时区差 8 小时会在跨日那一刻判错，所以逐点钉。
+    assert fx._zip_day('Wed, 16 Sep 2026 09:25:05 GMT') == datetime.date(2026, 9, 16), (
+        'GMT 09:25 = 北京 17:25，应算 09-16')
+    assert fx._zip_day('Wed, 16 Sep 2026 16:30:00 GMT') == datetime.date(2026, 9, 17), (
+        'GMT 16:30 = 北京次日 00:30，应算 09-17（时区没加对）')
+    assert fx._zip_day('garbage') is None, '解析不了必须给 None（不猜），退回下载后的权威判定'
+    D = datetime.date
+    assert fx.precheck_lag(D(2026, 9, 16), D(2026, 9, 17)) is True, '正本落后一天该拦下'
+    # 🔴 等号必须放行：整包就是当天收盘后重打的，判成"落后"的话**每天都不往下走**，
+    #   整条同步链永远跑不完，而它不报错（日志里只有一句"先不往下走"）。
+    assert fx.precheck_lag(D(2026, 9, 17), D(2026, 9, 17)) is False, (
+        '正本刚好到今天却被判成落后 —— 同步链会每天卡住')
+    assert fx.precheck_lag(D(2026, 9, 18), D(2026, 9, 17)) is False, '正本更新反被拦'
+    assert fx.precheck_lag(None, D(2026, 9, 17)) is False, '解析不出来时该放行（不猜）'
+
+    # ④ 链条：必须调正本修复，且不许再调退役的 ×10 补丁
+    #    （退役那个会把【已经正确】的价格再放大一次，而下游一路静默）
+    sh = open(os.path.join(os.path.dirname(REPO), 'datalake', 'sync_daily.sh')).read()
+    body = '\n'.join(l for l in sh.split('\n') if not l.lstrip().startswith('#'))
+    assert 'fix_etf_price_from_dayfile.py' in body, 'sync_daily.sh 没接正本修复'
+    assert 'fix_etf_price_scale.py' not in body, (
+        'sync_daily.sh 还在调退役的 ×10 补丁 —— 它会把正确价格再 ×10')
+
+    # ⑤ 退役守卫要真的拒，不是只在文档里写一句
+    rc = subprocess.run([sys.executable,
+                         os.path.join(os.path.dirname(REPO), 'tdx2db', 'scripts',
+                                      'fix_etf_price_scale.py'),
+                         '--db', '/nonexistent/x.db', '--dry-run'],
+                        capture_output=True, text=True)
+    assert rc.returncode == 2, '退役脚本没拒绝执行（退出码 %d）' % rc.returncode
+    assert '退役' in rc.stdout, '退役脚本没说清为什么拒绝'
+
+    return ('最近20日 %.1f%% 带第3位(基线 %.1f%%) · 持平 %.2f%%(基线 %.2f%%) · '
+            '滚动窗口 %d 日覆盖÷10那种坏法 + 塌陷往回扩 + 链条 + 退役守卫'
+            % (p_new, p_base, f_new, f_base, fx.WINDOW_DAYS))

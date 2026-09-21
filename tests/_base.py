@@ -260,3 +260,50 @@ def main():
         for d, n in sorted(times, reverse=True):
             print('  %6.1fs  %s' % (d, n))
     sys.exit(1 if fail else 0)
+
+
+def _lv_bind_strategy(pg, path, params_json=None):
+    """在策略浮层里绑一个策略（浮层要先打开）。
+
+    🔴 「怎么绑」收进**一处** —— 这个入口 2026-09-18 从「裸输入框手填路径」
+      变成「分组下拉 + 手填逃生口」，当场打挂一条既有用例
+      （`pg.fill('#bp')` -> `Element is not an <input>`）。散在各条用例里的话，
+      入口再变一次就要改 N 处（同 `_kmain` / `_via_pop` / `_lp_tab`
+      / `_lv_open_newform`）。
+
+    ★ 路径不在下拉里（清单外的文件）就走**手填**那条 —— 两条路都在这里，
+      调用方不必知道当前是哪种形态。
+    """
+    pg.wait_for_selector('#bp', timeout=20000)
+    opts = pg.eval_on_selector_all('#bp option', 'es => es.map(e => e.value)')
+    if path in opts:
+        pg.select_option('#bp', path)
+    else:
+        pg.select_option('#bp', '__manual__')
+        pg.fill('#bpm', path)
+    if params_json is not None:
+        pg.fill('#bj', params_json)
+    pg.click('#bb')
+
+
+def _lv_open_newform(pg, zone='live', timeout=8000):
+    """打开某个账户区的「+ 新建」表单，返回那个容器的选择器。
+
+    ★ 这个入口**已经变过一次**（2026-09-17：全局一个 `#lvnew` + `☐ 模拟盘`
+      勾选框 -> 实盘 / 模拟盘两区各一个「+ 新建」）。把"怎么点"收进一处，
+      入口再变时只改这个函数（同 `_kmain` / `_via_pop` / `_lp_tab` 那三个）——
+      散在各条用例里的话，下次要改 N 处，而漏改那处表现是超时 30 秒、
+      看着像页面坏了。
+    """
+    sel = '#nf_' + zone
+    pg.click('.znew[data-zone=%s]' % zone)
+    pg.wait_for_selector(sel + ' .nn', state='visible', timeout=timeout)
+    return sel
+
+
+def _lv_new_account(pg, name, cash, zone='live', timeout=8000):
+    """在某个区建一个账户。`zone='paper'` 建出来的就是模拟盘。"""
+    sel = _lv_open_newform(pg, zone, timeout)
+    pg.fill(sel + ' .nn', name)
+    pg.fill(sel + ' .nc', str(cash))
+    pg.click(sel + ' .nb')

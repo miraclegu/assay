@@ -1551,14 +1551,37 @@ def t_strategy_declares_lake():
         assert len(decl) == 1, '%s 没有模块级 DATALAKE 声明' % f
         assert decl[0].value.value == 'etf_lake', \
             '%s 的 DATALAKE 不是 etf_lake：%r' % (f, decl[0].value.value)
-        calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
-                 and getattr(n.func, 'id', None) == 'set_order_cost']
-        assert calls, ('%s 没调 set_order_cost —— ETF 不征印花税是【事实】，'
-                       '靠人记得传 --stamp-tax 0 迟早漏，而漏了不报错' % f)
-        kw = {k.arg: k.value.value for k in calls[0].keywords}
-        assert kw.get('close_tax') == 0.0, \
-            '%s 的 close_tax 不是 0（ETF 无印花税）：%r' % (f, kw.get('close_tax'))
-    notes.append('%d 个 ETF 策略都声明了 lake 与 close_tax=0' % len(etfs))
+        # 🔴 **判据落在【运行时】，不是"源码里有没有那个词"。**
+        #   2026-09-19 被 `etf_p1_gate.py` 打挂：它是**转发型变体**
+        #   （importlib 私有加载原版 + `initialize` 转发），
+        #   自己文件里当然没有 `set_order_cost` 这个字面量，
+        #   而运行时 `close_tax` **确实是 0**（继承来的）。
+        #   **失败的是断言不是产品** —— 而且静态查还漏得掉另一种错：
+        #   写了 `set_order_cost` 但值写错（比如被后面一行覆盖）。
+        #   所以改成 boot 一次、读**引擎实际用的那个 cost**。
+        #   ★ `set_order_cost` 在 `initialize` 里，**boot 之后**才生效
+        #     （同「抬头打印的成本是假的」那条）。
+        from assay.broker import Cost as _Cost
+        from assay.engine import Engine as _Engine
+        from assay.feed import PanelFeed as _PF
+        _mod = _run.load(os.path.join('strategies/ETF', f))
+        _root = _run.resolve_lake(_mod, None)
+        _feed = _PF('2026-01-01', datetime.date.today().isoformat(),
+                    root=_root)
+        _eng = _Engine(_mod, _feed, cash=100000, cost=_Cost(), params={})
+        _eng.boot()
+        # ★ 先判类型再比值：没声明时它是字符串 'auto'（按日期分段的股票
+        #   口径），`float()` 会抛 could not convert —— 用例是红的，
+        #   但**报错指不到原因**（同「报错必须指向真正的原因」）。
+        _ct = _eng.cost.close_tax
+        assert not isinstance(_ct, str) and float(_ct) == 0.0, \
+            ('%s 跑起来的印花税是 %r，不是 0 —— ETF 不征印花税是【事实】。'
+             '%s' % (f, _ct,
+                     '它是 auto（股票的按日期分段口径），说明这个策略'
+                     '根本没声明成本，或者转发链断了'
+                     if isinstance(_ct, str) else
+                     '年换手 9 次以上时这笔是系统性的'))
+    notes.append('%d 个 ETF 策略：lake 与【运行时】close_tax=0 都对' % len(etfs))
 
     # ② resolve_lake 四条路径
     class M(object):
