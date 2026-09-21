@@ -56,5 +56,47 @@
   "strategy_path": null,
   "tick_time": "22:00",
   "warmup_start": "2016-01-01"
+ },
+ {
+  "broker_note": "",
+  "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
+  "created": "2026-09-18T07:47:36",
+  "id": "a2",
+  "init_cash": 400000.0,
+  "mode": "paper",
+  "name": "FROEA-TRADE模拟账户",
+  "paper_start": "2026-09-01",
+  "params": {},
+  "strategy_path": "strategies/小市值/froec_traded.py",
+  "tick_time": "22:00",
+  "warmup_start": "2016-01-01"
+ },
+ {
+  "broker_note": "",
+  "code_sha256": "457e0dca5f8fee17012c18a97986d21d95f1f881239c215d7a12dfd2d1913a94",
+  "created": "2026-09-18T16:43:55",
+  "id": "a3",
+  "init_cash": 100000.0,
+  "mode": "paper",
+  "name": "ETF轮动模拟",
+  "paper_start": "2026-09-01",
+  "params": {},
+  "strategy_path": "strategies/ETF/etf_p1_rotation.py",
+  "tick_time": "22:00",
+  "warmup_start": "2016-01-01"
+ },
+ {
+  "broker_note": "",
+  "code_sha256": "b65260fc1150e858bed26206052170c213eb58b18e25921b064d317f7ec9df72",
+  "created": "2026-09-21T12:19:50",
+  "id": "a4",
+  "init_cash": 100000.0,
+  "mode": "paper",
+  "name": "ETF 轮动mask",
+  "paper_start": "2026-09-01",
+  "params": {},
+  "strategy_path": "strategies/ETF/etf_p1_mask.py",
+  "tick_time": "22:00",
+  "warmup_start": "2025-01-01"
  }
 ]

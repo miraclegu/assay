@@ -1,0 +1,188 @@
+{
+ "account": "a3",
+ "built_at": "2026-09-21T09:28:56",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 81639.59,
+ "code_sha": "457e0dca",
+ "code_sha256": "457e0dca5f8fee17012c18a97986d21d95f1f881239c215d7a12dfd2d1913a94",
+ "data_asof": "2026-09-18",
+ "data_fingerprint": {
+  "overall": "7a5125bb28fc",
+  "parts": {
+   "index": {
+    "hash": "4512b7e40316",
+    "n_files": 24,
+    "newest_mtime": "2026-09-18T18:05:27",
+    "total_bytes": 64743678
+   },
+   "panel": {
+    "hash": "fae83ecc1981",
+    "n_files": 1,
+    "newest_mtime": "2026-09-18T18:06:18",
+    "total_bytes": 119246209
+   },
+   "std": {
+    "hash": "8e898ef5f83d",
+    "n_files": 4,
+    "newest_mtime": "2026-09-18T18:06:18",
+    "total_bytes": 158419
+   }
+  }
+ },
+ "days_until_rebalance": null,
+ "explain": {
+  "captured": false,
+  "codes_total": 0,
+  "g_sets": {
+   "target": [
+    "513120.XSHG",
+    "515050.XSHG",
+    "515880.XSHG"
+   ]
+  },
+  "groups": [],
+  "n_groups": 0,
+  "notes": [
+   "这一轮策略没有查数据 —— 多半不是调仓日，所以没有候选池。"
+  ],
+  "params": {
+   "n_breadth": 8
+  },
+  "pool_shown": 0,
+  "pool_total": 0,
+  "set_labels": {
+   "target": "target"
+  },
+  "steps": []
+ },
+ "for_date": "2026-09-21",
+ "freed_est": 0,
+ "held_codes": [
+  "513120.XSHG",
+  "515050.XSHG",
+  "515880.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "513120.XSHG",
+   "name": "HK创新药",
+   "shares": 4000,
+   "why": ""
+  },
+  {
+   "code": "515050.XSHG",
+   "name": "5GETF",
+   "shares": 5400,
+   "why": ""
+  },
+  {
+   "code": "515880.XSHG",
+   "name": "通信ETF",
+   "shares": 8300,
+   "why": ""
+  }
+ ],
+ "is_rebalance_day": false,
+ "left_est": 81639.59,
+ "next_rebalance": null,
+ "no_price": [],
+ "params": {},
+ "recomputed": false,
+ "recomputed_at": [
+  "2026-09-18T21:21:22",
+  "2026-09-18T22:04:58",
+  "2026-09-18T23:06:04",
+  "2026-09-21T00:00:08",
+  "2026-09-21T01:00:09",
+  "2026-09-21T02:00:09",
+  "2026-09-21T03:00:09",
+  "2026-09-21T04:00:09",
+  "2026-09-21T05:00:09",
+  "2026-09-21T06:00:09",
+  "2026-09-21T07:00:09",
+  "2026-09-21T08:02:40",
+  "2026-09-21T09:10:44",
+  "2026-09-21T09:28:56"
+ ],
+ "revisions": [],
+ "sell": [],
+ "upcoming": [
+  {
+   "date": "2026-09-22",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-23",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-09-24",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-29",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-08",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-14",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-15",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-16",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-19",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-20",
+   "is_rebal": false,
+   "wday": 2
+  }
+ ],
+ "warnings": []
+}
