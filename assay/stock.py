@@ -245,11 +245,18 @@ def search(q, limit=20, root=None):
             #      （既有那条"同类匹配按市值降序"的断言当场抓到）。
             #      股票里没有匹配时（"红利ETF" / "上证指数"）自然轮到它们。
             #   ③ 最后才是 score 与市值。
+            #   🔴 ④ **最后再按代码 tie-break** —— 前三个键并列时（"红利"
+            #      一搜就是十几个同分的指数/ETF），谁在前取决于 duckdb 的
+            #      扫描顺序，而那是**跨进程随机**的：固定 hash 种子之后
+            #      连跑 5 次给出 5 个不同的结果（2026-09-21 实测）。
+            #      与 froec 那条 `ORDER BY r.increase DESC` 没有 tie-break
+            #      是**同一类**——只是那边不敢修（会改变全部历史归档），
+            #      而这里是看盘页的展示，让它可复现没有任何代价。
             out.append((0 if score < 0 else 1,
                         _KIND_RANK.get(r.get('kind'), 9),
-                        score, -(r['floatmv'] or 0), r))
-    out.sort(key=lambda x: x[:4])
-    return {'results': [x[4] for x in out[:max(1, min(int(limit or 20), 50))]],
+                        score, -(r['floatmv'] or 0), r['code'], r))
+    out.sort(key=lambda x: x[:5])
+    return {'results': [x[5] for x in out[:max(1, min(int(limit or 20), 50))]],
             'asof': str(day), 'total': len(rows), 'matched': len(out)}
 
 

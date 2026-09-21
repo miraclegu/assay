@@ -3670,6 +3670,70 @@ def t_alt_layer_in_symbols():
     assert _Y.KIND_FILE == {'etf': 'etf_*', 'index': 'index_*'}, _Y.KIND_FILE
 
 
+@case('搜索结果跨进程必须可复现（并列要有 tie-break）', 'fast')
+def t_search_deterministic():
+    """🔴 2026-09-21 做 stock.py 等价性时抓到的**既有缺陷**：
+    `search('红利')` 固定 hash 种子之后**跨进程 5 次给出 5 个不同结果**。
+
+    根因两层：`symbols.alt_rows` 那条 SQL 没有 `ORDER BY`（duckdb 并行扫描，
+    行序不保证），而 `search` 的排序前四个键在"红利"这种搜法下**大面积并列**
+    （十几个同分的指数/ETF）—— 于是谁在前取决于扫描顺序。
+
+    与 froec 那条 `ORDER BY r.increase DESC` 没有 tie-break 是**同一类**。
+    ★ 区别在于**敢不敢修**：那边不敢（会改变全部历史归档的结果），
+      而这里是看盘页的展示，让它可复现没有任何代价 —— 所以加了第五个键
+      （按代码）。
+
+    🔴 **跨进程的问题必须跨进程测** —— 同一个进程里连跑 N 次只证明了
+      进程内可复现，什么都没证（`PYTHONHASHSEED` 那轮记过这条）。
+    """
+    import subprocess as _sp
+    code = (
+        'import sys, json, hashlib; sys.path.insert(0, %r)\n'
+        'from assay.hashseed import ensure_fixed_hash_seed as e; e()\n'
+        'from assay import stock as S\n'
+        'r = S.search(%r, 20)\n'
+        "print(hashlib.md5(json.dumps(r, sort_keys=True, default=str,\n"
+        "      ensure_ascii=False).encode()).hexdigest()[:12])\n"
+        "print(len(r['results']))\n")
+
+    def runs(q, n=4):
+        out = []
+        for _ in range(n):
+            r = _sp.run([sys.executable, '-c', code % (REPO, q)],
+                        capture_output=True, text=True, cwd=REPO)
+            assert r.returncode == 0, '搜 %s 跑不起来：%s' % (q, r.stderr[-300:])
+            fp, cnt = r.stdout.split()
+            out.append((fp, int(cnt)))
+        return out
+
+    for q in ('红利', '银行', '600'):
+        got = runs(q)
+        assert len({x[0] for x in got}) == 1, (
+            '搜「%s」跨进程给出 %d 种结果 —— 并列时没有 tie-break：%r'
+            % (q, len({x[0] for x in got}), got))
+        assert got[0][1] > 0, '搜「%s」一条都没有，这条判据是空转的' % q
+
+    # 🔴 反向自证：**真的有大面积并列**，否则"可复现"是白给的
+    #   （所有键都互不相同时，任何实现都稳定 —— 那样这条用例什么都没证）。
+    from assay import stock as _S
+    rs = _S.search('红利', 20)['results']
+    key = [(0 if r.get('kind') == 'stock' else 1, -(r.get('floatmv') or 0))
+           for r in rs]
+    assert len(key) - len(set(key)) >= 5, \
+        '构造不对：「红利」这一搜只有 %d 个并列，测不出 tie-break' % (
+            len(key) - len(set(key)))
+
+    # 排序键里确实带了代码那一层（结构判据，防"只是这批数据碰巧稳定"）
+    import ast as _ast
+    src = io.open(os.path.join(REPO, 'assay/stock.py'), encoding='utf-8').read()
+    fn = next(n for n in _ast.parse(src).body
+              if isinstance(n, _ast.FunctionDef) and n.name == 'search')
+    seg = _ast.get_source_segment(src, fn) or ''
+    assert "r['code']" in seg and 'x[:5]' in seg, \
+        'search 的排序键里没有按代码的 tie-break 了'
+
+
 @case('取价唯一正本', 'fast')
 def t_symbols_price_single_source():
     """🔴 「查面板 -> 查不到就回落 tdx」这个模式，此前在【四个取价函数】里
