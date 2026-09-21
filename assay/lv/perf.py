@@ -21,32 +21,20 @@ from . import sig as _sig
 _SYM_RE = __import__('re').compile(r'^(sh|sz)\d{6}$')
 
 
+from assay import symbols as _SYM   # 取价/取名的唯一正本
+
+
 def _last_px(feed, codes, day):
     """{code: (最新收盘, 那天的日期, 那天的昨收)}，按 <= day 取最近一条。
-    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。
 
-    ★ 一并带回 `preclose` 是为了算**当日涨跌**：面板里有这一列，
-      不用自己回去找上一个交易日（停牌股的"上一个交易日"还得逐只算）。"""
+    🔴 **只转发**给唯一正本 `symbols.last_px`（2026-09-21）。此前
+      「查面板 -> 缺的回落 tdx」这个模式在四个取价函数里各写了一遍，
+      而它出过两次事（ETF 市值 0 / 浮盈 −100%，修 4 处还漏 3 处）——
+      每加一个标的类别就要记得改 N 处，**漏掉的那处不报错**。
+    """
     if not codes:
         return {}
-    q = "','".join(codes)
-    rows = feed.con.execute("""
-        SELECT code, close_bfq, date, preclose FROM (
-          SELECT jq_code AS code, close_bfq, date, preclose,
-                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
-          FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
-          WHERE jq_code IN ('%s') AND date <= DATE '%s'
-            AND date > DATE '%s' - INTERVAL 400 DAY
-        ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
-    out = {r[0]: (r[1], r[2], r[3]) for r in rows}
-    # 🔴 **面板是【股票】宽表，ETF / 指数一行都没有。** 查不到就回落到
-    #   tdx 原始日线 —— 不回落的话价格是 None -> 市值 0 -> 浮盈 −100%，
-    #   而它**不报错**，看着就像"这个账户把钱亏光了"（用户 2026-09-18 报的
-    #   正是这个）。
-    miss = [c for c in codes if c not in out]
-    if miss:
-        out.update(_tdx.last_close(feed.root, miss, day))
-    return out
+    return _SYM.last_px(feed.root, codes, day, con=feed.con)
 
 
 

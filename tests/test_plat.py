@@ -9,7 +9,8 @@ from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
                          _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop,
                          _all_case_src)
-import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
+import os, re, sys, io, json, glob, time, shutil, subprocess, datetime
+import inspect, textwrap  # noqa: E401,F401
 
 
 @case('查看服务 API 契约与安全')
@@ -3364,6 +3365,88 @@ def t_no_markdown_stars():
     return '扫了 web 下全部 .js，0 处；扫描器自证可用'
 
 
+@case('取价唯一正本', 'fast')
+def t_symbols_price_single_source():
+    """🔴 「查面板 -> 查不到就回落 tdx」这个模式，此前在【四个取价函数】里
+    各写了一遍（`perf._last_px` / `px.daily_close_map` / `px.day_price` /
+    `px.day_range`）。而它出过两次事，两次都不报错：
+
+        ETF 持仓市值 0.00 / 浮盈 -100%（四处漏了四处）
+        「修了 4 处还漏了 3 处」—— 权益曲线里 ETF 市值全程为 0
+
+    2026-09-21 收敛到 `assay/symbols.py`：`last_px` / `daily_close_map` /
+    `day_px` / `day_hl`。这条守卫钉的是**不许再长出第五份**。
+
+    ⚠ 顺带发现一处【既有的不一致】：`px.day_price` 面板那条路 round 到
+      **3 位**、tdx 那条路 round 到 **4 位**。重构阶段逐位保真（正本返回
+      `(值, 来源)` 让调用方各自 round），**没有顺手统一** —— 悄悄改精度
+      不算重构。要不要统一是另一个决定。
+    """
+    import ast as _ast
+    src = {}
+    for rel in ('assay/symbols.py', 'assay/lv/px.py', 'assay/lv/perf.py',
+                'assay/lv/tdx.py', 'assay/lv/hist.py'):
+        src[rel] = io.open(os.path.join(REPO, rel), encoding='utf-8').read()
+
+    # ① 正本真的在，而且四个函数都有（反向自证：名字打错的话下面全空转）
+    sy = _ast.parse(src['assay/symbols.py'])
+    fns = {n.name for n in _ast.walk(sy) if isinstance(n, _ast.FunctionDef)}
+    for nm in ('last_px', 'daily_close_map', 'day_px', 'day_hl'):
+        assert nm in fns, 'assay/symbols.py 里没有 %s —— 正本搬走了？' % nm
+
+    # ② 【核心】除正本外，谁都不许再拼那句「读面板 parquet」的 SQL。
+    #    判据落在**单个字符串字面量**上（整文件查会被 docstring 里提到的
+    #    这个词误伤 —— 这条判据为此改过三版）。
+    PANEL = 'mart/panel_daily'
+    for rel, txt in src.items():
+        if rel == 'assay/symbols.py':
+            continue
+        for node in _ast.walk(_ast.parse(txt)):
+            if isinstance(node, _ast.Constant) and isinstance(node.value, str) \
+                    and PANEL in node.value and 'read_parquet' in node.value:
+                raise AssertionError(
+                    '%s:%d 又自己拼了一条读面板的 SQL —— 取价一律走 '
+                    'assay/symbols.py（四个函数写过四遍，出过两次事）'
+                    % (rel, node.lineno))
+
+    # ③ 四个调用点确实【转发】到正本，不是各留一份
+    import assay.symbols as _S
+    from assay.lv import px as _px, perf as _perf
+    for mod, fn, want in ((_perf, '_last_px', 'last_px'),
+                          (_px, 'daily_close_map', 'daily_close_map'),
+                          (_px, 'day_price', 'day_px'),
+                          (_px, 'day_range', 'day_hl')):
+        body = inspect.getsource(getattr(mod, fn))
+        calls = [n for n in _ast.walk(_ast.parse(textwrap.dedent(body)))
+                 if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+                 and n.func.attr == want]
+        assert calls, '%s.%s 没有调 symbols.%s —— 它又自己取了一遍价' % (
+            mod.__name__, fn, want)
+
+    # ④ 正本**不抛错、不猜**：取不到给 None / 不给那个键。
+    #    「是不是没同步 / 停牌 / 代码写错」属于调用方（报错措辞留在 px.py）。
+    root = os.environ.get('ASSAY_DATALAKE') or os.path.join(
+        os.path.dirname(REPO), 'datalake')
+    assert _S.day_px(root, '999999.XSHE', '2026-09-18') == (None, None)
+    assert _S.day_hl(root, '999999.XSHE', '2026-09-18') is None
+    assert _S.last_px(root, ['999999.XSHE'], '2026-09-18') == {}
+
+    # ⑤ 反向自证：真代码必须取得到（否则 ④ 是「全 None == 全 None」的空转）
+    v, sr = _S.day_px(root, '601857.XSHG', '2026-09-18')
+    assert v and sr == 'panel', '股票该走面板：%r/%r' % (v, sr)
+    v2, sr2 = _S.day_px(root, '513120.XSHG', '2026-09-18')
+    assert v2 and sr2 == 'alt', 'ETF 该回落 tdx：%r/%r' % (v2, sr2)
+    # 🔴 两条路精度不同这件事本身要钉住 —— 判据是**结构**：那个 round 的
+    #   位数必须是个三元式（面板 3 / tdx 4）。写成常数就是把精度统一了，
+    #   而那会静默改变 day_price 的返回值（等价性基线 66 项会变）。
+    rnd = [n for n in _ast.walk(_ast.parse(textwrap.dedent(
+               inspect.getsource(_px.day_price))))
+           if isinstance(n, _ast.Call) and getattr(n.func, 'id', '') == 'round']
+    assert rnd and isinstance(rnd[0].args[1], _ast.IfExp), (
+        'day_price 的两路精度（面板 3 位 / tdx 4 位）不再逐位保真了 —— '
+        '要统一可以，但那是单独一个决定，得连等价性基线一起改')
+
+
 @case('「代码 -> 类别 / 名称 / K 线」只许有一份实现（symbols.py）')
 def t_symbols_single_source():
     """🔴🔴 2026-09-21 用户报：「首页显示了 513120.XSHG 的编码但没有中文名，
@@ -3717,6 +3800,19 @@ def t_runs_delete_api():
             sp = os.path.join(d, f)
             if os.path.isfile(sp):
                 _sh0.copy2(sp, dst)
+        # 🔴 把 `code_sha256` 换成一个**没有账户绑过**的值。
+        #   下面要断言"只有标星那个被挡下"，而归档另有一条保护
+        #   （账户绑定过这个版本），且**它是集合相关的** —— `protected()`
+        #   对每个绑定版本只留一次，留哪一次取决于传进去的那批。
+        #   于是照真数据取样时，`prune_runs.py` 跑一次、或者多标几个星，
+        #   held 就会莫名多出几个（2026-09-21 实测 2 个，而**产品是对的**）。
+        #   改 sha 之后这道保护在临时盘上不存在，构造与真数据无关了
+        #   （同「断言不许依赖真实数据碰巧如此」那条）。
+        _mp = os.path.join(dst, 'meta.json')
+        _mj = _js.loads(io.open(_mp, encoding='utf-8').read())
+        _mj['code_sha256'] = 'selftest' + (_mj.get('code_sha256') or '')[:56]
+        io.open(_mp, 'w', encoding='utf-8').write(
+            _js.dumps(_mj, ensure_ascii=False))
         made.append(os.path.basename(d))
     _prev_runs_env = os.environ.get('ASSAY_RUNS')
     os.environ['ASSAY_RUNS'] = _runs_tmp

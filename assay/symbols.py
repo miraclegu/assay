@@ -331,3 +331,144 @@ def names(codes, day=None, root=None):
     if miss:
         out.update(alt_names(root, miss))
     return out
+
+
+# ==================== 取价：面板优先 + ETF/指数回落 ====================
+#
+# 🔴🔴 **这一层存在的理由与上面取名那层完全相同：知识不该散在四处。**
+#   2026-09-21 普查发现「查面板 -> 查不到 -> 回落 tdx」这个**模式**在四个
+#   取价函数里各写了一遍（`perf._last_px` / `px.daily_close_map` /
+#   `px.day_price` / `px.day_range`）。它已经出过事，而且出过两次：
+#   2026-09-18「ETF 持仓市值 0.00 / 浮盈 −100%」，修了 4 处之后
+#   **又发现还漏了 3 处**（权益曲线 / 每日持仓 / 出信号）。
+#   每加一个标的类别就要记得改 N 处 —— 而漏掉的那处**不报错**。
+#
+# ★ 抽的不是样板代码（四者的 SQL 与返回形状差得远），抽的是
+#   **「谁知道 ETF/指数住在别处」这件事**。收进这里之后，将来加第三类标的
+#   只改这一个文件。
+# 🔴 **报错措辞留给调用方**：这里取不到一律给 None / 不给那个键。
+#   `px.day_price` 那句"是不是没同步"的判断是**实盘录入的 UX**，
+#   与"取不到"是两件事（同「报错必须指向真正的原因」那条）。
+
+
+def _panel_sql(root):
+    return "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % root
+
+
+def _con(con=None):
+    if con is not None:
+        return con
+    import duckdb
+    return duckdb.connect(':memory:')
+
+
+def last_px(root, codes, day, con=None):
+    """{聚宽代码: (收盘, 那天的日期, 那天的昨收)}，按 <= day 取最近一条。
+
+    停牌股拿最后已知价 —— 与 broker「按最后已知价挂账」一致。
+    ★ 一并带回 `preclose` 是为了算当日涨跌：面板里有这一列，不用自己
+      回去找上一个交易日（停牌股的"上一个交易日"还得逐只算）。
+    🔴 面板查不到的回落到 tdx —— 不回落的话价格 None -> 市值 0 ->
+      浮盈 −100%，**而它不报错**，看着就像"这个账户把钱亏光了"。
+    """
+    codes = list(codes or [])
+    if not codes:
+        return {}
+    rows = _con(con).execute("""
+        SELECT code, close_bfq, date, preclose FROM (
+          SELECT jq_code AS code, close_bfq, date, preclose,
+                 row_number() OVER (PARTITION BY jq_code ORDER BY date DESC) rn
+          FROM %s
+          WHERE jq_code IN ('%s') AND date <= DATE '%s'
+            AND date > DATE '%s' - INTERVAL 400 DAY
+        ) WHERE rn = 1""" % (_panel_sql(root), "','".join(codes), day, day)).fetchall()
+    out = {r[0]: (r[1], r[2], r[3]) for r in rows}
+    miss = [c for c in codes if c not in out]
+    if miss:
+        out.update(last_close(root, miss, day))
+    return out
+
+
+def daily_close_map(root, codes, since, con=None):
+    """{(聚宽代码, 日期): 不复权收盘} —— 整段逐日。
+
+    🔴 权益曲线与每日持仓**共用这一处**：它们本来是抄了两份的，
+      于是给 ETF 加回落时只改了一处，**两页对同一天给出不同的总资产**。
+    """
+    codes = list(codes or [])
+    if not codes:
+        return {}
+    out = {}
+    for c, dd, p in _con(con).execute("""
+        SELECT jq_code, date, close_bfq FROM %s
+        WHERE jq_code IN ('%s') AND date >= DATE '%s'
+    """ % (_panel_sql(root), "','".join(codes), since)).fetchall():
+        out[(c, dd)] = p
+    miss = [c for c in codes if not any(k[0] == c for k in out)]
+    if miss:
+        out.update(daily_close(root, miss, since))
+    return out
+
+
+def day_px(root, code, date, which='open', con=None):
+    """某只票某天的【不复权】价 -> `(值, 来源)`，取不到给 `(None, None)`。
+
+    `which` = 'open' / 'close'；`来源` = 'panel' | 'alt'。
+    🔴 **不报错是刻意的** —— "取不到"与"该怎么跟人解释"是两件事，
+      后者（是不是没同步 / 是不是停牌 / 是不是代码写错）属于调用方。
+    🔴 **不在这里 round，把来源一并返回** —— 因为 `px.day_price` 里
+      **面板那条路 round 到 3 位、tdx 那条路 round 到 4 位**（既有的不一致，
+      2026-09-21 抽正本时发现）。重构阶段先**逐位保真**，把这个不一致
+      暴露到签名上，要不要统一是另一个决定 —— 悄悄改精度不算重构。
+    """
+    col = 'open' if which == 'open' else 'close_bfq'
+    c = _con(con)
+    row = c.execute("SELECT %s FROM %s WHERE jq_code = ? AND date = DATE '%s'"
+                    % (col, _panel_sql(root), date), [code]).fetchone()
+    if row is not None and row[0] is not None:
+        return (float(row[0]), 'panel')
+    alt = day_ohlc(root, code, date)          # (open, high, low, close)
+    if alt is None:
+        return (None, None)
+    v = alt[0] if which == 'open' else alt[3]
+    return ((None, None) if v is None else (float(v), 'alt'))
+
+
+def panel_last_day(root, con=None):
+    """面板最新到哪天（`datetime.date`，没有就 None）。
+
+    ★ 「本地行情最新到哪天」是判断"信号新不新"的第一依据，而它此前在
+      `px.latest_data_day` 与 `px.day_price` 的报错分支里**各查了一遍**。
+    """
+    c = _con(con)
+    row = c.execute('SELECT MAX(date) FROM %s' % _panel_sql(root)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def panel_probe(root, code, date, con=None):
+    """给【报错措辞】用的两个事实 -> `(面板最新日, 这天这只票有没有行)`。
+
+    🔴 它不取价，只回答"是不是没同步" —— 而这两件事要做的动作完全不同：
+      面板最新日 < 请求日 = 等晚上同步；>= 还查不到 = 停牌或代码写错。
+    ★ 放这里是因为**「怎么查面板」只许有一份**：留在 `px.day_price` 里的话，
+      那个文件就又有了自己的一条面板 SQL（守卫抓到过一次）。
+    """
+    c = _con(con)
+    p = _panel_sql(root)
+    last = panel_last_day(root, con=c)
+    has = c.execute("SELECT count(*) FROM %s WHERE date = DATE '%s' "
+                    "AND jq_code = ?" % (p, date), [code]).fetchone()[0]
+    return (last, bool(has))
+
+
+def day_hl(root, code, date, con=None):
+    """某只票某天的 (最低, 最高)，不复权。取不到给 **None**。"""
+    c = _con(con)
+    row = c.execute("SELECT low, high FROM %s WHERE jq_code = ? AND date = DATE '%s'"
+                    % (_panel_sql(root), date), [code]).fetchone()
+    if row and row[0] is not None and row[1] is not None:
+        return (round(float(row[0]), 3), round(float(row[1]), 3))
+    alt = day_ohlc(root, code, date)
+    if alt is None or alt[1] is None or alt[2] is None:
+        return None
+    return (round(float(alt[2]), 3), round(float(alt[1]), 3))

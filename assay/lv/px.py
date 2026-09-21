@@ -4,7 +4,6 @@ import datetime
 import json
 import os
 import re
-import duckdb
 from ..feed import PanelFeed
 
 from . import base as _base
@@ -43,52 +42,43 @@ def day_price(code, date, which='open', datalake=None):
       当晚 sync_daily.sh 跑完才有当天的行情。那时候只能手填价格，或等晚上再录。
     """
     d = _base._d(date)
-    col = 'open' if which == 'open' else 'close_bfq'
     # ★ 不走 PanelFeed：它会把整个区间物化成 bars 表（取一个价付不起），
     #   而且 start/end 传 None 会拼成 `DATE 'None'`（踩过的坑）。
-    #   这里只要一行，直接对 parquet 点查。
-    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
-    con = duckdb.connect(':memory:')
-    row = con.execute(
-        "SELECT %s FROM %s WHERE jq_code = ? AND date = DATE '%s'"
-        % (col, panel, d), [code]).fetchone()
-    if row is None or row[0] is None:
-        # 🔴 面板是**股票**宽表 —— ETF / 指数不在里面。先回落到 tdx 原始
-        #   日线再决定报不报错，否则「价格留空自动补当日开盘价」这条路
-        #   对 ETF 整个走不通（报的还是"面板里没有这个代码"，
-        #   而人会以为是自己代码写错了）。
-        _alt = _tdx.day_ohlc(_lake(datalake), code, d)
-        if _alt is not None:
-            return round(float(_alt[0] if which == 'open' else _alt[3]), 4)
-        # ★ "本地最新数据日"要独立查面板 —— 这一行是给人判断"是不是没同步"
-        #   的唯一依据，绝不能出现 None。
-        mx = con.execute('SELECT MAX(date) FROM %s' % panel).fetchone()
-        last = mx[0] if mx else None
-        what = PRICE_FIELDS.get(which, which)
-        # 🔴 报错必须指向【真正的】原因。这天的面板明明在（last >= d）却说
-        #   "还没同步"是自相矛盾的，而人会照着这句去等晚上重试 —— 白等。
-        #   实测踩过：粘的是 301126.SZ（券商写法），报的却是"行情还没同步"。
-        if last is not None and last >= d:
-            has = con.execute(
-                "SELECT count(*) FROM %s WHERE date = DATE '%s' AND jq_code = ?"
-                % (panel, d), [code]).fetchone()[0]
-            raise _base.LiveError(
-                '取不到 %s 在 %s 的%s —— 但这天的行情本地是有的（最新到 %s），'
-                '所以【不是】没同步。\n%s'
-                % (code, d, what, last,
-                   ('这只票当天没有成交（停牌），也就没有%s。请手填价格。' % what)
-                   if has else
-                   ('面板里没有 %s 这个代码：可能当天还没上市 / 已退市，'
-                    '或者代码写错了。' % code)))
+    # 🔴 取价走唯一正本 `symbols.day_px`（面板优先 + ETF/指数回落）——
+    #   此前这个「查面板 -> 缺的回落 tdx」的模式在四个函数里各写了一遍。
+    # ★ 正本**不 round 也不报错**：它只回答"取不到吗"，
+    #   而"该怎么跟人解释"（是不是没同步 / 停牌 / 代码写错）留在下面。
+    # ⚠ 两条路的精度**本来就不一样**（面板 3 位 / tdx 4 位），
+    #   重构阶段逐位保真，不在这里顺手统一。
+    _v, _src = _SYM.day_px(_lake(datalake), code, d, which)
+    if _v is not None:
+        return round(_v, 3 if _src == 'panel' else 4)
+    # ★ "本地最新数据日"要独立查面板 —— 这一行是给人判断"是不是没同步"
+    #   的唯一依据，绝不能出现 None。查面板同样走正本（`panel_probe`）——
+    #   在这里再拼一条 SQL 就是第二份「怎么查面板」（守卫钉着）。
+    last, _has = _SYM.panel_probe(_lake(datalake), code, d)
+    what = PRICE_FIELDS.get(which, which)
+    # 🔴 报错必须指向【真正的】原因。这天的面板明明在（last >= d）却说
+    #   "还没同步"是自相矛盾的，而人会照着这句去等晚上重试 —— 白等。
+    #   实测踩过：粘的是 301126.SZ（券商写法），报的却是"行情还没同步"。
+    if last is not None and last >= d:
+        has = _has
         raise _base.LiveError(
-            '取不到 %s 在 %s 的%s。\n'
-            '最常见的原因是【当天行情还没同步】—— 本地最新数据日是 %s，'
-            '而 datalake 要等当晚 sync_daily.sh 跑完才有当天行情。\n'
-            '现在就要录的话请**手填价格**；或者等晚上同步完再录，'
-            '那时价格留空就会自动取%s。\n'
-            '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
-            % (code, d, what, last, what, what))
-    return round(float(row[0]), 3)
+            '取不到 %s 在 %s 的%s —— 但这天的行情本地是有的（最新到 %s），'
+            '所以【不是】没同步。\n%s'
+            % (code, d, what, last,
+               ('这只票当天没有成交（停牌），也就没有%s。请手填价格。' % what)
+               if has else
+               ('面板里没有 %s 这个代码：可能当天还没上市 / 已退市，'
+                '或者代码写错了。' % code)))
+    raise _base.LiveError(
+        '取不到 %s 在 %s 的%s。\n'
+        '最常见的原因是【当天行情还没同步】—— 本地最新数据日是 %s，'
+        '而 datalake 要等当晚 sync_daily.sh 跑完才有当天行情。\n'
+        '现在就要录的话请**手填价格**；或者等晚上同步完再录，'
+        '那时价格留空就会自动取%s。\n'
+        '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
+        % (code, d, what, last, what, what))
 
 
 
@@ -166,43 +156,19 @@ def latest_data_day(datalake=None):
       原来它挤在"（用 2026-09-01 收盘数据算，版本 xxx）"的括号里，
       看着像个脚注，而它恰恰是最该先看的那个数。
     """
-    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
-    row = duckdb.connect(':memory:').execute(
-        'SELECT MAX(date) FROM %s' % panel).fetchone()
-    return row[0].isoformat() if row and row[0] else None
+    d = _SYM.panel_last_day(_lake(datalake))
+    return d.isoformat() if d else None
 
 
 
 def daily_close_map(feed, codes, since):
     """{(code, date): 不复权收盘} —— 权益曲线与每日持仓**共用这一处**。
 
-    🔴🔴 **抽出来是因为它本来是抄了两份的**（`perf.equity_curve` 与
-      `hist._feed` 里逐字相同的两段）。CLAUDE.md 里写着"两者用同一套日期轴
-      与取价"，而实现其实是两份 —— 于是 2026-09-18 给 ETF 加回落时只改了
-      一处，另一处照旧，**两页对同一天给出不同的总资产**。
-      同「两处实现必然分叉」那条，这次分叉是我自己制造的。
-
-    🔴 **ETF / 指数不在面板里**，查不到就回落到 tdx 原始日线 ——
-      不回落的话它们的市值**全程是 0**，权益曲线只剩现金：
-      实测 a3 的 TWR 报 **−18.36%**，而那正好等于 `现金/本金 − 1`
-      （100,000 -> 81,639.59）。用户看到的是"单天 +41.8%、累计 −18%"，
-      而真实是 +2.5% —— **而它不报错**。
+    🔴 **只转发**给唯一正本 `symbols.daily_close_map`（2026-09-21）。
+      它本来就是为了消掉 `perf.equity_curve` 与 `hist._feed` 那两份逐字
+      相同的实现而抽出来的；现在连「面板 + tdx 回落」这一层也收进正本。
     """
-    codes = list(codes or [])
-    if not codes:
-        return {}
-    q = "','".join(codes)
-    out = {}
-    for c, dd, p in feed.con.execute("""
-        SELECT jq_code, date, close_bfq
-        FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
-        WHERE jq_code IN ('%s') AND date >= DATE '%s'
-    """ % (feed.root, q, since)).fetchall():
-        out[(c, dd)] = p
-    miss = [c for c in codes if not any(k[0] == c for k in out)]
-    if miss:
-        out.update(_tdx.daily_close(feed.root, miss, since))
-    return out
+    return _SYM.daily_close_map(feed.root, codes, since, con=feed.con)
 
 
 def names_of(codes, day=None, datalake=None):
@@ -224,22 +190,13 @@ def names_of(codes, day=None, datalake=None):
 
 
 def day_range(code, date, datalake=None):
-    """当日 high/low（不复权）。取不到返回 None —— 不报错，这是个可选校验。"""
-    d = _base._d(date)
-    panel = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % _lake(datalake)
-    row = duckdb.connect(':memory:').execute(
-        "SELECT low, high FROM %s WHERE jq_code = ? AND date = DATE '%s'"
-        % (panel, d), [_base.normalize_code(code)]).fetchone()
-    if not row or row[0] is None or row[1] is None:
-        # 🔴 回落到 tdx —— 不回落的话这道校验对 ETF **静默放行**：
-        #   小数点点错、误填后复权价全都拦不住，而它一声不吭
-        #   （同「空结果一律当失败」那条的反面：这里的空结果被当成了"没有
-        #   这个校验"）。
-        _alt = _tdx.day_ohlc(_lake(datalake), code, d)
-        if _alt is None or _alt[1] is None or _alt[2] is None:
-            return None
-        return (round(float(_alt[2]), 3), round(float(_alt[1]), 3))
-    return (round(float(row[0]), 3), round(float(row[1]), 3))
+    """当日 (low, high)（不复权）。取不到返回 None —— 不报错，这是个可选校验。
+
+    🔴 **只转发**给唯一正本 `symbols.day_hl`。不回落的话这道校验对 ETF
+      **静默放行**：小数点点错、误填后复权价全都拦不住，而它一声不吭。
+    """
+    return _SYM.day_hl(_lake(datalake), _base.normalize_code(code),
+                       _base._d(date))
 
 
 
