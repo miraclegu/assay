@@ -43,6 +43,17 @@ froec 的「排除 ST」过滤**不会排除它**。
      make_signal 只记一次 recomputed_at，不产生 revision 噪声）；
      文件没动 -> 内容必然没变 -> 跳过是对的。
 """
+
+# 🔴🔴 **第一件事：固定 hash 种子，否则回测跨进程不可复现。**
+#   实测 `etf_p1_rotation` 同数据同代码 10 个进程跑出两种结果各 5 次 ——
+#   策略里对一个 `set` 排序、并列时没有 tie-break，而 str 的 hash 每进程随机。
+#   只能在解释器启动前设，所以这里带着环境变量把自己重启一次（幂等）。
+#   详见 `assay/hashseed.py`。
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from assay.hashseed import ensure_fixed_hash_seed as _ehs   # noqa: E402
+_ehs()
 import argparse
 import datetime
 import json

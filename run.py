@@ -5,6 +5,17 @@
     python3 run.py strategies/小市值/sgmspeg_v0b.py --start 2019-01-01 --end 2026-06-30 --cash 1000000
     python3 run.py strategies/小市值/froec.py --start 2016-01-01 --end 2026-08-07 --cash 100000
 """
+
+# 🔴🔴 **第一件事：固定 hash 种子，否则回测跨进程不可复现。**
+#   实测 `etf_p1_rotation` 同数据同代码 10 个进程跑出两种结果各 5 次 ——
+#   策略里对一个 `set` 排序、并列时没有 tie-break，而 str 的 hash 每进程随机。
+#   只能在解释器启动前设，所以这里带着环境变量把自己重启一次（幂等）。
+#   详见 `assay/hashseed.py`。
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from assay.hashseed import ensure_fixed_hash_seed as _ehs   # noqa: E402
+_ehs()
 import argparse
 import importlib.util
 import io
