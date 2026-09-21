@@ -405,7 +405,9 @@ function openSettings(aid, a, ro){
        现在直接对着账单逐项抄，费率是实时算出来的，没有中间环节。 */
     $('#earch').onclick=async()=>{
       try{ await post('/api/live/save',{id:aid, archived:!a.archived});
-        close(); showLive(null);
+        /* 走 hash（同「建完账户」那条）：归档完回列表页，
+           让路由去渲染，别让页面与 hash 各说各话。 */
+        close(); location.hash = '#/live';
       }catch(e){ $('#emsg').className='lvmsg bad'; $('#emsg').textContent=String(e); }
     };
   });

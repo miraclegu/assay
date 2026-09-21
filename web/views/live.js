@@ -34,6 +34,23 @@ const LVPAGE=50;                      /* 流水每页条数（服务端也会夹
 const CFK={deposit:'入金', withdraw:'出金', dividend:'分红到账', adjust:'调整'};
 
 /* esc 复用文件上方那个（第 ~357 行）—— 不重复定义。 */
+/* 这一发还算不算数。
+   🔴 **光比代际是不够的**：`showLive` 也被【非路由】调用（建完账户、
+     收起侧栏、切「显示已归档」、关掉某个浮层），那几发的 hash 没变 ——
+     于是一发后到的重渲染可以把**路由要的那个账户**顶掉，结果是
+     「hash 指向 A、页面显示 B」，**正是代际守卫本来要防的那件事**。
+   ★ 2026-09-21 实测：那条 web 用例 60 轮挂 12 轮，现场一律是
+     `hash='#/live/hongli'` 而 `LVSEL='a6'`、无异常 —— 建完账户那一发
+     取到更大的代际先回来渲染，路由那一发回来时按设计作废了自己。
+   🔴 所以真值只有一个：**hash 点名了具体账户时，就只有它算数**；
+     hash 没点名（`#/live` 列表页）时才退回比代际。 */
+function lvStale(gen, aid){
+  const m = /^#\/live(?:\/([\w-]+))?/.exec(location.hash || '');
+  if (m && m[1]) return m[1] !== aid;
+  return gen !== LVGEN;
+}
+
+
 async function showLive(aid){
   const gen = ++LVGEN;
   stopPoll();
@@ -41,9 +58,9 @@ async function showLive(aid){
   let o;
   try{ o=await j('/api/live/accounts'+(LVALL?'?all=1':'')); }
   catch(e){
-    if(gen !== LVGEN) return;          // 有更新的一发在跑，这一发作废
+    if(lvStale(gen, aid)) return;      // 不是 hash 要的那一发，作废
     $('#main').innerHTML='<div class="none">实盘模块读取失败：'+esc(e)+'</div>'; return; }
-  if(gen !== LVGEN) return;            // ← 同上：不许把新页面盖回旧账户
+  if(lvStale(gen, aid)) return;        // ← 同上：不许把别的账户盖上来
   LV=o; LVSEL=aid||(o.accounts[0]&&o.accounts[0].id)||null;
   const cal=o.calendar||{};
   let head='';
@@ -200,6 +217,7 @@ async function showLive(aid){
         : ''; };
     box.querySelector('.nb').onclick=async()=>{
       const msg=box.querySelector('.nmsg');
+      const h0 = location.hash;   // 见下：await 回来时人可能已经走开
       try{
         const r=await post('/api/live/save',{
           name:nn.value.trim(), init_cash:parseFloat(box.querySelector('.nc').value||'0'),
@@ -207,7 +225,14 @@ async function showLive(aid){
           paper_start: paper ? (box.querySelector('.ns').value || '') : undefined,
           mode: paper?'paper':'live'});
         msg.className='lvmsg ok'; msg.textContent='已建';
-        showLive(r.account.id);
+        /* 🔴 **走 hash**，不直接 showLive —— 否则"页面显示哪个账户"又有了
+           第二个真值，而 hash 还停在上一个（那正是上面那条竞态的成因）。
+           🔴 但**只有人没自己走开时才跳**：这一发是 await 回来的，
+             期间人可能已经点开别的账户了 —— 无条件跳就是把竞态从
+             "渲染"搬到"导航"（2026-09-21 实测：现场从
+             `hash=hongli 显示 a6` 变成了 `hash 被顶回 a6`）。
+             走开了就不跳，新账户下次列表刷新自然有。 */
+        if(location.hash === h0) location.hash = '#/live/' + r.account.id;
       }catch(err){ msg.className='lvmsg bad'; msg.textContent=String(err); }
     };
   };});
@@ -403,7 +428,7 @@ async function loadLive(aid, quiet){
   /* 两道一起：容器被换掉了（切走了），或者**期间有更新的一发**
      —— 后者容器判据挡不住（同一个 `#lvbody` 上两发 loadLive 并发，
      旧的后回来会拿旧数据盖掉新数据）。 */
-  if($('#lvbody') !== b || gen !== LVGEN) return;
+  if($('#lvbody') !== b || lvStale(gen, aid)) return;
   /* 结构没变就只换数字，DOM 一行不动（滚动位置/hover/选中都保住）。 */
   if(quiet && livePatch(o)){
     if(o.rt_live) livePoll(aid); else stopPoll();

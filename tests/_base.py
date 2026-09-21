@@ -286,7 +286,7 @@ def _lv_bind_strategy(pg, path, params_json=None):
     pg.click('#bb')
 
 
-def _lv_open_newform(pg, zone='live', timeout=8000):
+def _lv_open_newform(pg, zone='live', timeout=20000):
     """打开某个账户区的「+ 新建」表单，返回那个容器的选择器。
 
     ★ 这个入口**已经变过一次**（2026-09-17：全局一个 `#lvnew` + `☐ 模拟盘`
@@ -296,12 +296,27 @@ def _lv_open_newform(pg, zone='live', timeout=8000):
       看着像页面坏了。
     """
     sel = '#nf_' + zone
-    pg.click('.znew[data-zone=%s]' % zone)
+    # 🔴 **点击可能落在正在被替换的 DOM 上**：侧栏由 `showLive` 整块
+    #   `innerHTML` 重渲染（建完账户、切账户都会），那一瞬点下去的按钮
+    #   连同它的 handler 一起被换掉 —— **表单永远不出来，且不报错**
+    #   （同「innerHTML 填充之后才存在的元素要重新绑事件」那一族）。
+    #   2026-09-21 实测：`#nf_paper .nn` 等满 20 秒也没出现，不是慢，
+    #   是那一下点空了。所以这里**认得出这种情况并重点一次**。
+    # ⚠ 这是**测试侧**的韧性，不是把产品问题盖住 —— 真实用户在重渲染那
+    #   一瞬点「+ 新建」同样会没反应。那个隐患另记，不在这条用例里修。
+    for _ in range(3):
+        pg.click('.znew[data-zone=%s]' % zone)
+        try:
+            pg.wait_for_selector(sel + ' .nn', state='visible',
+                                 timeout=max(2000, timeout // 3))
+            return sel
+        except Exception:                                   # noqa: BLE001
+            pg.wait_for_timeout(600)      # 等那一轮重渲染落定再点
     pg.wait_for_selector(sel + ' .nn', state='visible', timeout=timeout)
     return sel
 
 
-def _lv_new_account(pg, name, cash, zone='live', timeout=8000):
+def _lv_new_account(pg, name, cash, zone='live', timeout=20000):
     """在某个区建一个账户。`zone='paper'` 建出来的就是模拟盘。"""
     sel = _lv_open_newform(pg, zone, timeout)
     pg.fill(sel + ' .nn', name)

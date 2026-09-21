@@ -6133,7 +6133,7 @@ def t_loadlive_race():
             #   改成在**浏览器里**把第一发的 promise 延后 resolve：
             #   真并发，且不碰 driver。
             pg.unroute('**/api/live/account?*')
-            pg.evaluate("""() => {
+            _SLOW1 = """() => {
               const _j = window.j; let n = 0;
               window.j = async (u, ...rest) => {
                 const p = _j(u, ...rest);
@@ -6144,7 +6144,8 @@ def t_loadlive_race():
                 }
                 return p;
               };
-            }""")
+            }"""
+            pg.evaluate(_SLOW1)
             _n2 = next(x['name'] for x in lv.load_accounts() if x['id'] == a1)
             pg.evaluate("location.hash = '#/live/' + %r" % a2)   # 第一发（慢）
             pg.wait_for_timeout(150)
@@ -6161,6 +6162,75 @@ def t_loadlive_race():
                 'showLive 的旧那一发把新页面盖回去了 —— '
                 'hash 指着 %r，页面却显示 %r（而它不报错）' % (_n2, _final))
             assert not errs, '并发切账户时抛了：%s' % errs[:1]
+
+            # ---- 🔴🔴 第三种：一发【走路由】、一发【不走】 ----
+            #   上面两段两发都改了 hash，所以"最新那发"与"hash 要的那发"
+            #   恰好是同一个 —— **纯代际判据就够了，测不出区别**。
+            #   而 `showLive` 还被非路由调用（建完账户 / 收起侧栏 /
+            #   切「显示已归档」/ 关掉浮层），那几发 hash 没变：
+            #   于是一发后到的重渲染能把**路由要的那个账户**顶掉，
+            #   路由那发回来时反而按代际"作废了自己" ——
+            #   结果就是「hash 指向 A、页面显示 B」，**而它不报错**。
+            #   ★ 这是 2026-09-21 从**失败现场**倒推出来的：那条用例 60 轮
+            #     挂 12 轮，现场一律 `hash='#/live/hongli'` 而 `LVSEL='a6'`、
+            #     零 pageerror（光靠超时信息永远查不到这一步）。
+            pg.evaluate("location.hash = '#/live'")
+            pg.wait_for_timeout(400)
+            pg.evaluate(_SLOW1)
+            pg.evaluate("location.hash = '#/live/' + %r" % a1)   # 路由那发（慢）
+            pg.wait_for_timeout(150)
+            pg.evaluate("showLive(%r)" % a2)                     # 非路由那发（快）
+            pg.wait_for_timeout(3000)
+            _f2 = pg.eval_on_selector('#main .lvhead h2',
+                                      'e => e.textContent.trim()')
+            _sel = pg.evaluate('() => LVSEL')
+            assert _f2 == _n2 and _sel == a1, (
+                'hash 指着 %r(%s)，页面却显示 %r(LVSEL=%r) —— '
+                '非路由那一发把路由要的账户顶掉了' % (_n2, a1, _f2, _sel))
+            assert not errs, '第三种构造里抛了：%s' % errs[:1]
+
+            # ---- 🔴 第四种：在【别的账户页上】建一个新账户 ----
+            #   真实场景就是"我在看 hongli，顺手建一个"。
+            #   这一段防的是**修上面那条竞态时最容易引入的反作用**：
+            #   建完之后若还走 `showLive(新id)`，`lvStale` 会因为
+            #   "hash 点名的是 hongli" 把它判成过期 -> **账户建出来了却
+            #   不显示，屏幕上只有"已建"两个字**，而它不报错。
+            #   所以建完必须**走 hash**（且只在人没自己走开时跳）。
+            # 🔴 **从干净页面开始**：上一段给 `window.j` 打了补丁、页面还在
+            #   不停重渲染，漏进这一段的话「+ 新建」那个按钮解析得到却
+            #   **点不动**（playwright 的可操作性检查过不去，报的是
+            #   `Timeout 30000ms exceeded`，指不到真正的原因）。
+            pg.goto(base + '#/live/' + a1, wait_until='networkidle')
+            pg.reload(wait_until='networkidle')
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=_n2, timeout=30000)
+            _nm4 = '并发判据-新建'
+            _lv_new_account(pg, _nm4, '100000', zone='live')
+            try:
+                pg.wait_for_function(
+                    'n => { const h = document.querySelector("#main .lvhead h2");'
+                    '       return h && h.textContent.trim() === n; }',
+                    arg=_nm4, timeout=30000)
+            except Exception:
+                # 🔴 裸超时指不到原因 —— 把现场说出来（变异实测：建完之后
+                #   还走 `showLive(新id)` 的话，它会被 lvStale 判成过期而
+                #   作废，屏幕上只有"已建"两个字）。
+                _st = pg.evaluate(
+                    '() => ({hash: location.hash, sel: LVSEL,'
+                    ' h2: (document.querySelector("#main .lvhead h2")||{})'
+                    '       .textContent})')
+                raise AssertionError(
+                    '在别的账户页上建了账户 %r，页面却没跳过去 —— 现场：%r。'
+                    '账户建出来了却不显示（"已建"之外没有任何反馈），'
+                    '多半是建完走了 showLive() 而不是改 hash' % (_nm4, _st))
+            _h4 = pg.evaluate('() => location.hash')
+            _id4 = next(x['id'] for x in lv.load_accounts() if x['name'] == _nm4)
+            assert _h4 == '#/live/' + _id4, (
+                '建完账户之后 hash 没跟过去（%r）—— 页面与 hash 又成了'
+                '两个真值' % _h4)
+            assert not errs, '第四种构造里抛了：%s' % errs[:1]
             br.close()
     finally:
         httpd.shutdown()
