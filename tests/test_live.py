@@ -5874,10 +5874,30 @@ def t_account_note():
         #   而那与"页面切到哪个账户"毫无关系（判据比要证的事宽）。
         nm = next(x['name'] for x in lv.load_accounts() if x['id'] == aid)
         pg.goto(base + '#/live/' + aid, wait_until='networkidle')
-        pg.wait_for_function(
-            'n => { const h = document.querySelector("#main .lvhead h2");'
-            '       return h && h.textContent.trim() === n; }',
-            arg=nm, timeout=20000)
+        try:
+            pg.wait_for_function(
+                'n => { const h = document.querySelector("#main .lvhead h2");'
+                '       return h && h.textContent.trim() === n; }',
+                arg=nm, timeout=20000)
+        except Exception:
+            # 🔴 超时本身什么都说明不了 —— 把**现场**打出来。
+            #   这条用例偶发红过好几轮，每一轮都是靠猜在改判据
+            #   （同「该在第一次就把失败现场打出来」那条）。
+            st = pg.evaluate(
+                '() => ({hash: location.hash,'
+                ' h2: (document.querySelector("#main .lvhead h2")||{}).textContent,'
+                ' all: [...document.querySelectorAll(".lvhead h2")]'
+                '        .map(e => e.textContent),'
+                ' sel: (typeof LVSEL === "undefined") ? "无" : LVSEL,'
+                ' gen: (typeof LVGEN === "undefined") ? "无" : LVGEN,'
+                ' body: (document.querySelector("#main")||{}).textContent'
+                '        ? (document.querySelector("#main").textContent'
+                '           .slice(0, 160)) : "#main 是空的"})')
+            raise AssertionError(
+                '切到账户 %s(%s) 之后标题没变成它。现场：hash=%r h2=%r '
+                '全部 h2=%r LVSEL=%r LVGEN=%r 页面报错=%r #main 前 160 字=%r'
+                % (nm, aid, st['hash'], st['h2'], st['all'], st['sel'],
+                   st['gen'], errs[-3:], st['body']))
 
     real = lv.LIVE
     tmp = tempfile.mkdtemp(prefix='selftest_note_')
