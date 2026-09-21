@@ -211,6 +211,54 @@ def _via_pop(pg, loc, want=None):
     return href
 
 
+_GUARD_FILES = ('picks.json',)
+
+
+def _guard_snapshot():
+    """跑之前记下【生产文件】的内容。
+
+    🔴🔴 **selftest 不许写生产数据**这条纪律，此前只有 `live/` 有人工核对，
+      `picks.json` 一直没人盯 —— 2026-09-21 就出事了：两条批量删除的用例
+      是"备份真文件 -> 覆盖 -> finally 还原"，做变异测试时反复中断它们，
+      某一次没还原成功，**真 picks.json 少了 66 行星标**，是 `git status`
+      才发现的。标星是决策记录，同时是 `prune_runs` 的保护依据 ——
+      丢了不报错，只是下次清理会把那些归档一并删掉。
+    ★ 判据故意选**跑完文件变没变**，不是扫源码：扫源码分不出"读"和"写"
+      （实测误报三条只读的用例），而这个是**可证的事实**、骗不过去。
+    ⚠ 不盯 `live/`：真实的 serve.py 在后台 tick，它写账本是**它该做的事**，
+      盯了就是天天假报（同「假告警看多了就不看告警」）。
+    """
+    out = {}
+    for rel in _GUARD_FILES:
+        fp = os.path.join(REPO, rel)
+        try:
+            out[rel] = io_open_text(fp)
+        except Exception:                                   # noqa: BLE001
+            out[rel] = None
+    return out
+
+
+def _guard_check(snap):
+    """跑完之后比一遍；变了就是测试污染，返回一行人话。"""
+    bad = []
+    for rel, before in snap.items():
+        fp = os.path.join(REPO, rel)
+        try:
+            now = io_open_text(fp)
+        except Exception:                                   # noqa: BLE001
+            now = None
+        if now != before:
+            bad.append(rel)
+            if before is not None:      # 抢救回去，别让污染留在盘上
+                with open(fp, 'w', encoding='utf-8') as f:
+                    f.write(before)
+    if bad:
+        return ('🔴 测试污染：跑完之后 %s 变了（已按跑前的内容还原）—— '
+                '哪条用例碰了生产文件？正确做法是**重定向**，'
+                '不是"备份再还原"（那永远留着中断的窗口）' % '、'.join(bad))
+    return None
+
+
 def main():
     import time as _t
     ap = argparse.ArgumentParser(description='assay 自检')
@@ -238,6 +286,7 @@ def main():
              len(sel), len(CASES)))
     ok = fail = 0
     times = []
+    _snap = _guard_snapshot()          # 见 `_guard_snapshot`：不许写生产文件
     for name, fn, _tag in sel:
         t0 = _t.time()
         try:
@@ -253,6 +302,10 @@ def main():
             if os.environ.get('SELFTEST_TRACE'):
                 traceback.print_exc()
             fail += 1
+    _pol = _guard_check(_snap)
+    if _pol:
+        print('\n' + _pol)
+        fail += 1                      # 污染了生产文件就是失败，不只是提醒
     print('\n%d 通过 / %d 失败   总耗时 %.1fs（共 %d 个用例，本次跑 %d 个）'
           % (ok, fail, sum(d for d, _ in times), len(CASES), len(sel)))
     if os.environ.get('SELFTEST_TIMING'):

@@ -2024,8 +2024,13 @@ def t_no_runs_pollution():
     assert not dbad, \
         ('这些用例会**真删归档目录**，却没把 ASSAY_RUNS 重定向到临时目录：'
          '%s —— 一跑就毁生产归档，而归档是删不回来的' % sorted(set(dbad)))
-    # 每一处重定向都要在 finally 里还原
     SELF = 'selftest 不许写进生产归档'
+    # 🔴🔴 **`picks.json` 那条不在这里扫** —— 判据换成了「跑完之后这个
+    #   文件有没有变」，放在 `tests/_base.main()` 里（见那边的注释）。
+    #   理由：源码扫描分不出"读"和"写"（实测误报三条只读的用例），
+    #   而"跑完文件没变"是**可证的事实**、骗不过去。
+    #   ★ 两者分工说得清才留两道；这里留不下，所以只留那一道。
+    # 每一处重定向都要在 finally 里还原
     for m in _re.finditer(r"os\.environ\['ASSAY_RUNS'\] = _runs_tmp", src):
         name, a, b = _owner(m.start())
         # ★ 跳过**这条用例自己** —— 它的源码里也含那些字符串（就是上面
@@ -4198,8 +4203,19 @@ def t_runs_batch_delete():
     reg.set_runs(_runs_tmp)
     sv._scan()
     # ★ 挑一个种子归档标星，专门用来验"受保护的默认不删"
-    _marks_p = os.path.join(REPO, 'picks.json')
-    _marks_bak = open(_marks_p, encoding='utf-8').read()
+    # 🔴🔴 **不许碰真的 `picks.json`** —— 它是决策记录（标星同时是
+    #   `prune_runs` 的保护依据）。原来这两条用例是"备份 -> 覆盖 -> finally
+    #   还原"，而 2026-09-21 做变异测试时反复中断它，某一次没还原成功：
+    #   **真文件少了 66 行星标**，是 `git status` 才发现的。
+    #   备份再还原永远有这个窗口 —— 正确做法与 `lv.LIVE` / `ASSAY_RUNS`
+    #   同一条：**重定向**（`srv.runs.MARKS_FILE`，`_prune_mod()` 会把它
+    #   喂给 prune_runs），真文件一个字节都不写。
+    import assay.srv.runs as R
+    _marks_real = os.path.join(REPO, 'picks.json')
+    _marks_bak = open(_marks_real, encoding='utf-8').read()
+    _marks_p = os.path.join(_tf.mkdtemp(prefix='selftest_marks_'), 'picks.json')
+    _prev_marks = R.MARKS_FILE
+    R.MARKS_FILE = _marks_p
     _all = [os.path.basename(os.path.dirname(x)) for x in
             sorted(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))]
     _star = _all[0]
@@ -4297,7 +4313,9 @@ def t_runs_batch_delete():
             assert not errs, 'JS 报错 %d 处: %s' % (len(errs), errs[:2])
     finally:
         httpd.shutdown()
-        open(_marks_p, 'w', encoding='utf-8').write(_marks_bak)
+        R.MARKS_FILE = _prev_marks
+        assert open(_marks_real, encoding='utf-8').read() == _marks_bak, \
+            '真 picks.json 被动过了 —— 重定向没生效'
         if _prev_runs_env is None:
             os.environ.pop('ASSAY_RUNS', None)
         else:
@@ -4365,8 +4383,18 @@ def t_runs_delete_api():
     _prev_runs = reg.RUNS
     reg.set_runs(_runs_tmp)
     B._scan()
-    _marks_p = os.path.join(REPO, 'picks.json')
-    _bak = open(_marks_p, encoding='utf-8').read()
+    # 🔴🔴 **不许碰真的 `picks.json`** —— 它是决策记录（标星同时是
+    #   `prune_runs` 的保护依据）。原来这两条用例是"备份 -> 覆盖 -> finally
+    #   还原"，而 2026-09-21 做变异测试时反复中断它，某一次没还原成功：
+    #   **真文件少了 66 行星标**，是 `git status` 才发现的。
+    #   备份再还原永远有这个窗口 —— 正确做法与 `lv.LIVE` / `ASSAY_RUNS`
+    #   同一条：**重定向**（`srv.runs.MARKS_FILE`，`_prune_mod()` 会把它
+    #   喂给 prune_runs），真文件一个字节都不写。
+    _marks_real = os.path.join(REPO, 'picks.json')
+    _bak = open(_marks_real, encoding='utf-8').read()
+    _marks_p = os.path.join(_tf.mkdtemp(prefix='selftest_marks_'), 'picks.json')
+    _prev_marks = R.MARKS_FILE
+    R.MARKS_FILE = _marks_p
     n_cnt = lambda: len(_g0.glob(os.path.join(_runs_tmp, '*/*/*/meta.json')))
     try:
         # 🔴 **换掉整份 picks**，只留一条 —— 种子是从真归档复制的，里面本来
@@ -4417,7 +4445,9 @@ def t_runs_delete_api():
             '最后会变成绕过整个入口'
         n_left = n_cnt()
     finally:
-        open(_marks_p, 'w', encoding='utf-8').write(_bak)
+        R.MARKS_FILE = _prev_marks
+        assert open(_marks_real, encoding='utf-8').read() == _bak, \
+            '真 picks.json 被动过了 —— 重定向没生效'
         if _prev_runs_env is None:
             os.environ.pop('ASSAY_RUNS', None)
         else:
