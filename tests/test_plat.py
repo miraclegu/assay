@@ -3903,24 +3903,41 @@ def t_symbols_price_single_source():
     #    「是不是没同步 / 停牌 / 代码写错」属于调用方（报错措辞留在 px.py）。
     root = os.environ.get('ASSAY_DATALAKE') or os.path.join(
         os.path.dirname(REPO), 'datalake')
-    assert _S.day_px(root, '999999.XSHE', '2026-09-18') == (None, None)
+    assert _S.day_px(root, '999999.XSHE', '2026-09-18') is None
     assert _S.day_hl(root, '999999.XSHE', '2026-09-18') is None
     assert _S.last_px(root, ['999999.XSHE'], '2026-09-18') == {}
 
-    # ⑤ 反向自证：真代码必须取得到（否则 ④ 是「全 None == 全 None」的空转）
-    v, sr = _S.day_px(root, '601857.XSHG', '2026-09-18')
-    assert v and sr == 'panel', '股票该走面板：%r/%r' % (v, sr)
-    v2, sr2 = _S.day_px(root, '513120.XSHG', '2026-09-18')
-    assert v2 and sr2 == 'alt', 'ETF 该回落 tdx：%r/%r' % (v2, sr2)
-    # 🔴 两条路精度不同这件事本身要钉住 —— 判据是**结构**：那个 round 的
-    #   位数必须是个三元式（面板 3 / tdx 4）。写成常数就是把精度统一了，
-    #   而那会静默改变 day_price 的返回值（等价性基线 66 项会变）。
+    # ⑤ 反向自证：两条路都真的取得到（否则 ④ 是「全 None == 全 None」的空转）
+    #   ★ 判据不看"走了哪条路"（签名里已经没有来源了），看**面板有没有它**
+    #     —— 那才是这两条路分岔的依据。
+    v = _S.day_px(root, '601857.XSHG', '2026-09-18')
+    assert v, '股票（在面板里）取不到价：%r' % (v,)
+    assert _S.panel_probe(root, '601857.XSHG', '2026-09-18')[1], \
+        '构造不对：这只股票本来就不在面板里，⑤ 是空转的'
+    v2 = _S.day_px(root, '513120.XSHG', '2026-09-18')
+    assert v2, 'ETF（面板里没有）取不到价 —— 回落那条路断了：%r' % (v2,)
+    assert not _S.panel_probe(root, '513120.XSHG', '2026-09-18')[1], \
+        '构造不对：ETF 居然在面板里，那就没在测回落'
+    # 🔴 **两条路的精度必须一样**（2026-09-21 统一成 4 位）。
+    #   此前面板那条 round 到 3 位、tdx 那条 4 位 —— 同一个函数两种精度，
+    #   而它不报错。统一是**可证的空操作**：A 股不复权价本来就是两位小数，
+    #   实测面板 1083 万行里 `round(x,3) != round(x,4)` 的有 **0 行**；
+    #   ETF 最小变动 0.001，走的本来就是 4 位那条。
+    #   **往不丢精度的那一侧统一**，所以是 4 不是 3。
     rnd = [n for n in _ast.walk(_ast.parse(textwrap.dedent(
-               inspect.getsource(_px.day_price))))
+               inspect.getsource(_S.day_px))))
            if isinstance(n, _ast.Call) and getattr(n.func, 'id', '') == 'round']
-    assert rnd and isinstance(rnd[0].args[1], _ast.IfExp), (
-        'day_price 的两路精度（面板 3 位 / tdx 4 位）不再逐位保真了 —— '
-        '要统一可以，但那是单独一个决定，得连等价性基线一起改')
+    assert rnd and len(rnd) >= 2, 'symbols.day_px 里不再 round 了：%d 处' % len(rnd)
+    digits = {n.args[1].value for n in rnd
+              if isinstance(n.args[1], _ast.Constant)}
+    assert digits == {4}, (
+        'day_px 两条路的精度又不一样了：%r —— 统一在正本（4 位），'
+        '别退回按来源分（同一个函数两种精度，而它不报错）' % sorted(digits))
+    # 调用方不许再自己 round 回去（精度归正本一处）
+    for n in _ast.walk(_ast.parse(textwrap.dedent(
+            inspect.getsource(_px.day_price)))):
+        if isinstance(n, _ast.Call) and getattr(n.func, 'id', '') == 'round':
+            raise AssertionError('px.day_price 又自己 round 了 —— 精度归正本')
 
 
 @case('「代码 -> 类别 / 名称 / K 线」只许有一份实现（symbols.py）')

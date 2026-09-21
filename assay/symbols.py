@@ -410,27 +410,30 @@ def daily_close_map(root, codes, since, con=None):
 
 
 def day_px(root, code, date, which='open', con=None):
-    """某只票某天的【不复权】价 -> `(值, 来源)`，取不到给 `(None, None)`。
+    """某只票某天的【不复权】价（**4 位小数**），取不到给 None。
 
-    `which` = 'open' / 'close'；`来源` = 'panel' | 'alt'。
+    `which` = 'open' / 'close'。
     🔴 **不报错是刻意的** —— "取不到"与"该怎么跟人解释"是两件事，
       后者（是不是没同步 / 是不是停牌 / 是不是代码写错）属于调用方。
-    🔴 **不在这里 round，把来源一并返回** —— 因为 `px.day_price` 里
-      **面板那条路 round 到 3 位、tdx 那条路 round 到 4 位**（既有的不一致，
-      2026-09-21 抽正本时发现）。重构阶段先**逐位保真**，把这个不一致
-      暴露到签名上，要不要统一是另一个决定 —— 悄悄改精度不算重构。
+
+    ★ 精度 4 位：`px.day_price` 此前**面板那条路 round 到 3 位、tdx 那条路
+      4 位**（抽正本时发现的既有不一致）。2026-09-21 统一成 4 位，而这是
+      **可证的空操作** —— A 股不复权价本来就是两位小数，实测面板
+      **1083 万行里 `round(x,3) != round(x,4)` 的有 0 行**；
+      ETF 的最小变动是 0.001，走的本来就是 4 位那条路。
+      4 位是**不丢精度**的那一侧，所以往它统一。
     """
     col = 'open' if which == 'open' else 'close_bfq'
     c = _con(con)
     row = c.execute("SELECT %s FROM %s WHERE jq_code = ? AND date = DATE '%s'"
                     % (col, _panel_sql(root), date), [code]).fetchone()
     if row is not None and row[0] is not None:
-        return (float(row[0]), 'panel')
+        return round(float(row[0]), 4)
     alt = day_ohlc(root, code, date)          # (open, high, low, close)
     if alt is None:
-        return (None, None)
+        return None
     v = alt[0] if which == 'open' else alt[3]
-    return ((None, None) if v is None else (float(v), 'alt'))
+    return None if v is None else round(float(v), 4)
 
 
 def panel_last_day(root, con=None):

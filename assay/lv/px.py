@@ -44,13 +44,14 @@ def day_price(code, date, which='open', datalake=None):
     #   而且 start/end 传 None 会拼成 `DATE 'None'`（踩过的坑）。
     # 🔴 取价走唯一正本 `symbols.day_px`（面板优先 + ETF/指数回落）——
     #   此前这个「查面板 -> 缺的回落 tdx」的模式在四个函数里各写了一遍。
-    # ★ 正本**不 round 也不报错**：它只回答"取不到吗"，
-    #   而"该怎么跟人解释"（是不是没同步 / 停牌 / 代码写错）留在下面。
-    # ⚠ 两条路的精度**本来就不一样**（面板 3 位 / tdx 4 位），
-    #   重构阶段逐位保真，不在这里顺手统一。
-    _v, _src = _SYM.day_px(_lake(datalake), code, d, which)
+    # ★ 正本**不报错**：它只回答"取不到吗"，而"该怎么跟人解释"
+    #   （是不是没同步 / 停牌 / 代码写错）留在下面。
+    # ★ 精度统一在正本（4 位）—— 此前这里按来源分 3 位 / 4 位，
+    #   是抽正本时暴露出来的既有不一致。统一是**可证的空操作**：
+    #   面板 1083 万行里 round(x,3) != round(x,4) 的有 0 行。
+    _v = _SYM.day_px(_lake(datalake), code, d, which)
     if _v is not None:
-        return round(_v, 3 if _src == 'panel' else 4)
+        return _v
     # ★ "本地最新数据日"要独立查面板 —— 这一行是给人判断"是不是没同步"
     #   的唯一依据，绝不能出现 None。查面板同样走正本（`panel_probe`）——
     #   在这里再拼一条 SQL 就是第二份「怎么查面板」（守卫钉着）。
