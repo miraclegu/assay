@@ -23,6 +23,7 @@ from collections import namedtuple
 
 import duckdb
 from assay import paths as _paths   # datalake 根的唯一解析
+from assay import symbols as _SYM     # 代码换算的唯一正本
 
 # 撮合与风控需要的字段。策略要别的列走 query()/panel()，不必挤在这里。
 Bar = namedtuple('Bar', 'open_hfq close_hfq open_raw factor '
@@ -190,7 +191,7 @@ class PanelFeed:
         #   所以 glob 用正本导出的那个常量，不在这里再写一遍。
         ('panel', _paths.PANEL_GLOB),
         ('std',   'std/*.parquet'),
-        ('index', 'raw/tdx/kline/index_*.parquet'),
+        ('index', 'raw/tdx/kline/' + _paths.TDX_KLINE['index'] + '.parquet'),
     )
 
     def fingerprint(self):
@@ -227,14 +228,16 @@ class PanelFeed:
         指数在 raw/tdx/kline/index_*.parquet，不在 panel 里 ——
         panel 是「(date, code) 股票宽表」，塞指数进去会让 as-of 语义变浑。
         """
-        sym = code
-        if '.' in code:
-            num, mkt = code.split('.')
-            sym = ('sh' if mkt.upper() == 'XSHG' else 'sz') + num
+        # 🔴 代码换算走唯一正本（`symbols.to_symbol`）—— 这里原来内联了
+        #   第四份"聚宽口径 -> tdx symbol"，而它**不校验位数**：
+        #   `abc.XSHG` 会被拼成 `shabc` 再去查，报的是"没有数据"
+        #   而不是"这个代码不对"。正本认不出就给 None，退回原样。
+        sym = _SYM.to_symbol(code) or code
         rows = self.con.execute(
-            "SELECT date, close FROM read_parquet('%s/raw/tdx/kline/index_*.parquet') "
+            "SELECT date, close FROM %s "
             "WHERE symbol = '%s' AND date BETWEEN DATE '%s' AND DATE '%s' ORDER BY 1"
-            % (self.root, sym, self.start, self.end)).fetchall()
+            % (_paths.tdx_kline_sql('index', self.root), sym,
+               self.start, self.end)).fetchall()
         if not rows:
             raise SystemExit('基准 %s (tdx=%s) 没有数据' % (code, sym))
         # ★ 基点必须取回测首日的【前一交易日】收盘，不是首日收盘。
@@ -243,9 +246,10 @@ class PanelFeed:
         #   因为 2016-01-04 是熔断日(-8.99%)，用首日收盘做基点等于把它排除在基准之外。
         #   这与「回测首日不调仓」是同一类【边界差一天】的错。
         base = self.con.execute(
-            "SELECT close FROM read_parquet('%s/raw/tdx/kline/index_*.parquet') "
+            "SELECT close FROM %s "
             "WHERE symbol = '%s' AND date < DATE '%s' ORDER BY date DESC LIMIT 1"
-            % (self.root, sym, self.start)).fetchone()
+            % (_paths.tdx_kline_sql('index', self.root), sym,
+               self.start)).fetchone()
         return {r[0]: r[1] for r in rows}, (base[0] if base else rows[0][1])
 
     # ---------- 日历 ----------

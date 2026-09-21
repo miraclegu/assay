@@ -22,6 +22,7 @@ _SYM_RE = __import__('re').compile(r'^(sh|sz)\d{6}$')
 
 
 from assay import symbols as _SYM   # 取价/取名的唯一正本
+from assay import paths as _paths   # 路径与读法的唯一解析
 
 
 def _last_px(feed, codes, day):
@@ -478,8 +479,7 @@ BENCHMARKS = [
 #   等于把一个年化 ~5% 股息的东西按"股价涨了多少"来比，**系统性低估**，
 #   而它不报错，只是那条线一直偏低。指数没有除权（因子表里没有它的行），
 #   `coalesce(f, 1)` 正好。同「区间涨幅一律用后复权」那条。
-_KIND_FILE = {'index': 'index_*', 'etf': 'etf_*', 'stock': 'stock_*',
-              'block': 'block_*'}
+_KIND_FILE = _paths.TDX_KLINE          # 唯一一份在 paths.py
 
 
 # ★ 实现搬到了 `lv/tdx.py`（取价那条链也要用它，而 px 在 perf **之前**，
@@ -547,9 +547,10 @@ def bench_search(q, datalake=None, limit=12):
             if not pat:
                 continue
             got = dict(con.execute(
-                "SELECT symbol, max(date) FROM read_parquet('%s/raw/tdx/kline/%s.parquet') "
+                "SELECT symbol, max(date) FROM %s "
                 "WHERE symbol IN ('%s') GROUP BY 1"
-                % (root, pat, "','".join(s for s, _ in items))).fetchall())
+                % (_paths.tdx_kline_sql(pat, root),
+                   "','".join(s for s, _ in items))).fetchall())
             for sym, name in items:
                 if sym in got:
                     out.append({'code': sym, 'name': name, 'kind': kind,
@@ -602,7 +603,7 @@ def bench_curves(dates, codes, datalake=None):
             pats += [v for k, v in (('index', 'index_*'), ('etf', 'etf_*'),
                                     ('stock', 'stock_*')) if v not in pats]
             for pat in pats:
-                T = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (root, pat)
+                T = _paths.tdx_kline_sql(pat, root)
                 # 后复权收盘：close × 因子（指数没有因子行 -> 1）
                 PX = ("SELECT k.date AS d, k.close * coalesce(f.hfq_factor, 1) AS c "
                       "FROM %s k LEFT JOIN %s f "

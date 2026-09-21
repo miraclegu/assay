@@ -3601,6 +3601,59 @@ def t_datalake_root_single_source():
         'PANEL_GLOB 用了 `**`：%r —— 它会把子目录里的 parquet 一起读进来' \
         % _P.PANEL_GLOB
 
+    # ⑦ tdx 原始日线的读法同样只许正本拼（2026-09-21）。
+    #    此前 6 处各拼一遍 `raw/tdx/kline/<pat>.parquet`，而
+    #    `feed.benchmark` 还内联了**第四份**"聚宽口径 -> tdx symbol"
+    #    （且不校验位数：`abc.XSHG` 会拼成 `shabc` 去查，报的是
+    #     "没有数据"而不是"这个代码不对"）。
+    #    🔴 判据要**排掉 docstring** —— 三个文件的文档里就写着这个路径
+    #      （第一版直接误报了它们：又一次「判据比要证的事宽」）。
+    bad3 = []
+    for f in files:
+        if os.path.abspath(f) == canon or not os.path.isfile(f):
+            continue
+        tree = _ast.parse(io_open_text(f))
+        docs = set()
+        for nn in _ast.walk(tree):
+            if isinstance(nn, (_ast.Module, _ast.FunctionDef, _ast.AsyncFunctionDef,
+                               _ast.ClassDef)) and nn.body:
+                f0 = nn.body[0]
+                if isinstance(f0, _ast.Expr) and isinstance(f0.value, _ast.Constant) \
+                        and isinstance(f0.value.value, str):
+                    docs.add(id(f0.value))
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str) \
+                    and id(n) not in docs \
+                    and 'raw/tdx/kline/' in n.value \
+                    and ('read_parquet' in n.value or n.value.endswith('.parquet')):
+                bad3.append('%s:%d' % (os.path.relpath(f, REPO), n.lineno))
+    assert not bad3, ('这几处又自己拼了一遍 tdx 日线的路径：%s —— '
+                      '一律走 assay/paths.tdx_kline_sql()' % bad3)
+
+    # ⑧ 🔴 **路径表与"要兜哪几类"是两件事，不许并成一个。**
+    #    `symbols.KIND_FILE` 被 `stock.alt_kind` 当**策略**用
+    #    （「只兜 ETF 与指数，不兜股票」）——把 stock 并进去就会让股票
+    #    也走回落，**而它不报错**，只是 1600 万行的表被无谓地扫。
+    from assay import symbols as _Y2
+    assert 'stock' in _P.TDX_KLINE, '路径表里应当有 stock（perf 的基准要用）'
+    assert 'stock' not in _Y2.ALT_KINDS and 'stock' not in _Y2.KIND_FILE, \
+        'symbols 的"兜哪几类"混进了 stock：%r —— 那是路径表，不是策略' % (
+            sorted(_Y2.KIND_FILE),)
+    from assay.lv import perf as _PF
+    assert _PF._KIND_FILE is _P.TDX_KLINE, \
+        'lv/perf 又自己留了一份类别表（此前就是两份，一份 4 类一份 2 类）'
+    # 反向自证：股票真的不走回落（只测 ETF 的话，"把所有代码都拖去 tdx"
+    #   也全绿 —— 这条为 lv/tdx 那轮记过）
+    from assay import stock as _S2
+    assert _S2.alt_kind('601857.XSHG') is None, '股票被判成了面板之外的标的'
+
+    # ⑨ `feed.benchmark` 不许再内联代码换算（第四份）
+    import inspect as _ins
+    from assay.feed import PanelFeed as _PF2
+    _bm = _ins.getsource(_PF2.benchmark)
+    assert 'to_symbol' in _bm, 'feed.benchmark 又自己写了一份代码换算'
+    assert "'sh' if" not in _bm, 'feed.benchmark 里还留着内联换算的残迹'
+
     # ⑥ `ASSAY_DATALAKE` 仍然是最高优先（**构造**，本机没设这个变量）
     _old = os.environ.get('ASSAY_DATALAKE')
     try:

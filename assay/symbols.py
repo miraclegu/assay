@@ -41,7 +41,12 @@ import re
 from assay import paths as _paths   # datalake 根的唯一解析
 
 # ★ 与 `lv/perf.py` 的 `_KIND_FILE` 同一份含义；这里只列会用到的两类。
-KIND_FILE = {'etf': 'etf_*', 'index': 'index_*'}
+# 🔴 **面板之外要兜哪几类** —— 这是**策略**，不是路径表。
+#   刻意**不含 stock**：股票本来就在面板里，而 `raw/tdx/kline/stock_*`
+#   是 1600 万行，拿它兜底既慢又没必要（`stock.alt_kind` 就按这个判）。
+#   路径长什么样在 `paths.TDX_KLINE`，两件事别并成一个。
+ALT_KINDS = ('etf', 'index')
+KIND_FILE = {k: _paths.TDX_KLINE[k] for k in ALT_KINDS}
 _MK2PFX = {'XSHG': 'sh', 'XSHE': 'sz'}
 
 
@@ -510,8 +515,8 @@ def alt_panel(kind, root=None):
       **不猜一个数填上去**。
     """
     lake = default_root(root)
-    K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, KIND_FILE[kind])
-    F = "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % lake
+    K = _paths.tdx_kline_sql(kind, lake)
+    F = _paths.tdx_factor_sql(lake)
     return ("""(SELECT k.symbol AS jq_code, k.symbol AS symbol, k.date,
         k.open, k.high, k.low,
         k.close AS close_bfq,
@@ -544,7 +549,7 @@ def alt_rows(con, root=None):
     lake = default_root(root)
     out = []
     for kind, pat in (('index', KIND_FILE['index']), ('etf', KIND_FILE['etf'])):
-        K = "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (lake, pat)
+        K = _paths.tdx_kline_sql(pat, lake)
         try:
             rows = con.execute("""
                 WITH last AS (

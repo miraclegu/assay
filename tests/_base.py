@@ -317,11 +317,31 @@ def _lv_open_newform(pg, zone='live', timeout=20000):
 
 
 def _lv_new_account(pg, name, cash, zone='live', timeout=20000):
-    """在某个区建一个账户。`zone='paper'` 建出来的就是模拟盘。"""
-    sel = _lv_open_newform(pg, zone, timeout)
-    pg.fill(sel + ' .nn', name)
-    pg.fill(sel + ' .nc', str(cash))
-    pg.click(sel + ' .nb')
+    """在某个区建一个账户。`zone='paper'` 建出来的就是模拟盘。
+
+    🔴 **开表单与填表单要一起重试**：侧栏由 `showLive` 整块 innerHTML
+      重渲染，表单可能在"打开之后、填之前"就被换掉 —— 那时
+      `pg.fill` 会一直等一个**已经脱离文档**的输入框，报的是
+      `Timeout 30000ms exceeded`，**指不到真正的原因**。
+      只给 `_lv_open_newform` 加重试是不够的（2026-09-21 实测：
+      开的那步过了，挂在 fill 上）。
+    ⚠ 同 `_lv_open_newform`：这是**测试侧**的韧性。真实用户在重渲染
+      那一瞬操作同样会丢，那个隐患另记，不在这里盖住。
+    """
+    last = None
+    for _ in range(3):
+        sel = _lv_open_newform(pg, zone, timeout)
+        try:
+            pg.fill(sel + ' .nn', name, timeout=max(3000, timeout // 4))
+            pg.fill(sel + ' .nc', str(cash), timeout=max(3000, timeout // 4))
+            pg.click(sel + ' .nb', timeout=max(3000, timeout // 4))
+            return
+        except Exception as e:                              # noqa: BLE001
+            last = e
+            pg.wait_for_timeout(600)      # 等那一轮重渲染落定，从开表单重来
+    raise AssertionError(
+        '建账户的表单填不进去（%s 区）—— 多半是填到一半被整块重渲染换掉了：%s'
+        % (zone, last))
 
 
 def _defining_file(name, sub='assay'):

@@ -57,3 +57,25 @@ def panel_sql(root=None):
       也可以不传 —— 归档回放那条路要按 run 自己的 lake 取。
     """
     return "read_parquet('%s/%s')" % (datalake(root), PANEL_GLOB)
+
+
+# tdx 原始日线按类别分文件。🔴 这是**路径表**，不是"要兜哪几类"的策略 ——
+#   两者此前混在一起：`lv/perf._KIND_FILE`（4 类）与 `symbols.KIND_FILE`
+#   （2 类）各写一份，而后者被 `stock.alt_kind` 当策略用
+#   （「只兜 ETF 与指数，不兜股票」）。把 stock 并进去就会让股票也走回落，
+#   **而它不报错**，只是 1600 万行的表被无谓地扫。所以路径表在这里、
+#   策略留在 `symbols.ALT_KINDS`。
+TDX_KLINE = {'index': 'index_*', 'etf': 'etf_*',
+             'stock': 'stock_*', 'block': 'block_*'}
+
+
+def tdx_kline_sql(kind, root=None):
+    """tdx 日线的 duckdb 读法。`kind` 是类别名或直接给 glob（`etf_*`）。"""
+    pat = TDX_KLINE.get(kind, kind)
+    return "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (datalake(root), pat)
+
+
+def tdx_factor_sql(root=None):
+    """复权因子表。★ 与日线**成对**出现（后复权 = close × coalesce(f,1)），
+    所以放一起 —— 分开两处写，下次加一类就会漏掉其中一处。"""
+    return "read_parquet('%s/raw/tdx/adjust_factor.parquet')" % datalake(root)
