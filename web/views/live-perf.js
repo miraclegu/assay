@@ -547,7 +547,7 @@ function renderChart(aid){
   /* 累计金额 = 逐日金额的前缀和。★ 不能用 equity − 起点：那含入金。 */
   const cum = []; let acc = 0;
   o.day_pnls.forEach(v => { acc += (v || 0); cum.push(Math.round(acc)); });
-  const money = v => (v >= 0 ? '+' : '') + num(v, 0) + ' 元';
+  const money = v => pnlv(v, ' 元');       // 唯一定义在 common.js
 
   /* 顺序 = 看的顺序：收益（默认）-> 资金。**回撤不在这里** —— 它是副图。
      🔴 旧状态兜底：上一版 LPC 可能是 'dd'（页签已经没了），不归一的话
@@ -798,8 +798,7 @@ function renderPerfTable(aid){
   const B = perfBuckets(o.dates, o.nav, 1.0, o.day_pnls);
   if(!LPV.ym) LPV.ym = o.dates[o.dates.length - 1].slice(0, 7);
   const sn = (v, d) => v == null ? '—' : _sn(v, d == null ? 2 : d) + '%';
-  const money = v => v == null ? '—'
-    : (v >= 0 ? '+' : '') + num(Math.round(v), 0);
+  const money = v => pnlv(v);              // 唯一定义在 common.js
   const cellTxt = r => LPV.show === 'ret' ? sn(r.ret)
     : LPV.show === 'pnl' ? money(r.pnl)
     : `${sn(r.ret)}<span class="cd2">${money(r.pnl)}</span>`;

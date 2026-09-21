@@ -8,12 +8,11 @@
    🔴 顶层名字不能与其它 .js 撞 —— 撞了是整页 SyntaxError、所有功能一起没。
      selftest 里有两两全比的断言。 */
 
-/* 金额 -> 「40.49 万」/「1.23 亿」。★ y 轴上要短，tooltip 里可以精确些。 */
+/* 金额 -> 「40.49 万」/「1.23 亿」。★ y 轴上要短，tooltip 里可以精确些。
+   🔴 **只转发**给 common.js 的 `yiv` —— 折算规则（阈值/单位/空格）
+     全站只许有一份，这里出的只是"精确些"那几位小数。 */
 function _money(v, dp){
-  const a=Math.abs(v);
-  if(a>=1e8) return (v/1e8).toFixed(dp==null?2:dp)+'亿';
-  if(a>=1e4) return (v/1e4).toFixed(dp==null?1:2)+'万';
-  return v.toFixed(dp==null?0:2);
+  return dp == null ? yiv(v) : yiv(v, {yi: dp, wan: 2, small: 2});
 }
 
 

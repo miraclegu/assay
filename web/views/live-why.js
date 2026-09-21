@@ -43,8 +43,9 @@ function lvFmt(v, kind){
   if(kind==='money'){
     const x=Number(v);
     if(!isFinite(x)) return '—';
-    return Math.abs(x)>=1e8 ? (x/1e8).toFixed(2)+' 亿'
-         : Math.abs(x)>=1e4 ? (x/1e4).toFixed(0)+' 万' : x.toFixed(0);
+    // 🔴 **只转发**给 common.js 的 `yiv`（折算规则一份）；这一页的
+    //   候选池是拿来横向扫的，所以万位不留小数、单位前带个空格。
+    return yiv(x, {wan: 0, sp: ' '});
   }
   if(kind==='pct'){ const x=Number(v); return isFinite(x)?(x*100).toFixed(2)+'%':'—'; }
   const x=Number(v);

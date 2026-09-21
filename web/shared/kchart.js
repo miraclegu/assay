@@ -265,13 +265,11 @@ function drawKChart(cv, opts) {
     g.textAlign = 'right'; g.fillStyle = DIM;
     /* 刻度格式：成交量那种上亿的数直接打出来是一串数字，读不出量级 ——
        按万 / 亿折一下。**只在这儿折**，读数浮层里仍是原始值。 */
-    const fmt = v => {
-      if (v == null) return '—';
-      const a = Math.abs(v);
-      if (a >= 1e8) return (v / 1e8).toFixed(2) + '亿';
-      if (a >= 1e4) return (v / 1e4).toFixed(a >= 1e6 ? 0 : 1) + '万';
-      return a >= 1000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : v.toFixed(2);
-    };
+    // 🔴 **只转发**给 common.js 的 `yiv`：折算规则一份，这里给的是
+    //   这条轴自己的小数分档（成交量上亿、而价格轴要看到分）。
+    const fmt = v => yiv(v, {
+      wan:   a => a >= 1e6 ? 0 : 1,
+      small: a => a >= 1000 ? 0 : a >= 100 ? 1 : 2});
     g.fillText(fmt(shi), PADL - 5, top + 8);
     g.fillText(fmt(slo), PADL - 5, top + subH);
     /* 0 轴：有柱子或指标自己要求时画一条虚线 —— MACD/BIAS/均线差这些

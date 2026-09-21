@@ -3365,6 +3365,127 @@ def t_no_markdown_stars():
     return '扫了 web 下全部 .js，0 处；扫描器自证可用'
 
 
+@case('万/亿折算与盈亏符号各只有一份（yiv / pnlv）', tag='web')
+def t_money_fmt_single_source():
+    """🔴 「按量级折成万/亿」此前**四处各写一遍**，四套小数规则加一套空格：
+
+        common.js yiv      1384.4万      chart.js _money   1384.4万
+        kchart.js 刻度      1384万        live-why.js       1384 万
+
+    同一个 13,844,147 在四个页面长得都不一样 —— 同「名称+代码那一格全站
+    一处定义 `cnCell`」那条，**而它不报错**。
+
+    另有 `live-perf.js` 里**两个同名 `money`**（不同函数作用域，所以不是
+    SyntaxError），行为却不同：图里那个没有 null 守卫，而 `null >= 0` 在 JS
+    里是 **true** —— 实测吐出 `+— 元`；两个都用 `>= 0`，于是**平盘写成
+    `+0`**，等于凭空报了个赚（同 `upc` 那条「判据要 > 0 / < 0 两头夹」）。
+
+    2026-09-21 收敛成 `common.js` 的 `yiv(v, o)` 与 `pnlv(v, unit)`：
+    折算规则（阈值 / 单位 / 空格）一份，**小数位仍由调用方给**
+    （y 轴要短、tooltip 要精确、成交量轴另有分档）—— 变的只是精度。
+
+    ⚠ `stockpop.js` 的「总市值 … 亿」「量 … 万股」**不在此列**：那是
+      **固定单位**不是按量级挑单位；`live-fee.js` 那一堆 `*1e4` 是**万分率**。
+      判据因此必须精确到「按量级折算」这个写法，不能见 `1e8` 就拦
+      （同「判据比要证的事宽」那条）。
+    """
+    import re as _re
+    canon = 'shared/common.js'
+    # ---- ① 除正本外，不许再写「按量级折算」 ----
+    bad = []
+    for rel in _web_files(os.path.join(REPO, 'web'), '.js'):
+        if rel.replace(os.sep, '/').endswith(canon):
+            continue
+        txt = io.open(os.path.join(REPO, 'web', rel), encoding='utf-8').read()
+        for m in _re.finditer(r'>=\s*1e[48]', txt):
+            seg = txt[max(0, m.start() - 160): m.start() + 160]
+            if '亿' in seg or '万' in seg:
+                bad.append('%s:%d' % (rel, txt[:m.start()].count('\n') + 1))
+    assert not bad, ('这几处又自己按量级折了一遍万/亿：%s —— '
+                     '一律走 common.js 的 yiv()（四处各写一遍，同一个数在'
+                     '四个页面长得都不一样）' % bad)
+
+    # ---- ② 两个正本各只定义一次 ----
+    allsrc = {rel: io.open(os.path.join(REPO, 'web', rel), encoding='utf-8').read()
+              for rel in _web_files(os.path.join(REPO, 'web'), '.js')}
+    for name, pat in (('yiv', r'function\s+yiv\s*\('),
+                      ('pnlv', r'(?:const|let|var|function)\s+pnlv\b')):
+        hits = [r for r, t in allsrc.items() if _re.search(pat, t)]
+        assert len(hits) == 1 and hits[0].replace(os.sep, '/').endswith(canon), \
+            '%s 定义在 %s —— 只许 common.js 有一份' % (name, hits)
+    lp = allsrc[[r for r in allsrc if r.endswith('live-perf.js')][0]]
+    for m in _re.finditer(r'const money = (.+)', lp):
+        assert 'pnlv(' in m.group(1), \
+            'live-perf 又自己写了一份盈亏格式化：%s' % m.group(1)[:60]
+
+    # ---- ③ 真页面上跑：证明加载顺序对（chart/kchart 用的是 common 里那个）----
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    JS = ('() => ({'
+          ' yiv: yiv(13844147.77),'
+          ' kchart: yiv(13844147.77, {wan: a => a >= 1e6 ? 0 : 1}),'
+          ' why: yiv(13844147.77, {wan: 0, sp: " "}),'
+          ' yi: yiv(1.2345e9), small: yiv(1234),'
+          ' nul: yiv(null), nan: yiv(NaN), inf: yiv(Infinity),'
+          ' p0: pnlv(0), ppos: pnlv(1234.4), pneg: pnlv(-1234.4),'
+          ' pnul: pnlv(null), punit: pnlv(1234, " 元"),'
+          ' pneg5: pnlv(-99.5), ppos5: pnlv(99.5)})')
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page()
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port)
+            pg.wait_for_function('typeof yiv === "function" '
+                                 '&& typeof pnlv === "function"', timeout=20000)
+            r = pg.evaluate(JS)
+            assert not errs, '页面报错：%r' % errs[:2]
+            # 单位与阈值三处一致（小数位各自不同，那是有意的）
+            assert r['yiv'] == '1384.4万' and r['kchart'] == '1384万' \
+                and r['why'] == '1384 万', r
+            assert r['yi'] == '12.35亿' and r['small'] == '1234', r
+            # 🔴 退化输入一律「—」，不许吐 NaN / Infinity亿 / +— 元
+            assert r['nul'] == r['nan'] == r['inf'] == '—', r
+            # 🔴 平盘不许带 `+`；null 不许带单位
+            assert r['p0'] == '0' and r['pnul'] == '—', r
+            assert r['ppos'] == '+1,234' and r['pneg'] == '-1,234', r
+            assert r['punit'] == '+1,234 元', r
+            # 🔴 舍入必须对称（Math.round 一律朝 +∞，盈亏上说不通）
+            assert r['pneg5'] == '-100' and r['ppos5'] == '+100', r
+            # 反向自证：参数真的起作用，否则上面那几条是"全一样 == 全一样"
+            assert r['yiv'] != r['kchart'] and r['kchart'] != r['why'], r
+
+            # 🔴 上面那三个是**我自己手写的 options** —— 它证明 `yiv` 会算，
+            #   但**没碰任何一个调用点**。变异「live-why 把 sp 去掉」当场漏过。
+            #   所以再去 index.html 上调**真函数**（判据比要证的事窄，
+            #   而这次窄在"生产端算对了不等于消费端用上了"）。
+            pg.goto('http://127.0.0.1:%d/' % port)
+            pg.wait_for_function('typeof lvFmt === "function" '
+                                 '&& typeof _money === "function"', timeout=20000)
+            r2 = pg.evaluate('() => ({'
+                             ' why: lvFmt(13844147.77, "money"),'
+                             ' chart: _money(13844147.77),'
+                             ' chart3: _money(1.2345e9, 3)})')
+            assert not errs, '页面报错：%r' % errs[:2]
+            assert r2['why'] == '1384 万', 'live-why 没按自己的口径调：%r' % r2
+            assert r2['chart'] == '1384.4万', 'chart.js 没按自己的口径调：%r' % r2
+            assert r2['chart3'] == '12.345亿', 'chart.js 的 dp 没传下去：%r' % r2
+            br.close()
+    finally:
+        httpd.shutdown()
+    return ('折算一处（yiv）+ 盈亏一处（pnlv）；三个调用点单位一致、'
+            '小数各自；退化输入全给 —；舍入对称')
+
+
 @case('datalake 根只许解析一次（paths.py）', 'fast')
 def t_datalake_root_single_source():
     """🔴 「datalake 根在哪」此前在 **8 处**各写了一遍，而每一处都**自己数

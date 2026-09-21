@@ -30,9 +30,34 @@ const sign = v => v == null ? '' : (v > 0 ? 'pos' : (v < 0 ? 'neg' : ''));
    "平盘"和"微涨"是两件事，把 0 画成红的等于凭空报了个涨。
    ★ 判据用 `> 0` / `< 0` 两头夹，不是 `>= 0` —— 后者会把 0 并进涨。 */
 const upc  = v => v == null ? '' : (v > 0 ? 'var(--up)' : v < 0 ? 'var(--down)' : 'var(--dim)');
-const yiv  = v => v == null ? '—'
-  : Math.abs(v) >= 1e8 ? (v / 1e8).toFixed(2) + '亿'
-  : Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(1) + '万' : (+v).toFixed(0);
+/* 万 / 亿折算的【唯一】定义：阈值（1e8 / 1e4）、单位、要不要空格都在这儿。
+   🔴 此前**四处各写一遍**（这里 / chart.js 的 _money / kchart.js 的刻度 /
+     live-why.js 的 lvFmt），四套小数规则加一套空格 —— 同一个
+     13,844,147 在四个页面长成 `1384.4万` / `1384万` / `1384 万`。
+     同「名称+代码那一格全站一处定义 cnCell」那条：**同一份信息在每个
+     页面长得都不一样**，而它不报错。
+   ★ 小数位仍由调用方给（y 轴上要短、tooltip 里可以精确、成交量轴另有
+     一套分档），传函数就能按量级挑 —— 变的只是精度，**折算规则只有一份**。
+   ★ `small` 是不足 1 万时的位数。`sp` 给 `' '` 就是「1384 万」那种带空格的。 */
+function yiv(v, o){
+  if(v == null || v === '' || !isFinite(Number(v))) return '—';
+  v = Number(v); const a = Math.abs(v); o = o || {};
+  const sp = o.sp || '';
+  const pick = (d, dflt) => typeof d === 'function' ? d(a) : (d == null ? dflt : d);
+  if(a >= 1e8) return (v / 1e8).toFixed(pick(o.yi,    2)) + sp + '亿';
+  if(a >= 1e4) return (v / 1e4).toFixed(pick(o.wan,   1)) + sp + '万';
+  return v.toFixed(pick(o.small, 0));
+}
+/* 盈亏金额 -> 带符号的整数（`+1,234` / `-987` / `0`）。`unit` 例如 `' 元'`。
+   🔴 符号判据是 `> 0` **两头夹**，不是 `>= 0` —— 后者会把**平盘**写成
+     `+0`，那等于凭空报了个赚（同 `upc` 那条）。
+   🔴 null 要给 `—`：`null >= 0` 在 JS 里是 **true**，老写法会吐出
+     `+— 元` 这种东西（live-perf 的图里实测就是）。 */
+/* 🔴 舍入交给 `num`（`toLocaleString`）——它是**对称**的（±99.5 各自朝外）。
+     `Math.round` 一律朝 +∞：`Math.round(-99.5)` 是 **-99**，于是 +99.5 与
+     -99.5 朝同一个方向舍，盈亏上那是个说不通的偏向（对数当场抓到）。 */
+const pnlv = (v, unit) => (v == null || v === '' || !isFinite(Number(v)))
+  ? '—' : (Number(v) > 0 ? '+' : '') + num(Number(v), 0) + (unit || '');
 function num(x, d) {
   return (x == null || x === '' || isNaN(x)) ? '—'
     : Number(x).toLocaleString('zh-CN',
