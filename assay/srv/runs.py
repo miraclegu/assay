@@ -314,8 +314,38 @@ def api_run(q):
         return None
     meta = json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
     st = json.load(open(os.path.join(d, 'stats.json'), encoding='utf-8'))
+    # 🔴🔴 **「这次回测用了哪些参数」不等于 `meta.params`。**
+    #   归档里存的只有**命令行覆盖过的**那几个（froec 那次只有一个
+    #   `div_method`），而真正生效的配置是「该版本声明的 40 个默认值
+    #   ⊕ 覆盖的那几个」。只看覆盖项的话，"这次跑在什么配置上"根本答不了
+    #   —— 用户 2026-09-19：「每个回测用了哪些参数看的还是非常不清楚」。
+    # ★ 归档里**带着 `strategy.py` 快照**，所以全集是现成的：
+    #   照那一份解析（不是照磁盘上的当前文件 —— 那可能早就改了，
+    #   同「账户绑的是快照不是磁盘文件」那条）。
+    over = meta.get('params') or {}
+    pall = []
+    try:
+        code = open(os.path.join(d, 'strategy.py'), encoding='utf-8').read()
+    except Exception:                                       # noqa: BLE001
+        code = ''
+    for p in (_parse_params(code) if code else []):
+        v = over.get(p['name'], p['default'])
+        pall.append(dict(p, value=_jsonable(v),
+                         # ★ `--param` 传进来的都是字符串，而默认值有类型 ——
+                         #   `'1'` vs `1` 直接比会把"没改"报成"改了"。
+                         changed=(p['name'] in over
+                                  and str(v) != str(p['default']))))
+    # 覆盖了、但当前快照里已经没有这个参数（改过代码）—— 也要列出来，
+    # 静默丢掉的话"这次明明传了它"就查无对证了。
+    known = {p['name'] for p in pall}
+    for k, v in over.items():
+        if k not in known:
+            pall.append({'name': k, 'default': None, 'value': _jsonable(v),
+                         'type': '', 'comment': '', 'doc': [],
+                         'group': '（该版本没有声明这个参数）', 'changed': True})
     return {'meta': {k: _jsonable(v) if not isinstance(v, (dict, list)) else v
                      for k, v in meta.items()},
+            'params_all': pall,
             'stats': {k: _jsonable(v) for k, v in st.items()}}
 
 
@@ -932,3 +962,155 @@ def api_datafp(_q):
 #   改 md 忘了改 html 就分叉 —— 而分叉的文档比没有文档更危险。
 #   这里【每次请求重读文件】，改 md 刷新页面就生效，前端一行都不用动。
 #   新增一份文档只需在 _DOCS 加一行。
+
+
+# ============================ 批量删除归档 ============================
+#
+# 🔴 **两阶段：先预演、再确认。** 弹窗里列的东西必须是**服务端真的会删的
+#   那一份**，不是前端自己算的 —— 前端算一份的话，"页面上说删 12 个、
+#   实际删了 15 个"不报错（同「判据取服务端的清单，不写死」那条）。
+#
+# 🔴 **保护只认【证据类】两条**：picks 标记（决策证据）、账户绑定过这个版本
+#   （"这个版本回测过没有"的唯一依据）。**不含** `prune_runs` 那条
+#   「实盘上线之后」—— 那是**批量清理**的启发式（防止误删在用的），
+#   而这里是人逐个挑出来的；套上它会把近期归档全挡住，等于功能不存在。
+#
+# ★ 删之前把结论（meta+stats）抽进 `_pruned_conclusions.jsonl` ——
+#   与 `prune_runs.py` **同一个函数**，不另写一份。
+#   「tar 备份 ≠ 保留结论」那条：只存 meta 不存 stats 的话，
+#   翻出来只知道"跑过"，不知道结果 = 等于没留。
+
+
+def _prune_mod():
+    """把 `prune_runs` 的模块级常量对齐到本进程的实际路径再返回。
+
+    🔴 它的 `RUNS` 是 **import 时**从环境变量算的，而 selftest 会在
+      import 之后改 `registry.RUNS`（重定向到临时归档，「不许写生产数据」）。
+      不对齐的话用例会删到**真归档**。
+    """
+    import importlib
+    pr = importlib.import_module('prune_runs')
+    pr.RUNS = registry.RUNS
+    pr.MARKS = MARKS_FILE
+    pr.LIVE = os.path.join(os.path.dirname(base.HERE), 'live')
+    return pr
+
+
+def _del_rows(run_ids):
+    """run_id -> 行（含目录、meta、stats、体积）。认不出的单独返回，不静默丢。"""
+    rows, bad = [], []
+    for rid in run_ids:
+        d = _dir(rid)
+        if d is None:
+            bad.append(rid)
+            continue
+        # 🔴 再确认一次落在归档根下 —— `_dir` 已经只从索引取，这是冗余防御，
+        #   但删除是不可逆的，这一道便宜。
+        rp, root = os.path.realpath(d), os.path.realpath(registry.RUNS)
+        if not (rp == root or rp.startswith(root + os.sep)):
+            bad.append(rid)
+            continue
+        meta, stats, size = {}, {}, 0
+        try:
+            meta = json.load(open(os.path.join(d, 'meta.json'), encoding='utf-8'))
+        except Exception:                                       # noqa: BLE001
+            pass
+        try:
+            stats = json.load(open(os.path.join(d, 'stats.json'), encoding='utf-8'))
+        except Exception:                                       # noqa: BLE001
+            pass
+        for r2, _ds, fs in os.walk(d):
+            for fn in fs:
+                try:
+                    size += os.path.getsize(os.path.join(r2, fn))
+                except OSError:
+                    pass
+        parts = os.path.relpath(d, registry.RUNS).split(os.sep)
+        rows.append({'rid': rid, 'dir': d, 'meta': meta, 'stats': stats,
+                     'bytes': size,
+                     'group': parts[0] if len(parts) > 1 else '',
+                     'strategy': parts[1] if len(parts) > 2 else '',
+                     'ran': meta.get('ran_at') or rid})
+    return rows, bad
+
+
+def _del_protect(rows):
+    """{rid: [理由]} —— 只留【证据类】两条（见本节顶部注释）。"""
+    try:
+        why = _prune_mod().protected(rows)
+    except Exception:                                           # noqa: BLE001
+        return {}
+    out = {}
+    for rid, rs in (why or {}).items():
+        keep = [r for r in rs if not r.startswith('实盘上线')]
+        if keep:
+            out[rid] = keep
+    return out
+
+
+def api_runs_delete(_q, body):
+    """批量删除归档。`dry=True` 只预演（一个文件都不动）。
+
+    入参：`{run_ids: [...], dry: bool, confirm: bool, force_protected: bool}`
+    🔴 真删必须同时给 `confirm=True` —— 漏传就拒，而不是"看着像没点到"。
+    """
+    body = body or {}
+    ids = body.get('run_ids') or []
+    if not isinstance(ids, list) or not ids:
+        return {'error': '没有选中任何回测'}
+    if len(ids) > 500:
+        return {'error': '一次最多 500 个（选了 %d）' % len(ids)}
+    ids = [str(x) for x in ids]
+    rows, bad = _del_rows(ids)
+    prot = _del_protect(rows)
+    force = bool(body.get('force_protected'))
+    todo = [x for x in rows if force or x['rid'] not in prot]
+    held = [x for x in rows if not force and x['rid'] in prot]
+
+    def _brief(x):
+        m, s = x['meta'], x['stats']
+        return {'run_id': x['rid'], 'group': x['group'], 'strategy': x['strategy'],
+                'start': m.get('start'), 'end': m.get('end'),
+                'params': m.get('params') or {}, 'bytes': x['bytes'],
+                'annual_return': s.get('annual_return'),
+                'max_drawdown': s.get('max_drawdown'),
+                'why_protected': prot.get(x['rid']) or []}
+
+    plan = {'ok': True, 'dry': bool(body.get('dry')),
+            'n_total': len(rows), 'n_delete': len(todo), 'n_held': len(held),
+            'bytes': sum(x['bytes'] for x in todo),
+            'delete': [_brief(x) for x in todo],
+            'held': [_brief(x) for x in held],
+            'unknown': bad}
+    if body.get('dry'):
+        return plan
+    if not body.get('confirm'):
+        # 🔴 不是"静默不动"：说清少了什么（同「说了不能做就得给下一步」）
+        return dict(plan, error='缺少 confirm=true —— 真删必须显式确认')
+    if not todo:
+        return dict(plan, error='没有可删的：%d 个受保护、%d 个认不出'
+                                % (len(held), len(bad)))
+    # ---- 先存结论，再删目录 ----
+    try:
+        n_saved = _prune_mod().save_conclusions(
+            [{'rid': x['rid'], 'meta': x['meta'], 'stats': x['stats'],
+              'dir': x['dir']} for x in todo])
+    except Exception as e:                                      # noqa: BLE001
+        return dict(plan, error='结论没存下来，已中止删除（%s: %s）'
+                                % (type(e).__name__, e))
+    import shutil
+    done, fail = [], []
+    for x in todo:
+        try:
+            shutil.rmtree(x['dir'])
+            done.append(x['rid'])
+        except Exception as e:                                  # noqa: BLE001
+            fail.append({'run_id': x['rid'], 'err': '%s: %s' % (type(e).__name__, e)})
+    # ★ `_scan()` 这一句是**冗余防御**：`api_runs` 自己就会重扫，所以
+    #   删完不扫在页面那条路上观察不到（变异测过，抓不到）。留着是防
+    #   别的读 `_index` 的入口拿到已删的行。**别把它说成被测到了。**
+    #   而 `_cache.clear()` 不是冗余：缓存里可能还攥着已删归档的 DataFrame。
+    _scan()
+    _cache.clear()
+    return dict(plan, dry=False, deleted=done, failed=fail,
+                n_deleted=len(done), conclusions_saved=n_saved)

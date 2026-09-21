@@ -65,6 +65,7 @@ ROUTES = {
     '/api/live/explains': live.api_live_explains,
     '/api/live/code': live.api_live_code,
     '/api/live/strategy': live.api_live_strategy,
+    '/api/live/strategies': live.api_live_strategies,
     '/api/live/equity': live.api_live_equity,
     '/api/live/holdings': live.api_live_holdings,
     '/api/live/trips': live.api_live_trips,
@@ -82,6 +83,7 @@ ROUTES = {
     '/api/stock/profile': stock.api_stock_profile,
     '/api/stock/kline': stock.api_stock_kline,
     '/api/stock/finance': stock.api_stock_finance,
+    '/api/rt/indices': rt.api_rt_indices,
     '/api/rt/status': rt.api_rt_status,
     '/api/rt/bars': rt.api_rt_bars,
     '/api/stock/indicators': stock.api_stock_indicators,
@@ -122,6 +124,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):                       # noqa: N802
         u = urlparse(self.path)
         POSTS = {'/api/backtest': runs.api_backtest, '/api/mark': runs.api_mark,
+                 '/api/runs/delete': runs.api_runs_delete,
                  '/api/live/save': live.api_live_save,
                  '/api/live/fill': live.api_live_fill,
                  '/api/live/tick': live.api_live_tick,

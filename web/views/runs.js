@@ -39,7 +39,7 @@ function agg(rs){                // 一组回测的汇总
           latest:rs.slice().sort((x,y)=>(x.ran_at||'')<(y.ran_at||'')?1:-1)[0]};
 }
 const RUNCOLS=[
-  ['mark','★'],['run_id','run_id',1],['start','区间',1],['cash','初始资金'],['params','参数',1],
+  ['mark','★'],['cmp','⚖'],['run_id','run_id',1],['start','区间',1],['cash','初始资金'],['params','参数',1],
   ['annual_return','年化'],['max_drawdown','回撤'],['excess_annual','超额年化'],
   ['info_ratio','信息比率'],['sharpe','夏普'],['turnover_per_year','年换手'],
   ['n_trades','交易'],['win_rate','胜率'],['ran_at','跑于',1]];
@@ -52,6 +52,8 @@ function runTable(rs){
       <td><span class="st ${r.mark?'on':''}" data-mk="${r.run_id}"
         title="${r.mark?('已选中'+(r.mark_note?'：'+esc(r.mark_note):'')+'（点击取消）'):'标记为选中的规则'}"
         >${r.mark?'★':'☆'}</span></td>
+      <td class="cmpck"><input type="checkbox" data-cmp="${r.run_id}"
+        title="勾 2~4 次做比对（不必先标星）"></td>
       <td class="l mono">${r.run_id}${r.stale?`<span class="stale" title="归档时的数据与当前不一致，变化部件：${esc(r.stale_parts)}">数据已变</span>`:''}</td>
       <td class="l">${r.start} ~ ${r.end}</td>
       <td>${(+r.cash).toLocaleString()}</td>
@@ -70,21 +72,46 @@ function runTable(rs){
      文件夹（可嵌套文件夹）→ 策略文件 → 【代码版本】→ 回测
    ★ 策略身份 = 文件内容哈希：同一路径改一个字符就是另一个策略，
      所以版本是独立的一层。只有一个版本时跳过这层，免得多点一次。 */
+/* 一次回测在目录树里的路径分段 —— **一处定义**。
+   `buildTree`（建树）与 `revealRun`（把某一次展开出来）都读它：
+   分两处写的话"展开的节点"与"树里的节点"迟早对不上，
+   而那不报错，只是点了「与别的回测比对」之后什么都没展开。 */
+function treeParts(r){
+  let parts=(r.strategy_path||'').split('/').filter(Boolean);
+  if(parts[0]==='strategies'){
+    parts=parts.slice(1);
+  }else if(parts.length>1){
+    // ★ 仓库外的路径【压成一层】。诊断用的一次性脚本常放在 scratchpad，
+    //   strategy_path 会是逃逸出仓库的相对路径，例如
+    //   ../../../../private/tmp/claude-501/<...>/scratchpad/froec_oldsql.py
+    //   —— 8 段路径会铺出 8 层、每层只有一个子节点的空壳，把目录树撑坏。
+    //   完整路径仍挂在文件节点的 title 上，可审计。
+    parts=['_仓库外', parts[parts.length-1]];
+  }
+  if(parts.length<1||!parts[0]) parts=['_未知路径', r.strategy+'.py'];
+  return parts;
+}
+
+/* 把某一次回测所在的节点【展开】并记下来，供 renderCatalog 滚过去。
+   ★ 从回测详情页点「⚖ 与别的回测比对」时用 —— 落在一棵全折叠的树上
+     等于"到了那边还要再找一遍"，那是把入口做成摆设（同个股页
+     「⚖ 拉去对比」要带着当前这只票过去那条）。 */
+let REVEAL=null;
+function revealRun(rid){
+  const r=(RUNS||[]).find(x=>x.run_id===rid);
+  if(!r) return;
+  const parts=treeParts(r).slice(), file=parts.pop();
+  let k='';
+  parts.forEach(d=>{ k+='/'+d; OPEN.add(k); });
+  k+='/'+file; OPEN.add(k);
+  OPEN.add(k+'@'+(r.sem_sha||r.code_sha));   /* 多版本时还有一层 */
+  REVEAL=rid;
+}
+
 function buildTree(rs){
   const root={dirs:{}, files:{}};
   rs.forEach(r=>{
-    let parts=(r.strategy_path||'').split('/').filter(Boolean);
-    if(parts[0]==='strategies'){
-      parts=parts.slice(1);
-    }else if(parts.length>1){
-      // ★ 仓库外的路径【压成一层】。诊断用的一次性脚本常放在 scratchpad，
-      //   strategy_path 会是逃逸出仓库的相对路径，例如
-      //   ../../../../private/tmp/claude-501/<...>/scratchpad/froec_oldsql.py
-      //   —— 8 段路径会铺出 8 层、每层只有一个子节点的空壳，把目录树撑坏。
-      //   完整路径仍挂在文件节点的 title 上，可审计。
-      parts=['_仓库外', parts[parts.length-1]];
-    }
-    if(parts.length<1||!parts[0]) parts=['_未知路径', r.strategy+'.py'];
+    const parts=treeParts(r).slice();
     const file=parts.pop();
     let node=root;
     parts.forEach(d=>{ node.dirs[d]=node.dirs[d]||{dirs:{},files:{}}; node=node.dirs[d]; });
@@ -175,7 +202,7 @@ function renderCatalog(){
   if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
     (RUNS.length?'没有匹配的回测':'还没有归档 —— 先跑一次 <code>python3 run.py ...</code>')+'</div>';return;}
   const auto=!!q;            // 过滤时自动展开，否则默认全收起
-  $('#cat').innerHTML=fpBar()+pickBar()+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
+  $('#cat').innerHTML=fpBar()+pickBar()+'<div class="lvtags" id="cmpbar"></div>'+'<div class="lvtags" id="delbar"></div>'+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
     `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
       所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
       回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;
@@ -188,6 +215,14 @@ function renderCatalog(){
     const now=!e.classList.contains('op');
     e.classList.toggle('op',now); body.classList.toggle('op',now);
     now?OPEN.add(e.dataset.k):OPEN.delete(e.dataset.k);});
+  cmpWire();     /* ⚖ 比对：归档目录也能勾（不必先标星）*/
+  delWire();     /* 🗑 管理：同一列勾选框的第二种含义（模式互斥）*/
+  if(REVEAL){
+    const row=document.querySelector('.runs tr[data-id="'+REVEAL+'"]');
+    if(row){ row.classList.add('revealed');
+             row.scrollIntoView({block:'center'}); }
+    REVEAL=null;                 /* 一次性：下次进目录不该再跳 */
+  }
   document.querySelectorAll('.runs tbody tr').forEach(e=>
     e.onclick=ev=>{ev.stopPropagation();
       location.hash='#/run/'+encodeURIComponent(e.dataset.id);});
@@ -239,7 +274,7 @@ function showPicks(){
     {k:'n_trades',      t:'交易',   f:r=>r.n_trades??'—'},
     {k:'win_rate',      t:'胜率',   f:r=>pct(r.win_rate,1)},
   ];
-  const NCOL=2+COLS.length;
+  const NCOL=3+COLS.length;   /* +1 = 比对勾选列 */
   /* 成本口径那一【列】按要求去掉了（太挤），但保护不能丢：本项目两次因为
      "拿滑点 0 的数字去比含滑点的基准"得出错误结论（FROEC 与 v0b 各一次）。
      改成只给【与多数行不同】的那几行挂一个「口径不同」标记 + 顶部那条总提示；
@@ -267,8 +302,11 @@ function showPicks(){
       点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。${nDiff>1?
       ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致 —— 与多数行不同的那几行标了「口径不同」，'
       +'跨行比年化前先看清（本项目两次栽在拿滑点 0 的数字比含滑点的基准上）。</b>':''}</div>
+    <div class="lvtags" id="cmpbar"></div>
+    <div class="lvtags" id="delbar"></div>
     <div class="pw"><table class="pkt">
-      <tr>${th('name','策略 · 参数','tx nmc')}<th class="tx">区间</th>
+      <tr><th class="cmpck" title="勾选 2~${CMP_MAX} 行做比对">⚖</th>
+        ${th('name','策略 · 参数','tx nmc')}<th class="tx">区间</th>
         ${COLS.map(c=>th(c.k,c.t)).join('')}</tr>
       ${Object.keys(by).sort().map(g=>{
         /* 组内展平再排序 —— 分组保留（业务域是有意义的归拢），
@@ -282,6 +320,8 @@ function showPicks(){
             <span class="lvwhy">　${rows.length} 条</span></td></tr>
           ${rows.map(r=>`<tr class="rw" data-go="${esc(r.run_id)}"
             title="${esc(r.run_id)}　本金 ${(+r.cash).toLocaleString()}　${esc(costTxt(r))}">
+            <td class="cmpck"><input type="checkbox" data-cmp="${esc(r.run_id)}"${
+              CMPSEL.indexOf(r.run_id)>=0?' checked':''}></td>
             <td class="tx nmc"><span class="nm2">${esc(r._st)}</span>${
               odd(r)?`<span class="stale" title="这一行的成本口径与多数行不同：${esc(costTxt(r))}　跨行比年化前先看清">口径不同</span>`:''}
               ${r.stale?`<span class="stale" title="归档时的数据与当前不一致：${esc(r.stale_parts)}">数据已变</span>`:''}
@@ -296,6 +336,8 @@ function showPicks(){
   </div>`;
   document.querySelectorAll('#pk tr.rw[data-go]').forEach(e=>
     e.onclick=()=>{ location.hash='#/run/'+encodeURIComponent(e.dataset.go); });
+  cmpWire();          /* ⚖ 比对的勾选与工具条，与归档目录页共用 */
+  delWire();          /* 🗑 管理（两页共用，同 cmpWire）*/
   document.querySelectorAll('#pk th[data-sk]').forEach(e=>
     e.onclick=()=>{
       const k=e.dataset.sk;
@@ -432,11 +474,30 @@ async function openVersion(sha){
             聚宽口径 <span class="cmt" style="display:inline">滑点0/佣金万3/印花税千一</span></label></div></div>
       </div>
       <h3>策略参数（${ps.length} 个）${ps.length?'<span class="cmt" style="display:inline"> —— 留空 = 用该版本默认值</span>':''}</h3>
-      ${ps.length?`<div class="pgrid pf">${ps.map(pp=>`
-        <div><label>${esc(pp.name)}</label>
-          <input data-p="${esc(pp.name)}" placeholder="${esc(pp.default)}">
-          <div class="cmt">默认 <span class="dv">${esc(pp.default)}</span>
-            ${pp.comment?' · '+esc(pp.comment):''}</div></div>`).join('')}</div>`
+      ${ps.length?(()=>{
+        /* 🔴 **按源码里的段落分节，并把上方注释块当说明。**
+           2026-09-19 用户："策略回测页面，对参数没有详细的解释。"
+           查下来不是没人写 —— froec 40 个参数里 25 处写了说明，
+           只是都写在**上一行**（Python 惯例），而解析器只看行内注释，
+           还因为正则里的 \s 跨行而抓到了**下一行**的段落标题：
+           于是每个参数配的是**别人的**说明（比没有更糟）。
+           ★ 段落分组是**排版**不是语义保证 —— 标题写什么就是什么，
+             所以下面那句话要说清它的来源。 */
+        const gs=[]; ps.forEach(pp=>{ const g=pp.group||'';
+          let t=gs[gs.length-1];
+          if(!t||t.g!==g){ t={g:g,rows:[]}; gs.push(t); } t.rows.push(pp); });
+        return gs.map(t=>`${t.g?`<h4 class="psect">${esc(t.g)}</h4>`:''}
+          <div class="pgrid pf">${t.rows.map(pp=>`
+          <div><label>${esc(pp.name)}</label>
+            <input data-p="${esc(pp.name)}" placeholder="${esc(pp.default)}">
+            <div class="cmt">默认 <span class="dv">${esc(pp.default)}</span>
+              ${pp.comment?' · '+esc(pp.comment):''}</div>
+            ${(pp.doc||[]).length?`<div class="cmt pdoc">${
+              (pp.doc||[]).map(esc).join('<br>')}</div>`:''}</div>`).join('')}</div>`).join('')
+          + '<div class="cmt" style="margin-top:6px">说明取自策略源码里参数<b>上一行</b>'
+          + '的注释；小标题是源码里的 <span class="mono"># ---- ---- </span> 段落，'
+          + '是排版不是语义保证。</div>';
+      })()
         :`<div class="note">该版本没有用 <span class="mono">g.x = getattr(g,'x',默认)</span>
            的写法声明参数，所以没有可填项。</div>`}
       <div style="margin-top:14px;display:flex;align-items:center;gap:12px">
