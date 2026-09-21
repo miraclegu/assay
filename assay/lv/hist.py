@@ -34,6 +34,7 @@
 import datetime
 
 from . import base as _base
+from . import px as _px
 from . import pos as _pos
 from . import px as _px
 
@@ -54,15 +55,8 @@ def _feed(rows, flows, datalake=None):
                      datetime.date.today().isoformat(), root=datalake)
     days = [d for d in feed.trading_days if d >= d0]
     codes = sorted({r['code'] for r in rows})
-    px = {}
-    if codes and days:
-        q = "','".join(codes)
-        for c, dd, p in feed.con.execute("""
-            SELECT jq_code, date, close_bfq
-            FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
-            WHERE jq_code IN ('%s') AND date >= DATE '%s'
-        """ % (feed.root, q, days[0])).fetchall():
-            px[(c, dd)] = p
+    # ★ 与 `perf.equity_curve` **同一处取价**（见 `px.daily_close_map`）。
+    px = _px.daily_close_map(feed, codes, days[0]) if days else {}
     return feed, days, px
 
 

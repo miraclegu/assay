@@ -20,6 +20,92 @@ UNSUPPORTED = {
 
 
 
+def _plain(t):
+    """docstring 首行 -> 能直接摆进下拉框的纯文本。
+
+    🔴 **剥掉 markdown 的 `**粗体**` 标记。** 这一行会进 `<option>` 的文字
+      与 `title` 属性，而**属性里连 `<b>` 都用不了** —— 星号会原样显示成
+      一串 `**`（同 indicators 的 `desc` 进 title 那条，记过两次了）。
+    ★ 处理在**展示层**，不去改策略：实测 29 个策略里 8 个的首行用了
+      markdown，而 docstring 本来就是写给人读的、用 markdown 完全合理。
+      要求二十多个作者改写作风格是修错了地方。
+    ★ 只剥标记、**保留内容**（`**成交时点**` -> `成交时点`）——
+      直接删掉那段字会把话说不完整。
+    """
+    t = re.sub(r'\*\*(.+?)\*\*', r'\1', (t or '').strip())
+    return re.sub(r'`([^`]+)`', r'\1', t)
+
+
+def list_strategies(current=None):
+    """可以绑的策略清单（`strategies/` 下扫出来），按目录分组。
+
+    🔴 **判据是"有没有顶层 `initialize`"，不按文件名/目录名猜** ——
+      那正是 `run.py` 加载策略时认的东西（缺了它直接
+      `SystemExit('策略缺少 initialize(context)')`），所以这里与它**同源**。
+      共享层 `strategies/ETF/_etf_core.py`（docstring 第一句就写着
+      "本文件不是策略"）因此自动挡在外面，而不是靠 `_` 前缀那种约定 ——
+      约定会过期，而"能不能跑"是可证的事实（同「判类别按快照里的 class，
+      不按代码前缀猜」）。
+
+    ★ 用 `ast` **静态**解析，不 import：import 会执行模块顶层代码
+      （建面板、连 duckdb、注册任务），"列一个清单"不该有这些副作用，
+      而且 29 个文件逐个 import 会很慢。
+
+    🔴 **当前绑着的那个即使已经不在磁盘上，也要回一条并标 `missing`。**
+      静默从清单里消失的话，页面上那个选择器会自动落到别的策略，
+      人一保存就把账户**悄悄改绑**了 —— 而它不报错
+      （同「面板里查不到的不静默丢掉，那一行留着并标 missing」）。
+
+    ★ `_` 开头的目录（`_demo`）排在最后：项目里 `_` 开头一律是
+      实验/演示（同 `prune_runs.py` 拿 `_` 开头的分组判实验）。
+    """
+    import ast
+
+    root = os.path.join(_base.ROOT, 'strategies')
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != '__pycache__')
+        for fn in sorted(filenames):
+            if not fn.endswith('.py') or fn.startswith('.'):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                tree = ast.parse(open(full, encoding='utf-8').read())
+            except Exception:                               # noqa: BLE001
+                # 语法坏了的文件不列 —— 它本来也绑不上（run.py 会崩）
+                continue
+            if not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and n.name == 'initialize' for n in tree.body):
+                continue
+            rel = os.path.relpath(full, _base.ROOT)
+            grp = os.path.relpath(dirpath, root)
+            doc = (ast.get_docstring(tree) or '').strip().splitlines()
+            out.append({
+                'path': rel,
+                'group': '' if grp == '.' else grp,
+                'name': fn[:-3],
+                'desc': _plain(doc[0] if doc else ''),
+            })
+    out.sort(key=lambda r: (r['group'].startswith('_'), r['group'], r['name']))
+
+    cur = (current or '').strip()
+    if cur and not any(r['path'] == cur for r in out):
+        # 绑着一个清单里没有的路径：可能文件被删/改名，也可能它本来就
+        # 不在 `strategies/` 下（`bind_version` 接受任意路径）。
+        # 两种都要**如实说**，不许从清单里静默抹掉。
+        exists = os.path.isfile(cur if os.path.isabs(cur)
+                                else os.path.join(_base.ROOT, cur))
+        out.insert(0, {
+            'path': cur, 'group': '当前绑定',
+            'name': os.path.basename(cur)[:-3],
+            'desc': ('当前绑定（不在 strategies/ 下）' if exists
+                     else '当前绑定 —— 但这个文件现在不在磁盘上了'),
+            'missing': not exists, 'outside': exists,
+        })
+    return {'items': out, 'current': cur or None,
+            'root': 'strategies'}
+
+
 def _load_with_deps(path):
     """执行策略文件，并记下它【从仓库里另外加载的 .py】。
 

@@ -64,17 +64,20 @@ from . import pos as _pos
 #: 这样流水页一眼看得出哪几笔是人敲的、哪几笔是引擎跑的。
 SOURCE = 'paper'
 
-#: 账户的 `mode` 取值。`live` 是默认（真金白银），`paper` 是模拟盘。
-MODE_LIVE, MODE_PAPER = 'live', 'paper'
+#: `MODE_*` / `is_paper` 的**正本在 `lv/base.py`** —— 它们是账户模型的
+#: 一部分，而 `lv/bench.py` 也要用（决定推演起点），放这里会循环依赖。
+#: 这里 re-export 只为保住对外契约（`live.is_paper` / `paper.is_paper`）。
+MODE_LIVE, MODE_PAPER = _base.MODE_LIVE, _base.MODE_PAPER
+is_paper = _base.is_paper
 
 
-def is_paper(acct):
-    """这个账户是不是模拟盘。
-
-    ★ 判据放一处 —— 散在各页写 `a.get('mode') == 'paper'` 的话，
-      将来加个 `mode` 取值就得满仓库找（同「判据只有一份」那条）。
-    """
-    return (acct or {}).get('mode') == MODE_PAPER
+def _fmt_money(v):
+    """把金额写成人读的样子 —— 40.0 -> "40"、400000.0 -> "400,000"。"""
+    try:
+        f = float(v)
+    except Exception:                                       # noqa: BLE001
+        return str(v)
+    return ('%,.0f' % f).replace('%', '') if False else format(f, ',.0f')
 
 
 def _state_path(aid):
@@ -284,13 +287,60 @@ def advance(aid, datalake=None, rebuild=False):
     except Exception as e:                                  # noqa: BLE001
         recon = {'error': str(e)}      # 对账失败不该让推进整个失败
 
+    # 🔴🔴 **0 笔成交必须说出为什么** —— 2026-09-18 用户报「选了起始时间、
+    #   也推进了，但是没有任何数据出现」。查下来：`init_cash=40`（40 元），
+    #   而一手股票要几千元 —— 引擎**已经记了 30 条「资金不足一手」拒单**
+    #   （`broker.rejects`，那行注释就写着"拒单必须可见，不静默"），
+    #   而 `advance` **没把它带出来**：返回 `ok=True`、推到了最新日、
+    #   `n_fills=0`，页面一片空白，**没有任何地方说原因**。
+    #   链条在这里断了 —— broker 记了，传不到页面等于没记。
+    #   ★ 判据取**引擎自己给的拒单原因**，不自己猜：
+    #     "本金太小"只是这一次的原因，候选池为空 / 起点之后没有调仓日 /
+    #     数据不够都会表现成同一个"0 笔"，而它们要做的事完全不同。
+    rejects = []
+    why_empty = None
+    try:
+        import collections as _c
+        _rj = list(getattr(eng.broker, 'rejects', []) or [])
+        _cnt = _c.Counter(str(r[3]) for r in _rj if len(r) >= 4)
+        rejects = [{'why': w, 'n': n} for w, n in _cnt.most_common(8)]
+        if not got:
+            if rejects:
+                # ★ 不再重复"一笔成交都没有" —— 页面的标题行已经这么写了，
+                #   同一句话说两遍（同「汇总数字只在 KPI 板出现一次」）。
+                why_empty = ('引擎%s。最多的原因是「%s」（%d 次）。'
+                             % ('下过单，但全被拒了' if _rj else '压根没下单',
+                                rejects[0]['why'], rejects[0]['n']))
+                if '资金不足' in rejects[0]['why']:
+                    why_empty += ('本金 %s 元买不起一手 —— A 股一手 100 股，'
+                                  '常见的票一手要几千到几万元。'
+                                  '改大初始资金再「重建」即可。'
+                                  % _fmt_money(meta.get('cash')))
+            else:
+                why_empty = ('引擎一次拒单都没有 —— 也就是策略压根没下单：'
+                             '起点（%s）之后可能没有调仓日，或者候选池是空的。'
+                             % str(meta.get('start'))[:10])
+    except Exception as e:                                  # noqa: BLE001
+        rejects = [{'why': '拒单统计失败：%s' % e, 'n': 0}]
+
     st = state(aid)
     st.update({
         'recon': recon,
+        'rejects': rejects,
+        'why_empty': why_empty,
         'n_dividends': n_div,
         'advanced_to': str(meta['end'])[:10],
         'advanced_at': _base._now(),
         'data_fingerprint': meta.get('data_fingerprint'),
+        # 🔴 **"推进到哪天"要连着"这是哪份数据"一起说。**
+        #   ETF 策略声明 `DATALAKE='etf_lake'`，而那个 lake 是**手工**
+        #   `build_etf_lake.py` 建的、不在 `sync_daily.sh` 里 —— 实测它停在
+        #   2026-09-11 而主数据已到 09-17。只写「推进到 09-11」的话，
+        #   人拿它跟别处的 09-17 一比就以为推进坏了，**而它不报错**
+        #   （同「数据日与报价时间写在同一个标签里，两处各写一半看着像
+        #   自相矛盾」那条）。
+        'datalake': os.path.basename(str(meta.get('datalake') or '')),
+        'datalake_declared': bool(meta.get('datalake_declared')),
         'sha': meta.get('sha'),
         'n_fills': len(got),
         'errors': errs[:20],
@@ -299,6 +349,7 @@ def advance(aid, datalake=None, rebuild=False):
     _save_state(aid, st)
     return {'ok': True, 'added': added, 'advanced_to': st['advanced_to'],
             'n_fills': len(got), 'n_dividends': n_div, 'recon': recon,
+            'rejects': rejects, 'why_empty': why_empty,
             'errors': errs[:20], 'mismatch': None}
 
 

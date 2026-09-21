@@ -205,6 +205,19 @@ def _rt_catch_up(max_stale=2):
 
 
 
+def api_rt_indices(_q):
+    """GET /api/rt/indices —— 主要指数的实时快照（所有页面底部那条带子）。
+
+    ★ 清单与缓存都在 `realtime.indices()` **一处**（同「可选清单由服务端
+      给」）：前端硬编码的话，加一个指数页面上不会出现、删一个会显示
+      一条取不到的空行。
+    ★ 返回里带 `session`（是不是交易时段）—— 页面据此决定轮不轮询。
+      **前端不自己判时段**：改了时段或遇到半日市会白轮/漏轮，而
+      "多轮几次"不报错、"该轮没轮"更不报错（同实盘页 `rt_live` 那条）。
+    """
+    return _rt().indices()
+
+
 def api_rt_status(_q):
     """GET /api/rt/status —— 1 分钟线库的状态 + 轮询情况。"""
     rt = _rt()

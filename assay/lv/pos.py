@@ -21,6 +21,23 @@ def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
 
     校验在这里做而不是页面上 —— 页面能绕过，这里是唯一入口。
     """
+    # 🔴🔴 **绑了策略的模拟盘不许手工录。**（2026-09-18 用户定的规则：
+    #   "模拟账户只有在不设置策略的时候，才能手动操作"。）
+    #   理由不是洁癖 —— `paper.advance` **每次从起点重放整段**，然后拿
+    #   重跑结果与账本逐笔对账（`_key_of`）。手工塞进去的那几笔引擎不会
+    #   跑出来，于是**下一次推进必然报 mismatch**，而它给的原因是
+    #   「多半是数据被修正过」—— **指不到真正的原因**，人会去查数据。
+    #   ★ 反过来**没绑策略的模拟盘照常能录** —— 那就是"手工模拟盘"，
+    #     用来推演自己拍脑袋的操作，与引擎无关。
+    #   ★ 判据在这里（唯一入口），不在页面上 —— 页面能绕过。
+    if source == 'manual':
+        _a = _base.get_account(aid)
+        if _base.is_paper(_a) and _a.get('code_sha256'):
+            raise _base.LiveError(
+                '这个模拟盘绑了策略（%s），成交由引擎推演产生，不能手工录 —— '
+                '手工那几笔引擎不会跑出来，下次「推进」会整段对不上账。\n'
+                '要手工操作请先在「策略」里解绑；要让引擎跑请点「▷ 推进」。'
+                % (_a.get('strategy_path') or '').split('/')[-1])
     if side not in _base.SIDES:
         raise _base.LiveError('side 只能是 buy/sell，收到 %r' % side)
     try:

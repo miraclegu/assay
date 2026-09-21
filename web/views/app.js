@@ -75,6 +75,9 @@ function route(){
   }
   const v=/^#\/ver\/([0-9a-f]{6,64})$/.exec(location.hash||'');
   if(v){ openVersion(v[1]); return; }
+  /* ⚖ 策略比对：#/cmp/<idA>,<idB>[,C,D] —— 深链接可分享（同 compare.html?codes=）*/
+  const cm=/^#\/cmp\/(.+)$/.exec(location.hash||'');
+  if(cm){ showCmp(decodeURIComponent(cm[1]).split(',').filter(Boolean)); return; }
   if((location.hash||'')==='#/picks'){ showPicks(); return; }
   if((location.hash||'')==='#/runs'){ showCatalog(); return; }
   if((location.hash||'')==='#/sync'){ showSync(); return; }

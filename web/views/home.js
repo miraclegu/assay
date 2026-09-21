@@ -23,7 +23,13 @@ async function showHome(){
     /* 逐账户拉一次详情才有待办清单与权益 —— 账户不多（个数级），
        并发拉没问题。 */
     const ds = await Promise.all((accts.accounts||[])
-      .filter(a=>!a.archived)
+      /* 🔴 **首页只列真实盘，模拟盘不进来**（2026-09-19 用户要求）。
+         首页回答的是"今天什么状态、要做什么"，而模拟盘是**推演** ——
+         把它混进来有两个坏处：待办里会出现"引擎明天要买什么"这种
+         其实不用你动手的事；总资产那一列也会把推演的钱算进视野。
+         ★ 判据用服务端给的 `paper`（`lv.is_paper` 唯一定义），
+           不在前端比 `mode` 字符串（老账户根本没有这个字段）。 */
+      .filter(a=>!a.archived && !a.paper)
       .map(a=>one('/api/live/account?id='+encodeURIComponent(a.id))
         .then(o=>({acct:a, d:o}))));
     ds.forEach(x=>todo.push(x));
@@ -79,10 +85,12 @@ function homeLive(accts, todo){
     `<div class="lvmsg bad">${esc((accts||{}).error||'取不到账户')}</div>`);
   const rows = todo.filter(x=>x.d && !x.d.error);
   if(!rows.length) return homeCard('实盘', '#/live',
-    '<div class="none">还没有账户 —— 去实盘页建一个</div>');
+    '<div class="none">还没有实盘账户 —— 去实盘页建一个'
+     + '<div class="lvwhy" style="margin-top:4px">模拟盘不列在首页：'
+     + '它是推演，不是今天要你动手的事</div></div>');
   return homeCard('实盘 · 今日待办与持仓', '#/live', `
     <table class="pkt"><tr>
-      <th class="tx">账户</th><th class="rt">总资产</th><th class="rt">持仓浮盈</th>
+      <th class="tx">账户</th><th class="rt">总资产</th><th class="rt">当日盈亏</th>
       <th class="rt">仓位</th><th class="tx">今天</th></tr>
       ${rows.map(x=>{
         const P=x.d.pos||{}, wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
@@ -98,13 +106,23 @@ function homeLive(accts, todo){
             href="#/live/${esc(x.acct.id)}" style="color:inherit">${esc(x.acct.name)}</a>
             <div class="lvwhy">${(P.items||[]).length} 只持仓</div></td>
           <td class="rt">${num(P.equity,2)}</td>
-          <td class="rt" style="color:${upc(P.pnl)}">${P.pnl==null?'—':(P.pnl>=0?'+':'')+num(P.pnl,2)}
-            <div class="lvwhy">${ratv(P.pnl_pct)}</div></td>
+          <!-- 🔴 **当日盈亏，不是累计浮盈**：首页问的是"今天怎么样"，
+               而浮盈是开仓至今的累计 —— 那是复盘时看的，属于业绩页。
+               ★ 幅度的分母是**持仓市值**（不是总资产），与实盘页那一格
+                 同一口径，所以后面那行小字必须标"持仓"——
+                 不标的话同屏两个百分比看着像其中一个算错了。
+               ★ 停牌股取不到价时 pnl_day 是 null（整只票没数据）——
+                 显示"—"而不是 0 —— 0 会被读成"今天不涨不跌"。 -->
+          <td class="rt" style="color:${upc(P.pnl_day)}">${
+            P.pnl_day==null?'—':(P.pnl_day>=0?'+':'')+num(P.pnl_day,2)}
+            <div class="lvwhy">${(P.pnl_day==null||!P.market_value)?'—'
+              :ratv(P.pnl_day/(P.market_value-P.pnl_day))+' 持仓'}</div></td>
           <td class="rt">${wt==null?'—':(wt*100).toFixed(1)+'%'}</td>
           <td class="tx">${act}</td></tr>`;}).join('')}
     </table>
-    <div class="lvwhy" style="margin-top:4px">浮盈按<b>摊薄成本</b>（含买入费）算。
-      调仓日是纯日历的，能提前算出来；清单要等前一交易日收盘。</div>`);
+    <div class="lvwhy" style="margin-top:4px">当日盈亏 = Σ 每一批 ×（现价 − 基准），
+      <b>今天买的</b>那批基准用成交价、<b>以前买的</b>用昨收；幅度的分母是持仓市值。
+      累计浮盈去账户页看。调仓日是纯日历的，能提前算出来；清单要等前一交易日收盘。</div>`);
 }
 
 function homeMarket(o){

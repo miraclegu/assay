@@ -107,7 +107,7 @@ def _parse_note(code):
 _PARAM_RE = re.compile(
     r"^\s*g\.(?P<name>[A-Za-z_]\w*)\s*=\s*getattr\(\s*g\s*,\s*"
     r"['\"](?P<key>[A-Za-z_]\w*)['\"]\s*,\s*(?P<default>.+?)\s*\)"
-    r"\s*(?:#\s*(?P<comment>.*))?$", re.M)
+    r"[^\S\n]*(?:\#[^\S\n]*(?P<comment>[^\n]*))?$", re.M)
 
 
 
@@ -145,12 +145,75 @@ def _parse_params(code):
         if not isinstance(val, (int, float, str, bool)):
             continue
         seen.add(name)
-        out.append({'name': name, 'default': val,
+        out.append({'name': name, 'default': val, 'line': ln,
                     'type': 'bool' if isinstance(val, bool) else
                             ('int' if isinstance(val, int) else
                              ('float' if isinstance(val, float) else 'str')),
                     'comment': (m.group('comment') or '').strip()})
+    _attach_docs(code, out, lo)
     return out
+
+
+# `# ---- 段落标题 ----` —— 策略里用它把参数分组（froec 有 6 段）
+_SECT_RE = re.compile(r'^#\s*-{2,}\s*(?P<t>.+?)\s*-{2,}\s*$')
+
+
+def _attach_docs(code, params, lo=1):
+    r"""给每个参数补上【上方注释块】与【所属段落】。
+
+    🔴🔴 **原来这两样一个都没有，而"行内注释"还抓错了行。**
+      `_PARAM_RE` 里那个 `\s*(?:#...)` 的 `\s` **匹配换行** ——
+      于是行内没注释时它会吃掉换行、抓到**下一行**的注释。
+      实测 froec：`g.weekday` 拿到的是下一行那句
+      `# ---- 用于定位对标残差的两个开关 ----`（段落标题！），
+      于是回测页上**每个参数配的是别人的说明** —— 比没有说明更糟
+      （同「分叉的文档比没有文档更危险」）。
+
+    ★ 归属按 **Python 惯例**：注释写在它说明的那一行**上面**。
+      实测 froec 40 个参数里行内注释只有 4 个，而上方注释块有 25 处 ——
+      "没有详细解释"不是因为没人写，是因为没去读那个地方。
+    ★ `group` 要**跨过别的参数行**往上找（一段标题下面往往跟着好几个
+      参数），而 `doc` 只取**紧邻**的那一块 —— 两者的查找范围不同。
+    """
+    lines = code.splitlines()
+    for p in params:
+        p_line = p.pop('line')
+        i = p_line - 2                        # 参数行的上一行（0-based）
+        doc = []
+        while i >= 0:
+            t = lines[i].strip()
+            if not t.startswith('#'):
+                break
+            if _SECT_RE.match(t):             # 段落标题不算这个参数的说明
+                break
+            doc.append(t.lstrip('#').strip())
+            i -= 1
+        doc.reverse()
+        p['doc'] = [x for x in doc if x]
+        # 段落标题：一路往上找，**跨过别的参数行**，遇到函数定义就停
+        # 🔴 **往上找要有边界**：只在 `initialize` 函数体内找。
+        #   不设界的话找不到就一路翻到文件开头，给它安一个**别处**的
+        #   段落标题 —— 实测红利那次 `div_method` 被安上了 froec 风格的
+        #   「持有缓冲区…」，而那与它毫无关系。**错的说明比没有说明更糟**。
+        # ★ 边界只有一道：**不许出 `initialize`**（参数本来就只在它里面取）。
+        #   ⚠ 我原来还写了一道 `def`/`class` 护栏 —— 变异测试证明**两道
+        #     互相遮蔽、测不出哪道在起作用**，所以删掉弱的那道，
+        #     让判据与实现一一对应（同「别把冗余说成抓到了」）。
+        #   ⚠ 另外：加这道边界**并没有**修好红利那个
+        #     `div_method -> 「持有缓冲区…」`——那个标题本来就在 initialize 内
+        #     （249~465 里的第 284 行），按"最近的上方标题"就是它。
+        #     **那是源码排版的事实，不是解析错**，所以页面上标一句
+        #     "段落是排版不是语义保证"，不去猜作者的意图。
+        g, j = '', p_line - 2
+        while j >= lo - 1:
+            t = lines[j].strip()
+            mm = _SECT_RE.match(t)
+            if mm:
+                g = mm.group('t')
+                break
+            j -= 1
+        p['group'] = g
+    return params
 
 
 

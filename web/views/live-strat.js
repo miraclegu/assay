@@ -15,6 +15,16 @@ async function openStrat(aid, sha){
   if(!o) o={version:{}, code:'', files:[], params_declared:[],
             runs_same_params:[], runs_other_params:[], _unbound:true};
   const v=o.version||{}, ro=LV.readonly;
+  /* 🔴 **可选清单由服务端给**（同基准那条）：本地有哪几个策略、哪个是
+     共享层（`_etf_core.py` 没有 initialize）、绑着的那个文件还在不在，
+     **只有服务端知道**。前端硬编码一份的话，加一个策略页面上绑不到，
+     删一个则会列出「选了绑上去就崩」的死选项 —— 比不给这个选项更糟。
+     ★ 未绑定的账户也要取：上面那一发在未绑定时根本不发请求，
+     而"没绑过"正是最需要这个选择器的时候。 */
+  let SL={items:[]};
+  try{ SL=await j('/api/live/strategies?current='
+        +encodeURIComponent(v.strategy_path||'')); }catch(e){ SL={items:[]}; }
+  const SLI=SL.items||[], SLCUR=SLI.find(x=>x.path===(v.strategy_path||''));
   const runTab=(rows,title)=>rows.length?`<div style="margin-top:8px"><b>${title}（${rows.length}）</b>
     <table class="lvt"><tr><th>区间</th><th>本金</th><th>年化</th><th>回撤</th><th>夏普</th><th>参数</th></tr>
     ${rows.map(r=>`<tr><td><a href="#/run/${encodeURIComponent(r.run_id)}">${esc(r.start)}~${esc(r.end)}</a>
@@ -92,12 +102,28 @@ async function openStrat(aid, sha){
           <td class="tx lvrsn">${x.reason?esc(x.reason):'<span class="lvwhy">—</span>'}</td></tr>`).join('')}</table>`
         :'<div class="none">还没绑定过</div>'}
       <div class="lvform">
-        <input id="bp" placeholder="strategies/…/x.py" style="flex:1;min-width:200px"
+        ${(()=>{ /* 按服务端给的顺序分组（它已经排好：_ 开头的目录在最后） */
+          const gs=[]; SLI.forEach(x=>{ const g=x.group||'其它';
+            let t=gs[gs.length-1];
+            if(!t||t.g!==g){ t={g:g,rows:[]}; gs.push(t); } t.rows.push(x); });
+          return `<select id="bp" style="flex:2;min-width:260px">${
+            gs.map(t=>`<optgroup label="${esc(t.g)}">${t.rows.map(x=>
+              `<option value="${esc(x.path)}"${x.path===(v.strategy_path||'')?' selected':''}
+                 title="${esc(x.path)}${x.desc?' — '+esc(x.desc):''}"
+               >${esc(x.name)}${x.desc?' — '+esc(x.desc.slice(0,40)):''}</option>`
+            ).join('')}</optgroup>`).join('')
+          }<option value="__manual__">其它（手填路径）…</option></select>`; })()}
+        <input id="bpm" placeholder="strategies/…/x.py" style="display:none;flex:1;min-width:200px"
                value="${esc(v.strategy_path||'')}">
         <input id="bj" placeholder='参数 {"a":1}' style="flex:1;min-width:140px"
                value="${esc(JSON.stringify(v.params||{}))}">
         <button class="btn" id="bb" ${ro?'disabled':''}>绑定当前磁盘版本</button>
       </div>
+      ${SLCUR&&SLCUR.missing?`<div class="lvwarn" id="bpgone">
+        <b>当前绑的这个策略文件已经不在磁盘上了</b>（${esc(SLCUR.path)}）——
+        信号仍然照**快照**跑（快照在 <code>live/&lt;账户&gt;/code/</code> 里，
+        删了 runs/ 也读得到），所以实盘没坏；但你没法再"绑定当前磁盘版本"。
+        文件是改名了就在上面重选一个，是误删就从 git 恢复。</div>`:''}
       <div class="lvmsg" id="bmsg"></div>
       <div class="lvwhy">换版本只是<b>追加一行</b>，账户与流水连续 ——
         「一段时间用策略 A、之后换 B」不需要新建账户。</div>
@@ -118,12 +144,27 @@ async function openStrat(aid, sha){
       ()=>{ ev.target.textContent='已复制'; },
       ()=>{ ev.target.textContent='复制不了，手选吧'; });
   };
+  /* 「其它（手填路径）…」是**逃生口**：`bind_version` 本来就接受任意路径，
+     只给下拉的话「绑一个不在 strategies/ 下的文件」这条路就被堵死了 ——
+     而硬拒不给出路，最后会变成绕过整个入口（同 `force_price` /
+     `--allow-shrink` 那条）。平时它不占地方（输入框藏着）。 */
+  const bpVal=()=>{ const sel=$('#bp');
+    if(!sel) return ($('#bpm')||{}).value ? $('#bpm').value.trim() : '';
+    return sel.value==='__manual__'
+      ? (($('#bpm')||{}).value||'').trim() : sel.value.trim(); };
+  if($('#bp')) $('#bp').onchange=()=>{
+    const man=$('#bp').value==='__manual__';
+    $('#bpm').style.display = man ? '' : 'none';
+    if(man) $('#bpm').focus();
+  };
   const bb=$('#bb');
   if(bb) bb.onclick=async()=>{
     const m=$('#bmsg');
     let pr={}; try{ pr=JSON.parse($('#bj').value||'{}'); }
     catch(e){ m.className='lvmsg bad'; m.textContent='参数不是合法 JSON'; return; }
-    try{ await post('/api/live/save',{id:aid, strategy_path:$('#bp').value.trim(),
+    const sp=bpVal();
+    if(!sp){ m.className='lvmsg bad'; m.textContent='先选一个策略（或手填路径）'; return; }
+    try{ await post('/api/live/save',{id:aid, strategy_path:sp,
           params:pr, reason:'网页绑定'});
       $('#stclose').click(); showLive(aid);
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }

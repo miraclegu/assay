@@ -228,6 +228,57 @@ TX_F = {'name': 1, 'code': 2, 'price': 3, 'preclose': 4, 'open': 5,
         'volume': 36, 'amount_wan': 37, 'turnover_pct': 43}
 
 
+def snapshot_syms(syms):
+    """腾讯批量快照，**按 tdx symbol 取**（`sh000001` / `sz399006` / `bj899050`）。
+
+    🔴 **指数不能走 `snapshot()`** —— 它用 `stock.norm_code` 归一化，
+      而那是按**股票**的前缀规则写的（60/68/90 沪、00/30/20 深），
+      上证指数恰好是 `sh000001`、会被直接拒（同「指数按 symbol 认，
+      不去动 normalize_code」那条）。所以这一层按 symbol 收发，
+      `snapshot()` 改成在它外面做代码映射 —— **解析只有一份**。
+
+    ★ 返回 `{symbol: {...}}`；取不到的**不在字典里**（不要拿旧价顶上）。
+    """
+    syms = [x for x in (syms or []) if x]
+    out = {}
+    for i in range(0, len(syms), TX_BATCH):
+        chunk = syms[i:i + TX_BATCH]
+        try:
+            txt = urllib.request.urlopen(
+                urllib.request.Request(TX_URL + ','.join(chunk),
+                                       headers={'User-Agent': HDR['User-Agent']}),
+                timeout=TIMEOUT).read().decode('gbk', 'replace')
+        except Exception:                                   # noqa: BLE001
+            continue                    # 这一批没拿到；不影响别的批
+        for line in txt.strip().split('\n'):
+            if '="' not in line:
+                continue
+            f = line.split('"')[1].split('~')
+            if len(f) <= TX_F['change_pct']:
+                continue
+            tag = line.split('v_')[1].split('=')[0] if 'v_' in line else ''
+            if tag not in chunk:
+                continue
+
+            def _n(k, d=None, _f=f):
+                try:
+                    return float(_f[TX_F[k]])
+                except Exception:                           # noqa: BLE001
+                    return d
+            px = _n('price')
+            if not px:
+                continue                # 停牌/无成交 -> 不给，不要塞 0
+            out[tag] = {'symbol': tag, 'name': f[TX_F['name']], 'price': px,
+                        'preclose': _n('preclose'), 'open': _n('open'),
+                        'high': _n('high'), 'low': _n('low'),
+                        'change_pct': _n('change_pct'),
+                        'turnover_pct': _n('turnover_pct'),
+                        'volume': _n('volume'),
+                        'amount': (_n('amount_wan') or 0) * 1e4,
+                        'ts': f[TX_F['ts']]}
+    return out
+
+
 def snapshot(codes, root=None):
     """腾讯批量快照。**一次请求拿全部**，实时盈亏用它。
 
@@ -242,49 +293,137 @@ def snapshot(codes, root=None):
             m[('sh' if jc.endswith('XSHG') else 'sz') + jc[:6]] = jc
     if not m:
         return {}
+    raw = snapshot_syms(list(m))
     out = {}
-    # ★ 一次能拼多少：**实测 900 只可以、950 只起 HTTP 414 (URI Too Long)**
-    #   （URL 约 6.3KB 是界限；不是截断，是直接 414）。
-    #   但耗时随批量非线性抖：25 只中位 667ms、最大 8.6s；800 只 10~13s。
-    #   取 400 —— 持仓规模（几十只）一批就够，而万一拿它扫大批量时
-    #   单批也不会卡到十几秒。
-    keys = list(m)
-    for i in range(0, len(keys), TX_BATCH):
-        chunk = keys[i:i + TX_BATCH]
-        try:
-            txt = urllib.request.urlopen(
-                urllib.request.Request(TX_URL + ','.join(chunk),
-                                       headers={'User-Agent': HDR['User-Agent']}),
-                timeout=TIMEOUT).read().decode('gbk', 'replace')
-        except Exception:                                   # noqa: BLE001
-            continue                    # 这一批没拿到；不影响别的批
-        for line in txt.strip().split('\n'):
-            if '="' not in line:
-                continue
-            f = line.split('"')[1].split('~')
-            if len(f) <= TX_F['turnover_pct']:
-                continue
-            tag = line.split('v_')[1].split('=')[0] if 'v_' in line else ''
-            jc = m.get(tag)
-            if not jc:
-                continue
-            def _n(k, d=None):
-                try:
-                    return float(f[TX_F[k]])
-                except Exception:                           # noqa: BLE001
-                    return d
-            px = _n('price')
-            if not px:
-                continue                # 停牌/无成交 -> 不给，不要塞 0
-            out[jc] = {'code': jc, 'name': f[TX_F['name']], 'price': px,
-                       'preclose': _n('preclose'), 'open': _n('open'),
-                       'high': _n('high'), 'low': _n('low'),
-                       'change_pct': _n('change_pct'),
-                       'turnover_pct': _n('turnover_pct'),
-                       'volume': _n('volume'),
-                       'amount': (_n('amount_wan') or 0) * 1e4,
-                       'ts': f[TX_F['ts']]}
+    for tag, d in raw.items():
+        jc = m.get(tag)
+        if jc:
+            out[jc] = dict(d, code=jc)
+            out[jc].pop('symbol', None)
     return out
+
+
+# ---------------------------------------------------------------- 主要指数
+# 🔴 **清单一处定义**（同「可选清单由服务端给」那条）：前端硬编码的话，
+#   加一个指数页面上不会出现、删一个则会显示一条取不到的空行。
+# ★ 每个都**实测取得到**（2026-09-19 逐个打过腾讯批量接口）。
+# 🔴 **中证2000（sh932000）与万得微盘股（8841431.WI）腾讯都【没有】** ——
+#   后者是万得专有，tdx 与腾讯都不提供（CLAUDE.md 记过）。
+#   用户说的"微盘股"这里给的是**国证2000**：同为"小市值 2000 只"口径，
+#   但它**比微盘股大一档** —— 所以名字里**不写"微盘"**，只写它本来的名字
+#   （同「不拿 ETF 当指数用」那条：近似物要叫自己的名字）。
+# ★ **顺序按"这个人盯什么"排**，不按市值从大到小：
+#   先三个看大势的（上证/深成/创业板），紧接着是**小市值那一档**
+#   —— 本机跑的是小市值与红利策略，微盘/国证2000/中证1000 才是天天要看的；
+#   沪深300、科创50、北证50 放后面。
+#   🔴 排在后面的在窄屏上会被挤到横滚区（带子自己滚，不撑 body）——
+#     所以**最该看的必须在前面**，否则默认就看不见（实测 10 格 1609px，
+#     1500px 视口下最后一格要滚出来才见得到）。
+INDICES = [
+    ('sh000001', '上证'), ('sz399001', '深成'), ('sz399006', '创业板'),
+    ('sz399303', '国证2000'), ('sh000852', '中证1000'),
+    ('sh000905', '中证500'), ('sh000300', '沪深300'),
+    ('sh000688', '科创50'), ('bj899050', '北证50'),
+]
+_IDX_TTL = 20          # 秒。多个页面同时开着时共享这一份，别各打各的
+_IDX_CACHE = {'at': 0.0, 'rows': [], 'asof': None}
+
+# ---- 自建「微盘400」：全市场总市值最小 400 只、等权 ----
+# 🔴 **万得微盘股（8841431.WI）拿不到**，而三个公开小盘指数都**代表不了它**：
+#   2026-09-19 量过（自建月度调仓代理 2016~2026 当基准）——
+#     国证2000 相关性 0.864 / beta 0.97 / 跟踪误差 **13.7%/年**（三项里最好）
+#     但 2024-01 微盘踩踏那段它 -20.1% 而代理 -39.1%（**少跌 19pp**）
+#   更要命的是**日频方向**：最小400等权 vs 国证2000，2024-01 起 658 个交易日
+#     日差 sd 1.39pp、|差|>1pp 占 38.6%、**方向相反占 19.6%**
+#   —— 五天里有一天国证2000 会把方向说反。所以这一格自己算。
+#
+# ★ 名字叫**「微盘400」**不叫"微盘股"：它是我们自建的近似物，
+#   名字里就说清"400 只"，不冒充万得那个（同「不拿 ETF 当指数用」）。
+# ★ 只给**涨跌幅、不给点位**：等权组合没有"点位"这回事，
+#   编一个基点出来就是在造一个看着像指数的数（同「不猜一个数填上去」）。
+# 🔴 成分**按日缓存**：面板每天才变一次，日内重算是白费；
+#   而且它与 9 个指数**拼在同一个请求里**发出去（上限 900，实测 409 只
+#   0.22 秒）—— 分两次就是把请求数翻倍，而限流是这条链上唯一的风险
+#   （同「抓取范围合并去重」那条）。
+MICRO_N = 400
+MICRO_LABEL = '微盘400'
+_MICRO = {'day': None, 'syms': []}
+
+
+def micro_members(root=None):
+    """最近一个面板日、总市值最小 `MICRO_N` 只的 tdx symbol。按日缓存。
+
+    ★ 用**总市值**（万得微盘股的口径），不是流通市值。
+    ★ 与历史代理（月度调仓）的区别：这里是**日更**——盘中要回答的是
+      "今天这批最小的票怎么样"，而不是复现一条可回测的指数。
+      两者的口径差要在文档里说清，别混用。
+    """
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    if _MICRO['day'] == today and _MICRO['syms']:
+        return _MICRO['syms']
+    try:
+        import duckdb
+        lake = _lake(root)
+        P = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % lake
+        rows = duckdb.connect().execute(
+            "SELECT jq_code FROM %s WHERE date = (SELECT max(date) FROM %s) "
+            "AND totalmv > 0 AND public_status IN ('正常上市','ST','*ST') "
+            "ORDER BY totalmv LIMIT %d" % (P, P, MICRO_N)).fetchall()
+    except Exception:                                       # noqa: BLE001
+        return _MICRO['syms']            # 取不到就沿用上一次，别让这一格消失
+    syms = [('sh' if r[0].endswith('XSHG') else 'sz') + r[0][:6] for r in rows]
+    if syms:
+        _MICRO.update(day=today, syms=syms)
+    return _MICRO['syms']
+
+
+def indices(force=False):
+    """主要指数的实时快照。**所有页面底部那条常驻带子**读它。
+
+    ★ **缓存 %d 秒**：这条带子挂在 `common.js` 上、每个打开的页面都会轮询，
+      不缓存的话 N 个标签页就是 N 倍请求 —— 而限流是这条链上唯一的风险
+      （同 `_rt_catch_up` 的 20 秒节流）。
+    ★ **收盘后不刷新也没关系**：返回里带 `session`，页面据此停掉轮询
+      （同「收盘后不轮」那条）；值仍然给最后一次的，所以带子不会空掉。
+    """ % _IDX_TTL
+    now = time.time()
+    if not force and _IDX_CACHE['rows'] and now - _IDX_CACHE['at'] < _IDX_TTL:
+        return {'items': _IDX_CACHE['rows'], 'asof': _IDX_CACHE['asof'],
+                'session': in_session(), 'cached': True}
+    mem = micro_members()
+    # ★ 指数与微盘成分**拼在同一个请求里**（409 个，上限 900）
+    got = snapshot_syms([c for c, _ in INDICES] + mem)
+    rows = []
+    for sym, short in INDICES:
+        d = got.get(sym)
+        if not d:
+            continue            # 取不到就不显示这一格，**不要塞 0 或旧值**
+        rows.append({'symbol': sym, 'short': short, 'name': d['name'],
+                     'price': d['price'], 'change_pct': d['change_pct'],
+                     'ts': d['ts']})
+    # ---- 微盘400：等权平均当日涨跌 ----
+    # 🔴 **停牌/取不到的整只剔除，不算成 0%** —— 算成 0 会把一批没交易的
+    #   票当成"今天平盘"，等权平均被系统性拉向 0（同「空结果一律当失败」）。
+    mr = [got[x]['change_pct'] for x in mem
+          if x in got and got[x].get('change_pct') is not None]
+    if mem and len(mr) >= len(mem) * 0.6:
+        # ★ 插在「国证2000」**前面** —— 它是这一档里最贴切的那个，
+        #   而国证2000 每 5 天就有 1 天把方向说反（见上面那段实测）。
+        _at = next((i for i, r in enumerate(rows)
+                    if r['symbol'] == 'sz399303'), len(rows))
+        rows.insert(_at, {'symbol': 'micro%d' % MICRO_N, 'short': MICRO_LABEL,
+                     'name': '自建：全市场总市值最小 %d 只等权（无点位，'
+                             '只给当日涨跌）' % MICRO_N,
+                     'price': None, 'change_pct': round(sum(mr) / len(mr), 2),
+                     'n': len(mr),
+                     'ts': max((got[x]['ts'] for x in mem if x in got),
+                               default='')})
+    if rows:                    # 一条都没取到时保留上一份，别让带子闪成空
+        _IDX_CACHE.update(at=now, rows=rows,
+                          asof=max((r['ts'] or '') for r in rows))
+    return {'items': _IDX_CACHE['rows'], 'asof': _IDX_CACHE['asof'],
+            'session': in_session(), 'cached': False}
 
 
 def fetch(codes, root=None, sleep=SLEEP, on_progress=None):

@@ -25,19 +25,44 @@ async function openRun(id, initTab){
      <div class="row1"><h2>${m.strategy}</h2>
        <span class="meta">${m.group} · ${m.first_day} ~ ${m.last_day} ·
          初始 ${(+m.cash).toLocaleString()} · ${m.trading_days} 交易日
-         ${Object.keys(m.params||{}).length?' · '+Object.entries(m.params).map(
-            ([k,v])=>k+'='+v).join(' '):''}</span></div>
+         ${(()=>{
+            /* ★ 抬头只放**改过的**那几个（同「图例只列与基准不同的参数」）；
+               "一共多少个参数、默认值是什么"在「参数」页签里给全。 */
+            const ch=(run.params_all||[]).filter(p=>p.changed);
+            const n=(run.params_all||[]).length;
+            if(!n) return Object.keys(m.params||{}).length
+              ? ' · '+Object.entries(m.params).map(([k,v])=>k+'='+v).join(' ') : '';
+            return ' · <a href="javascript:void(0)" id="hdpar" title="点开「参数」页签看全部">'
+              + (ch.length ? ch.map(p=>esc(p.name)+'='+esc(String(p.value))).join(' ')
+                           : '全部默认参数')
+              + '</a> <span class="cmt">('+n+' 个参数，改过 '+ch.length+' 个)</span>';
+          })()}</span></div>
      <div class="row1"><span class="meta">run_id ${m.run_id} ·
        代码 ${(m.code_sha256||'').slice(0,8)} ·
        数据 ${((m.data_fingerprint||{}).overall||'—').slice(0,8)} ·
        跑于 ${m.ran_at} (${m.elapsed_sec}s)</span></div>
+     <div class="row1"><a class="btn" id="rdcmp" href="javascript:void(0)"
+       title="把这次回测预选为基准 A，再到归档目录里勾另一条">⚖ 与别的回测比对</a></div>
      <div id="tabs">
-       ${['概览','权益曲线','收益明细','交易记录','持仓','拒单','策略代码','日志','元信息']
+       ${['概览','权益曲线','收益明细','交易记录','持仓','拒单','参数','策略代码','日志','元信息']
          .map((t,i)=>`<div data-i="${i}" class="${i?'':'on'}">${t}</div>`).join('')}
      </div>
    </div>
-   ${[0,1,2,3,4,5,6,7,8].map(i=>`<div class="pane ${i?'':'on'}" id="p${i}"></div>`).join('')}`;
+   ${[0,1,2,3,4,5,6,7,8,9].map(i=>`<div class="pane ${i?'':'on'}" id="p${i}"></div>`).join('')}`;
   document.querySelectorAll('#tabs div').forEach(e=>e.onclick=()=>tab(+e.dataset.i));
+  const rc=$('#rdcmp');
+  if(rc) rc.onclick=()=>{
+    /* 预选当前这次当基准 A（CMPSEL 第一个），再跳去勾第二条。
+       ★ 不直接开比对页 —— 只有一条时那页只能显示"至少要选 2 次"，
+         而人会以为功能坏了。带着它去能挑的地方，才是入口。 */
+    CMPSEL = [m.run_id];
+    /* 去【归档目录】而不是「选中的规则」—— 后者只列标星的，
+       想比两次没标星的回测就走不通了（那是个死路，而它不报错）。
+       `revealRun` 把它所在的节点展开并滚过去 —— 落在一棵全折叠的树上
+       等于"到了那边还要再找一遍"，那是把入口做成摆设。 */
+    revealRun(m.run_id);
+    location.hash = '#/runs';
+  };
   paneOverview(); paneEquity();
   if(initTab) tab(initTab);
   window.scrollTo(0,0);
@@ -45,9 +70,55 @@ async function openRun(id, initTab){
 function tab(i){
   document.querySelectorAll('#tabs div').forEach((e,k)=>e.classList.toggle('on',k===i));
   document.querySelectorAll('.pane').forEach((e,k)=>e.classList.toggle('on',k===i));
-  ({2:paneMonthly,3:paneTrades,4:paneHoldings,5:paneRejects,6:paneCode,7:paneLog,
-    8:paneMeta}[i]||(()=>{}))();
+  /* 🔴 **按下标映射，插一个页签就得整串挪** —— 漏一个的表现是
+     "点某个页签出来的是另一页的内容"，而它不报错。 */
+  ({2:paneMonthly,3:paneTrades,4:paneHoldings,5:paneRejects,6:paneParams,
+    7:paneCode,8:paneLog,9:paneMeta}[i]||(()=>{}))();
 }
+
+/* ============ 参数 ============ */
+/* 🔴🔴 **「这次回测用了哪些参数」不等于归档里那个 `meta.params`。**
+   后者只有**命令行覆盖过的**那几个（常常只有 1 个），而真正生效的配置是
+   「该版本声明的全部默认值 ⊕ 覆盖的那几个」。只看覆盖项的话，
+   "这次跑在什么配置上"根本答不了 —— 用户 2026-09-19：
+   「每个回测用了哪些参数看的还是非常不清楚」。
+
+   ★ 全集由**服务端**照归档里的 `strategy.py` **快照**解析
+     （不是照磁盘上的当前文件 —— 那可能早改了，同「账户绑的是快照」那条）。
+   ★ **改过的排最前并高亮**：一屏四十个参数里，人要找的就是那几个。
+   ★ 段落分组取自策略源码里的 `# ---- 标题 ----`，所以标题写什么就是什么
+     —— 它是**排版**不是语义保证，页面上要说这一句。 */
+function paneParams(){
+  const ps=(DATA.run||{}).params_all||[];
+  const el=$('#p6');
+  if(!ps.length){ el.innerHTML='<div class="note">这个版本没有用 '
+    +'<span class="mono">g.x = getattr(g, \'x\', 默认)</span> 的写法声明参数，'
+    +'所以没有可列的。</div>'; return; }
+  const ch=ps.filter(p=>p.changed), rest=ps.filter(p=>!p.changed);
+  const row=p=>`<tr class="${p.changed?'prow-ch':''}">
+    <td class="tx"><b>${esc(p.name)}</b>${p.group?
+      `<div class="cmt">${esc(p.group)}</div>`:''}</td>
+    <td class="rt"><b${p.changed?' style="color:var(--accent)"':''}>${esc(String(p.value))}</b></td>
+    <td class="rt cmt">${p.default==null?'—':esc(String(p.default))}</td>
+    <td class="tx">${esc(p.comment||'')}${
+      (p.doc||[]).length?`<div class="cmt">${(p.doc||[]).map(esc).join('<br>')}</div>`:''}</td></tr>`;
+  el.innerHTML=`
+    <div class="sec"><h3>这次跑用的参数
+      <span class="cmt">${ps.length} 个 · 改过 ${ch.length} 个</span></h3>
+      <div class="note">「本次」= 命令行传的那几个 ⊕ 该版本的默认值。
+        默认值与说明都照<b>归档里的源码快照</b>解析 —— 磁盘上的文件可能已经改了。
+        段落分组取自源码里的 <span class="mono">
+        # ---- 标题 ----</span>，是<b>排版</b>不是语义保证。</div>
+      <div class="pw"><table class="pkt" style="margin-top:8px">
+        <tr><th class="tx">参数</th><th class="rt">本次</th>
+            <th class="rt">默认</th><th class="tx">说明</th></tr>
+        ${ch.map(row).join('')}
+        ${ch.length&&rest.length?`<tr><td colspan="4" class="tx cmt"
+          style="padding-top:10px">—— 下面这些都是默认值 ——</td></tr>`:''}
+        ${rest.map(row).join('')}
+      </table></div></div>`;
+}
+
 
 /* ============ 概览 ============ */
 function card(k,v,cls,note){return `<div class="card"><div class="k">${k}</div>
@@ -382,7 +453,7 @@ async function drawDay(S){
     <div id="d_sell"></div><div id="d_buy"></div><div id="d_hold"></div>`;
   tbl($('#d_sell'),o.sells,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是「后复权记账单位」（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'exit_price',t:'卖出价',f:px},
@@ -394,7 +465,7 @@ async function drawDay(S){
   ],'当日卖出 '+o.sells.length+' 笔'+(o.sells.length?'':'（无）'));
   tbl($('#d_buy'),o.buys,[
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
-    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是「后复权记账单位」（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'gross_amount',t:'成交金额',f:v=>rdMoney(v)},
     {k:'exit_date',t:'后来平仓于'},
@@ -408,7 +479,7 @@ async function drawDay(S){
     {k:'code',t:'标的',l:1,f:(v,r)=>nm(r)},
     {k:'weight',t:'权重',f:v=>pct(v,1)},
     {k:'value',t:'市值',f:v=>rdMoney(v)},
-    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是「后复权记账单位」（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'entry_date',t:'建仓日'},
     {k:'entry_price',t:'建仓价',f:px},
     {k:'last_price',t:'现价',f:px},
@@ -501,7 +572,7 @@ async function paneTrades(){
     {k:'side',t:'方向',l:1,f:v=>`<b style="color:${
        v==='buy'?'var(--up)':'var(--down)'}">${v==='buy'?'买':'卖'}</b>`},
     {k:'code',t:'股票',l:1,f:nmpop},
-    {k:'price',t:'价格',f:v=>fmtN(v,3),h:'当时的**不复权**成交价（含滑点），与券商对账单同一口径。'},
+    {k:'price',t:'价格',f:v=>fmtN(v,3),h:'当时的「不复权」成交价（含滑点），与券商对账单同一口径。'},
     {k:'shares',t:'份额',f:v=>fmtN(v,1)},
     {k:'amount',t:'金额',f:v=>v==null?'—':(+v).toFixed(0)},
     {k:'holding_days',t:'持有天',f:v=>v==null?'':v},
@@ -558,7 +629,7 @@ async function paneHoldings(){
   tbl($('#hdt'),h.rows,[
     {k:'code',t:'股票',l:1,f:nmpop},{k:'weight',t:'权重',f:v=>pct(v,2)},
     {k:'value',t:'市值',f:v=>v==null?'—':(+v).toFixed(0)},
-    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是**后复权记账单位**（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
+    {k:'shares',t:'份额',f:v=>rdMoney(v),h:'真实股数（不复权），就是券商对账单上的那个数。&#10;🔴 归档内部记的是「后复权记账单位」（实测 774.835189），展示层换算回真实值 —— 2026-09-14 起新归档直接存逐笔成交（fills），不用换算；旧归档按当日复权因子换算。'},
     {k:'last_price',t:'现价',f:v=>fmtN(v,3)},
     {k:'entry_date',t:'建仓日',l:1},{k:'entry_price',t:'建仓价',f:v=>fmtN(v,3)},
     {k:'unrealized_ret',t:'浮动收益',f:v=>pct(v,2),s:1},

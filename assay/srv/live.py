@@ -75,9 +75,15 @@ def api_live_accounts(_q):
         # ★ 红点用【盘上最新那份信号】判，不重算 —— 重算要重放 30 天 warmup，
         #   而这是每次打开实盘页都会跑的列表接口。
         alert, why = m.signal_alert(m.latest_signal(a['id']))
+        # 🔴 **「是不是模拟盘」由服务端判**（`lv.is_paper` 是唯一定义）——
+        #   前端原来各处写 `a.mode === 'paper'`，已经有两处了，再加侧栏分组
+        #   就是第三处；而老账户的 `mode` 字段**根本不存在**（早于那次改动），
+        #   靠前端比字符串就得记住"undefined 也算实盘"这条隐含规则。
+        #   同「权不权威这类判据由服务端给」那条。
         out.append(dict(a, n_positions=len(pos), cash=round(m.cash(a['id']), 2),
                         n_fills=len(m.fills(a['id'])),
                         n_versions=len(m.versions(a['id'])),
+                        paper=m.is_paper(a),
                         alert=alert, alert_why=why))
     cal = m.calendar_meta()
     # ★ 「权不权威」由服务端判 —— 名单只存在 live.AUTHORITATIVE_CAL 一处。
@@ -140,6 +146,25 @@ def api_live_account(q):
         # ★ 模拟盘的推进状态跟着账户一起给 —— 页面要显示"推进到哪天了"、
         #   以及对账差了多少。非模拟盘不带这个字段（页面按有无判断）。
         _paper = m.state(aid) if m.is_paper(_acct) else None
+        # 🔴🔴 **旧状态里没有 `why_empty`，页面就又是一片空白** ——
+        #   那正是用户报的症状（「也推进了，但是没有任何数据出现」），
+        #   只是这次的成因是**状态文件早于这个功能**：`rejects`/`why_empty`
+        #   落在 `_paper.json` 里，上一次推进时还没有这两个字段。
+        #   ★ **不猜原因**（本金太小 / 候选池空 / 没有调仓日会表现成同一个
+        #     "0 笔"，而要做的事完全不同）—— 只说清"这份状态没记原因"
+        #     并给下一步。同「删了要留痕，否则『空』与『本来就没有』
+        #     分不出来」。
+        #   ★ 它是**派生的显示兜底**，所以在这里拼、不写回状态文件
+        #     （`state()` 读出来的东西会被下一次 `_save_state` 落盘）。
+        if (_paper and _paper.get('advanced_to')
+                and not _paper.get('n_fills')
+                and not _paper.get('why_empty')):
+            _paper = dict(_paper, why_empty=(
+                '这份推进状态是旧版本留下的，没有记下原因（引擎的拒单原因'
+                '是后来才带出来的）。点上面的「▷ 推进」重算一次就会给出。'),
+                stale_state=True)
+        # 同列表接口那条：`paper` 这个布尔由服务端给，页面不比字符串
+        _acct = dict(_acct or {}, paper=m.is_paper(_acct))
         return {
             'account': _acct,
             'paper': _paper,
@@ -519,6 +544,20 @@ def api_live_strategy(q):
 
 
 
+def api_live_strategies(q):
+    """GET /api/live/strategies?current= —— 可以绑的策略清单。
+
+    🔴 **清单由服务端给**（同「可选清单由服务端给」那条）：本地有哪几个
+      策略、哪个是共享层、哪个文件已经不在了，**只有服务端知道**。
+      前端硬编码一份的话，加一个策略它不会出现（而那不报错，
+      只是从页面上绑不到），删一个则会列出一个绑上去就崩的死选项。
+    ★ 未绑定的账户也要打这个接口 —— 那正是最需要选择器的场景，
+      而 `/api/live/strategy` 在未绑定时前端根本不发请求。
+    """
+    m = _live()
+    return _live_err(lambda: m.list_strategies(q.get('current') or ''))
+
+
 def api_live_backtest(_q, body):
     """POST /api/live/backtest —— 用账户绑的【那个版本 + 那组参数】跑一次回测。
 
@@ -739,7 +778,8 @@ def api_live_save(_q, body):
                          broker_note=b.get('broker_note'),
                          tick_time=b.get('tick_time'),
                          warmup_start=b.get('warmup_start'),
-                         fee=b.get('fee'), mode=b.get('mode'))
+                         fee=b.get('fee'), mode=b.get('mode'),
+                         paper_start=b.get('paper_start'))
         if b.get('strategy_path'):
             m.bind_version(aid, b['strategy_path'], b.get('params') or {},
                            b.get('reason') or '')

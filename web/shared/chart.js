@@ -139,8 +139,8 @@ function lineChart(el,series,opt){
      </g>
      <rect id="hz" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent"/>
    </svg>
-   <div class="note" style="padding-left:8px">${series.map(s=>
-      `<span style="color:${s.c}">━</span> ${s.n}`).join('　')}</div>`;
+   ${opt.legend === false ? "" : `<div class="note" style="padding-left:8px">${series.map(s=>
+      `<span style="color:${s.c}">━</span> ${s.n}`).join('　')}</div>`}`;
   // hover
   const svg=el.querySelector('svg'), tip=$('#tip');
   const hov=svg.querySelector('.hov'), hvl=hov.querySelector('.hvl'),
@@ -287,4 +287,81 @@ function calGrid(ym, items, fmt, opt){
   return `<div class="calg">${['一','二','三','四','五','六','日']
       .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`
     + `<div class="note">交易日 ${ntd} 天 / 非交易日 ${nt} 天</div>`;
+}
+
+
+/* ============ 分组柱状图（逐年/逐月这种【离散】量）============
+
+   🔴 **离散量不画折线。** 逐年收益在 2016 与 2017 之间没有"过程"，
+     折线会画出一段斜线，读的人会以为那是渐变 —— 与「断开 = 没有数据」
+     同一条：图形语言本身就在说话，不要让它说错话。
+
+   ★ 几何与 `lineChart` 完全一致（W/L/R），所以上下两块摆在一起时
+     左右边界天然对齐、x 轴刻度同位（同「回撤副图不需要任何对位代码」）。
+   ★ 柱子颜色按**系列**给（哪个配置），不按涨跌 —— 这类图存在的理由就是
+     横向比几个配置；涨跌由柱子朝上还是朝下表达，信息没丢。            */
+function barChart(el, cats, series, opt){
+  opt = opt || {};
+  const W = 1160, H = opt.h || 200, L = 54, R = 16, T = opt.t || 22, B = 26;
+  const n = cats.length;
+  if(!n){ el.innerHTML = '<div class="note">无数据</div>'; return; }
+  let lo = 0, hi = 0;                       /* 🔴 0 必须在量程里 —— 柱状图的基线 */
+  series.forEach(s => s.v.forEach(v => { if(v == null) return;
+    if(v < lo) lo = v; if(v > hi) hi = v; }));
+  if(!(hi > lo)){ hi = lo + 1; }
+  const pad = (hi - lo) * 0.08; 
+  /* 只往"有数据的那一侧"留白：全为负的回撤图不该在 0 上面空一截
+     （那截白看着像"曾经为正"）。 */
+  if(hi > 0) hi += pad;
+  if(lo < 0) lo -= pad;
+  const Y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const gw = (W - L - R) / n;               /* 每个分类占的宽度 */
+  const m = series.length;
+  const bw = Math.min(18, gw * 0.72 / m);   /* 单根柱子最大 18px —— 同 K 线
+                                               MAXSTEP 那条：少数几年时不该
+                                               拉成几个大色块 */
+  const gx = i => L + gw * (i + 0.5);       /* 分类中心 */
+  const bx = (i, k) => gx(i) - bw * m / 2 + bw * k;
+
+  let ticks = [];
+  for(let k = 0; k <= 4; k++) ticks.push(lo + (hi - lo) * k / 4);
+  const yl = v => (v * 100).toFixed(0) + '%';
+  el.innerHTML = `
+   ${opt.title ? `<div class="ttl">${opt.title}</div>` : ''}
+   <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+     ${ticks.map(v => `<line class="gl" x1="${L}" x2="${W - R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/>
+        <text class="ax" x="${L - 7}" y="${(Y(v) + 3).toFixed(1)}" text-anchor="end">${yl(v)}</text>`).join('')}
+     <line class="zl" x1="${L}" x2="${W - R}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}"/>
+     ${cats.map((c, i) => `<text class="ax" x="${gx(i).toFixed(1)}" y="${H - 8}"
+         text-anchor="middle">${esc(c)}</text>`).join('')}
+     ${series.map((s, k) => s.v.map((v, i) => {
+        if(v == null) return '';
+        const y0 = Y(0), y1 = Y(v);
+        return `<rect x="${bx(i, k).toFixed(1)}" y="${Math.min(y0, y1).toFixed(1)}"
+            width="${(bw - 1.5).toFixed(1)}" height="${Math.max(1, Math.abs(y1 - y0)).toFixed(1)}"
+            fill="${s.c}" opacity="0.88"/>`;
+      }).join('')).join('')}
+     <g class="hov" style="display:none">
+       <rect class="hvb" y="${T}" height="${H - T - B}"/>
+     </g>
+   </svg>
+   ${opt.legend === false ? '' : `<div class="note" style="padding-left:8px">${
+     series.map(s => `<span class="lg"><i style="background:${s.c}"></i>${esc(s.n)}</span>`).join('')}</div>`}`;
+
+  /* hover：整组高亮 + 读数。★ 高亮的是**那一年**（整组），不是单根柱子
+     —— 这一页问的是"这一年三个配置各是多少"，逐根 hover 要移三次。 */
+  const svg = el.querySelector('svg'), tip = $('#tip');
+  const hov = svg.querySelector('.hov'), hvb = hov.querySelector('.hvb');
+  svg.onmousemove = e => {
+    const r = svg.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1,
+      Math.floor(((e.clientX - r.left) / r.width * W - L) / gw)));
+    hov.style.display = '';
+    hvb.setAttribute('x', (L + gw * i).toFixed(1));
+    hvb.setAttribute('width', gw.toFixed(1));
+    tip.textContent = cats[i] + '\n' + series.map(s =>
+      s.n + '  ' + (s.v[i] == null ? '—' : (s.v[i] * 100).toFixed(2) + '%')).join('\n');
+    _tipAt(tip, e.clientX, e.clientY);
+  };
+  svg.onmouseleave = () => { $('#tip').style.display = 'none'; hov.style.display = 'none'; };
 }

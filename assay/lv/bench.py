@@ -70,7 +70,14 @@ def build_engine(aid, datalake=None):
     sha = a.get('code_sha256')
     if not sha:
         return None, {'error': '账户还没绑定策略 —— 没有"策略曲线"可算'}
-    start = (a.get('created') or '')[:10]
+    # 🔴 **起点分两种，别混**：
+    #     实盘   -> 开户日。「策略曲线」要与实际那条**对齐起点**，
+    #               否则差异里混进"起点差"（同「两条的基点都必须是本金」）。
+    #     模拟盘 -> `paper_start`（人设的推演起点），没设才退回开户日。
+    #               它就是"这个模拟盘从哪天开始跑"，业绩页那条权益曲线
+    #               的起点是**账本第一笔**，所以自动跟着走、不会分家。
+    start = ((a.get('paper_start') or '') if _base.is_paper(a) else '')[:10] \
+        or (a.get('created') or '')[:10]
     if not start:
         return None, {'error': '账户没有开户日 —— 两条曲线没法对齐起点'}
     cash = float(a.get('init_cash') or 0)
@@ -94,7 +101,24 @@ def build_engine(aid, datalake=None):
         from assay.engine import Engine
         from assay.feed import PanelFeed
         from run import load as _load
-        feed_probe = PanelFeed(start, '2100-01-01', root=datalake)
+        from run import default_lake as _default_lake
+        # 🔴🔴 **策略声明的数据源要在这里解析，`run.py` 里那一份管不到。**
+        #   2026-09-13 修过一次「靠人记得传 --datalake 的都会漏」，做法是
+        #   策略模块级 `DATALAKE = 'etf_lake'` + `run.py` 的 `resolve_lake`。
+        #   但**建引擎的路径不止 run.py 一条** —— 模拟盘与业绩页那条
+        #   「策略曲线」走的是这里，而这里一直没接上：
+        #     实测 a3（ETF 轮动模拟盘）点「推进」-> `etf_master.parquet`
+        #     不存在，IOException 直接冒到 500。
+        #   ★ 而**崩掉还算好的**：`etf_trend_momentum` 在股票面板上
+        #     候选池恒空 -> 全程空仓、一条平线、**不报任何错**
+        #     （那正是当初那条纪律要挡的）。
+        #   ★ 复用 `run.resolve_lake` 而不是在这儿再写一遍：两处实现迟早分叉，
+        #     而分叉的表现是"命令行跑得对、模拟盘跑在另一个 lake 上"。
+        mod = _load(entry)
+        # ★ 解析 + 把 SystemExit 翻成人话都在 `base.resolve_strategy_lake`
+        #   **一处** —— 出信号那条链（`sig.make_signal`）也要用它。
+        root = _base.resolve_strategy_lake(mod, datalake)
+        feed_probe = PanelFeed(start, '2100-01-01', root=root)
         end = feed_probe.trading_days[-1]
         fp = feed_probe.fingerprint()
         k = _key(aid, sha, params, start, end, fp)
@@ -113,12 +137,20 @@ def build_engine(aid, datalake=None):
         #   没被抬到 5）。引擎默认的 5 元会让 froec 那种小额多笔凭空多付费用
         #   —— 而"策略曲线比实际差"就成了费率假设的产物，不是执行差异。
         # ★ `Cost` 的印花税参数叫 **close_tax**（`stamp_tax` 只是命令行的名字）。
+        # 🔴 **`close_tax` 不锁** —— 锁的那几项是"券商收多少"（账户知道），
+        #   而印花税是**标的属性**：ETF 无印花税是**事实不是偏好**
+        #   （所以它写在策略文件里，见「策略要自己声明数据源与费率」那条）。
+        #   锁死成 'auto' 的话，ETF 每笔卖出都被按股票收万5 ——
+        #   年换手 9 次就是 **0.45%/年** 凭空扣掉，**而它不报错**，
+        #   只是模拟盘的净值系统性偏低。
+        #   ★ 分工：佣金 / 最低佣金 = 券商的事（用账户的，锁）；
+        #     印花税 = 标的的事（策略声明了就听它，没声明时 'auto' 仍是股票口径）；
+        #     滑点 = 这条对照线的统一口径（锁，否则两条曲线不可比）。
         cost = Cost(slippage=BENCH_SLIP, commission=comm,
                     min_commission=float(
                         _fee.fee_model_at(aid, end).get('min_commission') or 0),
                     close_tax='auto',
-                    locked=['slippage', 'commission', 'min_commission',
-                            'close_tax'])
+                    locked=['slippage', 'commission', 'min_commission'])
         # 🔴🔴 **feed 给长区间，但开户日之前【一个委托都不下】。**
         #   两件事必须同时满足，而它们互相拉扯：
         #     ① 周内序号要对 —— `run_weekly(weekday=N)` 判「本周第 N 个交易日」，
@@ -148,12 +180,20 @@ def build_engine(aid, datalake=None):
 
         feed = PanelFeed(
             (datetime.date.fromisoformat(start)
-             - datetime.timedelta(days=40)).isoformat(), end, root=datalake)
-        eng = _GatedEngine(_load(entry), feed, cash=cash, cost=cost,
+             - datetime.timedelta(days=40)).isoformat(), end, root=root)
+        # ★ `mod` 上面已经加载过（为了读 DATALAKE）—— 不要再 `_load` 一次：
+        #   那会把策略文件的顶层代码**执行两遍**。
+        eng = _GatedEngine(mod, feed, cash=cash, cost=cost,
                            params=params)
         return eng, {'start': start, 'end': end, 'cash': cash, 'sha': sha,
                      'main_sha256': row.get('main_sha256'), 'params': params,
                      'data_fingerprint': fp, 'key': k,
+                     # ★ 数据源与成本一样**直接决定结果**，所以要带出去
+                     #   （同 run.py 抬头把「数据 <root>（策略声明）」打出来
+                     #   那条）。`root` 为 None 表示走默认 lake —— 这里解成
+                     #   实际路径，页面才说得出"跑在哪份数据上"。
+                     'datalake': root or _default_lake(),
+                     'datalake_declared': bool(getattr(mod, 'DATALAKE', None)),
                      'fee': {'buy': eff.get('buy_rate'),
                              'sell': eff.get('sell_rate'), 'commission': comm,
                              'note': 'sell_rate 含印花税；引擎另按日期分段加，'

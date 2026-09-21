@@ -51,12 +51,27 @@ function openSettings(aid, a, ro){
         <input id="etick" size="12" value="${esc(a.tick_time||'')}">
         <span class="lvwhy">HH:MM。只在数据同步压根没跑时才用；
           主路径是 <code>sync_daily.sh</code> 跑完直接触发</span></div>
+      ${a.paper?`<div class="frow"><label>推演起点</label>
+        <input id="epstart" type="date" value="${esc(a.paper_start||'')}">
+        <span class="lvwhy">模拟盘从这天开始跑到最新数据日。留空 = 开户日。<br>
+          🔴 <b>已经推演出成交之后就不能改了</b> —— 换起点会让整段账本对不上，
+          而那时页面只会说"数据被修正过"。要换请先「重建」（删档重开）。
+        </span></div>`:''}
       <div class="frow"><label>预热起点</label>
         <input id="ewarm" size="12" value="${esc(a.warmup_start||'')}">
         <span class="lvwhy">出信号时引擎从这天开始跑，要够策略建仓与滚动</span></div>
-      <div class="frow"><label>券商备注</label>
-        <input id="enote" value="${esc(a.broker_note||'')}" style="flex:1;min-width:200px">
-        <span class="lvwhy">给自己看的，如"华泰 · 主账户"</span></div>
+      <!-- 🔴 原来叫「券商备注」，而**模拟盘根本没有券商** —— 那个标签对它是错的。
+           内容本来也不止券商（连提示里的例子都混着账户用途）。字段键
+           broker_note 这个键**不改**（改名要动模型/服务端/前端三处，收益只是
+           名字；真正的问题是下面那条）。 -->
+      <div class="frow"><label>说明</label>
+        <textarea id="enote" rows="2" style="flex:1;min-width:240px;resize:vertical"
+          placeholder="${a.paper
+            ? '这个模拟盘在验证什么？例：不手工干预地跑 froec，与 FROEC-TRADE 实盘对照执行差异'
+            : '这个账户是什么？例：华泰 · 主账户 · 小市值策略，本金 40 万'}"
+          >${esc(a.broker_note||'')}</textarea>
+        <span class="lvwhy">给自己看的 ——
+          <b>账户列表与账户页都会显示</b>，几个账户放一起时靠它分辨。</span></div>
       <div class="frow"><label></label>
         <button class="btn" id="esave" ${ro?'disabled':''}>保存账户信息</button>
         <button class="btn" id="earch" ${ro?'disabled':''}
@@ -266,7 +281,8 @@ function openSettings(aid, a, ro){
         await post('/api/live/save',{id:aid, name:$('#ename').value.trim(),
           init_cash:parseFloat($('#ecash').value||'0'),
           tick_time:$('#etick').value.trim(), warmup_start:$('#ewarm').value.trim(),
-          broker_note:$('#enote').value});
+          broker_note:$('#enote').value,
+        ...($('#epstart') ? {paper_start:$('#epstart').value} : {})});
         close(); showLive(aid);
       }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
     };

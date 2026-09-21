@@ -10,6 +10,7 @@ import re
 from ..feed import PanelFeed
 
 from . import base as _base
+from . import tdx as _tdx
 from . import px as _px
 from . import fee as _fee
 from . import pos as _pos
@@ -37,7 +38,15 @@ def _last_px(feed, codes, day):
           WHERE jq_code IN ('%s') AND date <= DATE '%s'
             AND date > DATE '%s' - INTERVAL 400 DAY
         ) WHERE rn = 1""" % (feed.root, q, day, day)).fetchall()
-    return {r[0]: (r[1], r[2], r[3]) for r in rows}
+    out = {r[0]: (r[1], r[2], r[3]) for r in rows}
+    # 🔴 **面板是【股票】宽表，ETF / 指数一行都没有。** 查不到就回落到
+    #   tdx 原始日线 —— 不回落的话价格是 None -> 市值 0 -> 浮盈 −100%，
+    #   而它**不报错**，看着就像"这个账户把钱亏光了"（用户 2026-09-18 报的
+    #   正是这个）。
+    miss = [c for c in codes if c not in out]
+    if miss:
+        out.update(_tdx.last_close(feed.root, miss, day))
+    return out
 
 
 
@@ -246,15 +255,9 @@ def equity_curve(aid, datalake=None):
         return {'dates': [], 'equity': [], 'stats': None,
                 'note': '首笔成交日晚于最新行情日'}
     codes = sorted({r['code'] for r in rows})
-    px = {}
-    if codes:
-        q = "','".join(codes)
-        for c, dd, p in feed.con.execute("""
-            SELECT jq_code, date, close_bfq
-            FROM read_parquet('%s/mart/panel_daily/panel_*.parquet')
-            WHERE jq_code IN ('%s') AND date >= DATE '%s'
-        """ % (feed.root, q, days[0])).fetchall():
-            px[(c, dd)] = p
+    # ★ 取价走 `px.daily_close_map` **一处** —— 与「每日持仓」共用
+    #   （它们必须逐日给出同一个总资产，而原来是抄的两份）。
+    px = _px.daily_close_map(feed, codes, days[0])
     last = {}
     # 🔴🔴 **分红【不是】外部现金流 —— 它是投资收益。**（2026-09-14 修）
     #   TWR 的做法是"在每个有外部现金流的日子把区间切开"，目的是让
@@ -491,29 +494,10 @@ _KIND_FILE = {'index': 'index_*', 'etf': 'etf_*', 'stock': 'stock_*',
               'block': 'block_*'}
 
 
-def _name_snap(root):
-    """最新那份 symbol_name 快照（PIT 目录里挑 snap_date 最大的）。
-
-    ★ 照 `manifest.csv` 找，不去 glob 目录按文件名猜 —— 文件名是内容哈希，
-      新旧看不出来（同"判据要对上为什么保留"那条）。
-    """
-    import csv
-    mf = os.path.join(root, 'raw/tdx/snapshots/manifest.csv')
-    if not os.path.exists(mf):
-        return None
-    best = None
-    with io.open(mf, encoding='utf-8') as f:
-        for r in csv.DictReader(f):
-            if r.get('dataset') != 'symbol_name':
-                continue
-            if best is None or (r.get('snap_date') or '') > (best.get('snap_date') or ''):
-                best = r
-    if not best:
-        return None
-    fp = os.path.join(root, 'raw/tdx/snapshots', best['version_file'])
-    return fp if os.path.exists(fp) else None
-
-
+# ★ 实现搬到了 `lv/tdx.py`（取价那条链也要用它，而 px 在 perf **之前**，
+#   放这儿会成循环）。这里保留这个名字：`assay/stock.py` 的 `_snap_path`
+#   import 的就是它 —— **同一份实现，两个入口**，不是两份。
+_name_snap = _tdx.name_snap
 def bench_meta(codes, datalake=None):
     """这些 symbol 叫什么、是哪一类 —— {symbol: {'name','kind'}}。
 

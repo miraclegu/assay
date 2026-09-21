@@ -495,6 +495,180 @@ if(typeof window !== 'undefined' && !window.__zbOn){
   setInterval(zbScan, ZB_MS);
 }
 
+/* ============ 主要指数常驻带子（全局，页面最下方）============
+   用户 2026-09-19："把主要的指数都实时获取……始终显示在最上方或最下方，
+   不用特别大和显眼，普通字体大小即可。"
+
+   🔴 **挂在 common.js 上** —— 6 个独立 .html 与 index.html 都加载它，
+     所以任何页面都看得到（同炸板浮窗那条：挂在某一页的话，
+     人正在看别的页面时就没有了）。
+   ★ 做成**页面最下方的固定带子**而不是顶栏里一行：顶栏已经有 7 个入口，
+     再塞九个数字进去会和"今天要做什么"抢注意力。底部一条 12px 的带子
+     一眼扫得到、又不占视线（用户原话就是"不用特别大和显眼"）。
+   🔴 **清单与缓存都在服务端**（`realtime.INDICES` / `indices()`）——
+     前端硬编码的话，加一个指数页面上不会出现（而那不报错）。
+   🔴 **收盘后不轮询**，判据用服务端给的 `session` ——
+     前端自己判时段的话，改了时段或遇到半日市会白轮/漏轮
+     （同实盘页 `rt_live` 那条）。 */
+const IDX_MS = 60000;        // 与服务端 _rt_loop 同节拍
+let IDXBAR = null;
+
+/* ---- 显示哪些、什么顺序：本地偏好 ----
+   🔴🔴 **存的是「隐藏哪些 + 顺序」，不是「显示哪些」。**
+     存"显示列表"的话，服务端**将来加一个指数**时它不在列表里 ->
+     **静默不出现**，而没人会发现（同「加一个指标，广场上自动就有」
+     「照清单拼会漏掉新文件的全部组合」那两条）。
+     存"隐藏列表"则相反：新指数默认就在，要关得显式去关。
+   ★ 存 `localStorage` 不进 URL：这是"我习惯看哪几个"的个人设置，
+     而 URL 是拿去分享的（同指标参数那条）。
+   ★ **服务端始终取全部**，过滤与排序都在前端 —— 多个页面共享同一份
+     20 秒缓存，改设置**零请求**（同「一次取全，页签在本地切」）。 */
+const IDXPREF = 'idxpref';
+let IDXLAST = null;          // 最后一次取到的原始数据，改设置时就地重画
+
+function idxPref(){
+  try { const p = JSON.parse(localStorage.getItem(IDXPREF) || '{}');
+        return {hide: p.hide || [], order: p.order || []}; }
+  catch(e){ return {hide: [], order: []}; }
+}
+function idxSave(p){
+  try { localStorage.setItem(IDXPREF, JSON.stringify(p)); } catch(e){}
+}
+function idxApply(items){
+  const p = idxPref(), h = new Set(p.hide);
+  const pos = c => { const i = p.order.indexOf(c);
+                     return i < 0 ? 1e6 : i; };   // 没排过的排在后面
+  return (items || []).filter(r => !h.has(r.symbol))
+    .map((r, i) => [r, i]).sort((a, b) =>
+      (pos(a[0].symbol) - pos(b[0].symbol)) || (a[1] - b[1]))
+    .map(x => x[0]);
+}
+
+async function idxScan(){
+  let o = null;
+  try { o = await j('/api/rt/indices'); } catch(e){ return; }
+  if(!o || !(o.items || []).length) return;   // 取不到就**保持原样**，不闪成空
+  IDXLAST = o;
+  idxRender(o);
+  return o.session;
+}
+
+function idxRender(o){
+  const el = IDXBAR || (() => {
+    const d = document.createElement('div');
+    d.id = 'idxbar'; document.body.appendChild(d);
+    document.body.classList.add('hasidx');
+    return (IDXBAR = d);
+  })();
+  /* ★ 时间要说出来：现在是实时还是上一个交易日的收盘，
+     两者差一天而屏幕上长得一模一样（同「数据日与报价时间写同一个标签」）。*/
+  const ts = o.asof || '';
+  const when = ts.length >= 12
+    ? (ts.slice(4,6) + '-' + ts.slice(6,8) + ' ' + ts.slice(8,10) + ':' + ts.slice(10,12))
+    : '';
+  /* 🔴 **有的格子没有点位**（自建的「微盘400」是等权组合，
+     等权组合没有"点位"这回事）—— `Number(null).toFixed(2)` 会显示成
+     `0.00`，而那看着像"这个指数今天是 0 点"。没有就**不显示那一段**。 */
+  const show = idxApply(o.items);
+  /* 🔴 **全关掉时那个齿轮必须还在** —— 否则设置入口自己消失了，
+     人再也打不开这个面板（同 backLink 那条：死路比不给更糟）。 */
+  el.innerHTML = show.map(r =>
+      `<span class="ix" title="${esc(r.name)}　${esc(r.symbol)}${
+           r.n ? '　今日 ' + r.n + ' 只有成交' : ''}">
+         <b>${esc(r.short)}</b>${
+           r.price == null ? '' : ' ' + Number(r.price).toFixed(2)}
+         <i style="color:${upc(r.change_pct)}">${
+           (r.change_pct > 0 ? '+' : '') + Number(r.change_pct).toFixed(2)}%</i>
+       </span>`).join('')
+    + (show.length ? '' : '<span class="ix">指数都关掉了</span>')
+    + `<span class="ixw">${o.session ? '实时 ' : '已收盘 '}${esc(when)}`
+    + ` <a href="javascript:void(0)" id="idxcfg" title="选显示哪些、排什么顺序">⚙</a></span>`;
+  const g = document.getElementById('idxcfg');
+  if(g) g.onclick = idxCfgOpen;
+  return o.session;
+}
+
+/* ---- 设置面板：显示哪些、什么顺序 ----
+   ★ 入口就在带子自己上（那个 ⚙）—— 设置该放在它管的东西旁边
+     （同个股页把复权/主图收进图上方那个「⚙ 设置」）。
+   ★ 用 `.stmodal` 的样式（common.css 里，**所有页面都有**），
+     开关逻辑自己写 —— `modal()` 在 `views/app.js` 里，6 个独立 .html
+     根本没有它。 */
+function idxCfgOpen(){
+  if(!IDXLAST) return;
+  const all = IDXLAST.items || [];
+  let w = document.getElementById('idxcfgw');
+  if(!w){ w = document.createElement('div'); w.id = 'idxcfgw';
+          document.body.appendChild(w); }
+  const draw = () => {
+    const p = idxPref(), h = new Set(p.hide);
+    const ord = idxApply(all).map(r => r.symbol);
+    // 关掉的排在后面，仍然列出来（否则再也打不开它）
+    const rows = ord.concat(all.map(r => r.symbol).filter(c => h.has(c)));
+    w.className = 'stmodal';
+    w.innerHTML = `<div class="stbox" style="max-width:420px">
+      <div class="lvhead" style="margin-bottom:8px"><h2>指数带子</h2>
+        <span style="flex:1"></span>
+        <button class="btn" id="idxdone">关闭</button></div>
+      <div class="lvwhy" style="margin-bottom:8px">勾掉的不显示；
+        ↑↓ 调顺序。<b>窄屏上带子会横滚</b>，排在后面的要滚出来才看得见，
+        所以把最常看的放前面。</div>
+      <table class="lvt" style="width:100%">${rows.map((c, i) => {
+        const r = all.find(x => x.symbol === c) || {};
+        return `<tr><td class="tx" style="width:26px">
+            <input type="checkbox" data-c="${esc(c)}"${h.has(c) ? '' : ' checked'}></td>
+          <td class="tx">${esc(r.short || c)}
+            <span class="lvwhy">${esc((r.name || '').slice(0, 22))}</span></td>
+          <td class="rt" style="width:70px">
+            <a href="javascript:void(0)" data-up="${esc(c)}"
+               style="${i === 0 || h.has(c) ? 'visibility:hidden' : ''}">↑</a>
+            <a href="javascript:void(0)" data-dn="${esc(c)}"
+               style="${h.has(c) ? 'visibility:hidden' : ''}">↓</a></td></tr>`;
+      }).join('')}</table>
+      <div style="margin-top:10px"><button class="btn" id="idxrst">恢复默认</button></div>`;
+    w.querySelectorAll('input[data-c]').forEach(e => e.onchange = () => {
+      const q = idxPref(), c = e.dataset.c;
+      q.hide = e.checked ? q.hide.filter(x => x !== c) : q.hide.concat([c]);
+      idxSave(q); idxRender(IDXLAST); draw();
+    });
+    const move = (c, d) => {
+      const q = idxPref();
+      let o2 = q.order.length ? q.order.slice() : idxApply(all).map(r => r.symbol);
+      // 没排过的先补进来，否则 indexOf 是 -1、换不动
+      all.forEach(r => { if(o2.indexOf(r.symbol) < 0) o2.push(r.symbol); });
+      const i = o2.indexOf(c), jj = i + d;
+      if(i < 0 || jj < 0 || jj >= o2.length) return;
+      o2[i] = o2[jj]; o2[jj] = c;
+      q.order = o2; idxSave(q); idxRender(IDXLAST); draw();
+    };
+    w.querySelectorAll('a[data-up]').forEach(e =>
+      e.onclick = () => move(e.dataset.up, -1));
+    w.querySelectorAll('a[data-dn]').forEach(e =>
+      e.onclick = () => move(e.dataset.dn, 1));
+    const close = () => { w.className = ''; w.innerHTML = '';
+                          document.onkeydown = null; };
+    document.getElementById('idxdone').onclick = close;
+    document.getElementById('idxrst').onclick = () => {
+      idxSave({hide: [], order: []}); idxRender(IDXLAST); draw(); };
+    w.onclick = ev => { if(ev.target === w) close(); };
+    document.onkeydown = ev => { if(ev.key === 'Escape') close(); };
+  };
+  draw();
+}
+
+/* ★ 与炸板提示同一套：`setInterval` 而不是 stopPoll 那套 POLL ——
+   视图切换不该把这条带子停掉。
+   ★ 收盘后仍然**显示**最后的收盘值（带子不空），只是不再轮询。 */
+if(typeof window !== 'undefined' && !window.__idxOn){
+  window.__idxOn = true;
+  const tick = async () => {
+    const live = await idxScan();
+    if(live !== false) setTimeout(tick, IDX_MS);
+    /* live === false -> 已收盘，停掉；下次打开页面自然会再取一次。 */
+  };
+  setTimeout(tick, 400);
+}
+
 /* 把浮窗放到光标旁边，**放不下就翻到另一侧**。
    🔴 原来固定放右下（clientX+12）—— 光标移到图的最右边时浮窗整块跑到
      视口外面，读数看不见（而这正是最需要看读数的位置：曲线的最新一天）。

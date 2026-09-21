@@ -8,16 +8,42 @@ let LV=null, LVSEL=null, LVALL=false, LVO=null;
    决定，记住上次的选择会让人下次错过提示。 */
 let LVFOLD = localStorage.getItem('lvfold')==='1';
 let LVTODO = null;   // null=跟随 alert；true/false=本次手动覆盖
+/* 🔴🔴 **代际计数：await 回来之前，人可能已经切到别的账户了。**
+   `showLive` / `loadLive` 都是 `await` 取数再写 DOM。两发并发时
+   **谁后回来谁赢** —— 于是出现「hash 指向账户 A、页面显示账户 B」，
+   `LVSEL` 也被后回来那发覆盖，**而它不报错**。
+   真实场景：在账户列表里连点两个账户，第二个的请求先回、第一个后回，
+   就停在第一个上，地址栏却写着第二个，刷新一下才对。
+   ★ 判据是**代际**不是 `location.hash`：`showLive` 也被非路由调用
+     （建完账户、切「显示已归档」、收起侧栏），那几处 hash 根本没变。
+   ★ 实测：selftest 里 1/5 复现（建完账户那一发后回来，把刚 goto 过去的
+     账户覆盖掉，标题再也不变 -> 断言超时）。
+
+   🔴 **两道的分工别记反**（同 realtime 里「锁是根本修复、唯一 tmp 名
+     防跨进程」那条）：
+       loadLive 那道  **根本修复** —— 变异测试当场抓到，堆栈精确指到
+                      `$('#lvset').onclick` 那行
+       showLive 那道  **冗余防御** —— 构造出真并发之后变异**没抓到**
+                      （旧那发回来时页面并没有被盖回去）。保留它是因为
+                      逻辑上它才是"页面显示哪个账户"的守门人，而
+                      loadLive 只管 `#lvbody` 那一块；将来 showLive 里
+                      多渲染点东西时，这道就不再是冗余的。
+                      **没把它说成"抓到了"** —— 对数表里不许留没有判断的行。 */
+let LVGEN = 0;
 const LVPAGE=50;                      /* 流水每页条数（服务端也会夹到 1..500） */
 const CFK={deposit:'入金', withdraw:'出金', dividend:'分红到账', adjust:'调整'};
 
 /* esc 复用文件上方那个（第 ~357 行）—— 不重复定义。 */
 async function showLive(aid){
+  const gen = ++LVGEN;
   stopPoll();
   enterView();
   let o;
   try{ o=await j('/api/live/accounts'+(LVALL?'?all=1':'')); }
-  catch(e){ $('#main').innerHTML='<div class="none">实盘模块读取失败：'+esc(e)+'</div>'; return; }
+  catch(e){
+    if(gen !== LVGEN) return;          // 有更新的一发在跑，这一发作废
+    $('#main').innerHTML='<div class="none">实盘模块读取失败：'+esc(e)+'</div>'; return; }
+  if(gen !== LVGEN) return;            // ← 同上：不许把新页面盖回旧账户
   LV=o; LVSEL=aid||(o.accounts[0]&&o.accounts[0].id)||null;
   const cal=o.calendar||{};
   let head='';
@@ -43,45 +69,75 @@ async function showLive(aid){
      前端硬编码判据坑过一次（把 tdx 日历误报成不权威，每次打开都弹假告警）。
      账户列表的点、待办要不要展开，读的是同一个字段。 */
   const dot=a=>a.alert?`<span class="adot" title="${esc((a.alert_why||[]).join('；'))}"></span>`:'';
-  const tabs=o.accounts.map(a=>`<a class="ditem${a.id===LVSEL?' on':''}${a.archived?' miss':''}"
-      href="#/live/${a.id}" title="${esc(a.alert?(a.alert_why||[]).join('；'):(a.archived?'已归档':''))}">
-      <span>${dot(a)} ${esc(a.name)}</span><span class="dmeta">${a.n_positions} 只</span></a>`).join('');
+  /* 🔴🔴 **实盘与模拟盘分两个区**（2026-09-17，用户："希望模拟盘有一个单独的
+       入口……或者说账户区域和实盘的分开也可以"）。
+
+     ★ **没有做成顶栏第 8 个入口**，三条理由：
+       ① 模拟盘与实盘是**同一个页面、同一套 hash 路由**（`#/live/<id>`）——
+          多一个顶栏入口的话，打开模拟盘账户时那两个入口该亮哪个？
+          而顶栏高亮本来就是回答"我在哪"的（同「子页要点亮父级」那条）；
+       ② 顶栏是按**"今天要做什么"**分组的，而模拟盘不是一件独立的事，
+          它是**另一批账户**；
+       ③ 实盘与模拟盘要**互相对照**（同一策略，人执行 vs 引擎执行），
+          分成两页那个对照就要来回切。
+     🔴 **建账户的 `mode` 从"勾选框"变成"在哪个区里点的新建"** ——
+       `mode` **建好之后不能改**（同一本账混着真实成交与引擎成交就说不清了），
+       所以那个勾选框是最容易填错、且代价最大的一处。
+       少一个能填错的概念（同「刻意删掉『这个率含不含规费』开关」那条）。
+     🔴 **空的那一区照样显示**（带一句说明 + 新建入口）—— 藏起来的话，
+       从没建过模拟盘的人根本不知道有这功能（同「合并的风险是把功能藏起来」）。 */
+  /* 说明放**名称下方的小字**，不另占一列 —— 它是"这只账户是干什么的"、
+     属于名称的注解（同盘面榜单把「行业」放名称下方那条）。
+     一行截断，全文进 `title`：说明可长可短，摆进主行会把「N 只」挤走。 */
+  const item=a=>`<a class="ditem${a.id===LVSEL?' on':''}${a.archived?' miss':''}"
+      href="#/live/${a.id}" title="${esc([a.broker_note,
+          a.alert?(a.alert_why||[]).join('；'):'', a.archived?'已归档':'']
+        .filter(Boolean).join(' —— '))}">
+      <span>${dot(a)} ${esc(a.name)}${a.broker_note
+        ? `<i class="dnote">${esc(a.broker_note)}</i>` : ''}</span>
+      <span class="dmeta">${a.n_positions} 只</span></a>`;
+  /* 「是不是模拟盘」**读服务端给的布尔**，不在前端比 `mode` 字符串 ——
+     老账户根本没有 `mode` 这个字段（早于那次改动），比字符串就得记住
+     "undefined 也算实盘"这条隐含规则。 */
+  /* 🔴 **分组后的顺序只算一份**，展开态与收起态共用（`ORD`）——
+     rail 原来直接 `o.accounts.map`（账本原始顺序），于是"先建模拟盘再建实盘"
+     的账本上**两态的账户顺序不一样**：展开是「实盘…模拟盘」、收起是
+     「模拟盘…实盘」，收起再展开同一个账户跳到另一个位置。
+     实测构造验过（把模拟盘挪到 accounts.json 最前面即可复现），
+     **而它不报错**（同「两处各写一份迟早分叉」那条）。 */
+  const real=o.accounts.filter(a=>!a.paper), papr=o.accounts.filter(a=>a.paper);
+  const ORD=real.concat(papr);
+  const zone=(key,ttl,hint,list)=>`<div class="dzone" data-zone="${key}">
+      <div class="dgrp dzh"><span style="flex:1">${ttl}</span>
+        <a href="#" class="lvwhy znew" data-zone="${key}">+ 新建</a></div>
+      ${list.length?list.map(item).join(''):`<div class="dzempty">${hint}</div>`}
+      <div class="nfwrap" id="nf_${key}"></div></div>`;
+  const tabs=zone('live','💰 实盘账户',
+      '还没有实盘账户 —— 成交由你录入，持仓与收益由流水推导。', real)
+    + zone('paper','🧪 模拟盘账户',
+      '还没有模拟盘 —— 成交由<b>引擎</b>按绑定策略跑出来，数据更新后自动推进到最新；'
+      + '页面与实盘完全一样，只是账上的钱是推演出来的。', papr);
   /* 收起态：一条 44px 的轨，每个账户一个方块（名称首字）+ 角上的告警点。
      "收起后就看不到该干什么了"的收起功能不如不做。 */
   const rail=`<div class="drail">
       <a href="#" class="dchip" id="lvunfold" title="展开账户列表">›</a>
-      ${o.accounts.map(a=>`<a class="dchip${a.id===LVSEL?' on':''}"
+      ${ORD.map((a,i)=>`${(i && a.paper && !ORD[i-1].paper)?'<i class="dsep"></i>':''}<a class="dchip${a.id===LVSEL?' on':''}${a.paper?' paper':''}"
         href="#/live/${a.id}"
-        title="${esc(a.name)}${a.alert?' —— '+esc((a.alert_why||[]).join('；')):''}"
-        >${esc((a.name||'?').trim().slice(0,1))}${dot(a)}</a>`).join('')}
+        title="${esc(a.name)}${a.paper?'（模拟盘）':''}${a.alert?' —— '+esc((a.alert_why||[]).join('；')):''}"
+        >${esc((a.name||'?').trim().slice(0,1))}${dot(a)}</a>`)
+        /* 🔴 收起态也要看得出哪个是模拟盘 —— 收起来就分不出的话，
+           "把推演当成真金白银"只是时间问题（同那个紫色标签的理由）。
+           这里靠**紫色边**，不另加文字：轨只有 44px 宽。 */
+        .join('')}
     </div>`;
   $('#main').innerHTML=head+`<div id="dk" class="${LVFOLD?'fold':''}">
     ${LVFOLD?rail:`<div class="dside">
       <div class="dgrp" style="display:flex;align-items:baseline;gap:6px">
         <span style="flex:1">账户${LVALL?'（含已归档）':''}</span>
         <a href="#" id="lvfold" class="lvwhy" title="收起到左边">‹ 收起</a></div>
-      ${tabs||'<div class="none">还没有账户</div>'}
+      ${tabs}
       <div class="lvform" style="padding:2px 8px;gap:10px">
         <a href="#" id="lvall" class="lvwhy">${LVALL?'只看在用的':'显示已归档的'}</a>
-        <a href="#" id="lvnew" class="lvwhy">+ 新建账户</a>
-      </div>
-      <div id="nform" style="display:none;border-top:1px solid var(--line);
-           margin-top:8px;padding-top:8px">
-        <div class="lvform" style="padding:0 8px">
-          <input id="nn" placeholder="账户名称" style="flex:1;min-width:110px">
-          <input id="nc" size="6" placeholder="初始资金">
-          <label class="lvwhy" style="display:flex;align-items:center;gap:4px"
-                 title="成交由引擎按绑定策略跑出来，不用人录；数据更新后自动推进到最新">
-            <input type="checkbox" id="npaper"> 模拟盘</label>
-          <button class="btn" id="nb" ${o.readonly?'disabled':''}>建</button>
-        </div>
-        <div class="lvwhy" style="padding:2px 8px">
-          id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>）。
-          id 是内部主键、决定目录名，<b>不可改</b>；名称随时可改。<br>
-          🔴 <b>实盘 / 模拟盘建好之后不能改</b> —— 同一本账里混着真实成交与
-          引擎成交，之后就说不清哪一段是真的了。要换请新建一个账户。
-        </div>
-        <div class="lvmsg" id="nmsg"></div>
       </div>
       <div class="dhint" style="margin-top:12px">成交流水<b>只追加</b>，持仓由它推导。<br>
         策略版本绑定后源码<b>永久留痕</b>。</div>
@@ -91,19 +147,70 @@ async function showLive(aid){
   if($('#lvfold')) $('#lvfold').onclick=ev=>{ ev.preventDefault(); fold(true); };
   if($('#lvunfold')) $('#lvunfold').onclick=ev=>{ ev.preventDefault(); fold(false); };
   if($('#lvall')) $('#lvall').onclick=ev=>{ ev.preventDefault(); LVALL=!LVALL; showLive(LVSEL); };
-  if($('#lvnew')) $('#lvnew').onclick=ev=>{ ev.preventDefault();
-    const e=$('#nform'); e.style.display=(e.style.display==='none'?'':'none');
-    if(e.style.display==='') $('#nn').focus(); };
-  if($('#nb')) $('#nb').onclick=async()=>{
-    const m=$('#nmsg');
-    try{
-      const r=await post('/api/live/save',{
-        name:$('#nn').value.trim(), init_cash:parseFloat($('#nc').value||'0'),
-        mode:$('#npaper').checked?'paper':'live'});
-      m.className='lvmsg ok'; m.textContent='已建';
-      showLive(r.account.id);
-    }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
-  };
+  /* 建账户表单**长在它所属的那个区里**，`mode` 由区决定 ——
+     表单里没有"这是模拟盘吗"这个选项，也就没法填错。 */
+  document.querySelectorAll('.znew').forEach(e=>{ e.onclick=ev=>{
+    ev.preventDefault();
+    const z=e.dataset.zone, box=$('#nf_'+z);
+    if(box.innerHTML){ box.innerHTML=''; return; }          /* 再点一次收起 */
+    document.querySelectorAll('.nfwrap').forEach(x=>x.innerHTML='');  /* 只开一个 */
+    const paper = z==='paper';
+    box.innerHTML=`<div class="nform">
+      <div class="lvform" style="padding:0">
+        <input class="nn" placeholder="${paper?'模拟盘名称':'账户名称'}" style="flex:1;min-width:100px">
+        <!-- 🔴 **单位要写在框里**：原来只写"初始资金"，2026-09-18 用户
+             填了 40（想填 40 万），于是一手都买不起、推演出 0 笔成交、
+             页面一片空白。少一个能填错的地方，比事后解释便宜。 -->
+        <input class="nc" size="9" placeholder="初始资金（元）">
+        <button class="btn nb" ${o.readonly?'disabled':''}>建${paper?'模拟盘':'实盘账户'}</button>
+      </div>
+      <!-- ★ 说明在**建的时候**就能填：建完再去 ⚙ 设置里找的话多半不会填
+           （现有四个账户的说明全是空的，就是这么来的）。留空也行，不强制。 -->
+      <div class="lvwhy ncwhy" style="padding:2px 0 0;line-height:1.7"></div>
+      <div class="lvform" style="padding:4px 0 0">
+        <input class="nd" style="flex:1;min-width:160px" placeholder="${paper
+          ? '说明（选填）：在验证什么、和哪个实盘账户对照'
+          : '说明（选填）：哪个券商、跑什么策略、本金多少'}"></div>
+      ${paper?`<!-- 🔴 起点在【建的时候】设：建完再改的话，若已经推演过就
+           必须先「重建」（换起点会让整段账本对不上）—— 那时人已经看过
+           一遍数据了。留空 = 从今天起。 -->
+      <div class="lvform" style="padding:4px 0 0;align-items:center">
+        <span class="lvwhy" style="white-space:nowrap">推演起点</span>
+        <input class="ns" type="date" style="min-width:130px">
+        <span class="lvwhy">留空 = 从今天起。设成历史某天的话，
+          建好绑上策略就会一路推演到最新数据日。</span></div>`:''}
+      <div class="lvwhy" style="padding:4px 0 0">
+        ${paper?'成交由<b>引擎</b>按绑定策略跑出来，不用人录 —— 建好之后去「策略」绑一个版本，它会自动推进到最新数据日。<br>':''}
+        id 自动分配（下一个 <code>${esc(o.next_id||'a1')}</code>），
+        它是内部主键、决定目录名、<b>不可改</b>；名称随时可改。<br>
+        🔴 <b>实盘 / 模拟盘建好之后不能改</b> —— 同一本账里混着真实成交与引擎
+        成交，之后就说不清哪一段是真的了。要换请新建一个账户。
+      </div>
+      <div class="lvmsg nmsg"></div></div>`;
+    const nn=box.querySelector('.nn'); nn.focus();
+    /* ★ 本金太小**当场说一句**，不拦 —— 40 元的模拟盘也是合法的
+       （只是没意义），硬拦会挡住"我就想试试"。但不说的话人不会发现
+       自己少打了三个零（同「悄悄截断比查不出来更糟」那条的精神）。 */
+    const nc=box.querySelector('.nc'), ncw=box.querySelector('.ncwhy');
+    nc.oninput=()=>{ const v=parseFloat(nc.value||'0');
+      ncw.innerHTML = (v>0 && v<10000)
+        ? `🔴 ${num(v,0)} 元买不起一手 —— A 股一手 100 股，常见的票一手要
+           几千到几万元。填这个数的话推演出来会是<b>零笔成交</b>。
+           是不是想填 ${num(v*10000,0)}（${num(v,0)} 万）？`
+        : ''; };
+    box.querySelector('.nb').onclick=async()=>{
+      const msg=box.querySelector('.nmsg');
+      try{
+        const r=await post('/api/live/save',{
+          name:nn.value.trim(), init_cash:parseFloat(box.querySelector('.nc').value||'0'),
+          broker_note: box.querySelector('.nd').value.trim(),
+          paper_start: paper ? (box.querySelector('.ns').value || '') : undefined,
+          mode: paper?'paper':'live'});
+        msg.className='lvmsg ok'; msg.textContent='已建';
+        showLive(r.account.id);
+      }catch(err){ msg.className='lvmsg bad'; msg.textContent=String(err); }
+    };
+  };});
   if(LVSEL) loadLive(LVSEL); else $('#lvbody').innerHTML='<div class="none">先建一个账户</div>';
 }
 
@@ -197,6 +304,36 @@ function lvRtd(f, x, P){
   return '';
 }
 
+/* 模拟盘「重建」= 删档重开：删掉引擎推演出来的成交（`source=='paper'`），
+   按当前设置（本金 / 起点 / 绑定版本 / 参数）重跑一遍。
+
+   🔴 **手工补录的那几笔不动** —— 判据在 `lv/paper.py` 的 `reset` 一处
+     （它只删 `source == 'paper'` 的行），页面不重复实现。
+   🔴 **服务端要求显式 `confirm`** —— 手滑点一下就把账本里那几十笔删了，
+     而那是看过的东西。所以这里必须 confirm 一次，而且要**说清代价**。
+   ★ 一处定义、两个入口共用（0 笔那条警告 / 对账不一致那个浮层）——
+     各写一份的话措辞与 `confirm:true` 这个必传项迟早分叉。 */
+async function paperRebuild(aid){
+  const n=((LVO||{}).paper||{}).n_fills;
+  if(!confirm('重建会删掉这个模拟盘推演出来的成交'
+      + (n ? '（当前 '+n+' 笔）' : '')
+      + '，然后按当前的本金 / 起点 / 绑定版本重跑一遍。\n'
+      + '手工补录的那几笔不会被删。要继续吗？')) return;
+  const m=$('#lvmsg');
+  if(m){ m.className='lvmsg'; m.textContent='重建中…（从起点重放一遍）'; }
+  try{
+    const r=await post('/api/live/paper',{id:aid, act:'reset', confirm:true});
+    await loadLive(aid);
+    const m2=$('#lvmsg');
+    if(m2){ m2.className='lvmsg ok';
+      m2.textContent='重建完成 —— 推进到 '+(r.advanced_to||'—')
+        +'，成交 '+(r.n_fills!=null?r.n_fills:'—')+' 笔'; }
+  }catch(e){
+    const m2=$('#lvmsg');
+    if(m2){ m2.className='lvmsg bad'; m2.textContent=String(e); } else alert(String(e));
+  }
+}
+
 /* 结构签名：变了就只能整块重建（新增/卖光了持仓、待办换了、版本重绑）。
    🔴 判据要含**持仓代码序列**而不只是只数：换了一只票但只数不变时，
      逐格 patch 会把新票的数字填进旧票那一行 —— 而它不报错。 */
@@ -245,6 +382,7 @@ async function loadLive(aid, quiet){
      几百毫秒后再撑开 —— 那就是"整页跳一下"的来源。首次进入才给占位，
      那时本来就是空的、没有东西可跳。 */
   if(!quiet) b.innerHTML='<div class="none">读取中…</div>';
+  const gen = LVGEN;
   let o; try{ o=await j('/api/live/account?id='+encodeURIComponent(aid)); }
   catch(e){
     /* ★ 轮询失败**不要**把已经渲好的内容换成错误信息：网络抖一下就把
@@ -252,6 +390,20 @@ async function loadLive(aid, quiet){
     if(!quiet) b.innerHTML='<div class="none">'+esc(e)+'</div>';
     return;
   }
+  /* 🔴 **await 期间人可能已经走开了。** `b` 是在 await **之前**取的，
+     而这几百毫秒里 hash 可能已经切到别的账户 / 别的视图 —— 那时
+     `#lvbody` 已被换成新的一个，往旧的 `b` 上写等于**写进一个脱离文档的
+     节点**，紧接着 `$('#lvset').onclick` 就是 **null** 而抛
+     `Cannot set properties of null` —— **只在控制台里报**，页面看着正常
+     （同 `renderChart` / `lprBar` 往 null 写那次）。
+     实测：selftest 快速切账户时**偶发**，连跑三次才复现一次。
+     ★ 判据用**容器还是不是同一个**，不是 `location.hash` ——
+       同一个 hash 下也会重渲染（换区间 / 刷新），而"这个容器还在不在"
+       是当下的事实。 */
+  /* 两道一起：容器被换掉了（切走了），或者**期间有更新的一发**
+     —— 后者容器判据挡不住（同一个 `#lvbody` 上两发 loadLive 并发，
+     旧的后回来会拿旧数据盖掉新数据）。 */
+  if($('#lvbody') !== b || gen !== LVGEN) return;
   /* 结构没变就只换数字，DOM 一行不动（滚动位置/hover/选中都保住）。 */
   if(quiet && livePatch(o)){
     if(o.rt_live) livePoll(aid); else stopPoll();
@@ -262,6 +414,42 @@ async function loadLive(aid, quiet){
   await lvWhyLoad(aid);
   LVO=o;
   const a=o.account, sig=o.signal, ro=LV.readonly, P=o.pos||{};
+  /* 「这个账户是干什么的」—— 它是标题的注解，所以**独占一行、紧跟标题**，
+     不挤进 `.lvhead` 那一排（那排已经有名称/模拟盘标签/数据日/策略/三个按钮，
+     同「能进 tooltip 的就别占列」）。
+     🔴 **没有说明时整行不渲染** —— 留一句"（未填写）"就是常驻噪声
+     （同「常驻一条『一切正常』的横幅等于教人忽略这个位置」）。
+     入口指向 ⚙ 设置，否则人看得见却不知道去哪改。 */
+  const noteHtml = a.broker_note
+    ? `<div class="lvnote">${esc(a.broker_note)}</div>`
+    : '';
+  /* 🔴🔴 **推进"成功"但一笔成交都没有 -> 必须说出为什么。**
+     2026-09-18 用户报「选了起始时间、也推进了，但是没有任何数据出现」——
+     那次是本金填了 40（元），一手都买不起，引擎记了 30 条
+     「资金不足一手」拒单，而链条断在 `advance` 没把它带出来。
+     ★ 用**警告样式**不是 ⓘ：它要人去做事（改本金再重建），
+       而「警告不许进 ⓘ」—— 藏起来等于没有。
+     ★ 空着时整块不渲染（同说明那条）：常驻一条"一切正常"等于教人
+       忽略这个位置。 */
+  const emptyHtml = (a.paper && (o.paper||{}).why_empty)
+    ? `<div class="lvwarn"><b>这个模拟盘推进完之后一笔成交都没有</b><br>
+        ${esc(o.paper.why_empty)}
+        ${(o.paper.rejects||[]).length ? `<br><span class="lvwhy">引擎的拒单原因：${
+          o.paper.rejects.map(r=>`${esc(r.why)} × ${r.n}`).join('、')}</span>` : ''}
+        <!-- 🔴 **说了下一步就得给入口。** 提示里写着"改大初始资金再重建"，
+             而页面上原来**没有重建按钮**（前端从来没调过 act=reset）——
+             那就是「说了不能做却不给出路」，同 backLink 那条的反面。
+             🔴 **旧状态（没记原因）那一支不给这两个按钮** —— 那时我们
+             并不知道为什么 0 笔，摆一个「改初始资金」在那儿就是在
+             **暗示原因是本金**，而它可能根本不是（候选池空 / 没有调仓日
+             长得一模一样）。那一支的下一步是上面的「▷ 推进」。 -->
+        ${o.paper.stale_state ? '' : `<div style="margin-top:8px">
+          <button class="btn" id="lvsetc" ${ro?'disabled':''}>⚙ 改初始资金</button>
+          <button class="btn" id="lvrb" ${ro?'disabled':''}>↻ 重建</button>
+          <span class="lvwhy">重建 = 删掉推演出来的成交、按当前设置重跑
+            （手工补录的那几笔不动）</span></div>`}
+       </div>`
+    : '';
   const it=P.items||[];
   const sgn=x=>x==null?'':(x>=0?'+':'');
   const col = upc;
@@ -273,7 +461,9 @@ async function loadLive(aid, quiet){
     ${a.code_sha256?`<a class="lvtag on" href="#" id="lvstrat"
         title="源码 / 参数 / 版本历史 / 用这个版本跑过的回测">${esc(a.strategy_path.split('/').pop())}
         @${esc(a.code_sha256.slice(0,8))} ›</a>`
-      :'<a class="lvtag" href="#" id="lvstrat">未绑定策略 ›</a>'}
+      :`<span class="lvtag" title="这个账户不跑策略：成交自己录，没有信号与待办。
+随时可以绑一个策略，绑了就有了。">手工账户</span>
+        <a class="lvtag" href="#" id="lvstrat">绑定策略 ›</a>`}
     <span style="flex:1"></span>
     <!-- ★「立即重算」不在这一排：这排是**账户级**动作（记一笔/流水/设置），
          而重算算的是**调仓信号** —— 它属于「今日待办」那一块，
@@ -284,14 +474,15 @@ async function loadLive(aid, quiet){
          "版本 9FB82061" 一模一样，实测**人找不到它** ——
          看不出能点的入口 = 没有入口（同 backLink 那条的反面）。 -->
     <a class="btn" href="#/live/${a.id}/why">选股理由</a>
-    ${a.mode==='paper'?`<button class="btn" id="lvadv" ${ro?'disabled':''}
+    ${a.paper?`<button class="btn" id="lvadv" ${ro?'disabled':''}
        title="按绑定策略跑到最新数据日，把新成交写进账本（幂等，没新交易日就什么都不做）"
        >▷ 推进</button>`:''}
     <button class="btn" id="lvset">⚙</button>
   </div>
+  ${noteHtml}${emptyHtml}
   <div class="lvmsg" id="lvmsg"></div>
   <div id="lvkpi">${kpiHtml(o)}</div>
-  ${sigHtml(sig, o.alert, o.alert_why)}
+  ${sigHtml(sig, o.alert, o.alert_why, !!a.code_sha256)}
   <div class="lvsec"><h3>当前持仓
       ${it.length?`<span class="lvwhy">${it.length} 只</span>${posHelp(P)}
         ${Object.keys((LVWHYH||{}).entry||{}).length
@@ -317,7 +508,34 @@ async function loadLive(aid, quiet){
     LVTODO = !((LVTODO==null) ? !!o.alert : LVTODO); loadLive(aid); };
   $('#lvstrat').onclick=ev=>{ ev.preventDefault(); openStrat(aid, a.code_sha256||''); };
   $('#lvset').onclick=()=>openSettings(aid, a, ro);
-  $('#lvrec').onclick=()=>openRecord(aid, sig, ro);
+  /* 🔴 **按钮照样可点，点了把原因和下一步说清楚** —— 项目纪律：
+     一律不设 `disabled`（disabled 的元素连 title 都不触发，
+     "点了没反应"是最难查的那种坏）。
+     规则本身在服务端 `pos.add_fill` 一处判（页面能绕过）。 */
+  $('#lvrec').onclick=()=>{
+    if(a.paper && a.code_sha256){
+      modal(`<h3>这个模拟盘绑了策略，成交由引擎产生</h3>
+        <div class="lvwhy" style="line-height:1.9">
+          <!-- 🔴 HTML 里渲染不了 markdown 的星号，要用 <b> ——
+               同「desc 里不写 markdown 星号」那条（那次是 title 属性）。 -->
+          手工录的那几笔引擎不会跑出来，<b>下一次「▷ 推进」会整段对不上账</b>
+          —— 而那时报的原因是"数据被修正过"，指不到真正的原因。<br><br>
+          · 想让引擎跑 -> 点上面的 <b>▷ 推进</b><br>
+          · 想自己手工推演 -> 先在 <b>${esc((a.strategy_path||'策略').split('/').pop())}</b>
+            那里<b>解绑策略</b>，这个模拟盘就变成"手工模拟盘"<br>
+          · 两种都想要 -> 建两个模拟盘（账本混在一起就说不清哪笔是谁的）
+        </div>
+        <div style="margin-top:12px"><button class="btn" id="rcok">知道了</button>
+        <a class="btn" href="#" id="rcstrat">去解绑策略 ›</a></div>`, () => {
+        $('#rcok').onclick=()=>{ const e=$('#stwrap'); e.className=''; e.innerHTML=''; };
+        $('#rcstrat').onclick=ev=>{ ev.preventDefault();
+          const e=$('#stwrap'); e.className=''; e.innerHTML='';
+          openStrat(aid, a.code_sha256||''); };
+      });
+      return;
+    }
+    openRecord(aid, sig, ro);
+  };
   /* 模拟盘手动推进。★ 自动那条挂在 tick_daily（数据更新后），这里是
      "我现在就想看看"的入口 —— 两者调的是同一个接口，不是两套逻辑。
      🔴 innerHTML 之后才存在的元素要在这里绑，不是渲染开头
@@ -329,12 +547,32 @@ async function loadLive(aid, quiet){
       const r=await post('/api/live/paper',{id:aid});
       /* 🔴 对账不一致时**不刷新成"好像成功了"** —— 说清楚再让人决定。 */
       if(r.mismatch){
-        alert('重跑结果与账本对不上（到 '+r.mismatch.until+'）：\n'
-          + r.mismatch.why + '\n账本没有被改动。');
+        /* 🔴 **硬拒要给出路** —— 原来只弹一句"账本没有被改动"就完了，
+           人在页面上没有任何办法继续（同「硬拒而不给出路最后会变成
+           绕过整个入口」那条）。现在把「重建」摆在这里。 */
+        modal(`<h3>重跑结果与账本对不上（到 ${esc(r.mismatch.until)}）</h3>
+          <div class="lvwhy" style="line-height:1.9">${esc(r.mismatch.why)}<br><br>
+            账本里 ${r.mismatch.n_ledger} 笔、重跑出 ${r.mismatch.n_rerun} 笔。
+            <b>账本一个字节都没动。</b></div>
+          <div style="margin-top:12px">
+            <button class="btn" id="mmno">先不动</button>
+            <button class="btn" id="mmrb">↻ 重建（删档重开）</button></div>`, () => {
+          $('#mmno').onclick=()=>{ const e=$('#stwrap'); e.className=''; e.innerHTML=''; };
+          $('#mmrb').onclick=()=>{ const e=$('#stwrap'); e.className=''; e.innerHTML='';
+            paperRebuild(aid); };
+        });
       }
       await loadLive(aid);
     }catch(e){ b.textContent=old; alert(String(e)); }
   };
+  /* ★ 两个入口（0 笔警告里、对账不一致浮层里）走**同一条**重建链 ——
+     各写一份的话 confirm 的措辞与 `confirm:true` 这个必传项迟早分叉。 */
+  /* ★ 「手工账户」那块里的「绑定策略 ›」与顶栏那个是**同一条链** ——
+     各写一份的话迟早一个能开一个不能（同 `paperRebuild` 那条）。 */
+  if($('#lvbind2')) $('#lvbind2').onclick=ev=>{
+    ev.preventDefault(); openStrat(aid, a.code_sha256); };
+  if($('#lvrb')) $('#lvrb').onclick=()=>paperRebuild(aid);
+  if($('#lvsetc')) $('#lvsetc').onclick=()=>openSettings(aid, a, ro);
   /* 持仓表的表头排序 —— innerHTML 之后才存在，所以每次全量渲染都要重绑。 */
   lvSortBind(aid);
   /* 盘中才轮询；收盘后停掉并在页面上说清（不说的话人会以为坏了）。 */
@@ -602,7 +840,7 @@ const skLink=(code, text, cls)=>spLink(code, text, cls)
        （同「警告不许进 ⓘ」那条）。 */
 function paperTag(o){
   const a=o.account||{}, p=o.paper;
-  if(a.mode!=='paper') return '';
+  if(!a.paper) return '';          /* 判据由服务端给（lv.is_paper 唯一定义）*/
   const st=p||{};
   const to=st.advanced_to||'—';
   /* 对账差：账本与引擎天然差一点（舍入 + 复权因子里含着分红表没有的那些），
@@ -612,8 +850,15 @@ function paperTag(o){
   const mm=st.mismatch;
   return `<span class="lvtag on" style="background:#6b5bd6;border-color:#6b5bd6"
       title="成交由引擎按绑定策略跑出来，不是真实成交">模拟盘</span>
-    <span class="lvtag" id="lvpaper" title="${esc(mm?mm.why:'数据更新后自动推进到最新数据日')}"
-      >推进到 ${esc(to)}${mm?' · 🔴 对账不一致':''}${
+    <span class="lvtag" id="lvpaper" title="${esc(mm?mm.why:'数据更新后自动推进到最新数据日')
+        +(st.datalake_declared?'\n\n这个策略自己声明了数据源（DATALAKE），'
+          +'所以推进到的是【那份数据】的最新交易日，可能与主数据不同天。':'')}"
+      >推进到 ${esc(to)}${
+        /* 🔴 策略自己声明了数据源时**必须说出来**：它的最新日与主数据
+           常常不是同一天（etf_lake 手工建、不在每日同步链里），
+           只写"推进到 09-11"的话人拿它跟主数据 09-17 一比就以为坏了。 */
+        st.datalake_declared&&st.datalake?' · 数据源 '+esc(st.datalake):''
+      }${mm?' · 🔴 对账不一致':''}${
         bad?` · 对账差 ${num(rec.diff,2)} 元`:''}</span>`;
 }
 
@@ -723,11 +968,27 @@ function posHelp(P){
 }
 
 
-function sigHtml(s, alert, alertWhy){
+function sigHtml(s, alert, alertWhy, bound){
   /* 🔴 无信号那支**也要有按钮**：文案写着"点「立即重算」"，而按钮已从
      账户头部挪进这一块 —— 不给的话那句话指向一个不存在的按钮
      （同 backLink 那条：给一个点了没反应的入口比不给更糟）。
      而且恰恰是"还没有信号"时最需要它。 */
+  /* 🔴 **"没绑策略"是一种【正常状态】，不是"还差一步"。**
+     原来这两支混成一支：未绑策略的账户也显示「还没有信号 —— 点「立即重算」」
+     加一个按钮，而点下去必然报"账户还没绑定策略" ——
+     **指向一条走不通的路**（同 backLink 那条的反面）。
+     2026-09-19 用户要的「非策略账户」就是这个：手工记账的账户不该被
+     一直催着去绑策略。
+     ★ 判据用**绑没绑**（`code_sha256`）这个既有事实，**不加新字段** ——
+       加一个 `no_strategy` 就是第二份状态，而"标了 no_strategy 却绑了策略"
+       之类的组合迟早出现，且分叉不报错。 */
+  if(!bound) return `<div class="lvsec" style="margin-bottom:14px"><h3>今日待办
+      <span style="flex:1"></span>
+      <a class="btn" href="#" id="lvbind2">绑定策略 ›</a></h3>
+    <div class="none">这是<b>手工账户</b> —— 不跑策略，所以没有信号与待办。
+      <div class="lvwhy" style="margin-top:4px">持仓、成本、收益、业绩页都照常用，
+        成交自己在「✎ 记一笔」里录。想让它按策略出买卖清单，绑一个策略即可。</div>
+    </div></div>`;
   if(!s) return `<div class="lvsec" style="margin-bottom:14px"><h3>今日待办
       <span style="flex:1"></span>
       <button class="btn" id="lvtick" ${LV.readonly?'disabled':''}

@@ -11,6 +11,7 @@
 import datetime
 import json
 import os
+import sys
 import re
 import uuid
 
@@ -39,6 +40,22 @@ DEFAULT_WARMUP_START = '2016-01-01'
 #   而不是靠「同步 18:10 / 出信号 19:00」两个时间常量隔开。后者一旦同步变慢
 #   就错位，而错位的表现是【信号静默用了昨天的数据】。
 #   所以这里设得很晚：只在同步压根没跑（机器睡了、脚本坏了）时兜一次。
+
+#: 账户的 `mode` 取值。`live` 是默认（真金白银），`paper` 是模拟盘。
+#: 🔴 **放在 base 而不是 paper.py**：它是**账户模型**的一部分，而
+#:   `lv/bench.py` 要用它来决定推演起点 —— 而 `paper.py` 反过来
+#:   import 了 bench，放那边就是循环依赖（同「依赖是单向的 DAG」那条）。
+MODE_LIVE, MODE_PAPER = 'live', 'paper'
+
+
+def is_paper(acct):
+    """这个账户是不是模拟盘。
+
+    ★ 判据放一处 —— 散在各页写 `a.get('mode') == 'paper'` 的话，
+      将来加个 `mode` 取值就得满仓库找（同「判据只有一份」那条）。
+    """
+    return (acct or {}).get('mode') == MODE_PAPER
+
 
 DEFAULT_TICK_TIME = '22:00'
 
@@ -213,7 +230,8 @@ def get_account(aid):
 
 
 def upsert_account(aid, name=None, init_cash=None, broker_note=None,
-                   tick_time=None, warmup_start=None, fee=None, mode=None):
+                   tick_time=None, warmup_start=None, fee=None, mode=None,
+                   paper_start=None):
     lst = load_accounts()
     hit = next((a for a in lst if a['id'] == aid), None)
     if hit is None:
@@ -222,7 +240,7 @@ def upsert_account(aid, name=None, init_cash=None, broker_note=None,
                'broker_note': broker_note or '', 'tick_time': DEFAULT_TICK_TIME,
                'warmup_start': DEFAULT_WARMUP_START, 'created': _now(),
                # 🔴 `mode` 只在**建账户时**定，之后不给改（见下）。
-               'mode': mode if mode in ('live', 'paper') else 'live',
+               'mode': mode if mode in (MODE_LIVE, MODE_PAPER) else MODE_LIVE,
                'code_sha256': None, 'strategy_path': None, 'params': {}}
         lst.append(hit)
     elif mode is not None and mode != hit.get('mode', 'live'):
@@ -239,6 +257,34 @@ def upsert_account(aid, name=None, init_cash=None, broker_note=None,
         hit['init_cash'] = float(init_cash)
     if broker_note is not None:
         hit['broker_note'] = broker_note
+    if paper_start is not None:
+        # 🔴 **模拟盘的推演起点**（`lv/bench.py` 拿它当引擎 start）。
+        #   只对模拟盘有意义：实盘那条「策略曲线」必须从**开户日**起，
+        #   才能与实际曲线对齐起点（同「两条的基点都必须是本金」那条）。
+        if not is_paper(hit):
+            raise LiveError('只有模拟盘能设推演起点 —— 实盘的策略曲线'
+                            '必须从开户日起，否则两条线对不齐起点。')
+        ps = str(paper_start).strip()
+        if ps:
+            try:
+                _d(ps)
+            except Exception:                               # noqa: BLE001
+                raise LiveError('推演起点要写成 YYYY-MM-DD：%r' % paper_start)
+            if ps > _now()[:10]:
+                raise LiveError('推演起点不能是未来：%s' % ps)
+        # 🔴 **已经推演过就不许静默改。** `advance` 每次从起点**重放**，
+        #   换了起点之后旧账本必然对不上 —— 而那时页面报的是
+        #   「重跑结果与账本对不上，多半是数据被修正过」，**指不到真正的
+        #   原因**（同「报错必须指向真正的原因」那条）。
+        #   要换起点就走「重建」（删档重开），那是显式的、要确认的动作。
+        if ps != (hit.get('paper_start') or ''):
+            _n = sum(1 for r in fills(aid) if r.get('source') == MODE_PAPER)
+            if _n:
+                raise LiveError(
+                    '这个模拟盘已经推演出 %d 笔成交了，改起点会让它们全部'
+                    '对不上。请先「重建」（删档重开）再改，或者新建一个'
+                    '模拟盘。' % _n)
+        hit['paper_start'] = ps
     if tick_time is not None:
         hit['tick_time'] = tick_time
     if warmup_start is not None:
@@ -498,3 +544,37 @@ def calendar_meta():
 
 
 # ============================ 信号生成 ============================
+
+
+def repo_root():
+    """仓库根（`assay/`）—— import `run` 之前要把它放进 sys.path。"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_strategy_lake(mod, cli=None):
+    """策略模块级 `DATALAKE` 声明 -> 实际的 lake 路径。**一处定义**。
+
+    🔴 建引擎的路径**不止一条**：`run.py`（命令行）、`lv/bench.py`
+      （模拟盘 / 策略曲线）、`lv/sig.py`（出信号）。2026-09-13 只在 run.py
+      里接了 `resolve_lake`，于是后两条各自漏了一次 —— ETF 策略在模拟盘里
+      崩、在 tick 里每小时崩一次，而 `etf_trend_momentum` 那种会**全程空仓、
+      一条平线、不报任何错**。所以解析这件事收在这里，调用方只管传 `mod`。
+
+    🔴 `run.resolve_lake` 抛的是 **`SystemExit`（BaseException）** ——
+      `except Exception` 抓不到，在服务里会让请求线程直接死、页面只看到
+      一个没有原因的 500。这里翻成 `LiveError`。
+    """
+    root = repo_root()
+    added = False
+    if root not in sys.path:
+        sys.path.insert(0, root)
+        added = True
+    try:
+        from run import resolve_lake as _rl
+        try:
+            return _rl(mod, cli)
+        except SystemExit as e:
+            raise LiveError(str(e))
+    finally:
+        if added and sys.path and sys.path[0] == root:
+            sys.path.pop(0)
