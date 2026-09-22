@@ -440,8 +440,14 @@ def diff_one(aid, day, sig=None):
       也几乎总有差 —— 那是滑点与下单时机，与"照没照做"是两件事。
     """
     from . import sig as _sig
+    used = None
     if sig is None:
-        sig = _sig.load_signal(aid, day)
+        # 🔴🔴 比的必须是【你下单时手上那一版】，不是"现在这份" ——
+        #   主文件是执行完之后重算出来的，照着做完策略当然说"无事可做"，
+        #   于是清单变空、**照做的每一笔都被判成"提示外"**（用户 2026-09-22
+        #   报的就是这个：09-15 与 09-22 两期全变成提示外，而账本与当时那一版
+        #   精确一致）。见 `sig.signal_as_of`。
+        sig, used = _sig.signal_as_of(aid, day)
     if not sig:
         return {'date': day, 'error': '这一天没有信号'}
     got = _fill_map(aid, day)
@@ -497,15 +503,23 @@ def diff_one(aid, day, sig=None):
         # ★ 折算后按 100 股取整 —— A 股一手 100 股，给个 3,522 这种数
         #   照着下不了单（引擎内部也是 `int(value / (价 * 100))` 取整手）。
         want = float(r['want_shares'] or 0) * (scale if wb else 1.0)
+        # 🔴 **取整只用于显示，比容差要用未取整的那个值。**
+        #   `int(want/100)*100` 是**向下**取整：2600 x 0.843 = 2191.5 -> 2100，
+        #   丢掉 4.2%，而 TOL 的注释写的正是"一手 100 股 + 归一化后的凑整
+        #   误差" —— 先取整再比，等于把这份误差从容差里扣掉一遍。
+        #   实测 2026-09-15：实际 2300 对未取整的 2191.5 只差 **4.95%**
+        #   （在 8% 容差内 = 照做了），对取整后的 2100 却是 9.5% -> 判成
+        #   `over`。而且向下取整是**单向**偏差，系统性地更容易报"超量"。
+        want_cmp = want
         want = float(int(want / 100) * 100) if want else 0.0
         if wb or ws:
             r['want_shares'] = round(want) or None
         if wb:
             if not bs:
                 r['kind'] = 'missed'
-            elif want and abs(bs - want) / want <= TOL:
+            elif want_cmp and abs(bs - want_cmp) / want_cmp <= TOL:
                 r['kind'] = 'ok'
-            elif bs < want:
+            elif bs < want_cmp:
                 r['kind'] = 'short'
             else:
                 r['kind'] = 'over'
@@ -551,6 +565,9 @@ def diff_one(aid, day, sig=None):
         'got_amt': got_amt or None,
         'is_rebalance_day': sig.get('is_rebalance_day'),
         'n_want_buy': len(want_b), 'n_want_sell': len(want_s),
+        # ★ 用的是哪一版**必须带出去** —— 静默换一版去比，页面上就是个
+        #   说不清的差异（同「悄悄截断比查不出来更糟」）。
+        'used': used,
         'px_diff_avg': (sum(pxs) / len(pxs)) if pxs else None,
         'clean': not any(r['kind'] != 'ok' for r in rows),
     }
@@ -575,9 +592,14 @@ def diff_history(aid, limit=60):
                 sig = json.load(fh)
         except Exception:                                   # noqa: BLE001
             continue
+        # 🔴 这里**不能把 `sig` 传下去** —— 传了就等于让 `diff_one` 拿
+        #   "现在这份"去比，而它可能是执行完之后重算出来的空清单
+        #   （用户 2026-09-22：照做的两期全被判成"提示外"）。
+        #   让 `diff_one` 自己去挑【下单时手上那一版】。
+        #   ★ 这里读主文件只为**筛掉空段**（既没提示也没成交的日子）。
         if not ((sig.get('buy') or sig.get('sell')) or _fill_map(aid, day)):
             continue
-        out.append(diff_one(aid, day, sig))
+        out.append(diff_one(aid, day))
         if len(out) >= limit:
             break
     return out

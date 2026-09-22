@@ -8274,6 +8274,123 @@ def t_signal_revision_notice():
             '（%s 是真被改的）' % kept['code'][:6])
 
 
+@case('执行差异要比【下单时那一版】，且取整不许吃掉容差', tag='fast')
+def t_exec_diff_as_of():
+    """🔴🔴 用户 2026-09-22：「2026-09-15、2026-09-22 这两期我都是按提示
+    买入、卖出的，为什么现在都显示是提示外买入、卖出」。
+
+    两个独立缺陷叠在一起，**都不报错**：
+
+    ① 比的是**主文件**，而主文件是【执行完之后重算】出来的 —— 照着做完
+       策略当然说"无事可做"，清单变空，于是**照做的每一笔都被判成"提示外"**。
+       实测两期都精确对得上当时那一版（09-15 rev2 / 09-22 rev1）。
+       改法：`sig.signal_as_of` 取**开盘前最后一版**（信号本来就是给次日开盘
+       用的，人照着下单时手上就是那份；开盘后重算的那些没机会被执行）。
+
+    ② 判据**先把归一化后的期望值向下取整到手、再比容差** ——
+       `2600 x 0.843 = 2191.5 -> 2100`，丢掉 4.2%；而 TOL 的注释写的正是
+       "一手 100 股 + 归一化后的凑整误差"，先取整再比等于把这份误差
+       从容差里**扣掉一遍**。实测：实际 2300 对未取整的 2191.5 只差 4.95%
+       （容差内 = 照做了），对取整后的 2100 却是 9.5% -> 判成 `over`。
+       而且向下取整是**单向**偏差，系统性地更容易报"超量"。
+
+    ★ 两条都要**反向自证**：拿主文件去比必须不 clean、按取整值比必须判 over
+      —— 否则判据分不出"修好了"和"本来就这样"。
+    """
+    import copy
+    import json as _j
+    import shutil
+    import tempfile
+
+    from assay import live as lv
+    from assay.lv import bench as _b
+    from assay.lv import sig as _sg
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_xd_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    try:
+        # 🔴 **现找一个有 revision 的日子**，不要拿"最新那份"——
+        #   最新那份常常是明天的信号、一版都没被覆盖过，
+        #   于是这条用例静默变成空转（实测第一版就是这样）。
+        import glob as _g
+        aid = 'froec'
+        cur = day = None
+        for _f in sorted(_g.glob(os.path.join(
+                lv.LIVE, aid, 'signals', '*.json')), reverse=True):
+            _o = _j.load(open(_f, encoding='utf-8'))
+            if _o.get('revisions'):
+                cur, day = _o, _o['for_date']
+                break
+        assert cur, '构造不对：%s 没有任何被覆盖过的信号' % aid
+        # ---- ① 照【下单时那一版】比 ----
+        old, used = _sg.signal_as_of(aid, day)
+        assert used and used.get('rev'), \
+            ('没挑到归档的那一版（used=%s）—— 主文件建于 %s，'
+             'rev 建于更早才对' % (used, cur.get('built_at')))
+        assert used['built_at'] < day + 'T09:30', \
+            '挑的那版建于开盘之后（%s），它没机会被执行' % used['built_at']
+        d1 = _b.diff_one(aid, day)
+        assert d1.get('clean'), \
+            ('照着当时那一版做的，不该有差异：%s'
+             % [(r['code'], r['kind']) for r in d1['rows'] if r['kind'] != 'ok'])
+        # 反向自证：拿【主文件】去比必须不 clean，否则上面那条什么都没证
+        d0 = _b.diff_one(aid, day, sig=cur)
+        assert not d0.get('clean'), \
+            ('构造没意义：拿"现在这份"去比也是 clean 的 —— 那说明主文件与'
+             '那一版一样，这条判据分不出改没改')
+        # ---- ② 取整不许吃掉容差 ----
+        #   构造：把当时那一版的股数改成一个"归一化后刚好卡在整手边界"的值
+        b0 = [x for x in (old.get('buy') or [])]
+        assert b0, '构造不对：那一版没有买入'
+        got = _b._fill_map(aid, day).get(
+            lv.normalize_code(b0[0]['code']), {})
+        bs = got.get('buy_shares')
+        TOL_T = 0.08          # 与 bench.diff_one 里那个 TOL 同一个数
+        assert bs, '构造不对：账本里没有那一只的买入'
+        # 🔴 构造要**直接控制 `amount`**：`scale = 实际买入额 / Σamount`，
+        #   而 `want_cmp = shares x scale`。第一版把 amount 写成
+        #   `shares x ref_price`，于是 shares 一改 scale 跟着变、
+        #   **期望值被抵消回原处**（W 与 shares 无关），变异 ③ 因此漏过。
+        #   现在反解：要让 W 落在"未取整算在容差内、取整后越线"的那个带里。
+        got_amt = float(got.get('buy_amt') or 0)
+        assert got_amt > 0, '构造不对：那一天没有买入金额'
+        lo_w = bs / (1 + TOL_T)              # 未取整仍在容差内的下界
+        hi_w = (int(lo_w / 100) + 1) * 100   # 取整后会掉到更低一档
+        W = (lo_w + hi_w) / 2.0
+        assert abs(bs - W) / W <= TOL_T and \
+            abs(bs - int(W / 100) * 100) / (int(W / 100) * 100) > TOL_T, \
+            ('构造不成立：W=%.1f 分不出"取整前后"（bs=%s）' % (W, bs))
+        s2 = copy.deepcopy(old)
+        S = 10000
+        s2['buy'] = [dict(b0[0], shares=S, amount=S * got_amt / W)]
+        s2['sell'] = []
+        d2 = _b.diff_one(aid, day, sig=s2)
+        kinds = {r['code']: r['kind'] for r in d2['rows']}
+        k0 = kinds.get(lv.normalize_code(b0[0]['code']))
+        assert k0 == 'ok', \
+            ('实际 %s 股 vs 期望 %.1f 股（差 %.1f%%，在 %.0f%% 容差内）却判成 %r'
+             ' —— 多半是又拿【取整后 %d】的值去比了（那是 %.1f%%）'
+             % (bs, W, abs(bs - W) / W * 100, TOL_T * 100, k0,
+                int(W / 100) * 100,
+                abs(bs - int(W / 100) * 100) / (int(W / 100) * 100) * 100))
+        # 反向自证：真的超量时必须判出来
+        s3 = copy.deepcopy(s2)
+        s3['buy'] = [dict(b0[0], shares=int(bs * 1.5))]
+        d3 = _b.diff_one(aid, day, sig=s3)
+        k3 = {r['code']: r['kind'] for r in d3['rows']}.get(
+            lv.normalize_code(b0[0]['code']))
+        assert k3 in ('short', 'over'), \
+            '期望差 50%% 却还判 %r —— 容差成了摆设' % k3
+    finally:
+        lv.LIVE = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('%s 照 rev%s（建于 %s）比 -> clean，拿主文件比 -> 不 clean；'
+            '容差按未取整值算（差 4.5%% 判 ok、差 50%% 判 %s）'
+            % (day, used['rev'], used['built_at'][5:16], k3))
+
+
 @case('首页只列真实盘 · 当日盈亏 · 手工账户是一等状态（playwright）', tag='web')
 def t_home_real_only_and_manual():
     """用户 2026-09-19 两条：

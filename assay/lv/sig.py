@@ -550,6 +550,49 @@ def load_signal(aid, for_date):
     return _base._read_json(signal_path(aid, for_date), None)
 
 
+# 下单时点：froec 系列的 `rebal_time` 是 09:30，信号本来就是给**次日开盘**用的。
+_EXEC_AT = 'T09:30'
+
+
+def signal_as_of(aid, for_date, at=None):
+    """**你下单时手上是哪一版** —— 取 `built_at` 早于当天开盘的最后一版。
+
+    🔴🔴 用户 2026-09-22：「2026-09-15、2026-09-22 这两期我都是按提示买入、
+      卖出的，为什么现在都显示是提示外买入、卖出」。
+
+      根因：`diff_one` 比的是**主文件**，而主文件是**执行完之后重算**出来的
+      那份 —— 照着做完之后策略当然说"无事可做"，于是清单变空，**照做的每
+      一笔都被判成"提示外"**。实测两期都精确对得上当时那一版：
+
+          09-15  rev2（09-14 23:14）买 300980 / 卖 600774  = 账本实际
+          09-22  rev1（09-21 23:00）买 301062 / 卖 300980  = 账本实际
+
+    ★ 判据取**开盘之前的最后一版**：信号是给次日开盘用的，人照着下单时
+      手上就是那一份。开盘后重算出来的那些**根本没机会被执行**。
+    🔴 **不许静默替换** —— 返回 `(sig, meta)`，`meta` 说清用的是哪一版、
+      建于什么时候、一共有几版。页面必须显示（同「悄悄截断比查不出来更糟」）。
+    ★ 一版都没有（全部建于开盘之后）时**退回最早那一版**并标 `late=True`：
+      那多半是补录/回填，硬拿空清单去比只会满页假差异。
+    """
+    cur = load_signal(aid, for_date)
+    if not cur:
+        return None, None
+    cands = [(cur.get('built_at') or '', cur, None)]
+    for r in (cur.get('revisions') or []):
+        rp = os.path.join(_base.acct_dir(aid), r.get('archived') or '')
+        old = _base._read_json(rp, None) if r.get('archived') else None
+        if old:
+            cands.append((r.get('built_at') or old.get('built_at') or '',
+                          old, r.get('rev')))
+    cands.sort(key=lambda x: x[0])
+    cut = '%s%s' % (for_date, at or _EXEC_AT)
+    usable = [c for c in cands if c[0] and c[0] < cut]
+    late = not usable
+    pick = (usable[-1] if usable else cands[0])
+    return pick[1], {'rev': pick[2], 'built_at': pick[0], 'n_versions': len(cands),
+                     'late': late, 'is_current': pick[2] is None}
+
+
 
 def explain_side_path(aid, for_date):
     """事后复算出来的选股理由，落在 `signals/_explain/<date>.json`。

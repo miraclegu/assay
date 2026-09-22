@@ -954,6 +954,24 @@ function renderExec(aid){
     ${items.map(it => xdSection(it)).join('')}`;
 }
 
+/* 比的是【你下单时手上那一版】—— 必须说出来是哪一版。
+   🔴 用户 2026-09-22：「09-15、09-22 这两期我都是按提示买入卖出的，
+     为什么现在都显示是提示外」。根因是这里比的是**主文件**，而主文件是
+     执行完之后重算出来的（照做完策略说"无事可做" -> 清单变空 ->
+     照做的每一笔都成了"提示外"）。现在改成挑开盘前最后一版，
+     **而挑了哪一版必须写在脸上** —— 静默换一版去比，页面上就是个
+     说不清的差异（同「悄悄截断比查不出来更糟」）。 */
+function xdUsed(it){
+  const u = it.used;
+  if(!u || u.is_current) return '';
+  return '<div class="lvwhy" style="margin:0 0 6px">ⓘ 比的是【第 ' + u.rev
+    + ' 版】（建于 ' + esc((u.built_at||'').slice(5,16))
+    + '，当天共 ' + u.n_versions + ' 版）—— 那是你下单时手上的那一份；'
+    + '收盘后重算出来的那版没机会被执行。'
+    + (u.late ? '　⚠ 所有版本都建于开盘之后，这里退回了最早那一版。' : '')
+    + '</div>';
+}
+
 function xdSection(it){
   const bad = (it.rows || []).filter(r => r.kind !== 'ok');
   return `<div class="lvsec xds">
@@ -965,6 +983,7 @@ function xdSection(it){
       ${it.px_diff_avg == null ? ''
         : `<span class="lvwhy">价差均 ${pctv(it.px_diff_avg * 100)}</span>`}
     </h3>
+    ${xdUsed(it)}
     ${it.scale_why ? `<div class="lvwhy" style="margin:0 0 6px">
         ⓘ ${esc(it.scale_why)}</div>` : ''}
     <div class="pw"><table class="lvt xdt"><thead><tr>
