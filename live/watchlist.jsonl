@@ -39,3 +39,6 @@
 {"uid": "cff97a771785", "ts": "2026-09-18T18:10:16", "act": "add", "code": "515050.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入"}
 {"uid": "61a13f1a9082", "ts": "2026-09-18T18:10:16", "act": "note", "code": "159363.XSHE", "note": "已清仓（曾在实盘·ETF轮动模拟）"}
 {"uid": "b47df1ff93db", "ts": "2026-09-18T18:10:16", "act": "note", "code": "513090.XSHG", "note": "已清仓（曾在实盘·ETF轮动模拟）"}
+{"uid": "3a7c3d732328", "ts": "2026-09-22T10:12:33", "act": "group", "code": "300980.XSHE", "group": "实盘·FROEA-TRADE模拟账户"}
+{"uid": "b27a1d7ba6ff", "ts": "2026-09-22T10:12:33", "act": "add", "code": "301062.XSHE", "group": "实盘·FROEC-TRADE账户", "note": "持仓自动加入"}
+{"uid": "ec2bf068d8a5", "ts": "2026-09-22T11:12:34", "act": "note", "code": "300980.XSHE", "note": "已清仓（曾在实盘·FROEA-TRADE模拟账户）"}

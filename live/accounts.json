@@ -98,5 +98,19 @@
   "strategy_path": "strategies/ETF/etf_p1_mask.py",
   "tick_time": "22:00",
   "warmup_start": "2025-01-01"
+ },
+ {
+  "broker_note": "",
+  "code_sha256": "9097503b891a89ca6b3a4a4ce6d36e7c4a1fb1b51b40a475fdac5f5682d88289",
+  "created": "2026-09-21T16:52:35",
+  "id": "a5",
+  "init_cash": 100000.0,
+  "mode": "paper",
+  "name": "ETF轮动maskpos",
+  "paper_start": "2026-09-01",
+  "params": {},
+  "strategy_path": "strategies/ETF/etf_p1_maskpos.py",
+  "tick_time": "22:00",
+  "warmup_start": "2025-01-01"
  }
 ]

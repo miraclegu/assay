@@ -14,3 +14,7 @@
 {"code": "603506.XSHG", "fee": 33.06, "name": "", "note": "引擎撮合 · rebalance", "price": 11.6013, "shares": 3500, "side": "sell", "source": "paper", "trade_date": "2026-09-08", "ts": "2026-09-18T13:45:40", "uid": "1d52620e2545"}
 {"code": "300980.XSHE", "fee": 11.86, "name": "", "note": "引擎撮合 · open", "price": 22.2167, "shares": 1700, "side": "buy", "source": "paper", "trade_date": "2026-09-15", "ts": "2026-09-18T13:45:40", "uid": "bb10a570d960"}
 {"code": "600774.XSHG", "fee": 32.32, "name": "", "note": "引擎撮合 · rebalance", "price": 7.6343, "shares": 5200, "side": "sell", "source": "paper", "trade_date": "2026-09-15", "ts": "2026-09-18T13:45:40", "uid": "3705a4f75268"}
+{"code": "300980.XSHE", "fee": 33.58, "name": "", "note": "引擎撮合 · rebalance", "price": 24.2618, "shares": 1700, "side": "sell", "source": "paper", "trade_date": "2026-09-22", "ts": "2026-09-22T11:12:04", "uid": "bfd1491854ac"}
+{"code": "301062.XSHE", "fee": 5.0, "name": "", "note": "引擎撮合 · open", "price": 7.1153, "shares": 2000, "side": "buy", "source": "paper", "trade_date": "2026-09-22", "ts": "2026-09-22T11:12:04", "uid": "622de1d414c1"}
+{"code": "301152.XSHE", "fee": 5.0, "name": "", "note": "引擎撮合 · open", "price": 21.5862, "shares": 600, "side": "buy", "source": "paper", "trade_date": "2026-09-22", "ts": "2026-09-22T11:12:04", "uid": "ddb23b18e380"}
+{"code": "603506.XSHG", "fee": 5.0, "name": "", "note": "引擎撮合 · open", "price": 11.8689, "shares": 1200, "side": "buy", "source": "paper", "trade_date": "2026-09-22", "ts": "2026-09-22T11:12:04", "uid": "7ac37b347007"}

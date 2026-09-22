@@ -1,11 +1,11 @@
 {
- "account": "a3",
- "built_at": "2026-09-21T16:19:09",
+ "account": "a4",
+ "built_at": "2026-09-21T16:19:11",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
- "cash": 81639.59,
- "code_sha": "457e0dca",
- "code_sha256": "457e0dca5f8fee17012c18a97986d21d95f1f881239c215d7a12dfd2d1913a94",
+ "cash": 100000.0,
+ "code_sha": "b65260fc",
+ "code_sha256": "b65260fc1150e858bed26206052170c213eb58b18e25921b064d317f7ec9df72",
  "data_asof": "2026-09-18",
  "data_fingerprint": {
   "overall": "1b71e477dadc",
@@ -47,6 +47,7 @@
    "这一轮策略没有查数据 —— 多半不是调仓日，所以没有候选池。"
   ],
   "params": {
+   "mask_below": 12,
    "n_breadth": 8
   },
   "pool_shown": 0,
@@ -58,54 +59,16 @@
  },
  "for_date": "2026-09-21",
  "freed_est": 0,
- "held_codes": [
-  "513120.XSHG",
-  "515050.XSHG",
-  "515880.XSHG"
- ],
- "hold": [
-  {
-   "code": "513120.XSHG",
-   "name": "HK创新药",
-   "shares": 4000,
-   "why": ""
-  },
-  {
-   "code": "515050.XSHG",
-   "name": "5GETF",
-   "shares": 5400,
-   "why": ""
-  },
-  {
-   "code": "515880.XSHG",
-   "name": "通信ETF",
-   "shares": 8300,
-   "why": ""
-  }
- ],
+ "held_codes": [],
+ "hold": [],
  "is_rebalance_day": false,
- "left_est": 81639.59,
+ "left_est": 100000.0,
  "next_rebalance": null,
  "no_price": [],
  "params": {},
  "recomputed": false,
  "recomputed_at": [
-  "2026-09-18T21:21:22",
-  "2026-09-18T22:04:58",
-  "2026-09-18T23:06:04",
-  "2026-09-21T00:00:08",
-  "2026-09-21T01:00:09",
-  "2026-09-21T02:00:09",
-  "2026-09-21T03:00:09",
-  "2026-09-21T04:00:09",
-  "2026-09-21T05:00:09",
-  "2026-09-21T06:00:09",
-  "2026-09-21T07:00:09",
-  "2026-09-21T08:02:40",
-  "2026-09-21T09:10:44",
-  "2026-09-21T09:28:56",
-  "2026-09-21T16:07:26",
-  "2026-09-21T16:19:09"
+  "2026-09-21T16:19:11"
  ],
  "revisions": [],
  "sell": [],
