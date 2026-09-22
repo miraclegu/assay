@@ -2446,6 +2446,84 @@ def t_new_pages_ui():
         httpd.shutdown()
 
 
+@case('除权日的涨跌幅与昨收：三种口径都自洽（ETF 一拆二不许显示成腰斩）', 'fast')
+def t_xr_change_pct():
+    """🔴🔴 用户 2026-09-22："点进完整页，图看起来虽然是正确了，但是涨跌幅
+    仍然是错的，7-10 这天显示出 -53.47%。"
+
+    159516 半导体设备ETF国泰 2026-07-10 做过一次 **1 拆 2**（因子 2.0 -> 4.0），
+    不复权收盘 1.9450 -> 0.9050。而 `alt_panel` 当时是拿**两天的不复权收盘
+    直接相除**算 `change_pct` 的 -> **-53.47pp**，那天真实跌幅是 **-6.94pp**。
+    页面上就是一根"腰斩"，**而它不报错**。
+
+    🔴 顺带查出一个**所有标的都有**的旧问题：`kline` 把 `preclose` **原样
+      透传**，而 `close`/OHLC 会按 fq 缩放 —— 于是后复权图上「昨收 10.5、
+      收 25.4」自相矛盾。
+
+    判据是**自洽**：`close / preclose - 1 == change_pct`，三种口径都要成立。
+    ★ 口径对齐面板：面板的 `preclose` 就是**除权后昨收**（这条也在下面钉住）。
+    🔴 **反向自证不可省**：窗口里必须**真的含一个因子跳变日**，否则
+      naive 算法与正确算法给出同样的结果，这条用例是空转的
+      （本项目为「挑到因子恰好是 1 的票」栽过一次）。
+    """
+    from assay import stock as _S
+    from assay import paths as _P
+    import duckdb as _dk
+
+    CASES = [('159516.XSHE', '2026-07-10', '2026-07-14'),   # ETF：1 拆 2
+             ('605128.XSHG', '2026-06-02', '2026-06-05')]   # 股票：除权
+    for code, xr, end in CASES:
+        seen_jump = False
+        for fq in ('bfq', 'hfq', 'qfq'):
+            bars = _S.kline(code, 12, fq, end=end)['bars']
+            row = next((b for b in bars if b['date'] == xr), None)
+            assert row, '%s 的 %s 不在窗口里 —— 构造不对' % (code, xr)
+            # 反向自证：这一天**真的**是因子跳变日（否则这条空转）
+            i = [b['date'] for b in bars].index(xr)
+            prev = bars[i - 1]
+            naive = (row['close'] / prev['close'] - 1) * 100
+            if abs(naive - row['change_pct']) > 1:
+                seen_jump = True
+            # 自洽：容差按**显示精度**给（价格 round 到 3 位，
+            # 0.97 的 ETF 上最后一位就值 0.1pp）
+            got = (row['close'] / row['preclose'] - 1) * 100
+            tol = max(0.02, 100 * 0.0006 / max(row['preclose'], 1e-6))
+            assert abs(got - row['change_pct']) <= tol, (
+                '%s %s(%s)：close/preclose-1 = %.2fpp 而 change_pct = %.2fpp'
+                '（容差 %.2f）—— 昨收与涨跌幅不是同一个口径'
+                % (code, xr, fq, got, row['change_pct'], tol))
+        assert seen_jump, (
+            '%s 的 %s 不是因子跳变日 —— 这条判据在这只票上是空转的'
+            '（naive 算法与正确算法给出同样的结果）' % (code, xr))
+
+    # ETF 那一天具体是多少：钉死数值，防"改对了方向但算错了"
+    b = next(x for x in _S.kline('159516.XSHE', 12, 'bfq', end='2026-07-14')['bars']
+             if x['date'] == '2026-07-10')
+    assert -7.5 < b['change_pct'] < -6.4, \
+        '159516 在 2026-07-10 的涨跌幅是 %.2fpp —— 应当在 -6.94pp 附近；' \
+        '拿两天不复权收盘直接相除会得到 -53.47pp' % b['change_pct']
+
+    # 面板的 preclose 是【除权后昨收】—— 上面那条口径对齐的依据
+    c = _dk.connect(':memory:')
+    n, bad = c.execute("""
+        WITH x AS (SELECT jq_code, date, close_bfq, preclose, change_pct,
+                          hfq_factor,
+                          lag(hfq_factor) OVER (PARTITION BY jq_code
+                                                ORDER BY date) pf
+                   FROM %s WHERE date >= DATE '2026-06-01')
+        SELECT count(*), sum(CASE WHEN abs((close_bfq / preclose - 1) * 100
+                                           - change_pct) > 0.02 THEN 1 ELSE 0 END)
+        FROM x WHERE pf IS NOT NULL AND abs(hfq_factor / pf - 1) > 0.01
+    """ % _P.panel_sql()).fetchone()
+    assert n and n > 20, '除权样本太少（%s 个），这条是空转的' % n
+    assert not bad, ('面板里有 %d/%d 个除权日的 `close_bfq/preclose-1` 对不上 '
+                     '`change_pct` —— preclose 不再是除权后昨收了，'
+                     '而 alt_panel 是照它对齐的' % (bad, n))
+    return 'ETF 一拆二那天 %.2fpp（naive 会给 -53.47pp）；股票与 ETF × 三种口径' \
+           '昨收与涨跌幅自洽；面板 %d 个除权日 preclose 口径逐行成立' % (
+               b['change_pct'], n)
+
+
 @case('个股速览浮层：点了不跳走 / 买卖点贴 K 线且同日合并（playwright）', tag='web')
 def t_stockpop():
     """用户的原话是"点击股票名称就真的跳转到个股页面了，然后无法直接返回"，
@@ -2501,28 +2579,31 @@ def t_stockpop():
         assert t.index('shared/stockpop.js') > t.index('shared/common.js'), \
             '%s 里 stockpop.js 必须在 common.js 之后（它用 esc/num/j/_tipAt）' % f
     assert len(pops) >= 7, '只有 %d 个页面有浮层：%s' % (len(pops), pops)
-    # ④ 复权口径：**一律不复权**（2026-09-14 又改回来了，理由变了）
-    # ★ 这条断言的历史值得记，它是「判据要跟着【事实】走」的活样本：
+    # ④ 复权口径：**K 线前复权、成交价不复权 —— 两种并存**（2026-09-22）
+    # ★ 这条断言的历史是「判据要跟着【事实】走」的活样本，四版：
     #     原版      固定 `SP_FQ='bfq'` —— 那时浮层只有实盘一个来源
     #     09-13     改成"按来源定"（回测 -> hfq）—— 因为**归档存的是后复权**
     #     09-14     改回"一律 bfq" —— 因为归档的展示层换算回不复权了
-    #   中间那一版不是错的，它只是**将就了当时的存储口径**；把数据源本身
-    #   修正之后，那个分支就该消失。**规则只有一条，实盘与回测再没有分支。**
+    #     09-22     K 线改 **qfq** —— 因为**前三版共同的前提没了**：
+    #               买卖点此前画在 `Y(成交价)` 上，切复权就飘走；而 09-21
+    #               标记改成贴那根 K 线的上下方，位置与价格再无关系。
+    #   **前提一没，那条限制就该撤销，而不是留着一条没有理由的规则。**
+    #   用户 09-22 的原话："不复权的看不出正常的走势" —— 跨除权日的假跌幅
+    #   在形态上就是一根凭空的大阴线。
     sp = _io.open('web/shared/stockpop.js', encoding='utf-8').read()
     flat = sp.replace('"', "'").replace(' ', '')
-    assert "constspFq=()=>'bfq'" in flat, \
-        ('浮层必须一律用【不复权】：两个来源的成交价现在都是不复权'
-         '（实盘账本本来就是；回测展示层 2026-09-14 起也换算回去了）。'
-         '用 hfq 会让 B/S 标记整体飘走，**而它不报错**')
+    assert "constspFq=()=>'qfq'" in flat, \
+        ('浮层的 K 线必须是【前复权】：不复权跨除权日有假跌幅，形态上是一根'
+         '凭空的大阴线；后复权的纵轴又与券商软件对不上（同个股页的默认）')
     assert 'SP_FQ' not in sp, \
         '还留着 SP_FQ 这个旧常量 —— 两处定义迟早分叉（同「删字段要连带清干净」那条）'
     # 取数时真的用了它，而不是把 fq 写死在 URL 里
     assert 'fq=${spFq()}' in sp, 'kline 请求没有用 spFq()，口径切换等于没生效'
-    # 🔴 而服务端给的成交价也必须是不复权 —— 前端切了 K 线口径、后端还给
-    #   后复权价的话，标记照样飘，而两边各自看都"正常"。
+    # 🔴 **成交价那一半仍然必须是不复权** —— 这一页现在两种口径并存，
+    #   而「价格与份额照着券商对账单」那条没有变（同「记账口径不该漏到页面上」）。
     rs = _io.open('assay/srv/runs.py', encoding='utf-8').read()
     assert "'fq': 'bfq'" in rs and "'fq': 'hfq'" not in rs, \
-        'api_run_trades_of 还在声明 hfq —— 与浮层的口径对不上'
+        'api_run_trades_of 还在声明 hfq —— 成交价必须是不复权实际价'
 
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
     port = httpd.server_address[1]
@@ -2590,6 +2671,56 @@ def t_stockpop():
                                      date: h[0].ts[0].date} : null};
             }""")
             assert d['nt'], '这只票没有实盘成交 —— 换一个入口再验'
+
+            # 🔴 两种口径并存 -> 副标题必须**分开说**：K 线前复权、成交价
+            #   不复权。合成一句的话，人拿浮窗里的成交价去比纵轴会发现对不上，
+            #   而那看着像有一边算错了。（这个标签历史上**两次与图相反**。）
+            # ★ 判据钉**渲染出来的那行字**，不是源码：我第一版切了源码里
+            #   那 900 个字符，而**注释自己就提到这两个词** -> 永远命中、
+            #   变异当场漏掉（同「判据比要证的事宽」那条）。
+            sub = pg.inner_text('#spsub')
+            assert 'K 线' in sub and '前复权' in sub, \
+                '副标题没说 K 线是前复权：%r' % sub
+            assert '不复权' in sub and ('成交价' in sub or '份额' in sub), \
+                '副标题没说成交价/份额仍是不复权：%r' % sub
+
+            # 🔴 B/S 那个**字必须落在圆心上**（用户 2026-09-21 报了两次：
+            #   "字不在圆圈中央"）。第一次以为是右上角那个笔数小圆盖住了，
+            #   删掉之后**还是歪** —— 真因是 canvas 的 `textBaseline` 默认
+            #   `alphabetic`（字身整个在基线上方，10px 粗体偏高约 3px），
+            #   而 `textAlign` 这段**一次都没设过**，用的是本文件上一处画图
+            #   留下的值 —— 水平位置取决于**画图顺序**。
+            # ★ 判据是**墨迹重心与圆心的偏差**（可量的视觉事实），
+            #   不是"有没有画字"：后者在字歪到圆外时照样全绿。
+            ink = pg.evaluate("""(hit) => {
+              const cv = document.getElementById('spcv');
+              const g = cv.getContext('2d');
+              const dpr = cv.width / cv.clientWidth;
+              const R = 7.5, pad = Math.ceil((R + 2) * dpr);
+              const cx = hit.x * dpr, cy = hit.y * dpr;
+              const d = g.getImageData(Math.round(cx - pad), Math.round(cy - pad),
+                                       pad * 2, pad * 2).data;
+              /* 字是纯白 #fff，圆是品牌色、描边是背景色 —— 只收近白像素 */
+              let n = 0, sx = 0, sy = 0;
+              for (let j = 0; j < pad * 2; j++) for (let i = 0; i < pad * 2; i++) {
+                const o = (j * pad * 2 + i) * 4;
+                if (d[o] > 235 && d[o+1] > 235 && d[o+2] > 235 && d[o+3] > 200) {
+                  n++; sx += i; sy += j;
+                }
+              }
+              if (!n) return {n: 0};
+              return {n: n, dx: (sx / n - pad) / dpr, dy: (sy / n - pad) / dpr};
+            }""", d['first'])
+            # 反向自证：真的找到了字的墨迹（找不到的话下面两条是空转的）
+            assert ink['n'] >= 8, \
+                ('圆心附近一个白像素都没扫到（%s）—— 构造不对，'
+                 '这条判据是空转的' % ink['n'])
+            assert abs(ink['dy']) <= 1.2, \
+                ('B/S 的字垂直偏离圆心 %.2fpx —— textBaseline 没设成 middle 的话'
+                 '默认 alphabetic 会让它偏高约 3px' % ink['dy'])
+            assert abs(ink['dx']) <= 1.2, \
+                ('B/S 的字水平偏离圆心 %.2fpx —— textAlign 没显式设成 center，'
+                 '用的是上一处画图留下的值（画图顺序一变就错位）' % ink['dx'])
             # 🔴 **同一天同方向只画一个**（2026-09-21 用户要求）。
             #   原来是每笔一个、错开 8px —— 科创半导 2026-07-09 那天四个 S
             #   叠成一串。判据落在「组数」上，并**反向自证真的有合并发生**

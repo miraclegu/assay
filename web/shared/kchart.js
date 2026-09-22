@@ -203,14 +203,16 @@ function drawKChart(cv, opts) {
       g.lineTo(x + 3.2, y + 5.4); g.closePath(); g.fill();
     });
   }
-  /* 买卖点：画在**成交价的位置**上，不是主图底部。
-     ★ 与事件三角刻意不同族：事件回答"那天发生了什么"（固定在底部按日期
-       排开就够），买卖点回答"我在**哪个价位**进出的" —— 位置本身就是信息，
-       钉在底部等于把它扔掉。
-     🔴 成交价是**不复权**实际价，所以浮层固定用 bfq。切到后复权时标记会
-       整体飘走，**而它不报错** —— 判据写在调用方（stockpop 固定 bfq）。
-     ★ 同日多笔各画一个：最低佣金按成交笔收，分笔录入就是对的（见 CLAUDE.md），
-       图上也该看得出"那天分了两笔"。 */
+  /* 买卖点：**贴在那根 K 线的上下方**，一天同方向只画一个。
+     ⚠ 这段注释此前整段与代码相反（还写着"画在成交价的位置上""浮层固定
+       bfq""同日多笔各画一个"）—— 三条在 2026-09-21 都被推翻了，而**注释
+       留在原地**。同「代码在和自己的注释打架」那条：改行为要连注释一起改。
+     🔴 **y 只说"这一天有买/卖"**，价位与数量到浮窗里看。理由是口径一错
+       就整体飘走、而它不报错（实测回测那条链 21/106 只票飘出 K 线区间、
+       最多差 4 倍）。**顺带的好处是复权口径从此与标记无关** ——
+       浮层因此才敢默认前复权（见 stockpop.js 那条）。
+     ★ 与事件三角仍然不同族：事件钉在主图下沿按日期排开，买卖点贴着当根
+       K 线的高低点 —— 两者一眼分得开。 */
   const trs = opts.trades || [];
   const trHits = [];
   if (trs.length) {
@@ -248,18 +250,19 @@ function drawKChart(cv, opts) {
       g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = 1.4; g.stroke();
       g.fillStyle = '#fff';
       g.font = 'bold 10px ui-sans-serif,system-ui,sans-serif';
-      g.fillText(buy ? 'B' : 'S', x, cy + .5);
-      /* ★ 多笔时在角上标个数字：合并之后"这天有几笔"在图上就看不见了，
-         不标的话只能靠 hover 才知道（同「挪走可以，藏没了不行」）。 */
-      if (gp.list.length > 1) {
-        const bx = x + R - 1, by = cy - R + 1;
-        g.beginPath(); g.arc(bx, by, 5.2, 0, 6.2832);
-        g.fillStyle = col; g.fill();
-        g.strokeStyle = cssv('--bg', '#0f1216'); g.lineWidth = 1.2; g.stroke();
-        g.fillStyle = '#fff';
-        g.font = 'bold 7px ui-sans-serif,system-ui,sans-serif';
-        g.fillText(gp.list.length > 9 ? '9+' : String(gp.list.length), bx, by + .5);
-      }
+      /* 🔴 **两个对齐都要显式设**（用户 2026-09-21 第二次报"字不在圆圈
+         中央"）。canvas 的 textBaseline 默认是 `alphabetic` —— 字身整个
+         落在基线**上方**，于是 10px 粗体在 R=7.5 的圆里**偏高约 3px**，
+         一眼就看得出歪。而 textAlign 这里**一次都没设过**，用的是本文件
+         上一处画图留下的值（y 轴刻度那段设的 `right`）——
+         也就是说水平位置取决于**画图顺序**，那是定时炸弹。
+         ★ 判据量的是"字的墨迹重心与圆心的偏差"，不是"有没有画字"。 */
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(buy ? 'B' : 'S', x, cy);
+      /* ⚠ 这里一度在角上加过一个"几笔"的小数字（2026-09-21）——
+         **用户当场否掉**：它是多余的，而且那个小圆盖住圆点的右上角，
+         使 B/S 字母看着不在正中（笔数在 hover 的读数里本来就有）。
+         记一笔免得下次又想加：**图上一个标记只说"这天有买/卖"**。 */
       trHits.push({x: x, y: cy, r: R + 3, ts: gp.list});
     });
     g.restore();

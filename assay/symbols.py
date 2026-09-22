@@ -514,6 +514,17 @@ def alt_panel(kind, root=None):
     ★ 面板有而这里没有的（换手率、涨跌停价、估值、财务）一律 NULL ——
       **不猜一个数填上去**。
     """
+    # 🔴🔴 **涨跌幅与昨收都按【除权后】算**，不能拿两天的不复权收盘直接比。
+    #   实测 159516 半导体设备ETF国泰 2026-07-10 做过一次 1 拆 2
+    #   （因子 2.0 -> 4.0）：不复权收盘 1.9450 -> 0.9050，直接相除得
+    #   **-53.47pp**，而那天真实跌幅是 **-6.94pp** —— 页面上就是一根
+    #   "腰斩"，而它不报错（用户 2026-09-22 报的）。
+    # ★ 口径与面板对齐：面板的 `preclose` 就是**除权后昨收**（实测
+    #   `close_bfq / preclose - 1 == change_pct` 在除权日逐行精确成立），
+    #   所以这里也给除权后的昨收 = 昨日后复权收 ÷ 今日因子。
+    #   校验：3.8900 / 4.0 = 0.9725，0.9050 / 0.9725 - 1 = -6.94pp ✅
+    # ⚠ 说明写在**这里**而不是 SQL 里：SQL 字面量要走 `% (K, F)`，
+    #   里面的 `%` 会被当成格式符（刚踩过一次）。
     lake = default_root(root)
     K = _paths.tdx_kline_sql(kind, lake)
     F = _paths.tdx_factor_sql(lake)
@@ -523,11 +534,14 @@ def alt_panel(kind, root=None):
         k.close * coalesce(f.hfq_factor, 1) AS close_hfq,
         coalesce(f.hfq_factor, 1) AS hfq_factor,
         k.volume AS volume_shares, k.amount,
-        (k.close / lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date)
-         - 1) * 100 AS change_pct,
+        (k.close * coalesce(f.hfq_factor, 1)
+         / lag(k.close * coalesce(f.hfq_factor, 1))
+           OVER (PARTITION BY k.symbol ORDER BY k.date) - 1) * 100 AS change_pct,
         CAST(NULL AS DOUBLE) AS turnover,
         false AS is_limit_up, false AS is_limit_down,
-        lag(k.close) OVER (PARTITION BY k.symbol ORDER BY k.date) AS preclose
+        lag(k.close * coalesce(f.hfq_factor, 1))
+          OVER (PARTITION BY k.symbol ORDER BY k.date)
+          / coalesce(f.hfq_factor, 1) AS preclose
       FROM %s k LEFT JOIN %s f
         ON f.symbol = k.symbol AND f.date = k.date)""" % (K, F))
 

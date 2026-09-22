@@ -3794,7 +3794,15 @@ def t_search_deterministic():
             r = _sp.run([sys.executable, '-c', code % (REPO, q)],
                         capture_output=True, text=True, cwd=REPO)
             assert r.returncode == 0, '搜 %s 跑不起来：%s' % (q, r.stderr[-300:])
-            fp, cnt = r.stdout.split()
+            # 🔴 解析不了时要把**原始 stdout** 带出来。裸 `r.stdout.split()` 在子进程多打一行时会炸成一句
+            #   `too many values to unpack (expected 2)` —— 那**指不到原因**
+            #   （2026-09-22 全量跑时真发生过：returncode 是 0、活儿干完了，
+            #   只是多了一行输出，而报错看着像用例逻辑错了）。
+            tok = r.stdout.split()
+            assert len(tok) == 2, (
+                '搜 %s 的子进程输出不是「指纹 条数」两个 token —— '
+                '原始 stdout=%r stderr=%s' % (q, r.stdout[-300:], r.stderr[-300:]))
+            fp, cnt = tok
             out.append((fp, int(cnt)))
         return out
 

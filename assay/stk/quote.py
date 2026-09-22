@@ -223,6 +223,7 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
     for r in rows:
         f = r[6] or 1.0
         o, h, l_, cb = r[1], r[2], r[3], r[4]
+        k = 1.0
         if fq in ('hfq', 'qfq'):
             k = f / qf if fq == 'qfq' else f      # qfq 时 qf 是全局最新因子
             o = o * k if o is not None else None
@@ -248,7 +249,13 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
             'low': _r3(l_), 'close': _r3(cl),
             'volume': r[7], 'amount': r[8], 'change_pct': r[9],
             'turnover': r[10], 'limit_up': bool(r[11]), 'limit_down': bool(r[12]),
-            'preclose': _r3(r[13]),
+            # 🔴 昨收也要跟着 fq 缩放 —— 原来是**原样透传**，于是后复权图上
+            #   「昨收 10.5、收 25.4」自相矛盾（2026-09-22 查 ETF 涨跌幅时
+            #   顺带发现，**所有标的都有**）。
+            #   ★ 缩放系数就是今天这个 `k`：面板的 preclose 是**除权后**昨收，
+            #     `preclose × f(t) = close_bfq(t-1) × f(t-1)` 正好是昨日后复权收。
+            #     于是 `close / preclose - 1 == change_pct` 在**三种口径下都成立**。
+            'preclose': _r3(r[13] * k if r[13] is not None else None),
             # 这一天的**换算系数**（当前坐标价 ÷ 不复权价），bfq 恒 1。
             # 🔴 给出来是为了让页面能把**买卖点**（成交价是不复权实际价）
             #   画到同一套坐标上 —— 前端自己再存一份不复权 bars 去比的话，
