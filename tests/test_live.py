@@ -1413,25 +1413,31 @@ def t_live_ui():
             #     而按数据量测的话它测不出来（实测就是这么漏掉的）。
 
 
-            # ---- 选股理由：【独立页】，一期一段按排名列出 ----
+            # ---- 选股理由：业绩页的一个【页签】，一期一段按排名列出 ----
             #   ★ 一开始做成浮层 + 一个 .lvwhy 小链接，实测**人找不到它**
             #     （和旁边的"版本 9FB82061"长得一模一样）——
-            #     看不出能点的入口 = 没有入口。所以入口是按钮、内容是独立页
-            #     （同成交流水：会越来越长 -> 服务端分页）。
+            #     看不出能点的入口 = 没有入口。于是改成按钮 + 独立页。
+            #   🔴 2026-09-22 用户又把它**并进业绩页**（"选股理由应该也内置到
+            #     业绩里，执行差异都已经在里面了"）。所以账户页那个按钮没了，
+            #     入口是「📊 业绩」-> 「选股理由」页签 —— **失败的是断言不是
+            #     产品**，而它要保的（一期一段 / 按排名 / 只列调仓日 / 表头
+            #     top=0 / 没有 undefined）一条都没丢。
             assert pg.locator('table.lvbuy span.lvq').count() == nbuy, \
                 '每一行买入都该有一个「?」标出选中理由'
             # 当前账户 id 从侧栏高亮那一项取（这一段比下面的 `aid` 早）
             _aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
-            _wbtn = pg.locator('#lvbody .lvhead a.btn', has_text='选股理由')
-            assert _wbtn.count() == 1, '账户页顶部缺「选股理由」按钮'
+            assert pg.locator('#lvbody .lvhead a.btn',
+                              has_text='选股理由').count() == 0, \
+                '账户页那一排还留着「选股理由」按钮 —— 它已经并进业绩页了'
             # 🔴 对不上任何一期的持仓**不许**有出处标记 —— 硬凑一个出处
             #   比没有更糟（这些成交不是照信号做的）。
             assert pg.locator('#lvbody table.lvpos a.lvq').count() == 0, \
                 '这些成交对不上任何一期信号，却给了"出处"标记'
-            _wbtn.click()
-            pg.wait_for_selector('.whysec', timeout=15000)
+            _lp_enter(pg)
+            _lp_tab(pg, '选股理由')
+            pg.wait_for_selector('#lp_why .whysec', timeout=60000)
             pg.wait_for_timeout(400)
-            assert '选股理由' in pg.locator('#main .lvhead h2').first.inner_text()
+            assert '选股理由' in pg.locator('#lp_why .ttl').first.inner_text()
             _secs = pg.locator('.whysec').count()
             assert _secs >= 1, '选股理由页一段都没有'
             # 默认只列【调仓日】—— 非调仓日不选股，列出来是空段，
@@ -1467,10 +1473,19 @@ def t_live_ui():
                 assert _k in _hy, '选股理由页缺「%s」：%s' % (_k, _hy[:160])
             assert 'undefined' not in _hy and 'NaN' not in _hy, \
                 '选股理由页有 undefined/NaN：%s' % _hy[:200]
-            _why_msg = ('选股理由独立页：%d 段（只列调仓日）、候选池 %d 行按排名升序、'
+            _why_msg = ('选股理由页签：%d 段（只列调仓日）、候选池 %d 行按排名升序、'
                         '.pw 表头 top=0' % (_secs, _rows.count() - 1))
-            pg.click('a.lvtag[href="#/live/%s"]' % _aid)    # 回账户
-            pg.wait_for_selector('#lvrec', timeout=10000)
+            # 🔴 旧 hash 必须仍然到得了那一页签（书签 + 持仓行那个 `?`）——
+            #   合并最容易丢的就是这个，**而 404 之后"点了没反应"最难查**。
+            pg.goto(base + '#/live/%s/why' % _aid, wait_until='networkidle')
+            pg.wait_for_selector('#lp_why .whysec', timeout=60000)
+            assert 'tab=why' in pg.evaluate('()=>location.hash'), \
+                '旧 hash #/live/<id>/why 没 redirect 到选股理由页签：%s' \
+                % pg.evaluate('()=>location.hash')
+            assert pg.locator('#lptabs div.on').inner_text().strip() == '选股理由', \
+                '重定向过去了但激活的不是「选股理由」页签'
+            pg.goto(base + '#/live/%s' % _aid, wait_until='networkidle')  # 回账户
+            pg.wait_for_selector('#lvrec', timeout=60000)
             pg.wait_for_timeout(400)
 
             # ---- KPI 板：账户的数字集中一处，不再是顶栏一串标签 ----
@@ -2078,25 +2093,30 @@ def t_live_ui():
             assert pg.locator('#lvbody table.lvpos').count() == 1, \
                 '原实盘页的持仓表没了 —— 新标签页打开不该影响它'
 
-            # ---- 流水独立页 + 分页 + 冲正 ----
+            # ---- 交易明细（原「流水独立页」）+ 分页 + 冲正 ----
+            # 🔴🔴 2026-09-22 用户把流水独立页**并进了业绩页的「交易明细」
+            #   页签**（"和业绩里的交易记录有所重复"）。所以入口从
+            #   `a[href*="/fills"]` 变成「📊 业绩」-> 那个页签 ——
+            #   **失败的是断言不是产品**，它原本要保的那几条一个不少：
+            #   列序 / 名称那一格带小字代码 / 名称不是纯数字 / 分页 /
+            #   冲正是**追加**一条且两行都划掉 / "取的开盘价"有标记。
             aid = pg.locator('.ditem.on').get_attribute('href').split('/')[-1]
-            pg.click('a[href*="/fills"]')
-            pg.wait_for_timeout(1200)
-            assert '成交流水' in pg.locator('.lvhead').inner_text(), '没跳到流水页'
-            # 流水页的代码/名称也要能点开个股
-            assert pg.locator('#main table.lvt a[href*="/stock.html"]').count() >= 2, \
-                '流水页的代码/名称没链到个股页'
+            _lp_enter(pg)
+            _lp_tab(pg, '交易明细')
+            pg.wait_for_selector('#lp_fill table.lvt', timeout=60000)
+            FT = '#lp_fill table.lvt'
+            # 代码/名称也要能点开个股
+            assert pg.locator(FT + ' a[href*="/stock.html"]').count() >= 2, \
+                '交易明细的代码/名称没链到个股页'
             # 列序按【看的顺序】：哪天、买还是卖、哪只票、什么价、多少股、多少钱。
             # 录入时间与来源是审计信息，平时不看，排在最后。
-            _fh = [x.strip() for x in pg.locator('#main table.lvt th').all_inner_texts()]
-            # ★ 代码与名称合成一格（2026-09-16 全站统一）—— 列序其余不变：
-            #   哪天、买还是卖、哪只票、什么价、多少股、多少钱。
+            _fh = [x.strip() for x in pg.locator(FT + ' th').all_inner_texts()]
+            # ★ 代码与名称合成一格（2026-09-16 全站统一）—— 列序其余不变。
             _want = ['成交日', '方向', '名称', '价格', '股数', '金额', '费用']
-            assert _fh[:len(_want)] == _want, '流水列序不对：%s' % _fh
-            assert pg.locator('#main table.lvt tr:nth-child(2) '
-                              'td .cd, #main table.lvt tr:nth-child(2) '
-                              'td .cd0').count() >= 1, \
-                '流水页的名称格里没有小字代码'
+            assert _fh[:len(_want)] == _want, '交易明细列序不对：%s' % _fh
+            assert pg.locator(FT + ' tr:nth-child(2) td .cd, '
+                              + FT + ' tr:nth-child(2) td .cd0').count() >= 1, \
+                '交易明细的名称格里没有小字代码'
             assert _fh.index('录入时间') > _fh.index('费用') and \
                 _fh.index('来源') > _fh.index('费用'), \
                 '录入时间/来源应排在最后：%s' % _fh
@@ -2107,33 +2127,42 @@ def t_live_ui():
             #   ★ 列位置也**按表头找**，不写死第几列（列序会变）。
             _nm = pg.evaluate(
                 "(want) => {const ths = [...document.querySelectorAll("
-                "'#main table.lvt th')];"
+                "'#lp_fill table.lvt th')];"
                 " const i = ths.findIndex(e => e.textContent.trim() === want);"
                 " if (i < 0) return null;"
-                " return [...document.querySelectorAll('#main table.lvt tr')]"
+                " return [...document.querySelectorAll('#lp_fill table.lvt tr')]"
                 "   .slice(1).map(tr => {const td = tr.cells[i]; if (!td) return '';"
                 "     const cd = td.querySelector('.cd,.cd0');"
                 "     const all = (td.textContent || '').trim();"
                 "     return cd ? all.replace((cd.textContent || '').trim(), '').trim()"
                 "               : all;});}", '名称')
-            assert _nm is not None, '流水表找不到「名称」列'
-            assert any(_nm), '流水的「名称」列全空 —— 服务端没补名称'
+            assert _nm is not None, '交易明细表找不到「名称」列'
+            assert any(_nm), '交易明细的「名称」列全空 —— 服务端没补名称'
             assert not any(x and x.replace('.', '').isdigit() for x in _nm), \
                 '名称那一部分是纯数字，可能列错位了：%s' % _nm[:4]
-            assert '第 1/1 页' in pg.locator('#main').inner_text(), '分页控件没渲染'
-            assert pg.locator('#pprev').is_disabled(), '第一页的「上一页」应置灰'
+            # 分页条（上下各一套，走 lpNav 的 class 不是 id）
+            assert pg.locator('#lp_fill .pg').count() >= 2, '交易明细没有分页控件'
+            assert pg.locator('#lp_fill .pg button.fp').first.is_disabled(), \
+                '第一页的「上一页」应置灰'
+            # 🔴 「每页 N 条」回显的必须是**这一页自己**的分页状态（LPF），
+            #   不是清仓记录那份（lpNav 原来按 cls 猜，猜错了不报错）。
+            _per = pg.eval_on_selector('#lp_fill .pg select.fs', 'e=>e.value')
+            _lim = pg.evaluate('()=>String(LPF.lim)')
+            assert _per == _lim, ('交易明细的「每页」回显 %s 而 LPF.lim=%s'
+                                  ' —— 回显的是别人的分页状态' % (_per, _lim))
             n_before = len(lv.fills(aid))
-            pg.locator('a.lvrv').first.click()
-            pg.wait_for_timeout(1500)
+            pg.locator('#lp_fill a.lvrv').first.click()
+            pg.wait_for_timeout(1800)
             assert len(lv.fills(aid)) == n_before + 1, '冲正应【追加】一条'
-            assert pg.locator('.lvrev').count() >= 2, '原记录与冲正记录都该划掉'
-            # 取的开盘价要在流水里看得出来（与"估"的费用同理，别混成券商回报）
-            assert pg.locator('#main table.lvt td span.lvwhy').count() >= 1, \
-                '流水里"取的开盘价"应有标记，否则分不清是券商回报还是本地取的'
+            assert pg.locator('#lp_fill .lvrev').count() >= 2, \
+                '原记录与冲正记录都该划掉'
+            # 取的开盘价要看得出来（与"估"的费用同理，别混成券商回报）
+            assert pg.locator(FT + ' td span.lvwhy').count() >= 1, \
+                '"取的开盘价"应有标记，否则分不清是券商回报还是本地取的'
 
             # 回账户
-            pg.click('a[href="#/live/%s"]' % aid)
-            pg.wait_for_timeout(1000)
+            pg.goto(base + '#/live/%s' % aid, wait_until='networkidle')
+            pg.wait_for_selector('#lvrec', timeout=60000)
             assert pg.locator('#lvrec').count() == 1, '没回到账户页'
 
             # ---- 旧进程要有醒目横幅，而不是默默渲染 undefined ----
@@ -2166,7 +2195,7 @@ def t_live_ui():
             br.close()
             assert not errs, '页面有运行时错误：%s' % errs[:3]
             return ('信息架构：主视图仅[待办+持仓]，设置/记一笔/策略进浮层，'
-                    '流水独立页分页；策略单一入口(未绑定也能开)；'
+                    '交易明细分页；策略单一入口(未绑定也能开)；'
                     '「跑一次」不是 disabled 按钮（没开时常驻说明怎么开、'
                     '点了也有话说；开了能起 job，版本漂移给「重新绑定」+命令行）；'
                     '持仓 %d 只全部取到现价 + 当日涨跌/当日盈亏（今天买的按成交价）'
@@ -2178,7 +2207,7 @@ def t_live_ui():
                     '持仓与流水的代码名称都能新标签页打开个股（新标签无返回按钮）；'
                     '价格留空→09-01 开盘价 6.010 并标源/未同步日响亮报错不落盘/'
                     '价格区间校验有逃生口；'
-                    '排版：流水列序(日/方向/代码/名称/价/量/额/费,录入时间与来源置尾)、'
+                    '排版：交易明细列序(日/方向/名称/价/量/额/费,录入时间与来源置尾)、'
                     '持仓代码与名称分列、数据日与报价时间合成一个标签、'
                     '汇总数字只在 KPI 出现一次、KPI 板无 undefined、'
                     '侧栏可收起(轨上仍见告警点)、新建表单默认收起、待办按 alert 折叠；'
@@ -2186,7 +2215,7 @@ def t_live_ui():
                     '业绩板：盘中补点后标「今日/盘中时刻」、交易费用独立一格'
                     '（占本金，短样本不折年化）、ⓘ 说清 TWR/盘中/年化拖累；'
                     '旧进程有横幅；' + _why_msg + '（带流通市值/PB/ROE加速度，'
-                    '无 undefined，账户页入口是按钮不是小灰链接）；'
+                    '无 undefined，旧 hash 仍 redirect 得到）；'
                     '归档后数据仍在；0 个 JS 错误') % n_pos
     finally:
         httpd.shutdown()
@@ -2439,11 +2468,16 @@ def t_live_perf_tabs():
             # ---- ② 页签存在且只显示一个 pane ----
             tabs = [t.strip() for t in
                     pg.locator('#lptabs div').all_inner_texts()]
-            # 🔴 **顺序也要钉**，不只是"存在" —— 用户 2026-09-15 明确给了
-            #   顺序："业绩曲线、收益明细、执行差异、每日持仓、交易记录、
-            #   清仓记录"。只查"在不在"的话，顺序被改了不会有人发现。
-            WANT = ['业绩曲线', '收益明细', '执行差异', '每日持仓',
-                    '交易记录', '清仓记录']
+            # 🔴 **顺序也要钉**，不只是"存在" —— 用户两次都明确给了顺序，
+            #   只查"在不在"的话顺序被改了不会有人发现。
+            #   2026-09-15："业绩曲线、收益明细、执行差异、每日持仓、
+            #                交易记录、清仓记录"
+            #   2026-09-22（并进流水与选股理由、拆出盈亏榜之后重排）：
+            #     "业绩曲线、业绩明细、每日持仓、交易明细、清仓记录、
+            #      盈亏榜、选股理由、执行差异"
+            #   —— **执行差异挪到最后、选股理由在它前面**，那是他的使用顺序。
+            WANT = ['业绩曲线', '业绩明细', '每日持仓', '交易明细',
+                    '清仓记录', '盈亏榜', '选股理由', '执行差异']
             assert tabs == WANT, '页签顺序/命名不对：%s（要 %s）' % (tabs, WANT)
             # 「业绩」（KPI 板）**一直置顶**，不进页签
             g = pg.evaluate("""() => {
@@ -2480,7 +2514,7 @@ def t_live_perf_tabs():
                      '一次只看一块' % (name, n))
 
             # ---- ③ 交易记录 = 逐笔操作（买卖各一笔）----
-            open_tab('交易记录')
+            open_tab('交易明细')
             sides = pg.evaluate("""() => [...document.querySelectorAll(
                 '[id^=lpp].on table.lvt tr')].slice(1)
                 .map(tr => (tr.children[1] || {}).textContent.trim())""")
@@ -2523,15 +2557,26 @@ def t_live_perf_tabs():
                 notes.append('清仓记录 %d 笔往返（逐笔 %d >= 往返×2）'
                              % (n_trip, n_fill))
 
-            # ---- ⑤ 冲正按钮只在流水页 ----
-            open_tab('交易记录')
-            assert pg.locator('[id^=lpp].on a.lvrv').count() == 0, \
-                ('业绩页的交易记录里有「冲正」按钮 —— 那是"更正录入"，'
-                 '属于流水页那条链（这里是复盘视角）')
-            assert pg.locator('[id^=lpp].on a[href*="/fills"]').count() >= 1, \
-                ('没给去流水页的入口 —— 不给冲正可以，但不能把它**藏起来**'
-                 '（同「看不出能点的入口 = 没有入口」那条）')
-            notes.append('冲正留在流水页，但给了入口')
+            # ---- ⑤ 🔴🔴 冲正**必须在这里**（2026-09-22 起流水独立页并了进来）
+            #   这条断言原来是反的（"业绩页不许有冲正，它属于流水页那条链"）
+            #   —— **失败的是断言不是产品**：流水页没有入口之后，那条链的
+            #   另一头就没了，而冲正是 append-only 账本**唯一**的更正手段。
+            #   说了不能做却不给出路，最后会变成绕过整个入口（同 backLink）。
+            open_tab('交易明细')
+            assert pg.locator('[id^=lpp].on a.lvrv').count() >= 1, \
+                ('交易明细里没有「冲正」—— 流水独立页已经并进来了，'
+                 '这里不给的话录错了就再也改不了（账本只追加）')
+            # ★ 反向自证：已冲正/已作废的那几行本来就不给按钮，所以
+            #   "有按钮的行数 <= 总行数"必须成立 —— 否则是按钮画多了。
+            _nrow = pg.locator('[id^=lpp].on table.lvt tr').count() - 1
+            _nrv = pg.locator('[id^=lpp].on a.lvrv').count()
+            assert 0 < _nrv <= _nrow, '冲正按钮 %d 个 / 数据 %d 行' % (_nrv, _nrow)
+            # 🔴 旧的「去流水页更正 ›」链接要**删干净**：那一页已经没有入口了，
+            #   点过去只会被 redirect 弹回来（一个绕圈的死链）。
+            assert pg.locator('[id^=lpp].on a[href*="/fills"]').count() == 0, \
+                '交易明细里还留着「去流水页」的链接 —— 那一页已经并过来了'
+            notes.append('冲正已随流水页并入「交易明细」（%d/%d 行可冲正）'
+                         % (_nrv, _nrow))
             assert not errs, 'JS 报错：%s' % errs[:3]
             br.close()
     finally:
@@ -3011,7 +3056,7 @@ def t_live_perf_ui():
             assert pg.locator('a.lpin').count() == 0, \
                 '「累计收益」那一格不该再是链接（入口已经挪到「📊 业绩」按钮）'
             pg.click('#lvperf')
-            _lp_tab(pg, '收益明细')
+            _lp_tab(pg, '业绩明细')
             pg.wait_for_selector('#lp_tbl .lpbar', timeout=90000)
             pg.wait_for_timeout(500)
             assert pg.evaluate('()=>location.hash').endswith('/perf'), \
@@ -3040,7 +3085,7 @@ def t_live_perf_ui():
                 return t
 
             _pane_has('业绩曲线', '资金曲线', '收益曲线')
-            _pane_has('收益明细', '收益明细')
+            _pane_has('业绩明细', '业绩明细')
             # ★ 验完切回「业绩曲线」—— 下面那一大段都在这一页里操作
             #   （切曲线、勾基准、读 y 轴刻度）。不切回去的话它们全在
             #   隐藏的 pane 上点，超时 30 秒而看着像页面坏了。
@@ -3329,7 +3374,7 @@ def t_live_perf_ui():
             #     强度、位置是日期 —— 这一页存在的理由就是快速看形态。
             #   ★ 2026-09-15 起它在**自己的页签**里，先切过去再操作 ——
             #     不切的话是在隐藏的 pane 上点，超时 30 秒而看着像页面坏了。
-            _lp_tab(pg, '收益明细')
+            _lp_tab(pg, '业绩明细')
             assert pg.locator('#lp_tbl a.lpg.on').inner_text() == '日', \
                 '默认粒度该是「日」（打开就看到这个月每天怎么样）'
             assert pg.locator('#lp_tbl a.lps.on').inner_text() == '两者', \
@@ -8738,10 +8783,13 @@ def t_perf_trade_info():
                     '盈亏比对不上：%r vs %s' % (kpi['盈亏比'], want['profit_factor'])
 
             # ---- ③ 盈亏榜：只列真的 ----
-            _lp_tab(pg, '清仓记录')
-            pg.wait_for_selector('#lp_trip .pgrid', timeout=90000)
+            # 🔴 它 2026-09-22 从「清仓记录」挪成了**自己一个页签**
+            #   （用户：「盈利榜亏损榜不要放在清仓记录中」）——
+            #   **失败的是断言不是产品**，要证的事一个字没变，只是换了容器。
+            _lp_tab(pg, '盈亏榜')
+            pg.wait_for_selector('#lp_top .pgrid', timeout=90000)
             tops = pg.evaluate(
-                """() => [...document.querySelectorAll('#lp_trip .pgrid > div')]
+                """() => [...document.querySelectorAll('#lp_top .pgrid > div')]
                      .map(d => ({t: d.querySelector('.ttl').innerText,
                        r: [...d.querySelectorAll('tbody tr')].map(
                             tr => tr.children[2].innerText.trim())}))""")
@@ -8795,3 +8843,160 @@ def t_perf_trade_info():
             '盈亏榜 %d+%d 条各自同号、执行差异 %d 行方向逐格一致'
             % (aid, want['n'], (want['win_rate'] or 0) * 100,
                len(want['best']), len(want['worst']), nrow))
+
+
+@case('业绩页并页：旧 hash 不失效 / 盈亏榜独立 / 冲正跟着搬（playwright）', 'web')
+def t_perf_merge():
+    """用户 2026-09-22 四条：
+
+      「流水按钮是否还有存在的必要，和业绩里的交易记录有所重复，应该可以
+        合并到交易记录里」
+      「选股理由应该也内置到业绩里，执行差异都已经在里面了」
+      「盈利榜亏损榜不要放在清仓记录中，也单独开个页签在业绩」
+      「执行差异应该放最后面，前面放选股理由」
+
+    🔴 合并**唯一**真正的风险不是少两个按钮，是把东西弄丢（同「板块并进
+      盘面」那条）。所以判据全落在"还找得到吗"上：
+
+      ① 两个旧 hash 仍然到得了对应页签（书签 + 持仓行那个 `?` 的地址），
+         且走的是 **replace** 不是赋值 —— 赋值会往历史里塞一条，
+         按后退跳回旧地址又被弹回来，人就退不出去。
+      ② 盈亏榜**离开了清仓记录**（不然就是"挪了个位置还留着一份"）。
+      ③ 冲正**跟着搬进来了** —— 它是 append-only 账本唯一的更正手段。
+      ④ **没有成交的账户也要能看选股理由**：这一页现在是它唯一的入口，
+         而"还没有权益曲线"与选股理由毫无关系（第一版就这么挂了：
+         整页只剩一句话，页签一个都没有）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return 'playwright 没装，跳过'
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+    import assay.live as lv
+    import assay.server as sv
+
+    prev_live, prev_allow = lv.LIVE, sv.ALLOW_LIVE
+    tmp = tempfile.mkdtemp(prefix='merge_case_')
+    shutil.copytree(prev_live, os.path.join(tmp, 'live'))
+    lv.LIVE = os.path.join(tmp, 'live')
+    sv.ALLOW_LIVE = True
+    # ★ 挑一个**有往返**的账户：盈亏榜与冲正两条都要真数据才测得到
+    aid = next((a['id'] for a in lv.load_accounts()
+                if not a.get('archived') and (lv.trade_stats(a['id']) or {}).get('n')), None)
+    # 🔴 ④ 那条要一个**一笔成交都没有**的账户 —— 真账本里不一定有，
+    #   所以**构造**一个（同「断言要在能触发的构造上跑」）。
+    empty = 'zz_nofill'
+    lv.upsert_account(empty, name='空账户', init_cash=100000)
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d/' % port
+    errs, msg = [], []
+    try:
+        if not aid:
+            return '没有账户有往返，跳过'
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 1000})
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            # ---- ① 旧 hash -> 页签，且不往历史里塞一条 ----
+            pg.goto(base + '#/live', wait_until='networkidle')
+            pg.wait_for_selector('.ditem', timeout=60000)
+            home = pg.evaluate('()=>history.length')
+            for old, tab in (('/fills', '交易明细'), ('/why', '选股理由')):
+                pg.evaluate("(h)=>{location.hash=h;}", '#/live/%s%s' % (aid, old))
+                pg.wait_for_function("()=>location.hash.includes('/perf?tab=')",
+                                     timeout=60000)
+                pg.wait_for_selector('#lptabs div.on', timeout=60000)
+                assert pg.locator('#lptabs div.on').inner_text().strip() == tab, \
+                    ('旧 hash #/live/<id>%s 没落在「%s」页签上，而是 %s'
+                     % (old, tab, pg.locator('#lptabs div.on').inner_text()))
+            # replace 不是赋值：两次跳转 history 长度不该各涨一条
+            #   （`location.hash=` 那两次是用例自己塞的，各算 1）
+            grew = pg.evaluate('()=>history.length') - home
+            assert grew <= 2, \
+                ('旧 hash 用的是赋值不是 location.replace —— history 涨了 %d 条，'
+                 '按后退会跳回旧地址又被弹回来，人退不出去' % grew)
+            # 🔴 **参数也要跟着过去**，不只是落在那个页签上：
+            #   `?d=` 是持仓行那个 `?`「定位到它建仓那一期」的全部信息，
+            #   丢了的话人点过去落在第一页，看着像"这只票没有理由"——
+            #   **而它不报错**（变异实测：只钉页签的话丢 `d=` 照样全绿）。
+            pg.evaluate("(h)=>{location.hash=h;}",
+                        '#/live/%s/why?d=2026-09-01&all=1' % aid)
+            pg.wait_for_function("()=>location.hash.includes('/perf?tab=why')",
+                                 timeout=60000)
+            _h = pg.evaluate('()=>location.hash')
+            assert 'd=2026-09-01' in _h and 'all=1' in _h, \
+                '旧 hash 的 ?d= / ?all= 没带过去：%s' % _h
+
+            # ---- ② 盈亏榜独立，且**离开了**清仓记录 ----
+            pg.goto(base + '#/live/%s/perf' % aid, wait_until='networkidle')
+            pg.wait_for_selector('#lptabs div', timeout=60000)
+            tabs = [t.strip() for t in pg.locator('#lptabs div').all_inner_texts()]
+            assert tabs.index('选股理由') < tabs.index('执行差异'), \
+                '执行差异要排在最后、选股理由在它前面：%s' % tabs
+            _lp_tab(pg, '盈亏榜')
+            pg.wait_for_selector('#lp_top .pgrid', timeout=60000)
+            n_top = pg.locator('#lp_top .pgrid > div').count()
+            assert n_top == 2, '盈亏榜该是两块（盈利/亏损），实得 %d' % n_top
+            _lp_tab(pg, '清仓记录')
+            # ★ 等它**真的渲染完**再判"榜不在这里" —— 直接判的话，
+            #   pane 还空着时 count() 也是 0，断言空转（同「页签点得开 ≠
+            #   页签里有东西」）。
+            pg.wait_for_function(
+                "()=>{const e=document.querySelector('#lp_trip');"
+                " return e && /清仓记录/.test(e.innerText);}", timeout=60000)
+            assert pg.locator('#lp_trip .pgrid').count() == 0, \
+                ('清仓记录里还留着盈亏榜 —— 那是"挪了个位置还留着一份"，'
+                 '同一份信息两处渲染迟早分叉')
+
+            # ---- ③ 冲正跟着搬进来了（账本唯一的更正手段）----
+            _lp_tab(pg, '交易明细')
+            pg.wait_for_selector('#lp_fill table.lvt', timeout=60000)
+            rv = pg.locator('#lp_fill a.lvrv').count()
+            assert rv >= 1, '交易明细里没有「冲正」—— 录错了就再也改不了'
+            assert pg.locator('#lp_fill a[href*="/fills"]').count() == 0, \
+                '还留着「去流水页」的链接 —— 那一页已经并过来了（点了只会绕回来）'
+            msg.append('旧 hash 两条都 redirect 到页签；盈亏榜独立成页签；'
+                       '冲正 %d 个按钮' % rv)
+
+            # ---- ④ 一笔成交都没有的账户，选股理由仍然到得了 ----
+            pg.goto(base + '#/live/%s/perf' % empty, wait_until='networkidle')
+            # ★ 不直接 `wait_for_selector('#lptabs div')` —— 整页空掉时那是
+            #   一句 60 秒裸超时，**报错指不到原因**（变异实测就是这样）。
+            #   等"页面渲染完"，再自己判页签在不在。
+            pg.wait_for_function(
+                "()=>{const m=document.querySelector('#main');"
+                " return m && m.innerText.trim() && !/读取中/.test(m.innerText);}",
+                timeout=60000)
+            t2 = [t.strip() for t in pg.locator('#lptabs div').all_inner_texts()]
+            assert t2, ('没有成交的账户业绩页**一个页签都没有** —— 屏幕上只有'
+                        '"%s"。而这一页是选股理由与执行差异的唯一入口。'
+                        % pg.inner_text('#main')[:60].replace('\n', ' '))
+            assert t2 == tabs, \
+                ('没有成交的账户页签少了：%s —— 这一页现在是选股理由与执行差异的'
+                 '**唯一**入口，不能因为"还没有权益曲线"就整页空掉' % t2)
+            _lp_tab(pg, '选股理由')
+            pg.wait_for_selector('#lp_why', timeout=60000)
+            pg.wait_for_function(
+                "()=>{const e=document.querySelector('#lp_why');"
+                " return e && e.innerText.trim() && !/读取中/.test(e.innerText);}",
+                timeout=60000)
+            w = pg.inner_text('#lp_why')
+            assert '选股理由' in w or '还没有信号' in w, \
+                '空账户的选股理由页签没内容：%r' % w[:120]
+            assert '还没有权益曲线' not in w, \
+                ('空账户的选股理由页签显示的是"还没有权益曲线" —— '
+                 '那句话与选股理由毫无关系')
+            msg.append('空账户仍有 %d 个页签且选股理由打得开' % len(t2))
+            br.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE, sv.ALLOW_LIVE = prev_live, prev_allow
+        shutil.rmtree(tmp, ignore_errors=True)
+    assert not errs, '页面报错：%r' % errs[:3]
+    return '；'.join(msg)

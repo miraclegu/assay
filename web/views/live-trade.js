@@ -346,13 +346,13 @@ function openRecord(aid, sig, ro, tab){
    用户 2026-09-15："买入卖出都算一笔单独的操作，需要记录下来，
    这才是真正的交易记录。" —— 对。这张表就是它。
 
-   🔴 **不许在业绩页再抄一份**：同一份数据两处渲染迟早不一致
-     （列序、冲正按钮、估算标记会慢慢分叉），而那不报错。
-     所以流水独立页（`#/live/<id>/fills`，带录入与冲正）与业绩页的
-     「交易记录」页签共用这一个函数。
-   ★ `ro`（只读）与 `showRev`（显不显示冲正按钮）分开传：业绩页是**复盘**
-     视角，冲正属于"更正录入"，该留在流水页 —— 但**不是藏起来**，
-     业绩页那边给一条链过去。 */
+   🔴 **不许再抄一份**：同一份数据两处渲染迟早不一致（列序、冲正按钮、
+     估算标记会慢慢分叉），而那不报错。
+   ★ 2026-09-22 起调用方只剩一处（业绩页的「交易明细」页签）——
+     流水独立页并进去了。`showRev` 这个开关**保留**：它区分的是
+     "这一处该不该给更正入口"，而不是"能不能改"（后者是 `ro`）。
+     现在交易明细两个都给 —— 那是账本唯一的更正手段，藏起来等于
+     录错了再也改不了。 */
 function fillsTableHtml(rows, opt) {
   opt = opt || {};
   const ro = opt.ro, showRev = opt.showRev !== false;
@@ -407,39 +407,12 @@ function bindFillRevert(root, aid, reload) {
   });
 }
 
-async function showFills(aid, off){
-  stopPoll();
-  enterView();
-  if(!LV){ try{ LV=await j('/api/live/accounts'); }catch(e){} }
-  let o; try{ o=await j('/api/live/fills?id='+encodeURIComponent(aid)
-      +'&offset='+(off||0)+'&limit='+LVPAGE); }
-  catch(e){ $('#main').innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
-  const ro=(LV||{}).readonly, n=o.total, from=o.offset+1, to=Math.min(o.offset+o.limit,n);
-  const pages=Math.max(1, Math.ceil(n/o.limit)), cur=Math.floor(o.offset/o.limit)+1;
-  $('#main').innerHTML=`
-  <div class="lvhead">
-    <h2>成交流水</h2>
-    <a class="lvtag" href="#/live/${esc(aid)}">‹ 回账户</a>
-    <span class="lvtag">${n} 笔</span>
-    <span class="lvtag">费用合计 ${num(o.fee_total,2)}${
-      o.fee_estimated_n?'（'+o.fee_estimated_n+' 笔估算）':''}</span>
-  </div>
-  ${n?`<div class="lvsec">${fillsTableHtml(o.rows, {ro: ro})}
-    <div class="lvform" style="margin-top:10px;align-items:baseline">
-      <button class="btn" id="pprev" ${o.offset<=0?'disabled':''}>‹ 上一页</button>
-      <span class="lvwhy">第 ${cur}/${pages} 页 · 第 ${from}–${to} 笔（倒序）</span>
-      <button class="btn" id="pnext" ${to>=n?'disabled':''}>下一页 ›</button>
-    </div>
-    <div class="lvwhy" style="margin-top:6px">账本<b>只追加</b>：录错了点「冲正」——
-      追加一条反方向记录（费用取 −原费用，净影响 0），原记录保留并划掉。
-      改一笔 = 冲正 + 重录。</div>
-  </div>`
-  :'<div class="none">还没录过成交</div>'}`;
-  const go=x=>{ location.hash='#/live/'+aid+'/fills'+(x?'/'+x:''); };
-  if($('#pprev')) $('#pprev').onclick=()=>go(Math.max(0,o.offset-o.limit));
-  if($('#pnext')) $('#pnext').onclick=()=>go(o.offset+o.limit);
-  bindFillRevert(document, aid, () => showFills(aid, o.offset));
-}
+/* 🔴 成交流水的**独立页 `showFills` 已删干净**（2026-09-22）：用户把它并进了
+   业绩页的「交易明细」页签（"和业绩里的交易记录有所重复"）。
+   留一个没人调的渲染函数，下次有人会以为它是正本 —— 而那时两份已经分叉了。
+   ★ 旧 hash `#/live/<id>/fills` **仍然可达**：`app.js` 里 redirect 到
+     `#/live/<id>/perf?tab=fills`（书签是产品契约）。
+   ★ `fillsTableHtml` 与 `bindFillRevert` 都还在，只是调用方从两处变成一处。 */
 
 /* 策略详情：源码快照 + 参数表 + 【用这个版本跑过的回测】。
    关联键是主文件自身哈希 —— 账户的 code_sha256 是"主文件+依赖"的打包哈希，

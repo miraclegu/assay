@@ -86,18 +86,26 @@ function route(){
   const sm=/^#\/stock(?:\/([\w.]+))?$/.exec(location.hash||'');
   if(sm){ location.replace('/stock.html'
     + (sm[1]?('?code='+encodeURIComponent(decodeURIComponent(sm[1]))):'')); return; }
+  /* 🔴🔴 **成交流水与选股理由都并进业绩页了**（2026-09-22 用户：「流水按钮
+       和业绩里的交易记录有所重复，应该可以合并」「选股理由应该也内置到
+       业绩里」）。这两个 hash **保留并【跳转】** —— 它们是书签与持仓行
+       那个 `?` 的地址，属于产品契约（同 `#/stock/xxx` 那条：旧链接不该
+       失效，而"点了没反应"是最难查的那种坏）。
+     ★ 用 `location.replace` 不是赋值：不往历史里塞一条，否则按「后退」
+       会跳回旧地址、再被弹回来，人就退不出去了。 */
   const fm=/^#\/live\/([\w-]+)\/fills(?:\/(\d+))?$/.exec(location.hash||'');
-  if(fm){ showFills(fm[1], parseInt(fm[2]||'0',10)); return; }
-  /* 选股理由是**独立页**（同成交流水：会越来越长 -> 服务端分页）。
-     `?off=` 翻页、`?d=` 定位到某一期（持仓行的 ? 就链到这里）。 */
+  if(fm){ location.replace('#/live/'+fm[1]+'/perf?tab=fills'); return; }
   const wm=/^#\/live\/([\w-]+)\/why(?:\?(.*))?$/.exec(location.hash||'');
-  if(wm){ const q=new URLSearchParams(wm[2]||'');
-          showWhy(wm[1], parseInt(q.get('off')||'0',10), q.get('d')||'',
-                  q.get('all')==='1'); return; }
-  /* 业绩明细也是**独立页**：主视图只留「今日待办 + 当前持仓」，
-     曲线与年月日收益表是复盘时才看的（入口在 KPI 板的「累计收益」）。 */
-  const pm=/^#\/live\/([\w-]+)\/perf$/.exec(location.hash||'');
-  if(pm){ showPerf(pm[1]); return; }
+  if(wm){ const q=new URLSearchParams(wm[2]||''), ps=['tab=why'];
+          if(q.get('off')) ps.push('woff='+encodeURIComponent(q.get('off')));
+          if(q.get('d')) ps.push('d='+encodeURIComponent(q.get('d')));
+          if(q.get('all')==='1') ps.push('all=1');
+          location.replace('#/live/'+wm[1]+'/perf?'+ps.join('&')); return; }
+  /* 业绩页是**独立页**：主视图只留「今日待办 + 当前持仓」，其余八个页签
+     （曲线 / 明细 / 持仓 / 交易 / 清仓 / 盈亏榜 / 选股理由 / 执行差异）
+     都是复盘时才看的。`?tab=` 只在进页面时读一次（见 showPerf）。 */
+  const pm=/^#\/live\/([\w-]+)\/perf(?:\?(.*))?$/.exec(location.hash||'');
+  if(pm){ showPerf(pm[1], new URLSearchParams(pm[2]||'')); return; }
   const lm=/^#\/live(?:\/([\w-]+))?$/.exec(location.hash||'');
   if(lm){ showLive(lm[1]||null); return; }
   const dm=/^#\/docs(?:\/([\w-]+))?$/.exec(location.hash||'');

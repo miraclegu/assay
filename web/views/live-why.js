@@ -64,7 +64,7 @@ function lvWhyMark(x){
 function lvHoldMark(aid, code){
   const d=((LVWHYH||{}).entry||{})[code];
   if(!d) return '';
-  return ` <a class="lvq" href="#/live/${esc(aid)}/why?d=${esc(d)}"
+  return ` <a class="lvq" href="#/live/${esc(aid)}/perf?tab=why&d=${esc(d)}"
     title="建仓于 ${esc(d)} 那一期 —— 点开看当时为什么选它">?</a>`;
 }
 
@@ -75,25 +75,35 @@ async function lvWhyLoad(aid){
 }
 
 /* ---------------- 独立页 ---------------- */
-async function showWhy(aid, off, focus, all){
-  stopPoll();
-  enterView();
+/* 🔴🔴 **2026-09-22 起它是业绩页的一个页签**（用户：「选股理由应该也内置到
+     业绩里，执行差异都已经在里面了」），而 `#/live/<id>/why?d=…` 那个旧
+     hash **保留并 redirect**（书签与持仓行的 `?` 都指着它）。
+   ★ 渲染函数**仍然只有这一份**：`el` 给了就渲染进那个容器（页签模式），
+     不给就照旧整页接管。两处各抄一份的话，"一期一段 / 事后复算 / 候选池
+     截断"那套迟早分叉，而分叉的那份看着完全正常。
+   ★ `nav(o)` 是页签模式下的翻页回调（`{off, all, focus}`）—— 页签里**不许
+     碰 hash**：那会触发路由、把整条权益曲线重放一遍（几秒）。 */
+async function showWhy(aid, off, focus, all, el, nav){
+  const tab=!!el;
+  if(!tab){ stopPoll(); enterView(); }
   if(!LV){ try{ LV=await j('/api/live/accounts'); }catch(e){} }
-  const M=$('#main');
+  const M=el||$('#main');
   M.innerHTML='<div class="none">读取中…</div>';
   let o;
   try{ o=await j('/api/live/explains?id='+encodeURIComponent(aid)
       +'&full=1&offset='+(off||0)+'&limit='+LVWHYP
       +'&only='+(all?'all':'rebal')); }
   catch(e){ M.innerHTML='<div class="none">'+esc(e)+'</div>'; return; }
+  if(tab && !document.body.contains(M)) return;   /* 人已经走开 */
   const n=o.total, pages=Math.max(1, Math.ceil(n/(o.limit||LVWHYP)));
   const cur=Math.floor((o.offset||0)/(o.limit||LVWHYP))+1;
   const acc=((LV||{}).accounts||[]).find(x=>x.id===aid)||{};
   M.innerHTML=`
   <div class="lvhead">
-    <h2>选股理由</h2>
+    ${tab?'<div class="ttl">选股理由</div>'
+        :`<h2>选股理由</h2>
     <a class="lvtag" href="#/live/${esc(aid)}">‹ 回账户</a>
-    <span class="lvtag">${esc(acc.name||aid)}</span>
+    <span class="lvtag">${esc(acc.name||aid)}</span>`}
     <span class="lvtag">${all?'共 '+n+' 期':'调仓日 '+n+' 期'}</span>
     <a class="btn" id="wall" href="#">${all?'只看调仓日':'含非调仓日（共 '+(o.total_all||n)+' 期）'}</a>
     <span class="lvwhy">一期一段，按候选池排名依次列出 —— 选中 / 备选 / 没轮到 / 被剔除</span>
@@ -106,28 +116,32 @@ async function showWhy(aid, off, focus, all){
   </div>`;
   /* 🔴 innerHTML 之后才存在的元素必须重新绑 —— 只在渲染开头绑的话点了没反应，
      而且没有任何报错（对比页表格里的「移除」栽过）。 */
-  const q0=(all?'all=1':'');
-  const go=k=>{ const ps=[]; if(k) ps.push('off='+k); if(all) ps.push('all=1');
-                location.hash='#/live/'+aid+'/why'+(ps.length?'?'+ps.join('&'):''); };
-  if($('#wall')) $('#wall').onclick=ev=>{ ev.preventDefault();
-    location.hash='#/live/'+aid+'/why'+(all?'':'?all=1'); };
-  if($('#wprev')) $('#wprev').onclick=()=>go(Math.max(0,(o.offset||0)-LVWHYP));
-  if($('#wnext')) $('#wnext').onclick=()=>go((o.offset||0)+LVWHYP);
+  const go=(k, a2)=>{
+    if(tab){ nav({off: k, all: a2, focus: ''}); return; }
+    const ps=[]; if(k) ps.push('off='+k); if(a2) ps.push('all=1');
+    location.hash='#/live/'+aid+'/why'+(ps.length?'?'+ps.join('&'):'');
+  };
+  const wall=M.querySelector('#wall');
+  if(wall) wall.onclick=ev=>{ ev.preventDefault(); go(0, !all); };
+  const wp=M.querySelector('#wprev'), wn=M.querySelector('#wnext');
+  if(wp) wp.onclick=()=>go(Math.max(0,(o.offset||0)-LVWHYP), all);
+  if(wn) wn.onclick=()=>go((o.offset||0)+LVWHYP, all);
   M.querySelectorAll('button.whyrc').forEach(b=>{
     b.onclick=()=>lvWhyRecompute(aid, b.dataset.d, b);
   });
   /* 🔴 有后台复算在跑就自己回来看 —— 靠人手动刷新的话，页面会一直停在
-     "正在复算…"，**而它不报错**。用 hash 当护栏：人已经走开就别再渲染
-     （`stopPoll` 管的是 setInterval，这里是 setTimeout）。 */
+     "正在复算…"，**而它不报错**。护栏：独立页看 hash、页签看容器还在不在
+     （页签模式下切页签不改 hash，拿 hash 当护栏就永远成立）。 */
   if((o.periods||[]).some(p=>p.explain_pending)){
     const h=location.hash;
-    setTimeout(()=>{ if(location.hash===h) showWhy(aid, off, focus, all); }, 2500);
+    setTimeout(()=>{ if(tab ? document.body.contains(M) : location.hash===h)
+      showWhy(aid, off, focus, all, el, nav); }, 2500);
   }
   lvWhySqlBind(M);
   lvWhyMoreBind(M, aid, o);
   if(focus){
-    const el=document.getElementById('why-'+focus);
-    if(el){ el.scrollIntoView({block:'start'}); el.classList.add('whyhit'); }
+    const t=document.getElementById('why-'+focus);
+    if(t){ t.scrollIntoView({block:'start'}); t.classList.add('whyhit'); }
   }
 }
 

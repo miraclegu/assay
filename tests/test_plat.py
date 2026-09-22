@@ -2695,10 +2695,28 @@ def t_page_inventory():
         # 本文件里没有对应的 showXxx 实现
         if fn:
             assert fn in defined, '%s 的实现 %s 不见了' % (route, fn)
-    # 流水是独立页，单独核（它的路由带参数）
-    assert 'showFills' in defined and '/fills' in js, '成交流水独立页不见了'
-    # 选股理由也是独立页（同成交流水：会越来越长 -> 服务端分页）
-    assert 'showWhy' in defined and '/why' in js, '选股理由独立页不见了'
+    # 🔴🔴 成交流水与选股理由 2026-09-22 **并进了业绩页的页签**（用户：
+    #   「流水按钮和业绩里的交易记录有所重复，应该可以合并」「选股理由应该
+    #   也内置到业绩里」）。所以这两条断言的**前提没了** ——
+    #   **失败的是断言不是产品**，但它原本要保的东西一条都不能丢：
+    #   那两个 hash 是书签与持仓行那个 `?` 的地址，**属于产品契约**。
+    #   新判据 = 「路由还认得它们，且跳到业绩页对应的页签」。
+    assert 'showFills' not in defined, \
+        ('`showFills` 该删干净了 —— 它已经没有调用方（并进「交易明细」页签），'
+         '留一个没人用的渲染函数，下次有人会以为它是正本')
+    assert 'showWhy' in defined, '选股理由的渲染函数不见了'
+    # ★ 判据落在**那条路由自己那一段**上（从它的正则到下一个 return），
+    #   不在全文里找 —— 全文找的话，别处随便一个 `tab=fills` 也算命中。
+    for _old, _tab in (('fills', 'tab=fills'), ('why', 'tab=why')):
+        _i = js.find('/' + _old + '(?:')
+        assert _i > 0, '旧 hash #/live/<id>/%s 的路由整条没了' % _old
+        _seg = js[_i:js.find('return;', _i) + 7]
+        assert 'location.replace(' in _seg and _tab in _seg, \
+            ('旧 hash #/live/<id>/%s 没有 redirect 到业绩页的 %s —— 书签会 404，'
+             '而"点了没反应"是最难查的那种坏。那一段：%r' % (_old, _tab, _seg[:200]))
+    # ★ 只查"提到过 tab=fills"是不够的：要的是**跳转**。而 `location.replace`
+    #   不是赋值 —— 赋值会往历史里塞一条，按后退跳回旧地址又被弹回来，
+    #   人就退不出去了。
     # 🔴 后台复算时页面必须**说出来**并自己回来看：不说的话那一段就是一句
     #   "没有理由"，人会当成功能坏了；不轮询的话它会一直停在"正在复算…"，
     #   **两种都不报错**。
