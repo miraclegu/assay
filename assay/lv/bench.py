@@ -546,6 +546,15 @@ def diff_one(aid, day, sig=None):
             r['px_diff'] = r['got_px'] / float(r['strat_px']) - 1.0
         elif not (wb or ws):
             r['strat_px'] = None          # 策略没让买/卖，没有基准价
+        # 🔴 **方向由服务端给**（用户 2026-09-22：「比对操作时没有买卖方向」）。
+        #   `want_side` 只覆盖"策略点过名"的行，而 `extra`/`sell_extra`
+        #   恰恰是它为 None 的那两种 —— 前端自己按 `got_buy`/`got_sell` 推
+        #   就是第二份定义，改一处漏一处（同「判据由服务端给」那条）。
+        # ★ 同一天既买又卖（补仓后又减）给 `both`，不挑一个说 —— 那会
+        #   把另一半静默藏掉。
+        r['side'] = (r['want_side']
+                     or ('both' if (bs and ss) else
+                         ('buy' if bs else ('sell' if ss else None))))
         rows.append(r)
 
     n = {}

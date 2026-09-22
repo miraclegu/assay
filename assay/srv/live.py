@@ -814,6 +814,21 @@ def api_live_trips(q):
         aid, offset=q.get('offset') or 0, limit=q.get('limit') or 100))
 
 
+def api_live_trade_stats(q):
+    """GET /api/live/trade_stats?id=&top= —— 往返交易的统计与盈亏排行。
+
+    ★ 统计在**服务端**算，页面不重算 —— 回测详情页那套指标（笔数/胜率/
+      盈亏比）本来就由服务端给，实盘这边再在前端算一份必然分叉。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    try:
+        top = int(q.get('top') or 10)
+    except (TypeError, ValueError):
+        top = 10
+    return _live_err(lambda: m.trade_stats(aid, top=max(1, min(50, top))))
+
+
 def api_live_paper(_q, body):
     """模拟盘：推进到最新数据日 / 删档重建。
 

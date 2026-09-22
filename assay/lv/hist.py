@@ -249,3 +249,54 @@ def round_trips(aid, datalake=None, offset=0, limit=100):
     return {'total': total, 'offset': offset, 'limit': limit,
             'rows': trips[offset:offset + limit],
             'n_open': len(open_pos), 'open': open_pos}
+
+
+def trade_stats(aid, datalake=None, top=10):
+    """全程的**交易统计**：笔数 / 胜率 / 盈亏比 / 持有天 + 盈亏前十。
+
+    🔴 用户 2026-09-22：「综合面板中的信息相对回测还是少了点，比如交易笔数、
+      胜率、盈亏比、盈利前十（收益率）、亏损前十（收益率）」。
+      回测的 `stats.json` 早就有 `n_trades` / `win_rate` / `profit_factor` /
+      `avg_win` / `avg_loss` / `avg_holding_days` —— 实盘这边一个都没有。
+
+    ★ **在服务端算，不让页面重算**：`round_trips` 是**分页**的（默认 100 条），
+      页面拿到的只是当前这一页，照它算胜率会随翻页变 —— 而那不报错。
+    ★ 口径与 `round_trips` **同一条**（收益率含费），页面上要与那张表并排看。
+    🔴 盈亏比用 `平均盈利 / |平均亏损|`（**收益率**口径，与回测的
+      `profit_factor` 同义）—— 用金额算的话，一笔大仓位会把它带偏，
+      而这一页问的是"选得准不准"，不是"下注多大"。
+    ★ 一笔亏损都没有时盈亏比给 **None 不给 ∞**：页面显示 "—" 比一个
+      看着很厉害的 Infinity 诚实（同「拿不到分红那一格标查不到」）。
+    """
+    o = round_trips(aid, datalake=datalake, offset=0, limit=10 ** 9)
+    rs = o.get('rows') or []
+    out = {'n': len(rs), 'n_open': o.get('n_open'),
+           'win_rate': None, 'profit_factor': None,
+           'avg_win': None, 'avg_loss': None, 'avg_ret': None,
+           'avg_hold': None, 'pnl_closed': None,
+           'best': [], 'worst': []}
+    if not rs:
+        return out
+    win = [r for r in rs if (r.get('ret') or 0) > 0]
+    los = [r for r in rs if (r.get('ret') or 0) < 0]
+    out['win_rate'] = round(len(win) / len(rs), 6)
+    out['avg_win'] = round(sum(r['ret'] for r in win) / len(win), 6) if win else None
+    out['avg_loss'] = round(sum(r['ret'] for r in los) / len(los), 6) if los else None
+    if win and los and out['avg_loss']:
+        out['profit_factor'] = round(out['avg_win'] / abs(out['avg_loss']), 4)
+    out['avg_ret'] = round(sum((r.get('ret') or 0) for r in rs) / len(rs), 6)
+    hd = [r['holding_days'] for r in rs if r.get('holding_days') is not None]
+    out['avg_hold'] = round(sum(hd) / len(hd), 1) if hd else None
+    out['pnl_closed'] = round(sum((r.get('pnl') or 0) for r in rs), 2)
+    keep = ('code', 'name', 'entry_date', 'exit_date', 'shares',
+            'entry_price', 'exit_price', 'ret', 'pnl', 'holding_days', 'reason')
+    srt = sorted(rs, key=lambda r: (r.get('ret') is None, -(r.get('ret') or 0)))
+    # ★ 两张榜**都只列真的**：往返笔数少的时候，"前十"里会混进反号的那些，
+    #   于是「盈利前十」列出一笔 −0.21% —— 名不副实（实测 froec 只有 2 笔
+    #   往返时就这样）。宁可列不满十条，也不摆一个名不副实的榜
+    #   （同「不猜一个看着合理的」）。
+    out['best'] = [{k: r.get(k) for k in keep}
+                   for r in srt if (r.get('ret') or 0) > 0][:top]
+    out['worst'] = [{k: r.get(k) for k in keep}
+                    for r in reversed(srt) if (r.get('ret') or 0) < 0][:top]
+    return out

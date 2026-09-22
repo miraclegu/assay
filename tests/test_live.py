@@ -7,7 +7,7 @@
 """
 from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
-                         _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop,
+                         _kset, _kmain, _kfq, _klog, _lp_tab, _lp_enter, _via_pop,
                           _lv_open_newform, _lv_new_account,
                           _lv_bind_strategy, _lv_rec_fill)
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
@@ -2772,8 +2772,7 @@ def t_live_perf_dd_and_back():
             pg.goto('http://127.0.0.1:%d/stock.html?code=601857.XSHG' % port,
                     wait_until='networkidle')
             pg.click('text=💰 实盘')
-            pg.wait_for_selector('a.lpin', timeout=90000)
-            pg.click('a.lpin')
+            _lp_enter(pg)
             pg.wait_for_selector('#lp_dd svg', timeout=90000)
             pg.wait_for_timeout(400)
 
@@ -2979,18 +2978,39 @@ def t_live_perf_ui():
             pg.on('pageerror', lambda e: errs.append(str(e)))
             pg.on('console', lambda m: errs.append('console: ' + m.text)
                   if m.type == 'error' else None)
-            # ---- 入口：KPI 板的「累计收益」必须是**看得出能点**的链接 ----
+            # ---- 入口：账户按钮排里的「📊 业绩」 ----
+            # 🔴 这条断言**被改动作废过一次**（2026-09-22）：原版钉的是
+            #   KPI 板那个 `a.lpin`「累计收益 ›」链接 —— 而换掉它正是这次
+            #   要做的事（用户：「点击累计收益，进去的其实不仅仅是累计收益，
+            #   是一个综合的面板，从累计收益这边进去感觉不太合适」）。
+            #   **失败的是断言不是产品**，但它原本要保的东西一条都不能丢：
+            #   ① 入口**看得出能点**（按钮，不是一个画成标签的东西 ——
+            #      「看不出能点的入口 = 没有入口」，选股理由那次实测人找不到）；
+            #   ② 名字**说得出里面是什么**（这是这次新加的那一条）；
+            #   ③ 点了真的到得了。
             pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
                     wait_until='networkidle')
             pg.wait_for_selector('#lvbody .lvsec', timeout=90000)
-            pg.wait_for_selector('a.lpin', timeout=90000)
-            lnk = pg.locator('a.lpin').first
-            assert '累计收益' in lnk.inner_text(), \
-                '入口该长在「累计收益」那一格上'
-            assert '›' in lnk.inner_text(), \
-                ('入口要带 › —— **看不出能点的入口 = 没有入口**'
-                 '（选股理由那次实测人找不到）')
-            lnk.click()
+            pg.wait_for_selector('#lvperf', timeout=90000)
+            ent = pg.evaluate('''() => { const a = document.querySelector('#lvperf');
+                if(!a) return null;
+                const cs = getComputedStyle(a);
+                return {txt: a.innerText.trim(), cur: cs.cursor,
+                        bd: cs.borderTopWidth, vis: a.offsetWidth > 0};
+            }''')
+            assert ent and ent['vis'], '业绩页入口不可见'
+            assert '业绩' in ent['txt'], \
+                ('入口的名字要说得出里面是什么 —— 那一页有六个页签，'
+                 '叫「累计收益」等于给 destination 起了个错名字。实际：%r'
+                 % ent['txt'])
+            assert ent['cur'] == 'pointer' and ent['bd'] != '0px', \
+                ('入口要**看得出能点**（按钮：手型光标 + 边框），'
+                 '画成灰字标签的话人不会去点。实际：%r' % ent)
+            # 🔴 「累计收益」那一格**不再是入口** —— 留一个半对的链接
+            #   与一个对的按钮并存，等于两个入口一个名字是错的。
+            assert pg.locator('a.lpin').count() == 0, \
+                '「累计收益」那一格不该再是链接（入口已经挪到「📊 业绩」按钮）'
+            pg.click('#lvperf')
             _lp_tab(pg, '收益明细')
             pg.wait_for_selector('#lp_tbl .lpbar', timeout=90000)
             pg.wait_for_timeout(500)
@@ -3431,7 +3451,8 @@ def t_live_perf_ui():
             kk = [' '.join(x.split()) for x in
                   pg.locator('#main .kpi .k').all_inner_texts()]
             assert all('全程' in x for x in kk), \
-                'KPI 四格该标「· 全程」（图是按区间画的）：%s' % kk
+                ('KPI 板**每一格**都要标「· 全程」（图是按区间画的）——'
+                 '2026-09-22 加交易统计那四格时它当场抓到了漏标：%s' % kk)
             assert '这一段' in pg.inner_text('#lp_chart'), \
                 '图下面该给这一段的收益（与 KPI 的全程口径区分开）'
             #   🔴 账户只有几天时**所有预设档都落在全程**，测不出差别 ——
@@ -3605,7 +3626,7 @@ def t_live_perf_ui():
             assert not errs, '业绩页有运行时错误：%s' % errs[:3]
             br.close()
         return ('nav/day_rets/day_pnls 与 dates 对齐、nav 末值 == stats.twr、'
-                'nav[0] 含建仓当天收益；入口是「累计收益 ›」链接；'
+                'nav[0] 含建仓当天收益；入口是「📊 业绩」按钮（名字说得出里面是什么）；'
                 '三条曲线在**一个框**里切换（资金 y 轴=金额不是倍数 x、'
                 '回撤 y 轴最高**正好 0%%**、收益 tooltip 同时给净值与累计'
                 '金额且跨度小时刻度加小数位不出现 -0%%）；各标口径'
@@ -7586,20 +7607,30 @@ def t_paper_intraday():
     import tempfile
     import json as _json
     import io as _io2
-    aid = 'a2'
+    # 🔴🔴 **账户是【构造】出来的，不借用真账户。**
+    #   原来这里用 a2（froec_traded 的模拟盘），于是这一半悄悄依赖两件
+    #   "真实数据碰巧如此"的事，2026-09-22 两件一起翻车：
+    #     ① NEXT 要恰好是那个策略的**调仓日**（froec_traded 只在周内第 2 个
+    #        交易日调仓）。面板当天推到 09-22（周二）之后 NEXT = 09-23（周三）
+    #        -> 策略一个委托都不下 -> 「盘中那天一笔都没写」，**而产品一个
+    #        字没改**。
+    #     ② 就算撞上调仓日，a2 那会儿**满仓、只剩 193 元现金** ->
+    #        买入腿报"资金不足一手"、卖出腿报"收盘跌停无对手盘" -> 照样 0 笔。
+    #   所以现在：建一个**空仓、满现金**的模拟盘，并把调仓日**设成 NEXT**
+    #   （算出 NEXT 在它那个 ISO 周里是第几个交易日，喂给 `weekday`）——
+    #   于是它在 NEXT 这天必然建仓，与今天星期几、真账户什么状态全都无关。
+    # ★ `weekday` 只能设成 NEXT 自己的序号：引擎的周序号表是按 **feed 里
+    #   有的交易日**算的，而 feed = 面板(≤panel_last) + NEXT，所以只有
+    #   "紧挨着的下一个交易日"序号才是对的（隔一天的话那一周在 feed 里
+    #   缺了前几天，序号就偏了 —— 实测 09-29 算出来是 (1,-1) 不是 (2,-1)）。
+    aid = 'obx'
     prev_live = lv.LIVE
     tmp = tempfile.mkdtemp(prefix='ob_case_')
     try:
         shutil.copytree(prev_live, os.path.join(tmp, 'live'))
         lv.LIVE = os.path.join(tmp, 'live')
-        fp = os.path.join(lv.LIVE, aid, 'fills.jsonl')
-        nf = lambda: sum(1 for _ in _io2.open(fp, encoding='utf-8'))
-
         # 🔴 「盘中那一天」必须是**面板没有**的日子 —— 否则
         #   `can_advance_intraday` 会（正确地）拒掉："面板已经有那天的日线了"。
-        #   所以取**面板最新日的下一个交易日**，并**构造**它的快照：这样这一半
-        #   与"今天是不是交易日、几点了、有没有抓到数据"完全无关
-        #   （数据那条路已经由 ① 用历史真实数据验过了）。
         panel_last = str(lv.latest_data_day())[:10]
         NEXT = str(lv.next_trading_day(panel_last))[:10]
         assert NEXT > panel_last, '构造不对：下一个交易日没算出来'
@@ -7609,27 +7640,23 @@ def t_paper_intraday():
         flat = {r[0]: float(r[1]) for r in base_rows if r[1]}
         assert len(flat) > 100, '构造不对：面板最后一天只有 %d 行' % len(flat)
 
-        # 🔴 **把 NEXT 那天已有的成交从临时账本里摘掉。**
-        #   真账本上今天（= NEXT）可能已经被 `advance_intraday_all` 推过一轮
-        #   （实测 a2 上就有 4 笔），于是这一段的"新写了几笔""幂等"全都
-        #   **建立在真账本碰巧是什么样子上** —— 而那随时会变（今天有、
-        #   明天 NEXT 变成下一天就没有了）。同「判据不许依赖真实数据碰巧如此」。
-        _ls0 = _io2.open(fp, encoding='utf-8').read().splitlines()
-        _kept = [l for l in _ls0
-                 if _json.loads(l).get('trade_date') != NEXT]
-        if len(_kept) != len(_ls0):
-            _io2.open(fp, 'w', encoding='utf-8').write(
-                '\n'.join(_kept) + ('\n' if _kept else ''))
-            _sp = os.path.join(lv.LIVE, aid, '_paper.json')
-            if os.path.exists(_sp):
-                _st = _json.load(_io2.open(_sp, encoding='utf-8'))
-                _st.pop('prov_day', None)
-                _st.pop('prov_uids', None)
-                _io2.open(_sp, 'w', encoding='utf-8').write(
-                    _json.dumps(_st, ensure_ascii=False))
-        assert not [l for l in _io2.open(fp, encoding='utf-8')
-                    if _json.loads(l).get('trade_date') == NEXT], \
-            '构造不对：临时账本里 %s 那天还有成交' % NEXT
+        _wk = datetime.date.fromisoformat(NEXT).isocalendar()[:2]
+        _ordn = sum(1 for d in _lb.calendar_days()
+                    if str(d)[:10] <= NEXT and d.isocalendar()[:2] == _wk)
+        assert _ordn >= 1, '构造不对：算不出 NEXT 在那一周里的序号'
+        lv.upsert_account(aid, name='盘中推进构造', init_cash=400000,
+                          mode='paper', paper_start=panel_last)
+        lv.bind_version(aid, 'strategies/小市值/froec_traded.py',
+                        params={'weekday': _ordn}, reason='用例构造')
+        fp = os.path.join(lv.LIVE, aid, 'fills.jsonl')
+        nf = lambda: (sum(1 for _ in _io2.open(fp, encoding='utf-8'))
+                      if os.path.exists(fp) else 0)
+        # 先推到面板最新日：paper_start = panel_last 且那天不是调仓日，
+        # 所以这一步**不该产生成交** —— 组合就停在"空仓 + 满现金"上。
+        r0 = pp.advance(aid)
+        assert r0.get('ok'), '构造不对：基础推进失败 %s' % r0
+        assert r0['advanced_to'] == panel_last, \
+            '构造不对：基础推进到了 %s' % r0['advanced_to']
 
         # 构造出来的"今天快照"：平开（今开 = 昨收），高低都等于它。
         # ★ `preclose` 必须**等于**面板昨收，否则除权守卫会（正确地）跳过。
@@ -8505,3 +8532,266 @@ def t_home_real_only_and_manual():
         shutil.rmtree(tmp, ignore_errors=True)
     return ('首页只列 %d 个真实盘（%d 个模拟盘不列）、表头是当日盈亏；'
             '手工账户不再催你绑策略且入口还在' % (len(want), len(papr)))
+
+
+@case('交易统计：分页无关 + 榜只列真的', 'fast')
+def t_trade_stats():
+    """`/api/live/trade_stats` —— 笔数 / 胜率 / 盈亏比 / 盈亏榜。
+
+    用户 2026-09-22：「综合面板中的信息相对回测还是少了点，比如交易笔数、
+    胜率、盈亏比、盈利前十（收益率）、亏损前十（收益率）」。
+
+    🔴 判据三条，各对应一种**不报错**的坏法：
+
+      ① **统计必须与分页无关**：`round_trips` 默认只给 100 条，照它算胜率
+         会随翻页变。判据是 `n == 全量行数`，而**这条必须构造 >100 笔往返
+         才测得到** —— 真账本只有 2 笔，写死一个小账户等于空转
+         （同「断言要在能触发的构造上跑」）。
+      ② **榜只列真的**：往返少的时候「盈利前十」里会混进反号的那些
+         （实测 froec 只有 2 笔时就列出一笔 −0.21%）。判据两头钉：
+         best 全 > 0、worst 全 < 0，**并反向自证两种都真的存在**。
+      ③ **一笔亏损都没有时盈亏比给 None**：给 ∞ 或一个很大的数会看着像
+         "这个策略很厉害"（同「拿不到分红那一格标查不到，不猜一个数」）。
+
+    ★ 极值用**另一条独立的路**取（`round_trips(limit=10**9)` 全量自己排序），
+      不拿 `trade_stats` 自己的输出当期望（判据要独立）。
+    ★ 全程跑在**临时 `lv.LIVE`** 上，真账本一个字节不动。
+    """
+    from assay import live as lv
+    real = lv.LIVE
+    tmp = os.path.join(REPO, '_tmp_tstats')
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(os.path.join(tmp, 'a'))
+    try:
+        lv.LIVE = tmp
+        with io.open(os.path.join(tmp, 'accounts.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'id': 'a', 'name': 'T', 'init_cash': 1e7,
+                        'created': '2020-01-02T09:00:00'}], f)
+        # ---- 构造 N 笔往返：收益率**逐笔不同**，且正负都有 ----
+        # 🔴 N 必须 > round_trips 的默认 limit（100），否则判据 ① 空转。
+        n = 130
+        rows = []
+        for i in range(n):
+            code = '%06d.XSHE' % (300000 + i)
+            buy = 10.0
+            # 一半赚一半亏，幅度各不相同 -> 极值唯一，榜才验得出来
+            sell = buy * (1.0 + (0.01 * (i + 1) if i % 2 == 0 else -0.01 * (i + 1)))
+            for side, px, d in (('buy', buy, '2020-01-02'),
+                                ('sell', round(sell, 4), '2020-02-03')):
+                rows.append({'code': code, 'name': '', 'side': side,
+                             'shares': 100, 'price': px, 'fee': 0.0,
+                             'trade_date': d, 'ts': d + 'T10:00:00',
+                             'uid': '%s%04d' % (side[0], i), 'source': 'manual',
+                             'note': ''})
+        with io.open(os.path.join(tmp, 'a', 'fills.jsonl'), 'w', encoding='utf-8') as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + '\n')
+
+        full = lv.round_trips('a', offset=0, limit=10 ** 9)['rows']
+        page = lv.round_trips('a')                      # 默认分页
+        st = lv.trade_stats('a', top=10)
+        assert len(full) == n and page['total'] == n, \
+            '构造不对：应该有 %d 笔往返，实际全量 %d / total %d' % (
+                n, len(full), page['total'])
+        assert len(page['rows']) < n, \
+            '构造不对：默认分页应该只给一页（否则判据 ① 空转）'
+
+        # ---- ① 分页无关 ----
+        assert st['n'] == n, ('统计要用**全量**往返，不是当前这一页 —— '
+                              '照页面手上那一页算，胜率会随翻页变而不报错。'
+                              '实际 n=%s，全量 %d' % (st['n'], n))
+
+        # ---- ② 榜只列真的 + 极值对得上（独立算一遍） ----
+        rets = sorted([r['ret'] for r in full if r.get('ret') is not None])
+        assert rets[0] < 0 < rets[-1], '构造不对：要同时有赚的和亏的'
+        assert st['best'] and st['worst'], '两张榜都不该是空的'
+        assert all((r['ret'] or 0) > 0 for r in st['best']), \
+            '盈利榜里混进了不赚钱的 —— 列不满十条是事实，摆一个名不副实的榜不是'
+        assert all((r['ret'] or 0) < 0 for r in st['worst']), '亏损榜里混进了赚钱的'
+        assert abs(st['best'][0]['ret'] - rets[-1]) < 1e-9, \
+            '盈利榜第一名不是全量最大：%s vs %s' % (st['best'][0]['ret'], rets[-1])
+        assert abs(st['worst'][0]['ret'] - rets[0]) < 1e-9, \
+            '亏损榜第一名不是全量最小：%s vs %s' % (st['worst'][0]['ret'], rets[0])
+        assert len(st['best']) == 10 and len(st['worst']) == 10, \
+            'top=10 没生效：%d / %d' % (len(st['best']), len(st['worst']))
+
+        # ---- ③ 没有亏损时盈亏比 = None ----
+        assert st['profit_factor'] is not None, '构造里有亏损，盈亏比不该是 None'
+        os.makedirs(os.path.join(tmp, 'b'))
+        with io.open(os.path.join(tmp, 'accounts.json'), 'w', encoding='utf-8') as f:
+            json.dump([{'id': 'b', 'name': 'T2', 'init_cash': 1e7,
+                        'created': '2020-01-02T09:00:00'}], f)
+        win_only = [r for r in rows
+                    if r['side'] == 'buy' or float(r['price']) > 10.0]
+        keep = set(r['code'] for r in win_only if r['side'] == 'sell')
+        with io.open(os.path.join(tmp, 'b', 'fills.jsonl'), 'w', encoding='utf-8') as f:
+            for r in rows:
+                if r['code'] in keep:
+                    f.write(json.dumps(r, ensure_ascii=False) + '\n')
+        st2 = lv.trade_stats('b')
+        assert st2['n'] and st2['avg_loss'] is None, '构造不对：b 该是全赚的'
+        assert st2['profit_factor'] is None, \
+            ('一笔亏损都没有时盈亏比要给 None（页面显示「—」）—— '
+             '给 ∞ 或一个很大的数会看着像"这个策略很厉害"。实际 %s'
+             % st2['profit_factor'])
+        assert not st2['worst'], '全赚的账户不该有亏损榜'
+    finally:
+        lv.LIVE = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('%d 笔往返：统计与分页无关（默认页只有 %d 条）、'
+            '两张榜各 10 条且极值对得上、全赚时盈亏比为 None'
+            % (n, len(page['rows'])))
+
+
+@case('业绩页：执行差异带方向 + 交易统计四格与盈亏榜（playwright）', 'web')
+def t_perf_trade_info():
+    """用户 2026-09-22 的两条：
+
+      「执行差异中，比对操作时没有买卖方向，需要加上」
+      「综合面板中的信息相对回测还是少了点，比如交易笔数、胜率、盈亏比、
+        盈利前十（收益率）、亏损前十（收益率）等等，尽可能补全信息」
+
+    🔴 三条判据都落在**可证的事实**上，不是"有那一列 / 有那个格子"：
+
+      ① 方向列的每一格 == 服务端 `diff_history` 给的 `side` ——
+         前端自己按 `got_buy`/`got_sell` 推就是第二份定义（而 `extra` /
+         `sell_extra` 恰恰是 `want_side` 为 None 的那两种）。
+      ② KPI 四格的数 == `/api/live/trade_stats` —— 页面自己拿当前那一页
+         的往返算一遍的话，胜率会随翻页变**而不报错**。
+      ③ 两张榜只列真的：盈利榜每行 > 0、亏损榜每行 < 0。
+
+    ★ 「怎么进业绩页」走 `_lp_enter`（那个入口 2026-09-22 刚变过一次）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return 'playwright 没装，跳过'
+    from assay import server as sv
+    from assay import live as lv
+    from http.server import ThreadingHTTPServer
+    import threading
+
+    aid = None
+    for a in lv.load_accounts():
+        if a.get('archived'):
+            continue
+        if (lv.trade_stats(a['id']) or {}).get('n'):
+            aid = a['id']
+            break
+    if not aid:
+        return '没有账户有平仓往返，跳过'
+    want = lv.trade_stats(aid)
+    # ★ `diff_history` 在 `lv/bench.py`，不在门面的转发名单里（那份只收
+    #   base/fee/px/pos/ver/sig/perf/paper/hist）—— 直接 import 正本。
+    from assay.lv import bench as _bench
+    xd = {it['date']: it for it in _bench.diff_history(aid)}
+
+    prev = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    errs, nrow = [], 0
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 1000})
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
+                    wait_until='networkidle')
+            pg.wait_for_selector('#lvbody .lvsec', timeout=90000)
+            _lp_enter(pg)
+
+            # ---- ② KPI 四格：值必须来自服务端 ----
+            pg.wait_for_function(
+                "() => document.querySelectorAll('#lp_kpi > div').length >= 8",
+                timeout=90000)
+            # 🔴 **补进去这一发要幂等**：`render()` 会被调好几次（换基准 /
+            #   换区间都会重取权益），前一发在飞、后一发命中缓存立刻返回，
+            #   两发都往同一个 `#lp_kpi` 里 append -> 屏幕上 12 个格子。
+            #   判据是**再调一次仍然 8 格**（`>= 8` 那种写法看不出来）。
+            pg.evaluate("(a) => renderTradeKpi(a)", aid)
+            pg.wait_for_timeout(400)
+            n8 = pg.evaluate("() => document.querySelectorAll('#lp_kpi > div').length")
+            assert n8 == 8, 'KPI 板该是 8 格（4 全程 + 4 交易统计），实际 %d' % n8
+            # ★ 标签末尾都带「· 全程」（KPI 是全程口径、图按区间画）——
+            #   这里按**前缀**取，免得那个后缀一改这条就挂。
+            kpi = {k.split('\u00b7')[0].strip(): v for k, v in pg.evaluate(
+                """() => [...document.querySelectorAll('#lp_kpi > div')].map(
+                     d => [d.querySelector('.k').innerText.replace(/\\s+/g, ' ').trim(),
+                           d.querySelector('.v').innerText.trim()])""")}
+            assert '平仓笔数' in kpi and '胜率' in kpi and '盈亏比' in kpi \
+                and '平均持有' in kpi, '交易统计四格没补全：%r' % sorted(kpi)
+            assert kpi['平仓笔数'].replace(',', '') == str(want['n']), \
+                '平仓笔数对不上服务端：%r vs %s' % (kpi['平仓笔数'], want['n'])
+            # ★ 页面 `toFixed(1)` 的舍入误差上界正好是 5e-4，阈值写成它
+            #   就卡在边界上（偶发红）。放到 1e-3 仍然抓得到真错
+            #   （变异 ×90：45.0% vs 50%）。
+            assert abs(float(kpi['胜率'].rstrip('%')) / 100
+                       - want['win_rate']) < 1e-3, \
+                '胜率对不上服务端：%r vs %s' % (kpi['胜率'], want['win_rate'])
+            if want['profit_factor'] is None:
+                assert kpi['盈亏比'] == '—', \
+                    '没有亏损的往返时盈亏比要显示「—」，不能编一个数'
+            else:
+                assert abs(float(kpi['盈亏比']) - want['profit_factor']) < 0.01, \
+                    '盈亏比对不上：%r vs %s' % (kpi['盈亏比'], want['profit_factor'])
+
+            # ---- ③ 盈亏榜：只列真的 ----
+            _lp_tab(pg, '清仓记录')
+            pg.wait_for_selector('#lp_trip .pgrid', timeout=90000)
+            tops = pg.evaluate(
+                """() => [...document.querySelectorAll('#lp_trip .pgrid > div')]
+                     .map(d => ({t: d.querySelector('.ttl').innerText,
+                       r: [...d.querySelectorAll('tbody tr')].map(
+                            tr => tr.children[2].innerText.trim())}))""")
+            assert len(tops) == 2, '盈利榜 / 亏损榜该并排两块，实际 %d' % len(tops)
+            assert '盈利' in tops[0]['t'] and '亏损' in tops[1]['t'], \
+                '两张榜的标题不对：%r' % [t['t'] for t in tops]
+            assert len(tops[0]['r']) == len(want['best']) \
+                and len(tops[1]['r']) == len(want['worst']), \
+                '榜的行数与服务端不一致'
+            def _num(v):
+                return float(v.replace('\u2212', '-').rstrip('%').replace(',', ''))
+            for v in tops[0]['r']:
+                assert _num(v) > 0, \
+                    '盈利榜里混进了不赚钱的（%s）—— 列不满十条是事实' % v
+            for v in tops[1]['r']:
+                assert _num(v) < 0, '亏损榜里混进了赚钱的（%s）' % v
+
+            # ---- ① 执行差异：方向列逐格对服务端 ----
+            _lp_tab(pg, '执行差异')
+            pg.wait_for_selector('#lp_exec .xdt', timeout=90000)
+            heads = pg.evaluate(
+                """() => [...document.querySelectorAll('#lp_exec .xdt')[0]
+                     .querySelectorAll('thead th')].map(x => x.innerText.trim())""")
+            assert '方向' in heads, '执行差异表没有「方向」列：%r' % heads
+            i = heads.index('方向')
+            secs = pg.evaluate(
+                """(i) => [...document.querySelectorAll('#lp_exec .xds')].map(s => ({
+                     d: s.querySelector('h3').innerText.trim().split(/\\s+/)[0],
+                     rows: [...s.querySelectorAll('tbody tr')].map(tr => [
+                       tr.children[0].innerText.replace(/\\s+/g, ' ').trim(),
+                       tr.children[i].innerText.trim()])}))""", i)
+            lbl = {'buy': '买', 'sell': '卖', 'both': '买+卖', None: '—'}
+            for s in secs:
+                it = xd.get(s['d'])
+                assert it, '页面上那一期服务端没有：%r' % s['d']
+                assert len(s['rows']) == len(it['rows']), '行数对不上 %s' % s['d']
+                for (cell_txt, got), r in zip(s['rows'], it['rows']):
+                    assert r['code'] in cell_txt, \
+                        '行序对不上：%r 不含 %s' % (cell_txt, r['code'])
+                    assert got == lbl[r.get('side')], \
+                        ('方向对不上服务端：%s %s 页面 %r，服务端 side=%r'
+                         % (s['d'], r['code'], got, r.get('side')))
+                    nrow += 1
+            assert nrow, '一行都没比到 —— 断言空转了'
+            br.close()
+    finally:
+        httpd.shutdown()
+        sv.ALLOW_LIVE = prev
+    assert not errs, '页面报错：%r' % errs[:3]
+    return ('%s：KPI 四格对上服务端（%d 笔 / 胜率 %.0f%%）、'
+            '盈亏榜 %d+%d 条各自同号、执行差异 %d 行方向逐格一致'
+            % (aid, want['n'], (want['win_rate'] or 0) * 100,
+               len(want['best']), len(want['worst']), nrow))

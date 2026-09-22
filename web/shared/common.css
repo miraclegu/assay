@@ -659,8 +659,6 @@ tr.whygap td{color:var(--dim);font-size:10px;text-align:center;
 
 /* KPI 板里可点的那一格标题（业绩明细入口）——
    要看得出能点：颜色 + hover 下划线。 */
-.kpi a.lpin{color:var(--accent);text-decoration:none}
-.kpi a.lpin:hover{text-decoration:underline}
 
 /* 实盘业绩页的图块。★ 不复用 .pane —— 那个是回测页签容器，
    样式表里 display:none，用了就静默不显示（且不报错）。 */

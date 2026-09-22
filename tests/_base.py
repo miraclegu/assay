@@ -175,6 +175,21 @@ def _klog(pg, on=True):
     _kset(pg, False)
 
 
+def _lp_enter(pg, timeout=90000):
+    """实盘账户页 -> 业绩页。**怎么点收进这一处**。
+
+    🔴 这个入口变过一次（2026-09-22）：原来唯一的入口是 KPI 板里那个
+      「累计收益 ›」链接（`a.lpin`），而那一页有六个页签 ——
+      用户：「点击累计收益，进去的其实不仅仅是累计收益，是一个综合的面板，
+      从累计收益这边进去感觉不太合适」。现在是账户按钮排里的「📊 业绩」。
+    ★ 散在各条用例里的话，入口再变一次就要改 N 处
+      （同 `_kmain` / `_via_pop` / `_lv_open_newform`）。
+    """
+    pg.wait_for_selector('#lvperf', timeout=timeout)
+    pg.click('#lvperf')
+    pg.wait_for_function("() => location.hash.endsWith('/perf')", timeout=timeout)
+
+
 def _lp_tab(pg, name, timeout=90000):
     """业绩页：切到某个页签并等它可见。
 

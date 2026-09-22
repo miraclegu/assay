@@ -272,7 +272,7 @@ function renderPerf(aid){
     /* 🔴 这四格是**全程**（开户至今）的口径，而下面的图按所选区间画 ——
          不标"全程"的话两个数摆在同一屏上看着像对不上（区间收益写在
          图下面的 rgNote 里）。 */
-    + `<div class="kpi" style="margin-bottom:10px">
+    + `<div class="kpi" id="lp_kpi" style="margin-bottom:10px">
         ${cell('累计收益 (TWR)<span class="lvwhy"> · 全程</span>',
                `<span style="color:${col(st.twr)}">${pc(st.twr)}</span>`,
                st.pnl_total == null ? 'TWR'
@@ -330,6 +330,7 @@ function renderPerf(aid){
     if (e) e.innerHTML = _PANE[k] || ''; });
   document.querySelectorAll('#lptabs div').forEach(
     e => e.onclick = () => lpTab(+e.dataset.i));
+  renderTradeKpi(aid);
   if(o.nav && o.day_pnls){
     LPS = lprSlice(o);
     const rw = $('#lp_rgwrap');
@@ -972,6 +973,19 @@ function xdUsed(it){
     + '</div>';
 }
 
+/* 方向：买 / 卖。用户 2026-09-22：「比对操作时没有买卖方向，需要加上」。
+   原来只有「差异」那一列间接带方向（没卖 / 提示外卖出），而 `ok` 那些行
+   一个字都不说 —— 而"照做了"的那几行恰恰是最常扫的。
+   🔴 值取服务端的 `side`，不在这里按 got_buy/got_sell 推（那是第二份定义）。 */
+const XD_SIDE = {buy: ['买', 'var(--up)'], sell: ['卖', 'var(--down)'],
+                 both: ['买+卖', '']};
+
+function xdSide(r){
+  const v = XD_SIDE[r.side];
+  if(!v) return '<span class="lvwhy">—</span>';
+  return `<b style="color:${v[1]}">${v[0]}</b>`;
+}
+
 function xdSection(it){
   const bad = (it.rows || []).filter(r => r.kind !== 'ok');
   return `<div class="lvsec xds">
@@ -987,7 +1001,7 @@ function xdSection(it){
     ${it.scale_why ? `<div class="lvwhy" style="margin:0 0 6px">
         ⓘ ${esc(it.scale_why)}</div>` : ''}
     <div class="pw"><table class="lvt xdt"><thead><tr>
-      <th class="tx">名称</th><th class="tx">差异</th>
+      <th class="tx">名称</th><th class="tx">方向</th><th class="tx">差异</th>
       <th>提示股数</th><th>实际股数</th>
       <th>策略成交价</th><th>我的成交价</th><th>价差</th>
       <th class="tx">候选名次</th><th>笔数</th>
@@ -998,6 +1012,7 @@ function xdSection(it){
       const wantSh = r.want_shares == null ? '—' : num(r.want_shares, 0);
       return `<tr class="${r.kind === 'ok' ? '' : 'xdbad'}">
         <td class="tx">${cnCell(r.code, r.name)}</td>
+        <td class="tx">${xdSide(r)}</td>
         <td class="tx ${cls}">${lbl}</td>
         <td>${wantSh}</td>
         <td>${r.got_buy != null ? num(r.got_buy, 0)
@@ -1174,6 +1189,91 @@ async function renderFills(aid) {
   lpBind('#lp_fill', 'f', LPF, np, () => renderFills(aid));
 }
 
+/* ================= 交易统计：笔数 / 胜率 / 盈亏比 / 盈亏前十 =============
+   用户 2026-09-22：「综合面板中的信息相对回测还是少了点，比如交易笔数、
+   胜率、盈亏比、盈利前十（收益率）、亏损前十（收益率）等等，尽可能补全信息」。
+
+   🔴 **统计在服务端算**（`/api/live/trade_stats`）：`/api/live/trips` 是
+     **分页**的，照页面手上那一页算胜率会随翻页变 —— 而那不报错。
+   ★ 一次取、两处用（KPI 板 + 清仓记录页的两张榜）—— 各打一次接口的话，
+     同一份数据要重放两遍往返配对（同「一次取全，页签在本地切」）。
+   🔴 缓存**按账户**记：不带 aid 的话切到另一个账户还显示上一个的胜率，
+     而它不报错（同「基准要按账户记」那条）。 */
+let LPTS = null;
+
+async function lpStats(aid){
+  if(LPTS && LPTS._aid === aid) return LPTS;
+  const t = await j('/api/live/trade_stats?id=' + encodeURIComponent(aid));
+  t._aid = aid; LPTS = t;
+  return t;
+}
+
+/* KPI 板第二排。★ 与上面那四格**同一个 `.kpi` 网格**（auto-fit 自己换行）——
+     另起一块的话两排的格子宽度各算各的，上下对不齐。
+   🔴 这四格**也要标「· 全程」**：它们统计的是**全部**往返，而下面的图是
+     按所选区间画的 —— 两个口径摆同一屏不标就看着像对不上（既有那条
+     「KPI 每一格都要标全程」的断言当场把它抓了出来，**那是断言在干活**）。
+   ★ 异步补：它要把全部往返重放一遍，不该拖住第一眼要看的曲线
+     （同 `liveEquityTag` 那条）。 */
+async function renderTradeKpi(aid){
+  let t;
+  try { t = await lpStats(aid); } catch(e){ return; }
+  const el = $('#lp_kpi');
+  if(!el) return;                    /* 人已经走开了（见 renderChart 那条） */
+  /* 🔴 **幂等**：`render()` 会被调好几次（换基准 / 换区间都会重取权益），
+       而这一发是异步的 —— 前一发在飞、后一发命中缓存立刻返回，两发都往
+       **同一个**新 `#lp_kpi` 里 append，屏幕上就是 12 个格子。
+     ★ 判据从 DOM 读（打个标记），不另存一份"上次补过没有"——
+       `render()` 每次重建 innerHTML，存变量的话初值永远不对
+       （同「签名要从 DOM 读」那条）。 */
+  if(el.dataset.ts) return;
+  el.dataset.ts = '1';
+  const pc2 = x => x == null ? '—' : (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%';
+  const nw = (t.win_rate == null || !t.n) ? null : Math.round(t.win_rate * t.n);
+  el.insertAdjacentHTML('beforeend',
+    cell('平仓笔数<span class="lvwhy"> · 全程</span>', t.n == null ? '—' : num(t.n, 0),
+         (t.n_open ? '另有 ' + t.n_open + ' 批未平仓' : '')
+         + (t.pnl_closed == null ? ''
+            : (t.n_open ? ' · ' : '') + '已实现 ' + pnlv(t.pnl_closed) + ' 元'))
+    + cell('胜率<span class="lvwhy"> · 全程</span>', t.win_rate == null ? '—' : (t.win_rate * 100).toFixed(1) + '%',
+           nw == null ? '' : nw + ' / ' + t.n + ' 笔盈利')
+    /* 🔴 一笔亏损都没有时服务端给的是 **null**，这里就显示「—」并说明原因
+         —— 摆一个 ∞ 或者一个很大的数会看着像"这个策略很厉害"。 */
+    + cell('盈亏比<span class="lvwhy"> · 全程</span>', t.profit_factor == null ? '—' : t.profit_factor.toFixed(2),
+           t.profit_factor == null ? '还没有亏损的往返'
+             : '均盈 ' + pc2(t.avg_win) + ' / 均亏 ' + pc2(t.avg_loss))
+    + cell('平均持有<span class="lvwhy"> · 全程</span>', t.avg_hold == null ? '—' : t.avg_hold + ' 天',
+           t.avg_ret == null ? '' : '平均收益率 ' + pc2(t.avg_ret)));
+}
+
+/* 盈利 / 亏损前十。★ 放在「清仓记录」那一页的**表格上面** —— 这两张榜就是
+     那张表的摘要（"这一笔赚了多少"的极值），摆到别的页签去就要来回切。
+   🔴 两张榜**都只列真的**（服务端已按 ret>0 / ret<0 过滤）：往返笔数少时
+     会混进反号的那些，于是「盈利前十」里列出一笔 −0.21% —— 名不副实。
+     所以列不满十条是**事实**，要在标题里说出来（写死"前十"就是在说谎）。 */
+function lpTopHtml(t){
+  if(!t || !t.n) return '';
+  const row = (r, i) => `<tr>
+      <td class="tx lvwhy">${i + 1}</td>
+      <td class="tx">${cnCell(r.code, r.name, {date: r.exit_date})}</td>
+      <td style="color:${upc(r.ret)}">${pct(r.ret, 2)}</td>
+      <td style="color:${upc(r.pnl)}">${r.pnl == null ? '—' : num(r.pnl, 0)}</td>
+      <td class="lvwhy">${r.holding_days == null ? '—' : r.holding_days}</td>
+    </tr>`;
+  const one = (ttl, rows, empty) => `<div>
+      <div class="ttl">${ttl}<span class="lvwhy"> ${rows.length} 笔</span></div>
+      ${rows.length ? `<div class="pw"><table class="lvt"><thead><tr>
+        <th class="tx">#</th><th class="tx">股票</th>
+        <th>收益率</th><th>盈亏</th><th>持有天</th>
+      </tr></thead><tbody>${rows.map(row).join('')}</tbody></table></div>`
+        : `<div class="none">${empty}</div>`}
+    </div>`;
+  return `<div class="pgrid c2" style="margin-bottom:14px">
+    ${one('盈利榜', t.best || [], '还没有盈利的往返。')}
+    ${one('亏损榜', t.worst || [], '还没有亏损的往返。')}
+  </div>`;
+}
+
 async function renderTrips(aid) {
   const el = $('#lp_trip');
   if (!el) return;
@@ -1187,6 +1287,10 @@ async function renderTrips(aid) {
   const openNote = t.n_open
     ? `<span class="lvwhy">另有 <b>${t.n_open}</b> 批未平仓（在「每日持仓」里看）</span>`
     : '';
+  let ts = null;
+  try { ts = await lpStats(aid); } catch (e) { ts = null; }
+  if (!$('#lp_trip')) return;
+  const topHtml = lpTopHtml(ts);
   if (!t.total) {
     el.innerHTML = '<div class="ttl">清仓记录 ' + openNote + '</div>'
       + '<div class="none">还没有<b>平仓</b>记录 —— 买入之后卖出才会配成一笔往返。'
@@ -1196,7 +1300,7 @@ async function renderTrips(aid) {
   const p = Math.floor(t.offset / t.limit) + 1;
   const np = Math.max(1, Math.ceil(t.total / t.limit));
   const nav = lpNav(p, np, 't');
-  el.innerHTML = `<div class="ttl">清仓记录
+  el.innerHTML = topHtml + `<div class="ttl">清仓记录
       <span class="lvwhy">${t.total.toLocaleString()} 笔往返</span> ${openNote}</div>
     <div class="note">按 <b>FIFO 把买入与卖出配成一笔往返</b>，回答"这一笔赚了多少"
       —— 与「交易记录」那一页是两件事（那里是<b>逐笔操作</b>：
