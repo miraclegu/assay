@@ -464,6 +464,15 @@ def diff_one(aid, day, sig=None):
     #   信号里存着当时的 `cash`，拿它和"那天实际动用的资金"对齐比例。
     # ★ 只在**比股数**时用这个比例；`extra`/`missed` 这种"有没有"的判定
     #   不受它影响（买了没买是事实，与规模无关）。
+    # ⚠ **已知偏差，2026-09-22 决定【不改】**（用户："8% 的容差已经很大了"）：
+    #   `amount` 是按**限价**算的（`shares x limit`，limit = ref x 1.05），
+    #   而 `got_amt` 是**实际成交额**（按成交价）—— 于是即使一股不差地照做，
+    #   `scale` 也会系统性偏小约 5%，把人判成"超量 5%"。
+    #   5% 在 8% 容差内不报错，但它**吃掉 5/8 的容差预算**（2026-09-15 那次
+    #   正是它叠加取整才越线的，见下面 `want_cmp` 那段）。
+    #   ★ 改法是让两边同口径（`shares x ref_price`），但那会改变**所有历史期**
+    #     的 scale —— 属于口径变更不是修 bug，而取整那条修好之后容差够用。
+    #     记在这里，别下次又当成"漏了"。
     sig_cash = float(sig.get('cash') or 0)
     want_amt = sum(float(x.get('amount') or 0) for x in (sig.get('buy') or []))
     got_amt = sum((g.get('buy_amt') or 0) for g in got.values())
