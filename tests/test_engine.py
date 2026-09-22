@@ -1623,6 +1623,202 @@ def t_p1_constants_match_source():
     return '%d 个常量与正本（qmt_p1_rotation.py，GBK）逐个相同；反向自证通过' % checked
 
 
+@case('FROEC 变体：继承的参数必须逐个等于 froec_traded（不许凭印象复述）', tag='fast')
+def t_froec_family_inherits_params():
+    """🔴🔴 这条钉的是 `froec_yearly_ew` 那个**作废过一整批结论**的坑。
+
+    「要在 X 上只加一条规则，就必须【加载 X 本身】，不能复述它的参数」——
+    当初凭印象拼了 `_TRADED = {'stop_intraday':1,'stop_loss':0.35,'weekday':2}`，
+    而 `froec_traded.py` 实际设的是 `paused_in_pool` / `kcb_688_only` /
+    `weekday` —— **根本没有那两个止损参数**。于是两版参数不同 -> 止损行为
+    不同 -> 建仓日买的股数就不一样 -> 整条路径不同，**而它不报错**。
+    CLAUDE.md 里当时写的是「判据走 ast（`_TRADED` 这个 Name 还在不在）」，
+    而那条判据**一直没有写出来**；且它也太弱 —— 换个变量名就绕过去了。
+
+    所以判据落在**运行时**（同「ETF 策略必须声明 close_tax=0」那条从
+    "查字符串"改成"查运行时"）：boot 一次，读 `g` 上真正生效的那些参数。
+
+    🔴🔴 **`g` 是【全进程共享】的一个对象**（`assay/api.py` 的 `g = G()`，
+      策略都是 `from assay.api import *`），不是每个策略模块各一份。
+      判据的根因此是**每 boot 完一个就立刻取快照** —— 第一版我 boot 完三个
+      再一起读 `mod._base.g`，读到的是同一个对象的最终态，
+      于是三个策略都报 48 项、零差异，**整条判据空转而看着全绿**。
+
+    ⚠ `_api.g.__dict__.clear()` 是**冗余防御**，如实记：当前家族里每个
+      `initialize` 都把自己那 45 个参数无条件写一遍（`getattr(g,k,默认)`），
+      所以去掉这一行**可观察行为完全相同**（实测：两个产品变异照样抓到、
+      汇总数字一字不差）。留着是防"变体只在某个分支里设某个参数"那种泄漏
+      —— 别把它和上面那条根本判据的分工记反
+      （同 realtime 里「锁是根本修复、唯一 tmp 名防跨进程」那条）。
+    """
+    import io as _io
+    import run as _run
+    import assay.api as _api
+    from assay.broker import Cost as _Cost
+    from assay.engine import Engine as _Engine
+    from assay.feed import PanelFeed as _PF
+
+    D = 'strategies/小市值'
+    # ★ **扫目录**得出家族，不照清单拼 —— 照清单拼会漏掉新变体的全部检查，
+    #   而漏了不报错（同「断言直接扫目录而不是照清单拼」那条）。
+    fam = []
+    for f in sorted(os.listdir(D)):
+        if not (f.startswith('froec_') and f.endswith('.py')):
+            continue
+        src = _io.open(os.path.join(D, f), encoding='utf-8').read()
+        if "'froec_traded.py'" in src or "'froec_dy.py'" in src:
+            fam.append(f)
+    assert len(fam) >= 10, '家族只扫出 %d 个变体？扫描条件多半坏了' % len(fam)
+
+    # ★ 这两处差异是**声明过的**：变体存在的理由就是改它。
+    #   🔴 允许清单本身也要反向自证（见下）—— 否则它会烂成"什么都放行"。
+    INTENDED = {
+        'froec_close.py': {'rebal_time'},    # 尾盘买入：09:30 -> 14:55
+        'froec_devban.py': {'limit_days'},   # 黑名单换成偏离度：关掉 20 日窗口
+    }
+
+    feed = _PF('2026-08-01', datetime.date.today().isoformat())
+
+    def snap(path):
+        _api.g.__dict__.clear()          # 冗余防御，见 docstring
+        mod = _run.load(path)
+        _Engine(mod, feed, cash=100000, cost=_Cost(), params={}).boot()
+        return {k: v for k, v in vars(_api.g).items()
+                if not k.startswith('_')
+                and isinstance(v, (int, float, str, bool))}
+
+    base = snap(os.path.join(D, 'froec_traded.py'))
+    assert len(base) >= 30, \
+        'froec_traded 只读出 %d 个参数 —— 判据多半没 boot 起来' % len(base)
+
+    seen_intended, n_new = {}, 0
+    for f in fam:
+        s = snap(os.path.join(D, f))
+        miss = sorted(set(base) - set(s))
+        assert not miss, \
+            ('%s 缺了 froec_traded 的参数 %s —— 它没有【加载 froec_traded】，'
+             '而是自己拼了一份。那正是作废过一整批结论的坑' % (f, miss))
+        dif = sorted(k for k in set(base) & set(s) if base[k] != s[k])
+        ok = INTENDED.get(f, set())
+        bad = [k for k in dif if k not in ok]
+        assert not bad, \
+            ('%s 把继承来的参数改掉了：%s —— 这些值直接决定建仓日买多少股，'
+             '两版参数不同的话整条路径就不同，**而它不报错**。真要改就写进'
+             '用例里的 INTENDED 并说明理由' % (f, {k: (base[k], s[k]) for k in bad}))
+        seen_intended[f] = set(dif) & ok
+        n_new += len(set(s) - set(base))
+
+    # 🔴 反向自证 ①：允许清单里每一条都必须**真的还在发生** ——
+    #   变体改了实现之后清单会悄悄变成"白放行"，而那不报错。
+    for f, ks in INTENDED.items():
+        assert f in seen_intended, 'INTENDED 里的 %s 已经不在家族里了' % f
+        assert seen_intended[f] == ks, \
+            ('%s 声明要改 %s，实测改的是 %s —— 允许清单过期了'
+             % (f, sorted(ks), sorted(seen_intended[f])))
+    # 🔴 反向自证 ②：家族确实各自加了新参数，否则 snap 可能读的是同一份
+    assert n_new >= 10, '整个家族只多出 %d 个新参数？snap 多半没隔离开' % n_new
+    return ('%d 个变体 × %d 个继承参数逐个相同；新增 %d 个自己的参数；'
+            '声明的例外 %d 处都还在发生'
+            % (len(fam), len(base), n_new, len(INTENDED)))
+
+
+@case('FROEC-DY：换掉 PB+ROE 的三道口径（锚点 / 会计年度 / 不抄 SQL）', tag='fast')
+def t_froec_dy_screen():
+    """🔴 2026-09-22 的「策略一 / 策略二」。结论是**不采纳**（见策略 docstring），
+    但三道实现口径必须钉住 —— 它们坏掉的表现全是"静默给出一份看着正常的回测"。
+
+    ① **`roec` 的 INNER JOIN 改 LEFT JOIN 的锚点必须命中恰好一次。**
+      内连接顺带要求"有 5 期 ROE 数据"，那正是**要被换掉的规则的一部分**。
+      froec 改写法时必须**响亮失败**，不能静默退回旧语义
+      （同「保护分支不该静默跳过」那条）。
+    ② **会计年度不许过期。** 一家 2020 年之后再没分过红的公司，
+      `max(year(report_date))` 在 2026 年仍然给 FY2020 —— 于是
+      「FY2020 的分红 ÷ 今天的市值」被当成股息率用。实测占通过阈值那批的
+      10%~15%，**不是边角料**。
+    ③ **不许抄 froec 的宇宙 SQL** —— 抄了之后 froec 修一次 bug 本版不跟随。
+    """
+    import io as _io
+    import importlib.util as _ilu
+
+    P = 'strategies/小市值/froec_dy.py'
+    sp = _ilu.spec_from_file_location('t_dy_probe', P)
+    dy = _ilu.module_from_spec(sp)
+    sp.loader.exec_module(dy)
+    notes = []
+
+    # ---- ① 锚点 ----
+    froec_sql = _io.open('strategies/小市值/froec.py', encoding='utf-8').read()
+    n = froec_sql.count(dy._JOIN_IN)
+    assert n == 1, \
+        ('froec.py 里 `%s` 出现 %d 次（要恰好 1 次）—— 0 次说明 froec 改了'
+         '写法，LEFT JOIN 那一步会静默失效、"有 5 期 ROE"这条被换掉的规则'
+         '悄悄留着' % (dy._JOIN_IN, n))
+    # 反向自证：喂一条没有锚点的 SQL，包装必须**抛错**而不是放行
+    calls = []
+
+    def _orig(sql, **kw):
+        calls.append(sql)
+        import pandas as _pd
+        return _pd.DataFrame({'jq_code': []})
+    wrapped = dy._wrap(_orig)
+    try:
+        wrapped('SELECT 1 FROM somewhere_else', pbcut='x', roecut='y',
+                sd='2026-09-01', cand=10, skip=0)
+        raise AssertionError('锚点不在时必须抛 RuntimeError，不许静默放行 —— '
+                             '静默的话它就退回了"筛 PB+ROE"的旧语义')
+    except RuntimeError as e:
+        assert 'roec' in str(e), '报错要说清是哪个锚点没命中：%s' % e
+    # 反向自证：**没有** pbcut/roecut 的查询要原样透传（别把别的 SQL 也改了）
+    calls[:] = []
+    wrapped('SELECT 2', sd='2026-09-01')
+    assert calls == ['SELECT 2'], '不带 pbcut/roecut 的查询被动过了：%r' % calls
+    notes.append('锚点在 froec.SQL 里恰好 1 次；缺锚点抛错；无关查询原样透传')
+
+    # ---- ② 会计年度：纯函数 + 真实数据上**真的砍掉了行** ----
+    assert dy._fresh_ymin('2026-09-01') == 2025, '7 月及以后只认 y >= 当年-1'
+    assert dy._fresh_ymin('2026-06-30') == 2024, '7 月之前要放到 当年-2'
+    assert dy._fresh_ymin('2026-07-01') == 2025, '7 月 1 日就该收紧'
+    from assay.feed import PanelFeed as _PF
+    fd = _PF('2026-01-01', datetime.date.today().isoformat())
+    d = '2026-09-01'
+    dy._DY_CACHE.clear()
+    fresh = dy._dy_table(fd.query, d, 1200)
+    # 反向自证：把 ymin 放到史前，通过的票必须**明显更多** ——
+    #   否则这条规则是空转的，而"空转"与"生效"在页面上长得一模一样
+    loose = fd.query(dy.DY_SQL, sd=d, win=1200, ymin=1900)
+    n_f = sum(1 for v in fresh.values() if v[0] > 0.02)
+    n_l = sum(1 for r in loose.itertuples() if float(r.dy) > 0.02)
+    assert n_l > n_f, \
+        ('会计年度那道没起作用：不设下限 %d 只、设了 %d 只 —— 一样多说明'
+         '它是空转的' % (n_l, n_f))
+    assert (n_l - n_f) / float(n_l) > 0.03, \
+        '只砍掉 %.2f%%，与"实测 10%%~15%%"对不上，判据或数据有一边不对' \
+        % ((n_l - n_f) * 100.0 / n_l)
+    notes.append('会计年度：%d -> %d 只（砍掉 %.1f%%）'
+                 % (n_l, n_f, (n_l - n_f) * 100.0 / n_l))
+
+    # ---- ③ 不抄 SQL ----
+    src = _io.open(P, encoding='utf-8').read()
+    body = src.split('"""', 2)[2] if src.count('"""') >= 2 else src
+    for frag in ('WITH univ AS', 'eps1 AS', 'pb_half AS', 'roec AS'):
+        assert frag not in body, \
+            ('froec_dy.py 里出现了 froec 宇宙 SQL 的片段 `%s` —— 抄一份的话'
+             'froec 修 bug 本版不跟随，**而那不报错**' % frag)
+    # 🔴 判据走 ast，**不查字符串** —— froec_dy.py 的注释里就写着
+    #   「凭印象拼一份 `_TRADED = {...}` 是本项目作废过一整批结论的坑」，
+    #   查字符串会命中那行注释（实测第一版当场假失败；同「断言查字符串
+    #   会命中自己写的注释」那条，这已经是第四次）。
+    import ast as _ast
+    for f in ('froec_dy.py', 'froec_dy2.py'):
+        tree = _ast.parse(_io.open(os.path.join('strategies/小市值', f),
+                                   encoding='utf-8').read())
+        names = {t.id for n in _ast.walk(tree) if isinstance(n, _ast.Assign)
+                 for t in n.targets if isinstance(t, _ast.Name)}
+        assert '_TRADED' not in names, '%s 又凭印象拼了一份参数表' % f
+    notes.append('没抄 froec 的宇宙 SQL，也没有复述参数表')
+    return '；'.join(notes)
+
+
 @case('策略声明数据源与费率：不靠人记得传参（ETF 跑错 lake 会静默出结果）', tag='fast')
 def t_strategy_declares_lake():
     """🔴 2026-09-13 用户报的 bug，根因不是那个 IOException，是【谁来记得】。
