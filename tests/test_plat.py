@@ -4478,6 +4478,10 @@ def t_runs_batch_delete():
         sv._scan()
         import shutil as _sh
         _sh.rmtree(_runs_tmp, ignore_errors=True)
+        # 🔴 marks 那个临时目录也要清 —— 原来只清了 _runs_tmp，于是
+        #   **每跑一次漏 2 个**（2026-09-22 实测盘上积了 38 个）。
+        #   泄漏不报错，只是慢慢把 $TMPDIR 塞满。
+        _sh.rmtree(os.path.dirname(_marks_p), ignore_errors=True)
     return ('管理模式与比对互斥；选 %d 个（>比对上限 %d）；弹窗用服务端 dry 清单；'
             '取消不删；受保护的默认不删且有逃生口；说删 %d 个就删了 %d 个、'
             '结论 %d 条含指标' % (n_sel, got['cmpmax'], n_plan, n_del, len(rows)))
@@ -4610,5 +4614,9 @@ def t_runs_delete_api():
         B._scan()
         import shutil as _sh
         _sh.rmtree(_runs_tmp, ignore_errors=True)
+        # 🔴 marks 那个临时目录也要清 —— 原来只清了 _runs_tmp，于是
+        #   **每跑一次漏 2 个**（2026-09-22 实测盘上积了 38 个）。
+        #   泄漏不报错，只是慢慢把 $TMPDIR 塞满。
+        _sh.rmtree(os.path.dirname(_marks_p), ignore_errors=True)
     return ('dry 不动文件；漏 confirm 被拒；认不出的单独报；标星默认不删、'
             'force 才删；结论 %d 条含指标；剩 %d 个' % (len(rows), n_left))
