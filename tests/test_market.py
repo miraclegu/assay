@@ -4785,20 +4785,44 @@ def t_index_bar():
     #   算成 0 会把一批没交易的票当成"今天平盘"，等权平均被系统性拉向 0。
     #   ★ 这条**必须构造**：真实 400 只当前全都取得到，那条路平时
     #     一步都走不到（变异「停牌算 0」第一轮就是这么漏的）。
+    # 🔴🔴 而构造本身也必须**确定**：原来是两次 `indices(force=True)`，
+    #   也就是**两次 live 抓取** —— 盘中价格在两次之间真的在动，于是
+    #   容差 0.01 比自然波动还小，2026-09-22 11:xx 实测 +1.17% -> +1.18%
+    #   当场红了一次，而**产品是好的**（`n` 那条结构性判据是通过的）。
+    #   现在把那一发抓取**记忆化**，两次测量看的是同一份报价 ——
+    #   于是容差可以收到**严格相等**，比原来更硬
+    #   （同「盘中的判据不能拿刷新后重新读到的值当期望」那条）。
     _bak_m = list(_rt._MICRO['syms'])
+    _bak_snap = _rt.snapshot_syms
     try:
+        _fixed = {}
+
+        def _snap_once(syms):
+            want = [s for s in syms if s not in _fixed]
+            if want:
+                _fixed.update(_bak_snap(want) or {})
+            return {s: _fixed[s] for s in syms if s in _fixed}
+
+        _rt.snapshot_syms = _snap_once
+        _rt._IDX_CACHE.update(at=0, rows=[])
+        d0 = _rt.indices(force=True)
+        m0 = next(r for r in d0['items']
+                  if str(r['symbol']).startswith('micro'))
         _rt._MICRO['syms'] = _bak_m + ['sh999999'] * 20   # 20 个取不到的
         _rt._IDX_CACHE.update(at=0, rows=[])
         d3 = _rt.indices(force=True)
-        m3 = next(r for r in d3['items'] if str(r['symbol']).startswith('micro'))
-        assert m3['n'] == mic['n'], \
+        m3 = next(r for r in d3['items']
+                  if str(r['symbol']).startswith('micro'))
+        assert m3['n'] == m0['n'], \
             ('塞了 20 个取不到的成分之后样本数从 %s 变成 %s —— '
-             '它们被算进去了' % (mic['n'], m3['n']))
-        assert abs(m3['change_pct'] - mic['change_pct']) < 0.01, \
-            ('塞了 20 个取不到的成分之后涨跌从 %+.2f%% 变成 %+.2f%% —— '
-             '它们被当成 0%% 算进了等权平均'
-             % (mic['change_pct'], m3['change_pct']))
+             '它们被算进去了' % (m0['n'], m3['n']))
+        assert abs(m3['change_pct'] - m0['change_pct']) < 1e-9, \
+            ('塞了 20 个取不到的成分之后涨跌从 %+.4f%% 变成 %+.4f%% —— '
+             '它们被当成 0%% 算进了等权平均（两次测量用的是同一份报价，'
+             '所以这里本该逐位相同）'
+             % (m0['change_pct'], m3['change_pct']))
     finally:
+        _rt.snapshot_syms = _bak_snap
         _rt._MICRO['syms'] = _bak_m
         _rt._IDX_CACHE.update(at=0, rows=[])
 

@@ -189,7 +189,7 @@ def api_live_account(q):
             'n_fills': len(rows),
             'fee_total': round(sum(float(f.get('fee') or 0) for f in rows), 2),
             'fee_estimated_n': sum(1 for f in rows if f.get('fee_estimated')),
-            'signal': sig,
+            'signal': _sig_rev_ctx(aid, sig, rows),
             # ★ 待办要不要默认展开、账户列表的红点，同一个判据
             #   （live.signal_alert）—— 判据分两处写就一定会分叉
             'alert': alert, 'alert_why': why,
@@ -328,6 +328,65 @@ def api_live_equity(q):
     return _live_err(_go)
 
 
+
+
+def _sig_rev_ctx(aid, sig, rows):
+    """给 `revisions` 补两样【派生】信息 —— **不写回信号文件**。
+
+    🔴🔴 用户 2026-09-22 指出这条提示读不懂：「09-21T23:00 → 被 09-22T16:06
+      覆盖是这么意思？这个数据还是基于 09-21 的收盘数据计算出来的吗？」
+
+      查下来两版的 `data_asof` **都是 2026-09-21**（今天 16:16 那轮同步
+      重建了面板文件但 09-22 的行情还没出来，指纹变了所以 tick 重算）。
+      所以"覆盖"这个词没错，**错在页面只给了两个时间戳**，而人要判断的是
+      **基于哪天的数据**。
+
+    🔴 更要命的是第二条：那一版的「买 301062 / 卖 300980」之所以从清单里
+      消失，**不是决策变了，是用户当天 10:11/10:12 已经照着成交了**。
+      而提示写的是「如果已按之前那份准备了委托，请照现在这份核对」——
+      现在这份是**空的**，照它核对会读成"不该买不该卖"，正好相反。
+
+    所以这里判一条可证的事实：那几个"消失的"代码，在 `for_date` 当天的
+    账本里有没有**同方向**的成交。有就是"你已经做完了"，那不是警告。
+    ★ 旧记录没有 `data_asof` 字段（2026-09-22 之前写的）-> 从归档的那份
+      rev 文件里读；读不到就**明说未知**，不猜（同「拿不到分红那一格标
+      『查不到』」）。
+    """
+    revs = list((sig or {}).get('revisions') or [])
+    if not revs:
+        return sig
+    fd = (sig or {}).get('for_date')
+    done = {'buy': set(), 'sell': set()}
+    for f in (rows or []):
+        if str(f.get('trade_date'))[:10] == fd and f.get('side') in done:
+            done[f['side']].add(f.get('code'))
+    out = []
+    for r in revs:
+        r = dict(r)
+        if r.get('data_asof') is None and r.get('archived'):
+            try:
+                p = os.path.join(_live().acct_dir(aid), r['archived'])
+                with open(p, encoding='utf-8') as _f:
+                    r['data_asof'] = json.load(_f).get('data_asof')
+            except Exception:                               # noqa: BLE001
+                r['data_asof'] = None
+        d = r.get('diff') or {}
+        # 「消失的」里有多少是因为已经成交了
+        r['done'] = {
+            'buy': sorted(c for c in (d.get('buy_removed') or [])
+                          if c in done['buy']),
+            'sell': sorted(c for c in (d.get('sell_removed') or [])
+                           if c in done['sell'])}
+        _n_rm = len(d.get('buy_removed') or []) + len(d.get('sell_removed') or [])
+        _n_add = (len(d.get('buy_added') or []) + len(d.get('sell_added') or [])
+                  + len(d.get('hold_added') or []) + len(d.get('hold_removed') or []))
+        # ★ 全部"消失的"都能用成交解释、且没有任何新增 -> 这一版不是"决策变了"
+        #   （hold_added 是买入成交的副产物，不单独算变化）
+        r['all_done'] = bool(_n_rm) and \
+            len(r['done']['buy']) + len(r['done']['sell']) == _n_rm and \
+            not (d.get('buy_added') or d.get('sell_added'))
+        out.append(r)
+    return dict(sig, revisions=out)
 
 def api_live_signal(q):
     m = _live()
@@ -725,6 +784,24 @@ def api_live_holdings(q):
         aid, offset=q.get('offset') or 0, limit=q.get('limit') or 100))
 
 
+def api_live_sellable(q):
+    """GET /api/live/sellable?id=&date= —— **那天**能卖哪几只、各多少股。
+
+    「记一笔」的卖出下拉框读它。
+    🔴 判据是**成交日那天**的持仓，不是"今天"的 —— 照"今天"做会误伤补录
+      （昨天清仓了、今天持仓 0，补录昨天那笔卖出时下拉框就是空的）。
+      实测用户自己的账本里就有这种票（600774 只在 09-01 那天可卖）。
+    ★ 与 `add_fill` 那道校验**同源**（都走 `lots_asof`）—— 各写一份会出现
+      "UI 说能卖、服务端说不能"。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    day = (q.get('date') or '').strip() or None
+    import datetime as _dt
+    return _live_err(lambda: m.sellable_asof(
+        aid, day or _dt.date.today().isoformat()))
+
+
 def api_live_trips(q):
     """GET /api/live/trips?id=&offset=&limit= —— 交易记录（FIFO 往返）。
 
@@ -860,6 +937,21 @@ def _live_loop():
                              len(r['cleared'])), flush=True)
             except Exception as e:                          # noqa: BLE001
                 print('[watch] 同步异常: %s: %s' % (type(e).__name__, e), flush=True)
+            # ---- 盘中推进模拟盘（按今开）----
+            # ★ 「该不该推」与节流的判据全在 `paper.advance_intraday_all`
+            #   一处 —— 这里只把结果印出来（同 `sync_live` 那条）。
+            # 🔴 它**不能挂在 `tick_daily.py`** 上：那个脚本的判据 2 是
+            #   「A 腿数据到了最新交易日」，盘中必然不成立 -> 退出码 3。
+            #   两件事的判据正好相反，硬塞进去会把其中一件做错。
+            try:
+                for r in m.advance_intraday_all(
+                        log=lambda s: print(s, flush=True)):
+                    if r.get('error'):
+                        print('[paper] %s: %s' % (r.get('account'), r['error']),
+                              flush=True)
+            except Exception as e:                          # noqa: BLE001
+                print('[paper] 盘中推进异常: %s: %s'
+                      % (type(e).__name__, e), flush=True)
             for r in m.tick():
                 if r.get('error'):
                     print('[live] %s: %s' % (r.get('account'), r['error']), flush=True)

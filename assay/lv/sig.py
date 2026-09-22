@@ -683,6 +683,15 @@ def make_signal(aid, datalake=None, force=False):
                     old, ensure_ascii=False, indent=1, sort_keys=True))
             revs.append({'rev': n, 'built_at': old.get('built_at'),
                          'replaced_at': _base._now(),
+                         # 🔴 **数据日要记下来**（用户 2026-09-22 问：
+                         #   「这个数据还是基于 09-21 的收盘数据计算出来的吗？
+                         #    如果是基于 09-22 的数据算的，那何谈什么覆盖？」）
+                         #   —— 原来只给两个**时间戳**（建于 -> 被替换于），
+                         #   而真正要判断的是**基于哪天的数据**：数据日相同
+                         #   才是"同一份数据重算"，不同就是"数据更新了"，
+                         #   两种情形该说两句不同的话。
+                         'data_asof': old.get('data_asof'),
+                         'new_data_asof': sig.get('data_asof'),
                          # ★ 存**相对账户目录的完整路径**，页面直接显示。
                          #   只存 basename 的话页面要自己拼 'signals/'，
                          #   而归档搬进 _rev/ 子目录之后那个拼法就错了 ——

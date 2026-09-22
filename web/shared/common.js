@@ -340,7 +340,13 @@ function mountSearch(box, opts) {
     timer = setTimeout(async () => {
       try {
         const r = await j('/api/stock/search?limit=20&q=' + encodeURIComponent(t));
-        rows = r.results || []; idx = rows.length ? 0 : -1; draw();
+        /* ★ `filter` 让调用方剔掉不该出现的候选 —— 加在**这里一处**，
+             不是让每个调用方自己在 onPick 里拦：拦在 onPick 是"点了才说不行"，
+             而候选本来就不该列出来（同「列出来点了什么都不出来比不给更糟」）。
+             实盘买入用它排除**指数** —— 指数买不了，而且 `normalize_code`
+             对 `sh000001` 会报"自相矛盾"，那个报错指不到真正的原因。 */
+        rows = (r.results || []).filter(o.filter || (() => true));
+        idx = rows.length ? 0 : -1; draw();
       } catch (e) {
         dd.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
         dd.style.display = 'block';

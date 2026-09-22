@@ -631,10 +631,20 @@ def _():
     if not runs:
         return '跳过（归档为空）'
 
-    bak = sv.MARKS_FILE + '.selftest-bak'
-    had = os.path.isfile(sv.MARKS_FILE)
-    if had:
-        shutil.copy2(sv.MARKS_FILE, bak)
+    # 🔴🔴 **重定向，不是"备份再还原"。** 这条用例真的会 `api_mark` 打星，
+    #   原来的做法是"备份真 picks.json -> 写 -> finally 还原"，而
+    #   ① 中断一次就丢数据（2026-09-21 实测：真文件少了 66 行星标）；
+    #   ② 它跑的那十几秒里**人可能正在页面上点星**，还原就把人的改动盖掉
+    #     （2026-09-22 实测：框架层那条守卫就这么把用户刚点的星回滚了）。
+    #   正确做法与 `lv.LIVE` / `ASSAY_RUNS` 同一条：把模块里那个路径指到
+    #   临时目录，**真文件一个字节都不写**（同下面两条批量删除用例）。
+    import assay.srv.runs as R
+    import tempfile as _tf0
+    _marks_p = os.path.join(_tf0.mkdtemp(prefix='selftest_marks_'), 'picks.json')
+    if os.path.isfile(R.MARKS_FILE):
+        shutil.copy2(R.MARKS_FILE, _marks_p)   # 拿真内容当底子（星标冒泡要有数据）
+    _prev_marks = R.MARKS_FILE
+    R.MARKS_FILE = _marks_p
     try:
         # --- 服务端：非法输入必须拒掉，不能静默写进去 ---
         rid = runs[0]['run_id']
@@ -858,10 +868,8 @@ def _():
                 '同列左边界一致、参数可换行、本金与成本入 tooltip、'
                 '等宽数字、宽表自滚、点表头排序且回撤默认升序）' % (npick, _th))
     finally:
-        if had:
-            shutil.move(bak, sv.MARKS_FILE)
-        elif os.path.isfile(sv.MARKS_FILE):
-            os.remove(sv.MARKS_FILE)
+        R.MARKS_FILE = _prev_marks
+        shutil.rmtree(os.path.dirname(_marks_p), ignore_errors=True)
 
 
 @case('页签图标：能取到 / mimetype 对 / 浏览器真的用了它', tag='fast')
@@ -3367,6 +3375,71 @@ def t_param_docs():
             % (len(ps), n_doc, n_grp, rid[:15], len(pa), len(ch)))
 
 
+@case('自检要能看到进度：正在跑哪条、且实时可见')
+def t_selftest_progress():
+    """🔴 用户 2026-09-22：「--all 有个问题，看不到进度」。
+
+    两个成因，**缺一条都还是看不到**：
+      ① 进度行原来在用例**跑完之后**才打 —— 而最慢的几条各要 46~70 秒
+        （全量 1083 秒），那几十秒里屏幕上一个字都没有，分不出"在跑"
+        还是"卡死了"。所以要在**开跑之前**就把名字打出来。
+      ② 重定向到文件时 stdout 是**块缓冲**（攒满 4KB 才落盘），
+        `tail -f` 看到的永远是几十条之前的 —— 所以每行都要 flush。
+
+    ★ 判据走 **AST**（注释不是 AST 节点，查字符串会命中我自己写的说明）：
+      那个 print 必须**排在调用用例之前**，这是"看得到进度"的全部意义。
+    """
+    import ast as _a
+    src = open(os.path.join(REPO, 'tests', '_base.py'), encoding='utf-8').read()
+    tree = _a.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, _a.FunctionDef) and n.name == 'main')
+    loop = None
+    for n in _a.walk(fn):
+        if isinstance(n, _a.For) and any(
+                isinstance(x, _a.Try) for x in _a.walk(n)):
+            loop = n
+            break
+    assert loop is not None, 'main() 里找不到跑用例的那个循环'
+    # 循环体里：调用用例的那句在第几行、进度 print 在第几行
+    ln_call = min(
+        [x.lineno for x in _a.walk(loop)
+         if isinstance(x, _a.Call) and isinstance(x.func, _a.Name)
+         and x.func.id == 'fn'] or [10 ** 9])
+    ln_prog = min(
+        [x.lineno for x in _a.walk(loop)
+         if isinstance(x, _a.Call) and isinstance(x.func, _a.Name)
+         and x.func.id == 'print'] or [10 ** 9])
+    assert ln_call < 10 ** 9, '循环里没有调用 fn()'
+    assert ln_prog < ln_call, \
+        ('进度必须在【调用用例之前】打出来（现在 print 在第 %s 行、'
+         'fn() 在第 %s 行）—— 跑完才打的话，最慢那条的 70 秒里屏幕上'
+         '什么都没有' % (ln_prog, ln_call))
+    # 结果行必须 flush —— 否则重定向时 tail -f 看到的是几十条之前的
+    n_flush = sum(
+        1 for x in _a.walk(loop)
+        if isinstance(x, _a.Call) and isinstance(x.func, _a.Name)
+        and x.func.id == 'print'
+        and any(k.arg == 'flush' for k in (x.keywords or [])))
+    n_print = sum(
+        1 for x in _a.walk(loop)
+        if isinstance(x, _a.Call) and isinstance(x.func, _a.Name)
+        and x.func.id == 'print')
+    # ★ 终端那条 `\r` 擦除行故意不 flush（紧跟着就有一个 flush 的 print）
+    assert n_flush >= n_print - 2, \
+        ('循环里 %d 个 print 只有 %d 个 flush —— 重定向时 stdout 是块缓冲，'
+         '不 flush 就看不到进度' % (n_print, n_flush))
+    # 序号与总数：没有它就只知道"在跑"，不知道"还剩多少"
+    assert '[%*d/%d]' in src, '进度行要带【第几条/共几条】'
+    # 宽度要按【列】算：中文占 2 列，len() 只数 1
+    assert 'east_asian_width' in src, \
+        ('擦除/截断要按显示【列宽】算 —— 用 len() 的话中文行擦不干净'
+         '（留半行垃圾）、截断也会折行，而折行之后回车根本擦不掉')
+    return ('进度 print 在第 %d 行、fn() 在第 %d 行（先打后跑）；'
+            '%d/%d 个 print 带 flush；带序号与列宽换算'
+            % (ln_prog, ln_call, n_flush, n_print))
+
+
 @case('页面文案里不许写 markdown 星号（HTML 渲染不了）')
 def t_no_markdown_stars():
     """★ CLAUDE.md 记过两次（indicators 的 desc 进 title、这一轮的参数说明），
@@ -3392,7 +3465,56 @@ def t_no_markdown_stars():
     # 反向自证：扫描器真的抓得到（否则"0 处"可能是正则写坏了）
     probe = "x = '这里有**星号**的文案';"
     assert re.search(r"'[^'\n]*\*\*[^'\n]*'", probe), '扫描器自己坏了'
-    return '扫了 web 下全部 .js，0 处；扫描器自证可用'
+    # ---- 服务端那一半：错误/提示文案也会原样渲染进页面（2026-09-22 加）----
+    # 🔴 实测现网**六处**：`lv/px.py` 的「请**手填价格**」与「填了**后复权价**」
+    #   直接进 `#fmsg` 的 innerHTML、`srv/runs.py` 的「跑的是**当前版本**」
+    #   进版本页、`indicators.py` 那条 `desc` 进 `title` 属性
+    #   （CLAUDE.md 为它记过两次，**而扫描器一直只扫 web/**）。
+    # ★ 只用**三条窄规则**排掉误报，不维护白名单路径：
+    #     ① docstring（含 `"""…""" % X` 那种 —— 它的 Expr 是 BinOp，
+    #        只判 Constant 会漏，实测 `realtime.indices` 就是这种）
+    #     ② 长度 ≤ 3（`'**'` 是 glob 通配，不是文案）
+    #     ③ 含 SELECT/FROM 的 SQL 文本
+    #   实测 **0 误报**（未加规则时 11 条里 3 条是误报）。
+    import ast as _ast
+    pybad = []
+    for f in sorted(_g.glob(os.path.join(REPO, 'assay/**/*.py'), recursive=True)):
+        src = open(f, encoding='utf-8').read()
+        try:
+            tree = _ast.parse(src)
+        except SyntaxError:
+            continue
+        skip = set()
+        for n in _ast.walk(tree):
+            body = getattr(n, 'body', None)
+            if isinstance(n, (_ast.Module, _ast.ClassDef, _ast.FunctionDef,
+                              _ast.AsyncFunctionDef)) and body \
+               and isinstance(body[0], _ast.Expr):
+                v = body[0].value
+                v = v.left if isinstance(v, _ast.BinOp) else v
+                if isinstance(v, _ast.Constant) and isinstance(v.value, str):
+                    skip.add(id(v))
+        for n in _ast.walk(tree):
+            if not (isinstance(n, _ast.Constant)
+                    and isinstance(n.value, str)):
+                continue
+            v = n.value
+            if id(n) in skip or '**' not in v or len(v) <= 3:
+                continue
+            if re.search(r'(?i)\bselect\b|\bfrom\b', v):
+                continue
+            pybad.append('%s:%d %s' % (os.path.basename(f), n.lineno,
+                                       v.replace('\n', '⏎')[:60]))
+    assert not pybad, \
+        ('服务端文案里有 markdown 星号（它会原样渲染到页面上）：\n  '
+         + '\n  '.join(pybad[:6]))
+    # 反向自证：这半个扫描器也真的抓得到
+    _probe = _ast.parse("raise X('取不到价 —— 请**手填价格**再试')")
+    _found = [c for c in _ast.walk(_probe)
+              if isinstance(c, _ast.Constant) and isinstance(c.value, str)
+              and '**' in c.value and len(c.value) > 3]
+    assert _found, '服务端那半个扫描器自己坏了'
+    return '扫了 web 下全部 .js 与 assay 下全部 .py，0 处；两半扫描器都自证可用'
 
 
 @case('万/亿折算与盈亏符号各只有一份（yiv / pnlv）', tag='web')

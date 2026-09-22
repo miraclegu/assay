@@ -58,6 +58,7 @@ import os
 
 from . import base as _base
 from . import bench as _bench
+from . import openbar as _ob
 from . import pos as _pos
 
 #: 模拟盘写进账本的 `source`。★ 与手工录入（`manual`）分开，
@@ -119,15 +120,17 @@ def _ledger_fills(aid):
     ★ 只看 `source == 'paper'`：模拟盘账户上仍然可以手工补录
       （比如模拟一笔分红到账），那几笔不参与对账。
     """
-    out = []
-    for r in _base.fills(aid):
-        if r.get('source') != SOURCE or r.get('reverse_of'):
-            continue
-        out.append(r)
-    return out
+    # 🔴 走 `active_fills`：**被冲正掉的那一对"没有发生过"**，不该参与对账。
+    #   原来只跳过冲正记录本身、却把**被冲掉的原始记录**留着 —— 于是它的
+    #   key 在重跑里永远找不到，`advance` 每次都报「对账不一致」而账本不动，
+    #   **人只能去走「重建」删档重开**（实测：冲正一笔之后第二次推进就这样）。
+    # ★ 顺带一提，这也让"再添加一遍"不会发生：那个 key 重跑里本来就没有
+    #   （它正是因为对不上才被冲掉的）。
+    return [r for r in _pos.active_fills(_base.fills(aid))
+            if r.get('source') == SOURCE and not r.get('reverse_of')]
 
 
-def advance(aid, datalake=None, rebuild=False):
+def advance(aid, datalake=None, rebuild=False, intraday=False):
     """把模拟盘推进到最新数据日。**幂等**：没有新的交易日就什么都不做。
 
     返回 `{ok, added, advanced_to, mismatch, ...}`。
@@ -143,7 +146,8 @@ def advance(aid, datalake=None, rebuild=False):
     if not a.get('code_sha256'):
         return {'ok': False, 'error': '还没绑定策略 —— 模拟盘不知道要跑什么'}
 
-    eng, meta = _bench.build_engine(aid, datalake=datalake)
+    eng, meta = _bench.build_engine(aid, datalake=datalake,
+                                    intraday=intraday)
     if eng is None:
         return {'ok': False, 'error': meta.get('error') or '引擎建不起来'}
 
@@ -157,13 +161,29 @@ def advance(aid, datalake=None, rebuild=False):
     have = _ledger_fills(aid)
     st = state(aid)
 
+    # ---- 盘中写下的那几笔（provisional）单独拿出来 ----
+    # 🔴 它们**不参与** confirmed 的 mismatch 判定：盘中那根 bar 是按
+    #   今开 + 昨天的因子拼的**近似**，日终权威数据落地后本来就可能不同 ——
+    #   那不是"数据被修正过"，那是设计好的行为。混进 mismatch 里的话
+    #   **每天一次「对账不一致」**，而它给的原因指不到真正的原因
+    #   （用户 2026-09-22 选的就是「盘中先写、日终按冲正重录」这条路）。
+    prov_day = str(st.get('prov_day') or '')[:10]
+    prov_uids = set(st.get('prov_uids') or ())
+    prov = [r for r in have if r.get('uid') in prov_uids]
+    # 🔴 **`have` 要留全** —— 它同时是下面那个**去重集合** `have_keys` 的来源。
+    #   第一版把 provisional 从 `have` 里剔掉了，于是那几笔每次推进都被
+    #   **重新追加一遍**（实测第二次又加了 3 笔；卖出那笔被"重放出现负持仓"
+    #   挡住才没成 4 笔 —— 也就是说**账本会越推越脏，而它不报错**）。
+    #   排除只该发生在 **mismatch 比较**那一处。
+    have_conf = [r for r in have if r.get('uid') not in prov_uids]
+
     # ---- 对账：账本里已有的那几天，重跑结果必须一致 ----
     # ★ 按**账本最后一天**截断再比 —— 不截的话"今天新跑出一笔"会被当成
     #   不一致，而那正是我们要追加的东西。
     mismatch = None
-    if have:
-        last = max(str(r['trade_date'])[:10] for r in have)
-        a_keys = [_key_of(r) for r in have]
+    if have_conf:
+        last = max(str(r['trade_date'])[:10] for r in have_conf)
+        a_keys = [_key_of(r) for r in have_conf]
         b_keys = [_key_of(f) for f in got if str(f['date'])[:10] <= last]
         a_keys.sort()
         b_keys.sort()
@@ -177,7 +197,7 @@ def advance(aid, datalake=None, rebuild=False):
                 'n_ledger': len(a_keys), 'n_rerun': len(b_keys),
                 'why': ('重跑结果与账本对不上 —— 多半是数据被修正过'
                         '（本项目修过 volume / 复权因子 / ETF 价格刻度）。'
-                        '账本是 append-only 的证据，**不会被静默改写**；'
+                        '账本是 append-only 的证据，【不会被静默改写】；'
                         '要按新数据重来请显式「重建」（那是删档重开）。'),
             }
             if not rebuild:
@@ -213,6 +233,85 @@ def advance(aid, datalake=None, rebuild=False):
             added += 1
         except Exception as e:                              # noqa: BLE001
             errs.append('%s %s %s: %s' % (f['date'], f['code'], f['side'], e))
+
+    # ---- provisional 对账：确认，或者【冲正 + 重录】 ----
+    # ★ 判据是 `_key_of`（日期/代码/方向/股数）—— 与 confirmed 那条同一个。
+    #   在 `got` 里找得到 = 权威数据确认了它；找不到 = 盘中那份算错了
+    #   （除权、候选池被补抓改变、策略参数被改过…），按项目自己那套
+    #   **「改一笔 = 冲正 + 重录」**换掉，**不重写账本**。
+    # 🔴🔴 **只在这一轮的重跑真的覆盖了 `prov_day` 时才对账。**
+    #   否则会误伤：日终数据还没到就跑一次 `intraday=False`，那几笔在 `got`
+    #   里当然找不到（重跑只到面板最新日）—— 于是**它们会被全部冲正掉**，
+    #   而它们本来是对的、只是还没被确认。实测第一版就是这样。
+    #   两种该对账的情形：
+    #     ① 日终：权威日线到了（`panel_end >= prov_day`）
+    #     ② 盘中同一天再推：重跑本来就覆盖这一天（候选池被补抓改变过时，
+    #        旧的那几笔必须换掉）
+    prov_ok, prov_rev = 0, 0
+    _covered = bool(prov_day) and (
+        str(meta.get('panel_end') or meta['end'])[:10] >= prov_day
+        or str(meta.get('intraday_day') or '')[:10] == prov_day)
+    if prov and _covered:
+        rerun = set(_key_of(f) for f in got
+                    if str(f['date'])[:10] == prov_day)
+        for r in prov:
+            if _key_of(r) in rerun:
+                prov_ok += 1
+                continue
+            try:
+                _pos.add_fill(
+                    aid, trade_date=str(r['trade_date'])[:10], code=r['code'],
+                    # 🔴 冲正必须是**反向**那一笔（`buy` 冲成 `sell`）——
+                    #   `active_fills` 成对剔掉的条件里有 `side != side`，
+                    #   同向写的话它**配不上对**，于是那笔被当成又一次买入：
+                    #   实测持仓从 2000 变成 6200 股（2100+2000+2100 三个批次），
+                    #   **而它不报错**。
+                    side=('sell' if r['side'] == 'buy' else 'buy'),
+                    shares=int(r['shares']),
+                    price=r.get('price'),
+                    # 🔴 冲正的费用传 **−原费用** —— 语义是"这笔交易没发生"，
+                    #   手续费也要退掉（同页面上那个「冲正」按钮）。
+                    fee=-float(r.get('fee') or 0.0),
+                    source=SOURCE, reverse_of=r['uid'], datalake=datalake,
+                    note='盘中预成交被日终权威数据推翻 -> 冲正',
+                    force_price=True)
+                prov_rev += 1
+            except Exception as e:                          # noqa: BLE001
+                errs.append('冲正 %s %s: %s' % (r['trade_date'], r['code'], e))
+
+    # ---- 这一轮写下的哪几笔仍然是"盘中近似" ----
+    # ★ 判据是**这一天的权威日线到没到**（`panel_end`），不是"是不是盘中跑的"
+    #   —— 同一天日终再推一次时，那几笔就该转正（同「判据永远是现在的状态，
+    #   不是记录」）。
+    # ⚠ 算成**局部变量**再进最后那一次 `st.update` —— `advance` 末尾会
+    #   `st = state(aid)` **重新读一次磁盘**，写在前面那个 dict 上会被丢掉
+    #   （第一版就是这么挂的：`prov_day` 恒为 None、标记等于没做，
+    #   **而它不报错**，只是日终不会去对账那几笔）。
+    iday = meta.get('intraday_day')
+    if iday and str(meta.get('panel_end'))[:10] < iday:
+        # 盘中：这一天写下的全部算"还没被权威数据确认"
+        prov_day_new = iday
+        # 🔴 只标**还活着**的那几笔：`active_fills` 会把「冲正记录」与
+        #   「被它冲掉的原始记录」成对剔掉。不排除的话那一对每轮都会被
+        #   当成"对不上"再冲一次 —— **账本无限长胖，而它不报错**
+        #   （实测：冲正过一笔之后再推，每轮都多一条冲正）。
+        # ★ `_ledger_fills` 已经只给**还活着**的那些（走 active_fills），
+        #   所以冲正掉的那一对天然不在里面 —— 不然它们每轮都会被当成
+        #   "对不上"再冲一次，账本无限长胖（实测踩过）。
+        prov_uids_new = sorted(
+            r['uid'] for r in _ledger_fills(aid)
+            if str(r['trade_date'])[:10] == iday and r.get('uid'))
+    elif _covered:
+        # 权威数据已经覆盖到那一天 -> 上面刚对过账，**转正**
+        prov_day_new, prov_uids_new = None, []
+    else:
+        # 🔴 **这一轮没覆盖到就保持原样。** 清掉的话那几笔会被当成
+        #   confirmed 历史，下次日终一有差异就报 mismatch —— 而那正是
+        #   「盘中先写、日终按冲正重录」要避免的那条路。
+        #   实测第一版就是这么挂的：日终数据还没到时跑一次
+        #   `intraday=False`，标记清零，再推就报对账不一致。
+        prov_day_new = prov_day or None
+        prov_uids_new = sorted(prov_uids)
 
     # ---- 分红到账：写成【现金流】，不是成交 ----
     # 🔴 不补的话模拟盘的现金会少掉所有分红：引擎把分红计进 `pf.cash`，
@@ -330,6 +429,17 @@ def advance(aid, datalake=None, rebuild=False):
         'why_empty': why_empty,
         'n_dividends': n_div,
         'advanced_to': str(meta['end'])[:10],
+        'panel_end': str(meta.get('panel_end') or meta['end'])[:10],
+        'intraday_day': meta.get('intraday_day'),
+        'intraday_why': meta.get('intraday_why'),
+        # ★ 盘中被推迟的那几个任务（14:00 的止损/炸板）——「还没跑完」
+        #   要说出来，否则盘中那份持仓看着就是最终结果。
+        'intraday_deferred': dict(getattr(eng, '_ob_deferred', {}) or {}),
+        'intraday_skipped': ([] if not meta.get('intraday_feed') else
+                             list(getattr(meta['intraday_feed'],
+                                          'skipped', []))[:20]),
+        'prov_ok': prov_ok, 'prov_reverted': prov_rev,
+        'prov_day': prov_day_new, 'prov_uids': prov_uids_new,
         'advanced_at': _base._now(),
         'data_fingerprint': meta.get('data_fingerprint'),
         # 🔴 **"推进到哪天"要连着"这是哪份数据"一起说。**
@@ -348,9 +458,77 @@ def advance(aid, datalake=None, rebuild=False):
     st.pop('mismatch', None)
     _save_state(aid, st)
     return {'ok': True, 'added': added, 'advanced_to': st['advanced_to'],
+            'panel_end': st['panel_end'], 'intraday_day': st['intraday_day'],
+            'intraday_why': st['intraday_why'],
+            'intraday_skipped': st['intraday_skipped'],
+            'prov_day': st.get('prov_day'),
+            'n_provisional': len(st.get('prov_uids') or ()),
+            'prov_ok': prov_ok, 'prov_reverted': prov_rev,
             'n_fills': len(got), 'n_dividends': n_div, 'recon': recon,
             'rejects': rejects, 'why_empty': why_empty,
             'errors': errs[:20], 'mismatch': None}
+
+
+# 盘中推进的节流：每个账户最多这么久一次。**漏了不要紧** —— 日终权威
+# 数据落地后必然重算一遍（同 realtime「不挂 launchd」那条的理由）。
+INTRADAY_EVERY = 300
+_intraday_at = {}
+
+
+def advance_intraday_all(datalake=None, log=None, now=None):
+    """盘中：把绑了策略的模拟盘按【今开】各推进一格。
+
+    🔴 **不能挂在 `tick_daily.py` 上** —— 那个脚本的判据 2 是「A 腿数据到了
+      最新交易日」，盘中必然不成立（面板还停在昨天），于是它直接退出码 3。
+      那条判据对"出信号"是对的（宁可用昨晚那份，也不要拿半截数据覆盖），
+      而盘中推进**本来就设计成在那之前跑** —— 两件事判据相反，
+      硬塞进去就会把其中一件做错。
+    ★ 所以挂在 serve.py 那条 60 秒的线上（同 `watchlist.sync_live`）：
+      盘中推进**只在你看页面时才有意义**，漏一轮下一轮就补上。
+
+    ★ 两道节流，各有各的理由：
+      ① 每个账户 `INTRADAY_EVERY` 秒一次 —— 一次推进是**从起点重放整段**
+         （1~3 秒），60 秒一轮无脑推就是白烧 CPU。
+      ② **收盘后只推到"今天推过一次"为止**：今开固定、成交已定，
+         结果不会再变；但至少要推过一次，否则收盘到日终同步之间那几小时
+         页面上还是昨天（那正是用户报的那个症状）。
+    """
+    import time
+    from assay import realtime as _rt
+
+    out = []
+    try:
+        in_sess = bool(_rt.in_session(now))
+    except Exception:                                       # noqa: BLE001
+        in_sess = False
+    for a in _base.load_accounts():
+        if not is_paper(a) or a.get('archived') or not a.get('code_sha256'):
+            continue
+        aid = a['id']
+        st = state(aid)
+        day, why = _ob.can_advance_intraday(
+            st.get('panel_end') or st.get('advanced_to') or '1970-01-01',
+            now=now)
+        if why:
+            continue
+        # 收盘后：今天已经推过一次就不再推
+        if not in_sess and str(st.get('prov_day') or '')[:10] == day:
+            continue
+        t = time.time()
+        if t - _intraday_at.get(aid, 0.0) < INTRADAY_EVERY:
+            continue
+        _intraday_at[aid] = t
+        try:
+            r = advance(aid, datalake=datalake, intraday=True)
+            r['account'] = a.get('name') or aid
+            out.append(r)
+            if log:
+                log('[paper] %s 盘中推进 -> %s（新增 %s 笔，%s 笔待确认）'
+                    % (r['account'], r.get('advanced_to'), r.get('added'),
+                       r.get('n_provisional')))
+        except Exception as e:                              # noqa: BLE001
+            out.append({'account': a.get('name') or aid, 'error': str(e)})
+    return out
 
 
 def advance_all(datalake=None, log=None):

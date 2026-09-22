@@ -1688,8 +1688,21 @@ def t_signal_revision():
         'live.js 没读 s.revisions —— 留痕了但页面不说，等于没留痕'
     assert 'revs.length?' in flat and '被重算过' in js, \
         'revision 提示要按 revs.length 分支并说清「被重算过」'
-    assert 'lvwarn' in js.split('const rv=')[1][:400], \
-        'revision 提示必须用警告样式（它是"能不能照着下单"的前提）'
+    # 🔴 2026-09-22 改成**两种样式**（用户："这里的提示感觉有问题"）：
+    #   消失的那几只**当天都已成交**时走低调样式，真有决策变化才显红。
+    #   一律显红的话，每次照着信号成交完都跳一条红字 —— 那就是假告警，
+    #   而「假告警看多了就不看告警」。
+    #   ★ 这条是**静态扫描**，只能证"两种样式都写了"；真正的行为判据在
+    #     `t_signal_revision_notice`（构造两个方向 + 4 条变异全抓到）。
+    _rv = js.split('const rv=')[1][:1200]
+    assert 'lvwarn' in _rv and 'lvwhy' in _rv, \
+        ('revision 提示要【两种样式都有】：真有决策变化 -> 警告；'
+         '消失的那几只都是"你已成交" -> 低调')
+    assert 'allDone' in flat, \
+        '分支判据应是 allDone（服务端 `r.all_done` 给的"都是已成交"）'
+    assert 'data_asof' in js, \
+        ('提示里要写【数据日】—— 用户 2026-09-22 问的就是"这份基于哪天的'
+         '数据"，只给两个时间戳（建于 -> 被替换于）答不了那个问题')
     assert '请照现在这份核对' in js, \
         '要明说「如果已按之前那份准备了委托，请照现在这份核对」'
     assert 'r.archived' in js, '要写清旧版存在哪个文件（唯一的回滚凭据）'

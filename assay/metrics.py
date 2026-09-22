@@ -255,7 +255,7 @@ def report(curve, starting_cash, broker=None, bench=None, bench_code=None,
         print('  %s 平均仓位   %11.1f%%   最低 %.1f%%   仓位<80%% 的日子 %.1f%%'
               % (lvl, ea, m['exposure_min'], m['exposure_lt80_pct']))
         if ea < 70:
-            print('     ↑ 平均仓位过低 —— 收益被现金稀释，**与满仓策略不可直接比**。')
+            print('     ↑ 平均仓位过低 —— 收益被现金稀释，【与满仓策略不可直接比】。')
             print('       常见原因：目标池长期给不满（选股条件太严）、')
             print('       或选股 SQL 依赖的表区间不覆盖回测起点。查 [PICK] 的池子规模。')
     if m.get('empty_days'):
@@ -265,7 +265,7 @@ def report(curve, starting_cash, broker=None, bench=None, bench_code=None,
                  m['empty_days'], m['empty_pct'], m['max_empty_run'],
                  ('  %s ~ %s' % (span[0], span[1])) if span else ''))
         if m['empty_pct'] >= 10:
-            print('     ↑ 空仓占比过高，收益/回撤/夏普均被稀释，**结论不可用**。')
+            print('     ↑ 空仓占比过高，收益/回撤/夏普均被稀释，【结论不可用】。')
             print('       先查选股 SQL 依赖的表区间是否覆盖回测起点'
                   '（如 std/beta_daily.parquet 从 2005 起）。')
     if m.get('max_weight_avg') is not None:

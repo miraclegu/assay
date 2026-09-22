@@ -18,19 +18,32 @@ function openRecord(aid, sig, ro, tab){
   modal(`<div class="lvhead" style="margin-bottom:10px">
       <h2>记一笔</h2>
       <button class="btn rtab" data-t="fill">成交</button>
+      <button class="btn rtab" data-t="back">补录</button>
       <button class="btn rtab" data-t="cash">现金</button>
       <span style="flex:1"></span><button class="btn" id="mclose">关闭</button></div>
     <div id="rfill" class="lvsec">
-      <h3>逐笔录入</h3>
+      <div class="lvwarn" id="fbackhint" style="display:none;margin-bottom:8px">
+        <b>补录历史成交</b> —— 这里是给「那天做了、当时没录」用的，和日常录入
+        分开放，免得手滑把今天的成交记到别的日子上。三件要知道的：<br>
+        ① 账本 <b>append-only</b>：录错了只能写一条反向冲正再重录，删不掉；<br>
+        ② 可卖清单按<b>成交日那天</b>的持仓给（不是今天的）——
+           那天有、今天已清仓的票照样选得到；<br>
+        ③ 费用按<b>成交日那一档</b>费率算。换过券商之后拿今天的费率补录
+           三个月前那笔，数字看着很正常，<b>只是错的</b>。
+      </div>
+      <h3 id="fh3">逐笔录入</h3>
       <div class="lvform">
-        <input id="fd" size="10" placeholder="YYYY-MM-DD" value="${esc(d0)}">
-        <input id="fc" size="14" placeholder="代码 301126.SZ / sz301126">
         <select id="fs"><option value="buy">买</option><option value="sell">卖</option></select>
+        <span id="fdb" class="fdbox"></span>
+        <input type="hidden" id="fd" value="${esc(d0)}">
+        <span id="fcb" class="fcbox"></span>
+        <input type="hidden" id="fc">
         <input id="fq" size="7" placeholder="股数">
         <input id="fp" size="9" placeholder="价格(留空=开盘价)">
         <input id="ff" size="9" placeholder="费用(留空=按费率)">
         <button class="btn" id="fb" ${ro?'disabled':''}>录一笔</button>
       </div>
+      <div class="frow"><label></label><span class="lvwhy" id="fcmsg"></span></div>
       <div class="frow"><label></label>
         <label class="lvwhy" style="flex:0 0 auto;text-align:left">
           <input type="checkbox" id="fforce"> 按填的价，不校验当日高低区间</label>
@@ -45,6 +58,7 @@ function openRecord(aid, sig, ro, tab){
         <b>费用留空 = 按这个账户的费率算</b>（见 ⚙ 里的费率），入账标「估」。
         <b>留空不等于 0</b> —— 年换手 4.5 次的话，费用当 0 算一年会让权益虚高约 0.5%。
       </div>
+      <div id="rbulk">
       <h3 style="margin-top:12px">批量粘贴</h3>
       <div class="lvform">
         <textarea id="ft" placeholder="每行「日期 代码 买/卖 股数 价格 [费用]」，逗号/制表符/空格分隔皆可。价格填 - 表示按当日开盘价"></textarea>
@@ -62,8 +76,14 @@ function openRecord(aid, sig, ro, tab){
              用 ${esc(d0)} 的开盘价${sigOpen?'':
                '（该日行情还没同步，本地只到 '+esc(sig.data_asof||'?')+'）'}</label>`:''}
       </div>
+      </div>
+      <!-- 🔴 fmsg 必须在 rbulk 【外面】：批量粘贴那块在「补录」页签下
+           是 display:none，而它【同时也是逐笔录入的提示位】—— 套在里面的话
+           补录失败时屏幕上【什么都不出现】（那正是"点了没反应"这种最难查的
+           坏；实测：服务端明明回了"当天行情还没同步"，页面一个字没有）。
+           是既有那条「取不到当日行情时页面要说清原因」抓到的。 -->
       <div class="lvmsg" id="fmsg"></div>
-    </div>
+      </div>
     <div id="rcash" class="lvsec" style="display:none">
       <h3>入金 / 出金 / 分红到账</h3>
       <div class="lvform">
@@ -86,10 +106,25 @@ function openRecord(aid, sig, ro, tab){
           <td class="lvwhy">${esc(f.note||'')}</td></tr>`).join('')}</table>`
         :'<div class="none" style="margin-top:8px">还没有现金流水</div>'}
     </div>`, close=>{
+    /* 🔴 这三个必须声明在 `sel()` **之前** —— `sel(tab||'fill')` 在下面
+       几行就被调用，而 `let/const` 有**暂时性死区**：写在后面的话
+       `sel` 里一引用就抛 ReferenceError，**而它只在控制台里报**，
+       表现是弹窗里日期那一格空着（同「geo 是局部变量」那次）。
+       ★ `fcmsg` 同理从 `const 箭头` 改成**函数声明**（可提升）。 */
+    const D0 = $('#fd').value;
+    let FMODE = 'fill';
+    let FSMAX = null;                  /* 卖出上限（股）；买入时是 null */
     const sel=t=>{ $('#rfill').style.display=(t==='cash'?'none':'');
                    $('#rcash').style.display=(t==='cash'?'':'none');
                    document.querySelectorAll('.rtab').forEach(x=>
-                     x.classList.toggle('on', x.dataset.t===t)); };
+                     x.classList.toggle('on', x.dataset.t===t));
+                   if(t==='cash') return;
+                   FMODE = t;
+                   const hint=$('#fbackhint'), bulk=$('#rbulk'), h3=$('#fh3');
+                   if(hint) hint.style.display = (t==='back'?'':'none');
+                   if(bulk) bulk.style.display = (t==='back'?'none':'');
+                   if(h3) h3.textContent = (t==='back'?'补录一笔':'逐笔录入');
+                   fdRender(); fcRender(); };
     document.querySelectorAll('.rtab').forEach(x=>x.onclick=()=>sel(x.dataset.t));
     sel(tab||'fill');
     if(ro) return;
@@ -121,7 +156,156 @@ function openRecord(aid, sig, ro, tab){
         }else{ close(); showLive(aid); }
       }catch(e){ m().className='lvmsg bad'; m().textContent=String(e); }
     };
+    /* ---- 🔴 补录与常规操作**分开**（用户 2026-09-22）----
+       「补录功能可以开单独的按钮，和常规操作做区分，而不是混在正常的操作里」。
+
+       真正"混在正常操作里"的是**逐笔录入那个自由日期框** —— 它是手填的、
+       最容易填错，而填错的后果是**成本价与建仓日错**，那两个值直接喂给
+       止损判定与红利税档位（同「刻意删掉那个『含不含规费』开关」的理由：
+       **少一个能填错的地方**）。
+       所以常规那档把日期**锁成文本**，要改日期得显式切到「补录」。
+
+       ★ **只有一份表单**：两个页签共用 `#rfill` 那一套，只有「日期那一格」
+         与「顶部说明」按模式变。各写一份的话两边迟早分叉，而分叉的表现是
+         "补录那边少了个校验"。
+       ★ 批量粘贴**留在常规**：它的日期来自你粘进来的**对账单**、不是手填的，
+         而"照账单整批抄"本来就是常规操作。 */
+    function fdRender(){
+      const box = $('#fdb'); if(!box) return;
+      if(FMODE === 'back'){
+        /* ★ 默认**空**，不给一个可能错的默认值（同「拿不到分红那一格标
+             『查不到』，不猜一个数填上去」）。 */
+        box.innerHTML = '<input id="fdi" type="date" style="width:132px">';
+        $('#fd').value = '';
+        $('#fdi').onchange = () => { $('#fd').value = $('#fdi').value || '';
+                                     fcRender(); };
+      }else{
+        /* 常规：锁成文本。**切回来时要复位到 d0** —— 把补录填的那天带回
+           日常录入，正是"混在一起"最坏的后果。 */
+        $('#fd').value = D0;
+        box.innerHTML = '<b>' + esc(D0) + '</b>';
+      }
+    }
+
+    /* ---- 🔴 买与卖是**两种不同的输入**（用户 2026-09-22）----
+       「选择卖的时候，只能从当前持仓中选择，交易的数量不能超过持仓的数量。
+         买的时候，输入代码、名称，出现下拉框供选择。」
+
+       买：一个裸输入框要人**记住代码**（`301126.SZ` / `sz301126` / …），
+           打错一个字最好的情况是报"代码不对"，**打成另一只真实存在的票**
+           就是静默录错，而账本是 append-only 的。所以给搜索下拉。
+       卖：能卖的就那十来只，而且**有上限** —— 让人去自由输入等于把
+           "超卖"这件事留给服务端在提交后才说。
+
+       ★ 方向 `<select>` 提到**最前**：它决定后面那一格长什么样。
+       🔴 判据「能卖多少」由**服务端**给，且取的是**成交日那天**的持仓
+         （`/api/live/sellable?date=`）—— 照"今天"做会误伤补录，
+         实测用户自己的账本里就有这种票（600774 只在 09-01 那天可卖）。 */
+    /* 常规那档的日期 = 模板里填好的那个（信号的 for_date 或今天）。
+       ★ **从 DOM 读**，不在这儿再算一遍 —— 两处算迟早不一致
+         （同「签名要从 DOM 读，不要另存一份」那条）。 */
+    function fcmsg(html, bad){
+      const e = $('#fcmsg'); if (!e) return;
+      e.innerHTML = html || '';
+      e.style.color = bad ? 'var(--down)' : '';
+    }
+
+    async function loadSellable(){
+      const box = $('#fcb'), d = $('#fd').value.trim();
+      if(!d){
+        /* 补录模式下还没填日期 —— 说清下一步，不要摆一个空下拉在那儿
+           （空下拉看着像"没有持仓"，而事实是"还不知道问哪天"）。 */
+        box.innerHTML = '<select id="fsel"><option value="">先填成交日</option></select>';
+        fcmsg('先在左边填上<b>成交日</b> —— 能卖多少是按那天的持仓算的');
+        return;
+      }
+      box.innerHTML = '<select id="fsel"><option value="">读取中…</option></select>';
+      let o;
+      try{ o = await j('/api/live/sellable?id=' + encodeURIComponent(aid)
+                       + '&date=' + encodeURIComponent(d)); }
+      catch(e){ box.innerHTML = '<select id="fsel"><option value="">取不到</option></select>';
+                fcmsg('可卖清单取不到：' + esc(String(e)), 1); return; }
+      const it = o.items || [];
+      if(!it.length){
+        box.innerHTML = '<select id="fsel"><option value="">那天没有持仓</option></select>';
+        /* ★ 空的时候要说清是**哪天**没有持仓 —— 只说"没有持仓"的话，
+             补录历史卖出的人会以为功能坏了。 */
+        fcmsg('<b>' + esc(o.date || d) + '</b> 那天这个账户一股都没有 —— '
+              + '卖出要先有持仓。补录历史成交时请把上面的日期改成那一天。', 1);
+        return;
+      }
+      box.innerHTML = '<select id="fsel"><option value="">选一只（'
+        + it.length + ' 只可卖）</option>'
+        + it.map(x => '<option value="' + esc(x.code) + '" data-q="' + x.shares
+            + '">' + esc(x.name || x.code) + ' · ' + num(x.shares, 0)
+            + ' 股</option>').join('') + '</select>';
+      $('#fsel').onchange = () => {
+        const op = $('#fsel').selectedOptions[0];
+        const q = op ? parseInt(op.dataset.q || '0', 10) : 0;
+        $('#fc').value = $('#fsel').value || '';
+        FSMAX = q || null;
+        if(FSMAX){
+          $('#fq').max = FSMAX;
+          fcmsg('<b>' + esc(o.date || d) + '</b> 可卖 <b>' + num(FSMAX, 0)
+                + '</b> 股（点「全部」自动填）'
+                + ' <a href="#" id="fqall">全部</a>');
+          const al = $('#fqall');
+          if(al) al.onclick = ev => { ev.preventDefault();
+            $('#fq').value = FSMAX; chkQ(); };
+        }else{ $('#fq').removeAttribute('max'); fcmsg(''); }
+      };
+    }
+
+    /* 超量**当场拦住并说清**，而不是等提交后服务端退回来。
+       ★ 但**不给按钮加 disabled**（项目纪律：disabled 的元素连 title 都不
+         触发，点了没反应是最难查的那种坏）—— 按钮照样可点，点了说原因。 */
+    function chkQ(){
+      const n = parseInt($('#fq').value, 10);
+      if(FSMAX && n > FSMAX){
+        fcmsg('填了 <b>' + num(n, 0) + '</b> 股，而 <b>'
+              + esc($('#fd').value.trim()) + '</b> 那天只有 <b>'
+              + num(FSMAX, 0) + '</b> 股 —— 卖不了那么多', 1);
+        return false;
+      }
+      return true;
+    }
+
+    function fcRender(){
+      const side = $('#fs').value, box = $('#fcb');
+      $('#fc').value = ''; FSMAX = null;
+      $('#fq').removeAttribute('max');
+      fcmsg('');
+      if(side === 'sell'){ loadSellable(); return; }
+      box.innerHTML = '';
+      mountSearch(box, {
+        keep: true,
+        placeholder: '代码或名称，如 601857 / 中国石油',
+        /* 🔴 **排除指数** —— 它买不了，而且 `normalize_code('sh000001')`
+             会报"自相矛盾"，那个报错指不到真正的原因。ETF 是能买的
+             （项目里就有 ETF 轮动策略），所以只挡 index 这一类。 */
+        filter: r => r.kind !== 'index',
+        onPick: r => { $('#fc').value = r.code;
+          fcmsg('已选 <b>' + esc(r.name || '') + '</b> '
+                + '<code>' + esc(r.code) + '</code>'
+                + (r.kind === 'etf' ? ' · ETF' : '')); },
+      });
+    }
+
+    $('#fs').onchange = fcRender;
+    $('#fd').onchange = () => { if($('#fs').value === 'sell') loadSellable(); };
+    $('#fq').oninput = chkQ;
+    fcRender();
+
     $('#fb').onclick=()=>{ const fv=$('#ff').value.trim(), pv=$('#fp').value.trim();
+      if(!$('#fc').value.trim()){
+        m().className='lvmsg bad';
+        m().textContent=($('#fs').value==='sell'
+          ?'先从上面的下拉里选一只要卖的票'
+          :'先在上面搜一只票并选中（敲代码或名称）');
+        return; }
+      if(!chkQ()){ m().className='lvmsg bad';
+        m().textContent='股数超过那天的持仓 —— 见上面那行红字';
+        return; }
       done([{trade_date:$('#fd').value.trim(), code:$('#fc').value.trim().toUpperCase(),
         side:$('#fs').value, shares:parseInt($('#fq').value,10),
         price:(pv===''||pv==='-'?null:parseFloat(pv)),

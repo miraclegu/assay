@@ -531,6 +531,17 @@ table.lvfr tr.frbody td{background:var(--bg)}
 .pgrid.c3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 /* 搜索下拉 */
 .skbox{position:relative}
+/* 「记一笔」里放【搜索框 / 持仓下拉】的那一格。
+   🔴 宽度要给死：买入是搜索框（`.skq` 是 width:100%，容器不给宽就塌成 0），
+      卖出是 `<select>`（内容长短不一，不给 min-width 会随选中项抖动 ——
+      表单里一格宽度乱跳，旁边几个输入框跟着左右移）。
+   ★ `.skbox` 的 position:relative 由 mountSearch 自己加（它给容器加
+      `skbox` 类），这里只管尺寸。 */
+.fcbox{display:inline-block;position:relative;min-width:250px;max-width:320px}
+/* 「记一笔」的日期那一格：常规是**文本**（锁死）、补录是 date 输入框。
+   给死宽度 —— 两种形态宽度不同的话，切页签时后面那几个输入框会整排左右跳。 */
+.fdbox{display:inline-block;min-width:132px}
+.fcbox select{width:100%}
 .skdd{display:none;position:absolute;z-index:30;left:0;right:0;top:30px;
   background:var(--panel);border:1px solid var(--line);border-radius:6px;
   max-height:340px;overflow:auto;box-shadow:0 8px 24px rgba(0,0,0,.4)}

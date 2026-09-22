@@ -9,7 +9,7 @@ from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
                          _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop,
                           _lv_open_newform, _lv_new_account,
-                          _lv_bind_strategy)
+                          _lv_bind_strategy, _lv_rec_fill)
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
 
 
@@ -932,6 +932,40 @@ def t_live_core():
             _pv = lv.positions_valued('t_twr')
             assert abs(e3['stats']['day_pnl'] - _pv['pnl_day']) < 0.02,                 ('权益曲线的"今日" %.2f 与持仓表的"当日盈亏" %.2f 对不上'
                  % (e3['stats']['day_pnl'], _pv['pnl_day']))
+            # 🔴🔴 **构造出"当天有卖出"再断言** —— 上面那条一直是绿的，
+            #   因为它跑在一个当天没有任何成交的日子上，而
+            #   `positions_valued` 只遍历**当前持仓**：今天卖掉的批次已经
+            #   不在里面，实现的那部分一分都没算。用户 2026-09-22 报出来的
+            #   就是它（开盘竞价卖出 300980 的涨幅没进当日盈亏，实测漏 460）。
+            #   **不构造出卖出，这个断言永远抓不到。**
+            _code = '601857.XSHG'
+            _sell = 100.0
+            _sp = (_pc.get(_code) or 0) + 1.0        # 就按实时价卖
+            lv.add_fill('t_twr', _nx, _code, 'sell', _sell, price=_sp,
+                        fee=3.0, force_price=True)   # 未来日无行情 -> 显式逃生口
+            e5 = lv.equity_curve('t_twr')
+            _pv5 = lv.positions_valued('t_twr')
+            assert abs(e5['stats']['day_pnl'] - _pv5['pnl_day']) < 0.02, \
+                ('有卖出的日子两条对不上：权益曲线 %.2f vs 持仓表 %.2f —— '
+                 '持仓表漏了【当天卖出实现】或【当天费用】（构成：持仓 %s / '
+                 '已实现 %s / 费用 %s）'
+                 % (e5['stats']['day_pnl'], _pv5['pnl_day'],
+                    _pv5.get('pnl_day_hold'), _pv5.get('pnl_day_realized'),
+                    _pv5.get('pnl_day_fee')))
+            # 反向自证：这一笔**真的**产生了已实现与费用，否则上面那条
+            # 又退化成"两个相同的数相等"（= 空转）。
+            assert _pv5.get('pnl_day_realized'), \
+                '构造没生效：当天卖出的已实现是 %s' % _pv5.get('pnl_day_realized')
+            assert abs(_pv5['pnl_day_realized'] - _sell * (_sp - _pc[_code])) < 0.02, \
+                ('已实现算错：%s 股 × (卖价 %.4f − 昨收 %.4f) 应为 %.2f，实得 %s'
+                 % (_sell, _sp, _pc[_code], _sell * (_sp - _pc[_code]),
+                    _pv5['pnl_day_realized']))
+            assert abs(_pv5['pnl_day_fee'] + 3.0) < 0.01, \
+                '当天费用没扣或扣错：%s' % _pv5.get('pnl_day_fee')
+            # 三块必须真的加得起来 —— 合计与分项对不上是最难查的那种错
+            assert abs(_pv5['pnl_day'] - (_pv5['pnl_day_hold']
+                       + _pv5['pnl_day_realized'] + _pv5['pnl_day_fee'])) < 0.01, \
+                '合计 != 持仓 + 已实现 + 费用：%s' % _pv5
             # 没有实时价 -> 不补（不许凭空多一个 0% 交易日）
             _rtm.latest = lambda cs=None, day=None, root=None: {}
             e4 = lv.equity_curve('t_twr')
@@ -948,7 +982,8 @@ def t_live_core():
         lv.upsert_account('t_seed', name='seed', init_cash=100000)
         lv.add_fill('t_seed', '2026-08-10', '601857.XSHG', 'buy', 5000, 11.0,
                     fee=15, force_price=True)
-        es = lv.equity_curve('t_seed')['stats']
+        ec1 = lv.equity_curve('t_seed')
+        es = ec1['stats']
         assert abs(es['twr'] - (es['equity_end'] / es['init_cash'] - 1)) < 1e-6, \
             ('没有现金流时 TWR 必须等于 期末/起点 − 1：%.6f vs %.6f'
              ' —— 差的就是第一个交易日'
@@ -966,7 +1001,8 @@ def t_live_core():
         # 入金落在【非交易日】也不许被当成收益 —— F_t 要按区间取，
         # 不是"正好落在那天"
         lv.add_cashflow('t_seed', '2026-08-16', 200000, 'deposit', '周六入金')
-        es2 = lv.equity_curve('t_seed')['stats']
+        ec2 = lv.equity_curve('t_seed')
+        es2 = ec2['stats']
         #   🔴🔴 判据要**与盈亏方向无关**。这条断言前后错过两次，
         #     每次都是"判据依赖了写它那天的数据状态"：
         #       ① 第一版 `abs(差) < 0.02` —— 入金日固定、面板每天在长，
@@ -987,11 +1023,41 @@ def t_live_core():
             ('周末那笔 20 万没进 net_deposit（%s -> %s）—— 落在非交易日的'
              '现金流要按**区间**取，不是"正好落在那天"'
              % (es['net_deposit'], es2['net_deposit']))
-        # ★ 摊薄的方向：收益率被往 **0** 拉（盈亏两种情形都成立）。
-        assert abs(es2['twr']) <= abs(es['twr']) + 1e-9, \
-            ('入金之后 |TWR| 反而变大了（%.4f -> %.4f）—— 20 万闲置现金'
-             '按 0%% 计，只该把收益率往 0 摊薄'
-             % (es['twr'], es2['twr']))
+        # ★ 摊薄的方向要钉在**逐日收益率**上，不是在 TWR 上。
+        #   🔴 「|TWR| 只会变小」**在数学上不成立**（这是这条断言错的第三次）：
+        #     TWR = A × B − 1（A = 入金前那段的连乘、B = 入金后那段）。
+        #     入金只稀释 B、不动 A，而 A 与 1 差得远时结果可能**远离** 0 ——
+        #     构造 A=2.0 / B=0.5 时旧 TWR 恰好 0，把 B 稀释到 0.8 就成了
+        #     +0.6，|TWR| 反而变大。现在这个账户上碰巧没触发，
+        #     **而"碰巧"正是前两版栽的地方**。
+        #   ★ 真正无条件成立的是：**入金那天之后每一天的收益率都被往 0 拉，
+        #     之前那几天一个数都不许动**。它与盈亏符号、与 A 离 1 多远都无关。
+        DEP = '2026-08-16'
+        d1, r1 = ec1['dates'], ec1['day_rets']
+        d2, r2 = ec2['dates'], ec2['day_rets']
+        assert d1 == d2, '入金不该改变日期轴：%s vs %s' % (d1[:2], d2[:2])
+        pre = [i for i, d in enumerate(d1) if d <= DEP]
+        post = [i for i, d in enumerate(d1) if d > DEP]
+        assert pre and post, \
+            '构造不对：入金日 %s 两侧都要有交易日（前 %d 天 / 后 %d 天）' \
+            % (DEP, len(pre), len(post))
+        bad = [(d1[i], r1[i], r2[i]) for i in pre
+               if abs((r1[i] or 0) - (r2[i] or 0)) > 1e-9]
+        assert not bad, \
+            ('入金【之前】那几天的收益率被改了（%s）—— 现金流只该切开区间，'
+             '不该回溯改写历史' % bad[:2])
+        worse = [(d1[i], r1[i], r2[i]) for i in post
+                 if abs(r2[i] or 0) > abs(r1[i] or 0) + 1e-9]
+        assert not worse, \
+            ('入金【之后】有几天的 |收益率| 反而变大了（%s）—— 20 万闲置现金'
+             '按 0%% 计，只该把每天的收益率往 0 摊薄' % worse[:2])
+        # ★ 反向自证：真的有几天被拉动了 —— 否则"没有变大"可能只是因为
+        #   两边逐位相同（那时这条断言一个字都没证）。
+        moved = [i for i in post
+                 if abs((r1[i] or 0) - (r2[i] or 0)) > 1e-9]
+        assert moved, \
+            ('入金之后没有任何一天的收益率被摊薄 —— 那 20 万根本没进权益，'
+             '这条断言是空转的（入金后有 %d 个交易日）' % len(post))
 
         # ---- 3i) 「年化拖累」要够长的样本才给 ----
         #   🔴 开户两天就把两笔建仓的费用乘 122 倍，会得出"年化拖累 1.72%"
@@ -1556,11 +1622,17 @@ def t_live_ui():
             pg.wait_for_timeout(900)
             assert pg.locator('#dk .dside').count() == 1, '展开没生效'
 
-            # ---- 记一笔：一个入口、两个 tab ----
+            # ---- 记一笔：一个入口、三个 tab ----
+            # ★ 2026-09-22 从两个变成三个（「补录」从常规操作里分出来，
+            #   用户："补录功能可以开单独的按钮……而不是混在正常的操作里"）。
+            #   **失败的是断言不是产品** —— 但它保的"入口只有一个、页签齐全"
+            #   不能丢，所以是钉新规矩，不是删掉这条。
+            #   页签各自的行为由「记一笔：买是搜索下拉…」那条专门验。
             pg.click('#lvrec')
             pg.wait_for_selector('#rfill', timeout=10000)
             tabs = pg.locator('.rtab').all_inner_texts()
-            assert tabs == ['成交', '现金'], '记一笔应有成交/现金两个 tab，实得 %s' % tabs
+            assert tabs == ['成交', '补录', '现金'], \
+                '记一笔应有成交/补录/现金三个 tab，实得 %s' % tabs
             assert pg.locator('#ff').count() == 1, '缺费用输入框'
             assert pg.input_value('#fd'), \
                 '日期框不该是空的 —— 空了会让第二笔起静默失败'
@@ -1582,12 +1654,8 @@ def t_live_ui():
                     ('601088.XSHG', '100', '48.78', '3.21', 4878.0, 3.21),
                     ('600012.XSHG', '200', '16.69', '0', 3338.0, 0.0)):
                 b4 = _cash()
-                pg.fill('#fc', code)
-                pg.fill('#fq', q)
-                pg.fill('#fp', px)
-                pg.fill('#ff', fv)
-                pg.click('#fb')
-                pg.wait_for_timeout(1200)
+                _lv_rec_fill(pg, code, q, price=px,
+                             fee=(None if fv == '' else fv))
                 got = round(b4 - _cash() - amt, 2)
                 if want is None:
                     assert got > 0, '费用留空应估算出正数，实得 %.2f' % got
@@ -1886,12 +1954,7 @@ def t_live_ui():
             b4 = _cash()
             pg.click('#lvrec')
             pg.wait_for_selector('#rfill', timeout=8000)
-            pg.fill('#fd', '2026-09-02')
-            pg.fill('#fc', '601857.XSHG')
-            pg.fill('#fq', '1000')
-            pg.fill('#fp', '11.42')
-            pg.fill('#ff', '7.77')
-            pg.click('#fb')
+            _lv_rec_fill(pg, '601857.XSHG', '1000', price='11.42', fee='7.77', date='2026-09-02')
             pg.wait_for_timeout(1500)
             paid = round(b4 - _cash() - 11420, 2)
             assert abs(paid - 7.77) < 0.011, \
@@ -1925,13 +1988,9 @@ def t_live_ui():
                 if not _synced:
                     assert '还没同步' in pg.locator('#fopen').evaluate(
                         'e => e.parentElement.innerText'), '没勾上要说明为什么'
-            pg.fill('#fd', '2026-09-01')
-            pg.fill('#fc', '603889.XSHG')
-            pg.fill('#fq', '100')
-            pg.fill('#fp', '')                       # ← 留空
-            pg.fill('#ff', '')
-            pg.click('#fb')
-            pg.wait_for_timeout(1500)
+            # 价格/费用**留空** —— 留空 = 按成交日开盘价 / 按费率
+            _lv_rec_fill(pg, '603889.XSHG', '100', date='2026-09-01')
+            pg.wait_for_timeout(300)
             _px = [f for f in lv.fills(aid0) if f['trade_date'] == '2026-09-01'
                    and f['shares'] == 100]
             assert _px, '留空价格那笔没落盘（页面报错被吞了？）'
@@ -1944,15 +2003,15 @@ def t_live_ui():
             # 当天行情还没同步 -> 页面要报错并说清原因，不能用旧价顶上
             pg.click('#lvrec')
             pg.wait_for_selector('#rfill', timeout=8000)
-            pg.fill('#fd', '2028-01-03')
-            pg.fill('#fc', '603889.XSHG')
-            pg.fill('#fq', '100')
-            pg.fill('#fp', '')
-            pg.click('#fb')
+            _lv_rec_fill(pg, '603889.XSHG', '100', price='', date='2028-01-03')
             pg.wait_for_timeout(1500)
             _m = pg.locator('#rfill').inner_text()
             assert '还没同步' in _m or '取不到' in _m, \
-                '取不到当日行情时页面要说清原因，实得：%s' % _m[:200]
+                ('取不到当日行情时页面要说清原因。#fmsg=%r / #fd=%r / #fc=%r'
+                 ' / #fq=%r'
+                 % (pg.locator('#fmsg').inner_text()[:300],
+                    pg.input_value('#fd'), pg.input_value('#fc'),
+                    pg.input_value('#fq')))
             assert not [f for f in lv.fills(aid0) if f['trade_date'] == '2028-01-03'], \
                 '取不到价的那笔不该落盘'
             pg.keyboard.press('Escape')
@@ -7392,6 +7451,827 @@ def t_etf_price_and_name():
     return ('%s(%s) 取价/取名/区间校验都走 tdx 回落；股票仍走面板；'
             '持有 ETF 的账户市值非 0、有名字、权益曲线与每日持仓逐日一致；'
             'bench/sig 都在建 feed 前解析 DATALAKE' % (jq, nm[jq]))
+
+
+@case('模拟盘盘中推进：按今开成交 / 收盘派生量是哨兵 / 日终冲正重录', 'slow')
+def t_paper_intraday():
+    """🔴🔴 用户 2026-09-22：「这种模拟盘数据，如果应该按照交易计划的具体分时
+    去推进，如果是开盘竞价，应该调接口拿开盘数据自动推进。」
+
+    在此之前 `advance` 的终点是**最新数据日**，而今天的日线要等收盘后那个
+    同步窗口 —— 于是页面上同时摆着「今天要卖 1 买 3」和「推进到 09-21」，
+    **两个数看着自相矛盾，而没有任何地方说为什么**。
+
+    ★ 判据全部**构造**：拿**过去某一天**当"盘中那一天"（面板假装停在前一天），
+      于是能把盘中拼出来的 bar 与**日终权威值逐位对照** —— 而靠"今天恰好是
+      交易日且过了 09:31"的判据是空转的。
+    ★ 全程跑在**临时 `lv.LIVE`** 上，真账本一个字节不动。
+    """
+    import assay.live as lv
+    from assay.lv import openbar as ob, paper as pp, pos as _pos, base as _lb
+    import duckdb
+    import os
+    from assay import paths as _P
+    from assay.lv import bench as _bh0
+
+    DAY, PREV = '2026-09-21', '2026-09-18'
+    DAY0 = DAY
+    con = duckdb.connect(':memory:')
+
+    # ---- ① 盘中拼的 bar 必须 == 日终权威值（逐位） ----
+    codes = [r[0] for r in con.execute(
+        "SELECT jq_code FROM %s WHERE date = DATE '%s' ORDER BY jq_code"
+        % (_P.panel_sql(), DAY)).fetchall()]
+    bars, skipped = ob.today_bars(DAY, PREV, codes)
+    assert len(bars) >= 3, \
+        ('盘中只拼出 %d 根 bar —— 构造不对（那天的快照要在 '
+         'datalake/rt/snap_1m/ 里），下面的判据全是空转' % len(bars))
+    rows = con.execute(
+        "SELECT jq_code, open, hfq_factor, is_open_limit_up, is_open_limit_down"
+        " FROM %s WHERE date = DATE '%s' AND jq_code IN ('%s')"
+        % (_P.panel_sql(), DAY, "','".join(bars))).fetchall()
+    assert len(rows) == len(bars)
+    for code, o, f, lu, ld in rows:
+        b = bars[code]
+        assert abs(b.open_raw - float(o)) < 1e-9, \
+            '%s 盘中今开 %.4f != 日终权威 %.4f' % (code, b.open_raw, float(o))
+        assert abs(b.factor - float(f)) < 1e-9, \
+            '%s 复权因子对不上（盘中用的是昨天那份）' % code
+        assert abs(b.open_hfq - round(float(o) * float(f), 4)) < 1e-4, \
+            '%s open_hfq 不等于 不复权开盘 × 因子' % code
+        # 🔴 一字板判定要对得上 —— 它是 OPEN 相位**唯一**能拦住成交的判据
+        #   （broker：开盘涨停买不进 / 开盘跌停无对手盘）。涨跌停价是拿
+        #   昨收 × limit_pct 重建的，错了会**静默放行或静默拦掉**。
+        assert bool(b.open_limit_up) == bool(lu), '%s 开盘涨停判定不一致' % code
+        assert bool(b.open_limit_down) == bool(ld), '%s 开盘跌停判定不一致' % code
+
+    # ---- ①b ETF 那条路也要验：两个 lake 的 `limit_pct` **量纲不一样** ----
+    # 🔴 实测 2026-09-22：主面板（股票）是 **0.20**（小数），而 `etf_lake`
+    #   是 **10.0**（百分数）。照小数口径算 ETF 会得到 `pre × 11` 的涨停价
+    #   —— 不是"差一点"，是**十一倍**；而它在 broker 里只表现为
+    #   "开盘没涨停、照常成交"，**一个字都不报**。
+    # ★ ETF 的最小变动价位还是 0.001（股票 0.01），所以舍入位数也不同。
+    #   两件事都靠"复现昨天那一行的权威 limit_up"逐只自证。
+    _e = next((x for x in _lb.load_accounts()
+               if lv.is_paper(x) and (x.get('strategy_path') or '').find('ETF') >= 0
+               and not x.get('archived')), None)
+    if _e:
+        _eb, _em = _bh0.build_engine(_e['id'])
+        _eroot = str(_em.get('datalake') or '')
+        _eheld = sorted(_pos.positions(_e['id']) or {})
+        if _eroot and _eheld and os.path.isdir(_eroot):
+            eb, esk = ob.today_bars(DAY0, PREV, _eheld, root=_eroot)
+            assert eb, \
+                ('ETF lake 上一根 bar 都没拼出来（跳过 %s）—— 那说明涨跌停的'
+                 '口径/舍入自证失败，于是**每一只都被跳过**：ETF 模拟盘的'
+                 '盘中推进等于没有，而它不报错' % [x['why'][:30] for x in esk][:2])
+            erows = con.execute(
+                "SELECT jq_code, open, is_open_limit_up FROM %s"
+                " WHERE date = DATE '%s' AND jq_code IN ('%s')"
+                % (_P.panel_sql(_eroot), DAY0, "','".join(eb))).fetchall()
+            assert len(erows) == len(eb)
+            for code, o, lu in erows:
+                assert abs(eb[code].open_raw - float(o)) < 1e-9, \
+                    'ETF %s 今开对不上权威值' % code
+                assert bool(eb[code].open_limit_up) == bool(lu), \
+                    ('ETF %s 开盘涨停判定不一致 —— 涨跌停价多半按错了量纲'
+                     '（etf_lake 的 limit_pct 是百分数）' % code)
+            _n_etf = len(erows)
+        else:
+            _n_etf = 0
+    else:
+        _n_etf = 0
+
+    # ---- ② 收盘派生量是哨兵：读到就抛，不是 None ----
+    one = bars[sorted(bars)[0]]
+    for fld in ob.CLOSE_DERIVED:
+        v = getattr(one, fld)
+        assert isinstance(v, ob.Unknown), \
+            ('`%s` 应当是哨兵而不是 %r —— 给 None 的话策略侧会静默收到 None、'
+             '规则整段空转（本项目为 `guard.current()` 漏一列栽过）' % (fld, v))
+        try:
+            bool(v)
+            raise AssertionError('读 `%s` 居然没抛 —— 哨兵形同虚设' % fld)
+        except _lb.LiveError:
+            pass
+
+    # ---- ③ 除权守卫：今日基准价与面板昨收不一致 -> 跳过这只并说原因 ----
+    # ★ 构造（真实数据里今天没有除权的票 -> 那条分支平时一步都走不到）
+    import assay.realtime as _rtm
+    _keep = _rtm.latest           # 🔴 先抓住**原函数**再打补丁 ——
+    #   补丁里直接调 `_rt.latest` 的话调的是**被打过补丁的自己**，
+    #   当场 RecursionError（第一版就是这么挂的）。
+
+    def _fake_latest(codes_, day=None, root=None):
+        d = _keep(codes_, day=day, root=root) or {}
+        for k in d:                      # 把基准价改掉 = 假装今天除权了
+            if d[k].get('preclose'):
+                d[k]['preclose'] = float(d[k]['preclose']) * 0.5
+        return d
+
+    try:
+        _rtm.latest = _fake_latest
+        b2, sk2 = ob.today_bars(DAY, PREV, sorted(bars)[:3])
+    finally:
+        _rtm.latest = _keep
+    assert not b2 and len(sk2) == 3, \
+        ('除权守卫没生效：基准价对不上时还拼出了 %d 根 bar —— '
+         '拿昨天的因子去算除权后的价，股数与成交价会一起错，**而它不报错**'
+         % len(b2))
+    assert any('除权' in x['why'] for x in sk2), \
+        '跳过的原因里没提除权 —— 报错要指得到原因：%s' % sk2[:2]
+
+    # ---- ④~⑦ 账本那一半：全程在临时 LIVE 上 ----
+    import shutil
+    import tempfile
+    import json as _json
+    import io as _io2
+    aid = 'a2'
+    prev_live = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='ob_case_')
+    try:
+        shutil.copytree(prev_live, os.path.join(tmp, 'live'))
+        lv.LIVE = os.path.join(tmp, 'live')
+        fp = os.path.join(lv.LIVE, aid, 'fills.jsonl')
+        nf = lambda: sum(1 for _ in _io2.open(fp, encoding='utf-8'))
+
+        # 🔴 「盘中那一天」必须是**面板没有**的日子 —— 否则
+        #   `can_advance_intraday` 会（正确地）拒掉："面板已经有那天的日线了"。
+        #   所以取**面板最新日的下一个交易日**，并**构造**它的快照：这样这一半
+        #   与"今天是不是交易日、几点了、有没有抓到数据"完全无关
+        #   （数据那条路已经由 ① 用历史真实数据验过了）。
+        panel_last = str(lv.latest_data_day())[:10]
+        NEXT = str(lv.next_trading_day(panel_last))[:10]
+        assert NEXT > panel_last, '构造不对：下一个交易日没算出来'
+        base_rows = con.execute(
+            "SELECT jq_code, close_bfq FROM %s WHERE date = DATE '%s'"
+            % (_P.panel_sql(), panel_last)).fetchall()
+        flat = {r[0]: float(r[1]) for r in base_rows if r[1]}
+        assert len(flat) > 100, '构造不对：面板最后一天只有 %d 行' % len(flat)
+
+        # 🔴 **把 NEXT 那天已有的成交从临时账本里摘掉。**
+        #   真账本上今天（= NEXT）可能已经被 `advance_intraday_all` 推过一轮
+        #   （实测 a2 上就有 4 笔），于是这一段的"新写了几笔""幂等"全都
+        #   **建立在真账本碰巧是什么样子上** —— 而那随时会变（今天有、
+        #   明天 NEXT 变成下一天就没有了）。同「判据不许依赖真实数据碰巧如此」。
+        _ls0 = _io2.open(fp, encoding='utf-8').read().splitlines()
+        _kept = [l for l in _ls0
+                 if _json.loads(l).get('trade_date') != NEXT]
+        if len(_kept) != len(_ls0):
+            _io2.open(fp, 'w', encoding='utf-8').write(
+                '\n'.join(_kept) + ('\n' if _kept else ''))
+            _sp = os.path.join(lv.LIVE, aid, '_paper.json')
+            if os.path.exists(_sp):
+                _st = _json.load(_io2.open(_sp, encoding='utf-8'))
+                _st.pop('prov_day', None)
+                _st.pop('prov_uids', None)
+                _io2.open(_sp, 'w', encoding='utf-8').write(
+                    _json.dumps(_st, ensure_ascii=False))
+        assert not [l for l in _io2.open(fp, encoding='utf-8')
+                    if _json.loads(l).get('trade_date') == NEXT], \
+            '构造不对：临时账本里 %s 那天还有成交' % NEXT
+
+        # 构造出来的"今天快照"：平开（今开 = 昨收），高低都等于它。
+        # ★ `preclose` 必须**等于**面板昨收，否则除权守卫会（正确地）跳过。
+        def _synth(codes_, day=None, root=None):
+            if str(day or '')[:10] != NEXT:
+                return _keep(codes_, day=day, root=root)
+            out = {}
+            for c in (codes_ or ()):
+                v = flat.get(c)
+                if v:
+                    out[c] = {'code': c, 'at': NEXT + ' 09:31', 'price': v,
+                              'preclose': v, 'open': v, 'high': v, 'low': v,
+                              'amount': 1e7, 'src': 'snap'}
+            return out
+
+        base_n = nf()
+
+        _rtm.latest = _synth
+        DAY = NEXT
+        # ④ **只跑到 OPEN**：判据是**数任务调用次数**，不是猜成交的 reason
+        #   字符串（OPEN 相位的 reason 有 `open` 也有 `rebalance`，
+        #   我第一版就猜错了 —— 判据比要证的事窄）。
+        from assay.lv import bench as _bh
+        _eng, _mt = _bh.build_engine(aid, intraday=DAY)
+        assert _mt.get('intraday_day') == DAY, \
+            '构造不对：build_engine 没把 %s 当成盘中那一天（why=%s）' % (
+                DAY, _mt.get('intraday_why'))
+        _eng.boot()
+        _eng.run(verbose=False)
+        # 判据是引擎自己记的「被推迟的任务」——外面包一层数调用次数是量不出来的
+        # （被跳过的任务照样被调一次，我第一版就这么错了）。
+        dfr = dict(getattr(_eng, '_ob_deferred', {}) or {})
+        assert dfr, \
+            ('盘中那天没有任何任务被推迟 —— 而 froec_traded 在 14:00 注册了'
+             '炸板离场与止损两个任务，它们读的是**收盘派生量**，09:31 根本'
+             '不存在。一个都没拦住说明截断没生效（判据空转）')
+        assert all(t > ob.PHASE_CUTOFF for t in dfr), \
+            '被推迟的里混进了不晚于 %s 的任务：%s' % (ob.PHASE_CUTOFF, dfr)
+        _late_fills = [f for f in _eng.broker.fills
+                       if str(f['date'])[:10] == DAY
+                       and f.get('reason') == 'stop']
+        assert not _late_fills, \
+            '盘中那天出现了止损成交 %s —— 那一档必须留到日终' % _late_fills[:2]
+
+        r1 = pp.advance(aid, intraday=DAY)
+        assert r1.get('ok'), '盘中推进失败：%s' % r1
+        assert r1['advanced_to'] == DAY and r1['panel_end'] < DAY, \
+            '推进到的不是那一天 / panel_end 不对：%s' % (
+                (r1['advanced_to'], r1['panel_end']),)
+        day_rows = [_json.loads(l) for l in _io2.open(fp, encoding='utf-8')
+                    if _json.loads(l).get('trade_date') == DAY]
+        assert day_rows, '盘中那天一笔都没写 —— 后面的判据全是空转'
+        # ⑤ provisional 标记 + 幂等
+        assert r1['prov_day'] == DAY and r1['n_provisional'] == len(day_rows), \
+            '标记不对：prov_day=%s 笔数=%s 实际 %d 笔' % (
+                r1['prov_day'], r1['n_provisional'], len(day_rows))
+        r2 = pp.advance(aid, intraday=DAY)
+        assert r2['added'] == 0 and nf() == base_n + len(day_rows), \
+            '盘中推进不幂等：再推一次又加了 %s 笔（账本 %d 行）' % (
+                r2['added'], nf())
+        assert r2['prov_ok'] == len(day_rows) and r2['prov_reverted'] == 0
+
+        # ⑥ 日终数据还没到时跑一次 -> **不许冲正、标记要留着**
+        r3 = pp.advance(aid)
+        assert r3.get('ok'), r3
+        assert r3['prov_reverted'] == 0, \
+            ('日终数据还没到就把 %s 笔冲正了 —— 它们本来是对的、只是还没被确认'
+             % r3['prov_reverted'])
+        assert r3['n_provisional'] == len(day_rows), \
+            ('标记被清掉了（%s 笔）—— 清了之后那几笔会被当成 confirmed 历史，'
+             '下次日终一有差异就报 mismatch，而那正是要避免的那条路'
+             % r3['n_provisional'])
+
+        # ⑦ 盘中那笔算错了 -> 冲正 + 重录，且必须收敛
+        ls = _io2.open(fp, encoding='utf-8').read().splitlines()
+        hit = None
+        for i, ln in enumerate(ls):
+            d = _json.loads(ln)
+            if d.get('trade_date') == DAY and d.get('side') == 'buy':
+                hit = (d['code'], int(d['shares']))
+                d['shares'] = int(d['shares']) + 100
+                ls[i] = _json.dumps(d, ensure_ascii=False)
+                break
+        assert hit, '那天没有买入成交 —— 这一段是空转的'
+        _io2.open(fp, 'w', encoding='utf-8').write('\n'.join(ls) + '\n')
+        r4 = pp.advance(aid, intraday=DAY)
+        assert r4.get('ok'), '篡改后推进直接报 mismatch 了：%s' % r4.get('mismatch')
+        assert r4['prov_reverted'] == 1 and r4['added'] == 1, \
+            '没有走「冲正 + 重录」：冲正 %s 重录 %s' % (
+                r4['prov_reverted'], r4['added'])
+        pos = _pos.positions(aid).get(hit[0]) or {}
+        sh = pos.get('shares') if isinstance(pos, dict) else pos
+        assert int(sh or 0) == hit[1], \
+            ('冲正之后持仓没回到权威值：%s 现在 %s 股、应当 %s 股 —— '
+             '冲正必须是**反向**那一笔，同向写的话 `active_fills` 配不上对，'
+             '那笔会被当成又一次买入' % (hit[0], sh, hit[1]))
+        r5 = pp.advance(aid, intraday=DAY)
+        assert r5['prov_reverted'] == 0 and r5['added'] == 0, \
+            ('冲正过之后不收敛：又冲了 %s 笔、又加了 %s 笔 —— '
+             '「冲正记录」与「被冲掉的原始记录」必须排除在对账之外，'
+             '否则账本每轮都长胖' % (r5['prov_reverted'], r5['added']))
+    finally:
+        _rtm.latest = _keep          # ★ 补丁一定要还回去
+        lv.LIVE = prev_live
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    return ('盘中 bar 与日终权威 %d 只逐位相同（open/因子/open_hfq/涨跌停判定）；'
+            '%d 个收盘派生量是哨兵；除权守卫 3/3 跳过；'
+            'ETF lake %d 只（量纲/舍入逐只自证）；'
+            '只跑 OPEN、幂等、日终未到不冲正、篡改后冲正重录并收敛'
+            % (len(rows), len(ob.CLOSE_DERIVED), _n_etf))
+
+
+@case('记一笔：买是搜索下拉 / 卖只能从【那天的】持仓选且不超量（playwright）',
+      tag='web')
+def t_record_side_inputs():
+    """🔴 用户 2026-09-22：「选择卖的时候，只能从当前持仓中选择，交易的数量
+    不能超过持仓的数量。买的时候，输入代码、名称，出现下拉框供选择。」
+
+    ★ 判据落在**可量的事实**上，不是"有没有那个 class"：
+      买入那格必须是**搜索框**、卖出那格必须是**持仓下拉**，而且切换之后
+      对方**不许还在**（只查"新的出现了"的话，两个叠着也算过）。
+    🔴 「能卖多少」的判据是**成交日那天**的持仓 —— 照"今天"做会误伤补录。
+      反向自证用的是账本里真实存在的那种票（在某天可卖、今天已清仓）。
+    """
+    import threading
+    from http.server import ThreadingHTTPServer
+    from playwright.sync_api import sync_playwright
+    import assay.live as lv
+    import assay.server as sv
+    from assay.lv import pos as _pos
+
+    import shutil
+    import tempfile
+
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    aid = 'froec'
+    # 🔴 **跑在临时账本上。** 这条用例会点「录一笔」去验"超量被拦住" ——
+    #   万一哪天那道判据坏了（或做变异测试时），那一笔就**真的写进生产账本**
+    #   了，而账本是 append-only 的、删不掉。
+    #   （同「selftest 不许写生产数据」那条纪律。）
+    _prev_live = lv.LIVE
+    _tmp = tempfile.mkdtemp(prefix='rec_case_')
+    shutil.copytree(_prev_live, os.path.join(_tmp, 'live'))
+    lv.LIVE = os.path.join(_tmp, 'live')
+    # ★ 先在服务端找一个**"那天有、今天没有"**的日子 —— 没有这个构造，
+    #   「按成交日取」与「按今天取」两种实现给出同样的结果，判据空转。
+    today_it = {x['code'] for x in
+                _pos.sellable_asof(aid, lv.latest_data_day())['items']}
+    back_day, gone = None, None
+    for d in ('2026-09-01', '2026-09-02', '2026-09-08'):
+        s0 = {x['code'] for x in _pos.sellable_asof(aid, d)['items']}
+        ex = sorted(s0 - today_it)
+        if ex:
+            back_day, gone = d, ex[0]
+            break
+    assert back_day, \
+        ('构造不对：找不到"那天可卖、今天已清仓"的票 —— 「按成交日取」这条'
+         '判据会空转（两种实现给出同样的结果）')
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    errs = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page(viewport={'width': 1500, 'height': 950})
+            pg.on('pageerror', lambda e: errs.append(str(e)[:200]))
+            pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
+                    wait_until='domcontentloaded')
+            pg.wait_for_function("() => document.querySelector('#lvrec')",
+                                 timeout=30000)
+            pg.click('#lvrec')
+            pg.wait_for_selector('#fcb', timeout=20000)
+            pg.wait_for_timeout(800)
+
+            # ---- ① 默认是买：搜索框，且**没有**持仓下拉 ----
+            assert pg.is_visible('#fcb .skq'), \
+                '买入那格不是搜索框 —— 裸输入框要人记住代码，打成另一只真实'\
+                '存在的票就是静默录错，而账本是 append-only 的'
+            assert not pg.query_selector('#fsel'), \
+                '买入时还挂着持仓下拉 —— 两种输入叠在一起'
+            # ★ 「常规档」那几条要**排在 ③ 之前**：`#fd` 空掉的话，下面
+            #   算期望值的那句 `sellable_asof(aid, '')` 会直接崩成
+            #   `Invalid isoformat string`，**报错指不到原因**
+            #   （变异「成交档也给自由日期框」第一轮就是这么一句）。
+            d0 = pg.input_value('#fd')
+            assert d0, '常规档的成交日是空的 —— 它该默认是今天'
+            assert not pg.query_selector('#fdi'), \
+                ('「成交」页签里还留着自由日期输入框 —— 手填日期最容易错，'
+                 '而填错的后果是成本价与建仓日错，那两个值直接喂给止损判定'
+                 '与红利税档位。要改日期必须显式切到「补录」')
+            assert pg.is_visible('#rbulk'), \
+                '批量粘贴不在「成交」里 —— 它的日期来自对账单、不是手填的'
+            assert not pg.is_visible('#fbackhint'), \
+                '常规档挂着补录的说明 —— 那是常驻噪声'
+
+            # ---- ② 买入候选**不许有指数**（指数买不了）----
+            pg.fill('#fcb .skq', '上证指数')
+            pg.wait_for_timeout(900)
+            cand = pg.eval_on_selector_all(
+                '#fcb .skit b', 'es => es.map(e => e.textContent || "")')
+            assert cand, '搜「上证指数」一条候选都没有 —— 下面那条判据会空转'
+            assert not any(c.strip() == '上证指数' for c in cand), \
+                ('买入候选里出现了**指数**（%s）—— 它买不了，而 '
+                 '`normalize_code(\'sh000001\')` 会报"自相矛盾"，'
+                 '那个报错指不到真正的原因' % cand[:3])
+            # ★ 反向自证：这一搜**确实有结果**（都是 ETF）—— 否则"没有指数"
+            #   可能只是因为一条都没搜到
+            assert any('ETF' in c for c in cand), \
+                '这一搜没搜到 ETF，"排除指数"这条判据是空转的：%s' % cand[:3]
+
+            # 选一只真能买的，验证代码真的填进去了
+            pg.fill('#fcb .skq', '中国石油')
+            pg.wait_for_timeout(900)
+            assert pg.query_selector_all('#fcb .skit'), '搜「中国石油」没有候选'
+            pg.click('#fcb .skit >> nth=0')
+            pg.wait_for_timeout(250)
+            assert pg.input_value('#fc') == '601857.XSHG', \
+                '选中之后代码没填进去（#fc=%r）—— 选了没反应是最难查的那种坏' \
+                % pg.input_value('#fc')
+
+            # ---- ③ 切到卖：持仓下拉，且搜索框**不许还在** ----
+            pg.select_option('#fs', 'sell')
+            # ★ 等不到就**说清是什么没出来** —— 裸 `wait_for_selector` 超时
+            #   报的是一句 "Timeout 15000ms exceeded"，指不到原因
+            #   （变异「卖也用搜索框」第一轮就是这么一句）。
+            try:
+                pg.wait_for_selector('#fsel', timeout=12000)
+            except Exception:
+                raise AssertionError(
+                    '切到「卖」之后没有出现持仓下拉（#fsel）—— 卖出必须'
+                    '只能从持仓里选；现在那一格是 %s'
+                    % ('搜索框' if pg.query_selector('#fcb .skq') else '空的'))
+            pg.wait_for_timeout(500)
+            assert not pg.query_selector('#fcb .skq'), \
+                '切到卖之后搜索框还在 —— 卖出只能从持仓里选'
+            got = set(pg.eval_on_selector_all(
+                '#fsel option', 'es => es.map(e => e.value).filter(Boolean)'))
+            want = {x['code'] for x in
+                    _pos.sellable_asof(aid, pg.input_value('#fd'))['items']}
+            assert got == want, \
+                ('卖出下拉与服务端的可卖清单对不上：只在页面 %s / 只在服务端 %s'
+                 % (sorted(got - want)[:3], sorted(want - got)[:3]))
+
+            # ---- ④ 「补录」是**单独一个页签**，不混在常规操作里 ----
+            # 用户 2026-09-22：「补录功能可以开单独的按钮，和常规操作做区分，
+            # 而不是混在正常的操作里」。
+            # 🔴 判据落在**可量的事实**上：常规那档日期框**不存在**（锁成
+            #   文本，见 ①）、补录那档**才有**；切回来日期要**复位**。
+            #   只查"有没有那个页签"的话，把 `fdRender` 整个删掉照样全绿 ——
+            #   那时两档都是自由输入框，等于没分开。
+            pg.click('.rtab[data-t="back"]')
+            # ★ 不裸 `wait_for_selector` —— 那报的是一句 "Timeout 10000ms
+            #   exceeded"，**指不到原因**（同 ③ 那处）。
+            pg.wait_for_timeout(600)
+            assert pg.query_selector('#fdi'), \
+                ('「补录」页签里没有日期输入框 —— 那这个页签就什么都改不了，'
+                 '而补录的**全部意义**就是改成交日')
+            assert pg.input_value('#fd') == '', \
+                ('切到「补录」之后日期还带着 %r —— 不该给一个可能错的默认值'
+                 '（同「拿不到分红那一格标『查不到』，不猜一个数填上去」）'
+                 % pg.input_value('#fd'))
+            assert pg.is_visible('#fbackhint'), '补录档没有说明它是干什么的'
+            assert not pg.is_visible('#rbulk'), \
+                '补录档里还有批量粘贴 —— 两件事该分开'
+
+            pg.click('.rtab[data-t="fill"]')
+            pg.wait_for_timeout(300)
+            assert pg.input_value('#fd') == d0 and not pg.query_selector('#fdi'), \
+                ('从补录切回「成交」之后日期没复位（现在 %r，该是 %r）—— '
+                 '把补录填的那天带回日常录入，正是"混在一起"最坏的后果'
+                 % (pg.input_value('#fd'), d0))
+
+            # ---- ⑤ 改成交日要**重取** —— 判据是那只已清仓的票必须出现 ----
+            # ★ 日期现在锁在「成交」页签里，改日期要走**补录** —— 那正是
+            #   这一轮要分开的东西（用户："补录……和常规操作做区分"）。
+            pg.click('.rtab[data-t="back"]')
+            pg.wait_for_selector('#fdi', timeout=10000)
+            pg.select_option('#fs', 'sell')
+            pg.fill('#fdi', back_day)
+            pg.dispatch_event('#fdi', 'change')
+            try:
+                pg.wait_for_function(
+                    "([c]) => !!document.querySelector("
+                    "'#fsel option[value=\\'' + c + '\\']')",
+                    arg=[gone], timeout=12000)
+            except Exception:
+                raise AssertionError(
+                    '把成交日改成 %s 之后，%s 没进下拉 —— 要么改日期没重取'
+                    '（`#fd` 的 change 没接上），要么服务端给的是【今天】的'
+                    '持仓而不是那天的。当前下拉里是：%s'
+                    % (back_day, gone, sorted(set(pg.eval_on_selector_all(
+                        '#fsel option',
+                        'es => es.map(e => e.value).filter(Boolean)')))[:4]))
+            back_got = set(pg.eval_on_selector_all(
+                '#fsel option', 'es => es.map(e => e.value).filter(Boolean)'))
+            assert gone in back_got, \
+                ('把成交日改成 %s 之后，那天可卖的 %s 没出现在下拉里 —— '
+                 '照"今天的持仓"做的话，补录历史卖出时那只票永远选不到，'
+                 '而它不报错，只是"不在列表里"' % (back_day, gone))
+
+            # ---- ⑥ 超量：**当场**拦住并说清，提交也拦 ----
+            pg.select_option('#fsel', gone)
+            pg.wait_for_timeout(300)
+            mx = int(pg.get_attribute('#fq', 'max') or 0)
+            assert mx > 0, '选中之后没给股数上限（max=%r）' % mx
+            pg.fill('#fq', str(mx + 100))
+            pg.wait_for_timeout(250)
+            t1 = pg.inner_text('#fcmsg') or ''
+            assert str(mx) in t1.replace(',', '') and '卖不了' in t1, \
+                '填了超过上限的股数，没有当场说清可卖多少：%r' % t1[:80]
+            # ★ 按钮**不许**是 disabled（项目纪律：disabled 的元素连 title
+            #   都不触发，"点了没反应"是最难查的那种坏）—— 它照样可点，
+            #   点了把原因说清楚。
+            assert not pg.get_attribute('#fb', 'disabled'), \
+                '「录一笔」被设成 disabled 了 —— 本项目一律不这么做'
+            n_before = len(_pos.active_fills(lv.fills(aid)))
+            pg.click('#fb')
+            pg.wait_for_timeout(700)
+            assert '超过' in (pg.inner_text('#fmsg') or ''), \
+                '超量提交没有被拦住（提示：%r）' % (pg.inner_text('#fmsg') or '')[:60]
+            assert len(_pos.active_fills(lv.fills(aid))) == n_before, \
+                '🔴 超量那一笔真的写进账本了 —— 账本是 append-only 的'
+
+            # ---- ⑦ 一只都没选就提交 -> 说清下一步 ----
+            pg.select_option('#fsel', '')
+            pg.fill('#fq', '100')
+            pg.click('#fb')
+            pg.wait_for_timeout(500)
+            assert '选一只' in (pg.inner_text('#fmsg') or ''), \
+                '没选票就提交，提示没说清下一步：%r' % (
+                    pg.inner_text('#fmsg') or '')[:60]
+            assert len(_pos.active_fills(lv.fills(aid))) == n_before, \
+                '没选票却写进了账本'
+            assert not errs, '页面报错：%s' % errs[:2]
+            b.close()
+    finally:
+        httpd.shutdown()
+        lv.LIVE = _prev_live
+        shutil.rmtree(_tmp, ignore_errors=True)
+    return ('买=搜索下拉（指数已排除、候选里有 ETF 自证）；卖=%d 只可卖'
+            '与服务端逐只一致；补录是单独页签（成交档没有日期框、切回复位到 %s）；'
+            '改成交日到 %s 后 %s 回到清单；'
+            '超量与未选都当场拦住、账本 %d 笔未变'
+            % (len(want), d0, back_day, gone[:6], n_before))
+
+
+@case('实盘页每个账户都要真的渲染出来（不许卡在"读取中"）', tag='web')
+def t_live_pages_render():
+    """🔴🔴 用户 2026-09-22：「貌似直接把 froea 实盘账户跑挂了，一直在读取中」。
+
+    根因是我把 `lvDayParts` / `lvSoldToday` 写成**模块级函数**，而里面用的
+    `sgn` / `col` 是 `kpiHtml` 里的 **const 局部** -> `sgn is not defined`。
+    而它**只在控制台报**：异步回调里的异常不让页面报错，只让它少做一半，
+    屏幕上就卡在「读取中…」（同 `money is not defined` 那次、同 `geo` 那次
+    —— 本项目这是第三回）。
+
+    ★ **`node --check` 抓不到它**（语法完全合法），所以那条守卫不够。
+      这里钉两条，**分工别记反**：
+        · `pageerror` 为空      —— 直接判据，但将来谁加个 try/catch 吞掉就瞎了
+        · `#main` 里不许残留「读取中」 —— **用户可见的后果**，吞不掉
+      第二条才是根本判据，第一条是让报错指得到原因。
+
+    另外钉住当日盈亏那一格的形态（用户 2026-09-22 定）：
+      · 副标题**只有一个百分比**，不带"总资产"三个字、不带构成
+      · 构成进 `title`（hover 可见），差额的正式解释是表下那行「今天卖出」
+    """
+    import re
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_render_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    try:
+        accs = [a for a in lv.load_accounts() if not a.get('archived')]
+        # 🔴 **构造出"当天有卖出"** —— 不构造的话"构成 / 今天卖出"那几条
+        #   全是空转（真账本明天就没有今天的卖出了，同「断言不许依赖真实
+        #   数据碰巧如此」）。
+        # 🔴 日期要与 `positions_valued` 里那个 `d_now` **同源** ——
+        #   盘中它是**实时那天**（不是面板最新日）。第一版按面板最新日记，
+        #   于是那笔不算"今天"，已实现是 0、整段空转（构造自己的护栏抓到了）。
+        hit = None
+        for a in accs:
+            pv = lv.positions_valued(a['id'])
+            if pv.get('items'):
+                it = pv['items'][0]
+                if it.get('price') and it['shares'] >= 100:
+                    d_now = max([x['rt_at'][:10] for x in pv['items']
+                                 if x.get('rt_at')] or [pv['asof']])
+                    hit = (a['id'], it['code'], it['price'], d_now)
+                    break
+        assert hit, '构造不对：没有一个账户有可卖的持仓'
+        aid0, code0, px0, day = hit
+        lv.add_fill(aid0, day, code0, 'sell', 100, price=px0, fee=3.0,
+                    force_price=True)
+        _pv0 = lv.positions_valued(aid0)
+        assert _pv0.get('pnl_day_realized'), \
+            ('构造没生效：当天卖出的已实现是 %s —— 下面那几条会空转'
+             % _pv0.get('pnl_day_realized'))
+
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            with sync_playwright() as p:
+                try:
+                    br = p.chromium.launch()
+                except Exception as e:                      # noqa: BLE001
+                    return '跳过（浏览器不可用: %s）' % type(e).__name__
+                pg = br.new_page(viewport={'width': 1500, 'height': 950})
+                errs = []
+                pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+                n_ok = 0
+                for a in accs:
+                    errs.clear()
+                    pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, a['id']),
+                            wait_until='domcontentloaded')
+                    # 🔴 **先等内容出来，再等"读取中"消失** —— 只判后者的话
+                    #   页面还空着时就满足了（空白里当然没有"读取中"），
+                    #   于是这条判据在真卡住的页面上也是绿的。实测踩到。
+                    try:
+                        pg.wait_for_function(
+                            "() => { const k = document.querySelector('#lvkpi');"
+                            " const m = document.querySelector('#main');"
+                            " return k && k.textContent.trim().length > 0 && m"
+                            " && m.textContent.indexOf('读取中') < 0; }",
+                            timeout=25000)
+                    except Exception:
+                        # 🔴 **超时要把现场带出来** —— 裸 Timeout 报的是
+                        #   "Timeout 25000ms exceeded"，而真正的原因是控制台
+                        #   里那条异常（变异实测：去掉 `_lvsg` 就是这样）。
+                        raise AssertionError(
+                            '账户「%s」没渲染出来（卡在「读取中」或空白）。'
+                            '控制台报错：%s'
+                            % (a.get('name'), (errs[0][:200] if errs else '无')))
+                    pg.wait_for_timeout(600)
+                    assert not errs, \
+                        ('账户「%s」页面报错（页面不会自己说，只会少渲染一半）：%s'
+                         % (a.get('name'), errs[0][:200]))
+                    t = pg.inner_text('#main')
+                    assert '读取中' not in t, \
+                        ('账户「%s」卡在「读取中」—— 多半是某个回调抛了异常，'
+                         '而异常只在控制台里' % a.get('name'))
+                    n_ok += 1
+                # ---- 当日盈亏那一格的形态 ----
+                pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid0),
+                        wait_until='domcontentloaded')
+                pg.wait_for_selector('#lvkpi', timeout=25000)
+                pg.wait_for_timeout(800)
+                g = pg.evaluate(
+                    "() => [...document.querySelectorAll('#lvkpi div')]"
+                    ".filter(e => e.querySelector(':scope > .k') &&"
+                    " e.querySelector(':scope > .k').textContent.indexOf"
+                    "('当日盈亏') === 0)"
+                    ".map(e => ({title: e.getAttribute('title'),"
+                    " sub: (e.querySelector(':scope > .s')||{}).textContent||''}))")
+                assert len(g) == 1, '当日盈亏那格找不到或有多个：%s' % g
+                sub = (g[0]['sub'] or '').strip()
+                assert re.fullmatch(r'[+-]?\d+\.\d\d%', sub), \
+                    ('当日盈亏的副标题该【只有一个百分比】，实得 %r —— '
+                     '用户明确要求不带"总资产"三个字、也不要构成' % sub)
+                for w in ('持仓', '已实现', '费用'):
+                    assert w in (g[0]['title'] or ''), \
+                        '构成没进 title（%s 缺失）：%r' % (w, g[0]['title'])
+                assert '今天卖出' in pg.inner_text('#main'), \
+                    ('持仓表下面没有「今天卖出」那一行 —— 当日盈亏的合计含'
+                     '已实现，必然不等于持仓表各行之和，不列出来就是个'
+                     '对不上的数')
+        finally:
+            httpd.shutdown()
+    finally:
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev
+        sv._scan()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('%d 个账户逐个渲染、0 个 JS 报错、无「读取中」残留；'
+            '当日盈亏副标题只有一个百分比（%s）、构成在 title 里、'
+            '表下有「今天卖出」' % (n_ok, sub))
+
+
+@case('信号重算的提示：分清「你已成交」与「清单真变了」（playwright）', tag='web')
+def t_signal_revision_notice():
+    """🔴🔴 用户 2026-09-22：「09-21T23:00 → 被 09-22T16:06 覆盖是这么意思？
+    这个数据还是基于 09-21 的收盘数据计算出来的吗？」
+
+    查下来两版的 `data_asof` **都是 2026-09-21**（当天 16:16 那轮同步重建了
+    面板文件但 09-22 行情还没出来，指纹一变 tick 就重算），所以"覆盖"没错 ——
+    **错在页面只给了两个时间戳**，而判断"这份还能不能用"靠的是数据日。
+
+    更要命的是第二条：那一版的「买 301062 / 卖 300980」之所以消失，
+    **不是决策变了，是他当天 10:11/10:12 已经照着成交了**。而提示写的是
+    「请照现在这份核对」—— 而现在这份是**空的**，照它核对会读成
+    "不该买不该卖"，正好相反。
+
+    ★ 判据**两个方向都要**，只测一头的话"永远低调"或"永远显红"都全绿：
+        A 消失的那几只当天都已成交  -> **低调样式** + 说"你已成交"
+        B 有一只没成交（真的被改掉） -> **警告样式** + "请照现在这份核对"
+    🔴 两种情形都要**构造**：真账本明天就没有今天那几笔成交了
+      （同「断言不许依赖真实数据碰巧如此」）。
+    """
+    import copy
+    import json as _j
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from playwright.sync_api import sync_playwright
+
+    from assay import live as lv
+    from assay import server as sv
+    from assay.lv import sig as _sg
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_rev_')
+    shutil.copytree(real, os.path.join(tmp, 'live'), dirs_exist_ok=True)
+    lv.LIVE = os.path.join(tmp, 'live')
+    prev = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    sv._scan()
+    try:
+        aid = 'froec'
+        base_sig = lv.latest_signal(aid)
+        assert base_sig and base_sig.get('for_date'), \
+            '构造不对：%s 没有信号文件' % aid
+        pv = lv.positions_valued(aid)
+        assert len(pv.get('items') or []) >= 2, '构造不对：持仓不足 2 只'
+        sold, kept = pv['items'][0], pv['items'][1]
+        # 🔴 必须用【最新那份信号的 for_date】，不是面板最新日 ——
+        #   `latest_signal` 取 `sorted(signals/*.json)[-1]`，写一个更早的日期
+        #   等于**根本没被读到**，而那时页面显示的是真账本那份。
+        #   实测：A 档因此"通过"了（真账本恰好就是 all_done），
+        #   是 B 档把它抓出来的（同「断言不许依赖真实数据碰巧如此」）。
+        day = str(base_sig['for_date'])[:10]
+        # 构造两笔当天的成交：卖 sold、买一只新的
+        lv.add_fill(aid, day, sold['code'], 'sell', 100,
+                    price=sold['price'], fee=3.0, force_price=True)
+        newc = '000001.XSHE'
+        lv.add_fill(aid, day, newc, 'buy', 100, price=10.0, fee=3.0,
+                    force_price=True)
+
+        def _write(removed_sell, removed_buy):
+            s = copy.deepcopy(base_sig)
+            s['for_date'] = day
+            s['buy'], s['sell'], s['keep'] = [], [], []
+            s['revisions'] = [{
+                'rev': 1, 'built_at': day + 'T23:00:00',
+                'replaced_at': day + 'T16:06:00',
+                'data_asof': s.get('data_asof'),
+                'new_data_asof': s.get('data_asof'),
+                'archived': 'signals/_rev/%s.rev1.json' % day,
+                'diff': {'changed': True, 'buy_added': [], 'sell_added': [],
+                         'buy_removed': removed_buy,
+                         'sell_removed': removed_sell,
+                         'hold_added': [], 'hold_removed': []}}]
+            p = _sg.signal_path(aid, day)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(_j.dumps(s, ensure_ascii=False, indent=1, sort_keys=True))
+
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        got = {}
+        try:
+            with sync_playwright() as p:
+                try:
+                    br = p.chromium.launch()
+                except Exception as e:                      # noqa: BLE001
+                    return '跳过（浏览器不可用: %s）' % type(e).__name__
+                pg = br.new_page(viewport={'width': 1500, 'height': 950})
+                errs = []
+                pg.on('pageerror', lambda e: errs.append(e.stack or str(e)))
+
+                def _look(tag):
+                    # 🔴 同一个 hash goto 不重新加载 —— 必须 reload
+                    #   （本项目踩过四次）
+                    pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, aid),
+                            wait_until='domcontentloaded')
+                    pg.reload()
+                    pg.wait_for_function(
+                        "() => { const m = document.querySelector('#main');"
+                        " return m && m.textContent.indexOf('重算过') >= 0; }",
+                        timeout=25000)
+                    r = pg.evaluate(
+                        "() => { const q = c => [...document.querySelectorAll(c)]"
+                        ".filter(e => e.textContent.indexOf('重算过') >= 0);"
+                        " const w = q('.lvwarn'), s = q('.lvwhy');"
+                        " return {warn: w.length, quiet: s.length,"
+                        "  txt: (w[0]||s[0]||{}).innerText || ''}; }")
+                    assert not errs, '页面报错：%s' % errs[0][:200]
+                    got[tag] = r
+                    return r
+
+                # ---- A 全都已成交 -> 低调 ----
+                _write([sold['code']], [newc])
+                a = _look('done')
+                assert a['quiet'] == 1 and a['warn'] == 0, \
+                    ('消失的那几只当天都已成交，不该显红（warn=%d quiet=%d）：%s'
+                     % (a['warn'], a['quiet'], a['txt'][:160]))
+                assert '你当天已经成交了' in a['txt'], \
+                    '没说清"是你已经成交了"：%s' % a['txt'][:200]
+                assert '数据日' in a['txt'], \
+                    ('提示里没有【数据日】—— 用户问的就是"这份基于哪天的数据"，'
+                     '只给时间戳答不了：%s' % a['txt'][:200])
+
+                # ---- B 有一只没成交 -> 显红 ----
+                _write([sold['code'], kept['code']], [newc])
+                bb = _look('changed')
+                assert bb['warn'] == 1 and bb['quiet'] == 0, \
+                    ('有一只不是你成交的（清单真被改了），必须显红'
+                     '（warn=%d quiet=%d）：%s'
+                     % (bb['warn'], bb['quiet'], bb['txt'][:160]))
+                assert '请照现在这份核对' in bb['txt'], \
+                    '真变了却没让人去核对：%s' % bb['txt'][:200]
+                assert kept['code'] in bb['txt'] and '你已成交' in bb['txt'], \
+                    ('要把"已成交的"与"真被改的"分开点名：%s' % bb['txt'][:250])
+                br.close()
+        finally:
+            httpd.shutdown()
+    finally:
+        lv.LIVE = real
+        sv.ALLOW_LIVE = prev
+        sv._scan()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ('已成交那档走低调样式并写明数据日；有一只没成交时显红并点名'
+            '（%s 是真被改的）' % kept['code'][:6])
 
 
 @case('首页只列真实盘 · 当日盈亏 · 手工账户是一等状态（playwright）', tag='web')

@@ -74,7 +74,7 @@ def day_price(code, date, which='open', datalake=None):
         '取不到 %s 在 %s 的%s。\n'
         '最常见的原因是【当天行情还没同步】—— 本地最新数据日是 %s，'
         '而 datalake 要等当晚 sync_daily.sh 跑完才有当天行情。\n'
-        '现在就要录的话请**手填价格**；或者等晚上同步完再录，'
+        '现在就要录的话请【手填价格】；或者等晚上同步完再录，'
         '那时价格留空就会自动取%s。\n'
         '另一种可能：这只票当天停牌（没有成交，也就没有%s）。'
         % (code, d, what, last, what, what))
@@ -221,7 +221,7 @@ def check_price_in_range(code, date, price, datalake=None):
     raise _base.LiveError(
         '%s 在 %s 的价格区间是 %.3f ~ %.3f，而你填的是 %.3f —— 落在区间外，'
         '不可能是这天的成交价。\n'
-        '常见原因：小数点点错、看错行填了别只票的价、或者填了**后复权**价。\n'
+        '常见原因：小数点点错、看错行填了别只票的价、或者填了【后复权价】。\n'
         '（成交价一错，成本价就错，而成本价要喂给止损判定和红利税档位。）\n'
         '确实是这个价（如大宗交易），录入时勾上「按填的价，不校验」。'
         % (_base.normalize_code(code), _base._d(date), lo, hi, price))

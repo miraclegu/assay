@@ -108,15 +108,16 @@ function homeLive(accts, todo){
           <td class="rt">${num(P.equity,2)}</td>
           <!-- 🔴 **当日盈亏，不是累计浮盈**：首页问的是"今天怎么样"，
                而浮盈是开仓至今的累计 —— 那是复盘时看的，属于业绩页。
-               ★ 幅度的分母是**持仓市值**（不是总资产），与实盘页那一格
-                 同一口径，所以后面那行小字必须标"持仓"——
-                 不标的话同屏两个百分比看着像其中一个算错了。
+               🔴 2026-09-22：pnl_day 的口径改成【账户当日全口径】了
+                 （持仓浮动 + 当天卖出已实现 − 当天费用），所以分母跟着改成
+                 **总资产**。还按持仓市值算的话，有卖出的日子分母里少了
+                 已经卖掉的那部分，百分比会偏大 —— 而它不报错。
                ★ 停牌股取不到价时 pnl_day 是 null（整只票没数据）——
                  显示"—"而不是 0 —— 0 会被读成"今天不涨不跌"。 -->
           <td class="rt" style="color:${upc(P.pnl_day)}">${
             P.pnl_day==null?'—':(P.pnl_day>=0?'+':'')+num(P.pnl_day,2)}
-            <div class="lvwhy">${(P.pnl_day==null||!P.market_value)?'—'
-              :ratv(P.pnl_day/(P.market_value-P.pnl_day))+' 持仓'}</div></td>
+            <div class="lvwhy">${(P.pnl_day==null||!P.equity)?'—'
+              :ratv(P.pnl_day/(P.equity-P.pnl_day))+' 总资产'}</div></td>
           <td class="rt">${wt==null?'—':(wt*100).toFixed(1)+'%'}</td>
           <td class="tx">${act}</td></tr>`;}).join('')}
     </table>

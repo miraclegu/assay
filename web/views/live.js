@@ -293,6 +293,63 @@ function livePoll(aid){
      DOM 结构一行不动 —— 滚动位置、hover、选中的文字全保住。
    🔴 格子内容**一处定义**（`lvRtd`）：渲染与刷新各写一份的话，
      "刷新之后的数字格式跟首次渲染不一样"不报错，只是慢慢分叉。 */
+/* 今天卖掉的那几笔 —— **必须列出来**。
+   🔴 当日盈亏的合计现在含"当天卖出已实现"，于是它**必然不等于持仓表
+     各行之和**（那张表里已经没有卖掉的那只了）。不把这几行摆出来的话，
+     屏幕上就是一个对不上的合计，而人只会以为是算错了
+     （同「删了要留痕，否则『空』与『本来就没有』分不出来」）。 */
+/* 🔴 这两个函数是**模块级**的，所以里面不能用 `sgn` / `col` ——
+   它们是 `kpiHtml` / `posHtml` 那几个函数里的 **const 局部**。
+   第一版就这么写了，结果 `sgn is not defined`，而它**只在控制台报**，
+   页面卡在"读取中…"（同 `money is not defined` 那次、同 `geo` 那次：
+   回调里的异常不让页面报错，只让它少做一半）。
+   这里一律用 common.js 的全局件（`upc` / `num` / `esc`）。 */
+const _lvsg = v => (v == null ? '' : (v >= 0 ? '+' : ''));
+
+function lvSoldToday(P){
+  const rs = P.sold_today || [];
+  if(!rs.length) return '';
+  return '<div class="lvwhy" style="margin-top:8px">今天卖出（已计入当日盈亏）：'
+    + rs.map(x=>'<b>' + esc(x.name||x.code) + '</b> '
+        + num(x.shares) + ' 股 @ ' + num(x.price,3)
+        + (x.preclose!=null ? '（昨收 ' + num(x.preclose,3) + '）' : '')
+        + ' <span style="color:' + upc(x.pnl_day) + '">'
+        + _lvsg(x.pnl_day) + num(x.pnl_day,2) + '</span>'
+      ).join('　·　')
+    + (P.same_day_sell ? '　·　⚠ 其中 ' + num(P.same_day_sell)
+                         + ' 股是当天买当天卖（补录？基准用买入价）' : '')
+    + '</div>';
+}
+
+/* 当日盈亏的构成：持仓浮动 / 当天卖出已实现 / 当天费用。
+   ★ 只在真有后两项时才展开 —— 没有卖出也没费用的日子，
+     合计就等于持仓表各行之和，多写一行是噪声。 */
+/* 副标题**只给一个百分比**（用户 2026-09-22 定：「我只需要一个总资产的
+   百分比就行，后面也不要加总资产这 3 个字」）。
+   ★ 分母是【总资产】：口径已经是账户当日全口径了，还按持仓市值算的话，
+     有卖出的日子分母里少了卖掉的那部分，百分比会偏大，而它不报错。
+   🔴 构成（持仓 / 已实现 / 费用）挪进这一格的 `title` —— 合计必然不等于
+     持仓表各行之和，那个差额的**正式解释**是表下面那行「今天卖出」，
+     title 只是顺手能 hover 到。**不占主视图**（同「能进 tooltip 的就别占列」）。 */
+function lvDayPct(P){
+  if(P.pnl_day==null || P.equity==null) return '';
+  const base = P.equity - P.pnl_day;
+  if(!base) return '';
+  return _lvsg(P.pnl_day/base) + (P.pnl_day/base*100).toFixed(2) + '%';
+}
+
+function lvDayTitle(P){
+  if(P.pnl_day==null) return '';
+  const r=P.pnl_day_realized||0, f=P.pnl_day_fee||0;
+  if(!r && !f) return '';
+  const t=[];
+  if(P.pnl_day_hold!=null) t.push('持仓 '+_lvsg(P.pnl_day_hold)+num(P.pnl_day_hold,2));
+  if(r) t.push('当天卖出已实现 '+_lvsg(r)+num(r,2));
+  if(f) t.push('当天费用 '+num(f,2));
+  return ' title="当日盈亏 = ' + esc(t.join(' + ').replace('+ 当天费用 -','− 当天费用 '))
+         + '"';
+}
+
 const LV_RT_FIELDS = ['price', 'chg_day', 'pnl_day', 'value',
                       'pnl', 'pnl_pct', 'weight'];
 
@@ -519,6 +576,7 @@ async function loadLive(aid, quiet){
         c.rt ? lvRtd(c.k, x, P) : lvPosTd(c, x, aid)).join('')}</tr>`).join('')}
       </table></div>
       <!-- 持仓表包在 .pw 里，见本文件顶部注释 -->
+      ${lvSoldToday(P)}
       ${P.fee_estimated_n?'<div class="lvwhy" style="margin-top:6px">'
         +'⚠ 有 <b>'+P.fee_estimated_n+'</b> 笔买入的费用是<b>估算</b>的，'
         +'成本跟着也是估算 —— 对完账单可在流水页「冲正 + 重录」填实际值。'
@@ -640,14 +698,16 @@ function kpiHtml(o){
     ${cell('当日盈亏',
            P.pnl_day==null?'—':
            `<span style="color:${col(P.pnl_day)}">${sgn(P.pnl_day)}${num(P.pnl_day,2)}</span>`,
-           /* ★ 百分比要标【分母是什么】：这一格是持仓的当日浮动，
-                业绩板那格「今日」是**账户**当日收益（分母是总资产，还含
-                当天已实现的买卖与费用）。不标的话两个 −0.15%/−0.16%
-                摆在同一屏上，看着像其中一个算错了。 */
-           (P.pnl_day!=null&&P.market_value)
-             ? '持仓 '+(P.pnl_day/(P.market_value-P.pnl_day)>=0?'+':'')
-               +(P.pnl_day/(P.market_value-P.pnl_day)*100).toFixed(2)+'%'
-             : '')}
+           /* 🔴 2026-09-22 改口径：这一格现在是【账户当日全口径】——
+                持仓浮动 + 当天卖出已实现 − 当天费用，与业绩板那格「今日」
+                是**同一个数**（那边给百分比、这边给金额与构成）。
+                改之前它只算持仓浮动，于是当天卖掉的那部分一分都不算 ——
+                用户 2026-09-22 报：开盘竞价卖出 300980 的涨幅没进来，
+                实测漏了 +460.00（而跌着卖会把当日盈亏**报高**）。
+              ★ 副标题给【构成】而不是百分比：合计必然不等于持仓表各行之和
+                （多了已实现、少了费用），不写出来就看着像算错了。
+                只在真有已实现或费用时才写 —— 常驻一行噪声等于没写。 */
+           lvDayPct(P), '', lvDayTitle(P))}
     <div id="kperf" style="display:none"></div>
   </div>
   <div class="kpi" id="kperf2">
@@ -873,6 +933,13 @@ function paperTag(o){
   const rec=st.recon||{}, dp=rec.diff_pct;
   const bad=(dp!=null && Math.abs(dp)>0.0005);
   const mm=st.mismatch;
+  /* 盘中写下、还没被权威数据确认的笔数。判据由**服务端**给
+     （`prov_day` 是那一天、`prov_uids` 是那几笔）—— 前端不自己比日期：
+     "权威数据到没到"只有服务端知道（同「可选清单由服务端给」那条）。 */
+  const pv=(st.prov_day&&st.prov_day===st.advanced_to)
+    ?((st.prov_uids||[]).length||0):0;
+  /* 盘中被推迟的任务个数（服务端给的 `intraday_deferred`）。*/
+  const dfn=pv?Object.keys(st.intraday_deferred||{}).length:0;
   return `<span class="lvtag on" style="background:#6b5bd6;border-color:#6b5bd6"
       title="成交由引擎按绑定策略跑出来，不是真实成交">模拟盘</span>
     <span class="lvtag" id="lvpaper" title="${esc(mm?mm.why:'数据更新后自动推进到最新数据日')
@@ -883,8 +950,28 @@ function paperTag(o){
            常常不是同一天（etf_lake 手工建、不在每日同步链里），
            只写"推进到 09-11"的话人拿它跟主数据 09-17 一比就以为坏了。 */
         st.datalake_declared&&st.datalake?' · 数据源 '+esc(st.datalake):''
+      }${
+        /* 🔴🔴 **盘中那一格必须标出来，而且要说清它为什么还没被确认。**
+           用户 2026-09-22 问「今天应该是有交易计划的，为什么没能推进成功」——
+           当时页面上同时摆着「今天要卖 1 买 3」和「推进到 09-21」，
+           两个数看着自相矛盾，**而没有任何地方说为什么**（今天的日线要等
+           晚上同步）。现在盘中就按【今开】推一格，但它是**近似**：
+           今天的复权因子本地还没有，涨跌停价是按昨收重建的 ——
+           所以日终权威数据落地后会逐笔对账，不同就冲正重录。
+           ★ 不标的话人会把它当成已经落定的成交（同模拟盘那个紫标签的理由）。*/
+        pv?` · <b>盘中·按今开</b>（${pv} 笔待权威确认${
+             /* ★ 「还没跑完」也要说：盘中只跑到开盘竞价那一档，
+                  14:00 的止损与炸板离场读的是**收盘派生量**、今天还不存在。
+                  不说的话盘中那份持仓看着就是最终结果。 */
+             dfn?`，另有 ${dfn} 个 14:00 的判定留到日终`:''}）`:''
       }${mm?' · 🔴 对账不一致':''}${
-        bad?` · 对账差 ${num(rec.diff,2)} 元`:''}</span>`;
+        bad?` · 对账差 ${num(rec.diff,2)} 元`:''}</span>${
+        /* ★ 「为什么今天没推」也要说 —— 沉默与"推过了"在屏幕上长得一样。
+             只在**今天还没推过**时出现，推过了就不占地方。 */
+        (!pv&&st.intraday_why&&!mm)
+          ?`<span class="lvtag" title="盘中推进的判据（每条都可证）">盘中未推：${
+              esc(st.intraday_why)}</span>`:''
+      }`;
 }
 
 /* ★ 数据日与报价时间写在【同一个标签】里，紧跟账户名。
@@ -1028,20 +1115,61 @@ function sigHtml(s, alert, alertWhy, bound){
      ★ 只在"决策变了"时显红；数据变了而清单没变只记 recomputed_at，
        不在这里出现 —— 天天一条"重算过"的话，人就不看这个位置了。 */
   const revs=s.revisions||[];
-  const rv=revs.length?`<div class="lvwarn"><b>⚠️ 这份清单被重算过
-      ${revs.length} 次，与最初那份不一致</b>${revs.map(r=>{
-        const d=r.diff||{}, seg=[];
-        for(const k of ['buy','sell','hold']){
-          const nm={buy:'买入',sell:'卖出',hold:'持有'}[k];
-          if((d[k+'_added']||[]).length) seg.push(`${nm}新增 ${d[k+'_added'].join('、')}`);
-          if((d[k+'_removed']||[]).length) seg.push(`${nm}移除 ${d[k+'_removed'].join('、')}`);
-        }
-        return `<div style="margin-top:4px">第 ${r.rev} 版（${esc((r.built_at||'').slice(5,16))}
-          → 被 ${esc((r.replaced_at||'').slice(5,16))} 覆盖）：${
-          seg.length?esc(seg.join('；')):'（清单未变，只是指纹变了）'}
-          <span class="lvwhy">　旧版留在 ${esc(r.archived||'')}</span></div>`;
-      }).join('')}<div style="margin-top:4px">如果已按之前那份准备了委托，
-      <b>请照现在这份核对</b>。</div></div>`:'';
+  /* 🔴🔴 一条提示要回答两个问题，原来两个都没答（用户 2026-09-22）：
+       ①「基于哪天的数据」—— 原来只给两个**时间戳**（建于 -> 被替换于），
+         而判断"这份还能不能用"靠的是 `data_asof`。实测那次两版**都是
+         09-21**（当天 16:16 同步重建了面板但 09-22 行情还没出来），
+         所以"覆盖"是对的 —— 只是人完全无从判断。
+       ②「为什么变了」—— 那次消失的「买 301062 / 卖 300980」**不是决策变了，
+         是他当天 10:11/10:12 已经照着成交了**。而提示写的是"请照现在这份
+         核对"，而现在这份是**空的** —— 照它核对会读成"不该买不该卖"，
+         正好相反。
+     ★ 所以分两种情形，**用两种样式**：全都能用"已成交"解释的走低调样式
+       （那不是要人做事的事）；真有决策变化才显红。
+       混成一种的话，每次执行完信号都跳一条红字 ——「假告警看多了就不看
+       告警」。 */
+  const _rvAsof=r=>{
+    const a=r.data_asof, b=r.new_data_asof||s.data_asof;
+    if(!a) return '数据日未知（旧格式）';
+    return a===b?`数据日 ${a}，未变`:`数据日 ${a} → ${b}`;
+  };
+  const _rvSeg=r=>{
+    const d=r.diff||{}, dn=r.done||{}, seg=[];
+    for(const k of ['buy','sell','hold']){
+      const nm={buy:'买入',sell:'卖出',hold:'持有'}[k];
+      if((d[k+'_added']||[]).length) seg.push(`${nm}新增 ${d[k+'_added'].join('、')}`);
+      const rm=(d[k+'_removed']||[]), dd=(dn[k]||[]);
+      if(rm.length){
+        const rest=rm.filter(x=>dd.indexOf(x)<0);
+        seg.push(`${nm}移除 ${rm.join('、')}`
+          +(dd.length?`（其中 ${dd.join('、')} <b>你已成交</b>）`:'')
+          +(rest.length&&dd.length?`，${rest.join('、')} 是真的被改掉了`:''));
+      }
+    }
+    return seg.length?seg.join('；'):'（清单未变，只是指纹变了）';
+  };
+  const allDone=revs.length&&revs.every(r=>r.all_done);
+  const rv=!revs.length?''
+    :allDone
+    /* 全都能用"已成交"解释时，别再逐项写"移除 X（其中 X 你已成交）" ——
+       那是把同一个代码印两遍。直接把那几只列一次就够。 */
+    ? `<div class="lvwhy" style="margin:4px 0">这份清单重算过 ${revs.length} 次（${
+        esc(_rvAsof(revs[revs.length-1]))}）。${revs.map(r=>{
+        const dn=r.done||{}, t=[];
+        if((dn.sell||[]).length) t.push('卖出 '+dn.sell.join('、'));
+        if((dn.buy||[]).length) t.push('买入 '+dn.buy.join('、'));
+        return `<br>第 ${r.rev} 版里的「${esc(t.join('　'))}」已从清单移除 ——`
+          + ` <b>你当天已经成交了</b>，不是清单被改。`
+          + `旧版留在 ${esc(r.archived||'')}`;
+      }).join('')}</div>`
+    : `<div class="lvwarn"><b>⚠️ 这份清单被重算过
+      ${revs.length} 次，与最初那份不一致</b>${revs.map(r=>
+        `<div style="margin-top:4px">第 ${r.rev} 版（${esc(_rvAsof(r))}　·　${
+          esc((r.built_at||'').slice(5,16))} 建 → ${
+          esc((r.replaced_at||'').slice(5,16))} 重算）：${_rvSeg(r)}
+          <span class="lvwhy">　旧版留在 ${esc(r.archived||'')}</span></div>`
+      ).join('')}<div style="margin-top:4px">如果已按之前那份准备了委托，
+      <b>请照现在这份核对</b>。</div></div>`;
   /* 数据动过但清单没变 —— 低调说一句就够，不用警告样式 */
   const rc=(!revs.length&&(s.recomputed_at||[]).length)
     ? `<div class="lvwhy" style="margin:4px 0">数据更新后重算过

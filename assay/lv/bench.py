@@ -25,6 +25,7 @@ import os
 import sys
 
 from . import base as _base
+from . import openbar as _ob
 from . import fee as _fee
 from . import ver as _ver
 
@@ -52,7 +53,7 @@ def _repo():
         os.path.abspath(__file__))))
 
 
-def build_engine(aid, datalake=None):
+def build_engine(aid, datalake=None, intraday=False):
     """按【这个账户】的绑定版本 + 参数 + 费率建一个引擎，**还没跑**。
 
     返回 `(eng, meta)`；`meta` 含 start/end/cash/sha/fp/fee 等。
@@ -178,14 +179,74 @@ def build_engine(aid, datalake=None):
                     return False
                 return Engine._due(self, i, d, freq, wd, md, ev, off)
 
+            def _boot(self, verbose=False):
+                Engine._boot(self, verbose)
+                # 🔴🔴 **盘中那一天只跑到 OPEN 相位为止。**
+                #   引擎没有分时线：`09:31~14:59` 全归 INTRADAY 并**一律用
+                #   当日收盘价代理**，而收盘还没发生。froec_traded 的
+                #   `check_limit_up`(14:00 炸板离场) 与 `stop_check`(14:00 止损)
+                #   读的是**收盘派生量** —— 09:31 根本不存在。
+                #   让它们跑 = 拿一个不存在的收盘去做判定，**而它不报错**。
+                # ★ 为什么在这里包 `_tasks` 而不是在 `_due` 里判：
+                #   `_due(i, d, freq, wd, md, ev, off)` **拿不到 `t`**，
+                #   映射不回"这个任务是几点的"。
+                # ★ `_boot` 可重入（`run()` 里还会调一次），所以要门闩 ——
+                #   不然任务被包两层，第二层的 `t` 还是对的但纯属浪费。
+                if not _iday or getattr(self, '_ob_cut', False):
+                    return
+                self._ob_cut = True
+                cut, day = _ob.PHASE_CUTOFF, _iday
+
+                # ★ 被推迟的任务要**记下来**：人该知道"今天 14:00 的止损/
+                #   炸板还没跑，留到日终" —— 不说的话盘中那份持仓看着就是
+                #   最终结果（同「拒单必须可见，不静默」那条）。
+                #   它同时是"截断真的生效了"的**可观察判据**：包在外面数
+                #   调用次数是量不出来的（被跳过的任务照样被调一次）。
+                self._ob_deferred = {}
+
+                def _wrap(t, func):
+                    def _f(ctx):
+                        if str(ctx.current_date)[:10] == day and t > cut:
+                            self._ob_deferred[t] = \
+                                self._ob_deferred.get(t, 0) + 1
+                            return
+                        return func(ctx)
+                    return _f
+
+                self._tasks = [(t, fq, _wrap(t, fn), wd2, md2, ev2, of2)
+                               for (t, fq, fn, wd2, md2, ev2, of2) in self._tasks]
+
         feed = PanelFeed(
             (datetime.date.fromisoformat(start)
              - datetime.timedelta(days=40)).isoformat(), end, root=root)
+        # ---- 盘中推进：在面板之外**追加今天这一天** ----
+        # ★ `end` 仍然是面板最新日（权威），今天是**多出来**的那一格；
+        #   `meta['end']` 因此改成实际推到的最后一天，而 `panel_end`
+        #   单独带出去 —— 页面要能说清"权威到哪天、盘中多推了哪天"。
+        # ★ `intraday` 可以是 True（= 今天）或一个日期字符串（点名哪一天）。
+        #   后者给复盘与判据构造用：拿**过去某一天**当"盘中那一天"，
+        #   就能把盘中拼出来的 bar 与**日终权威值**逐位对照 ——
+        #   而靠"今天恰好是交易日且过了 09:31"的判据是空转的
+        #   （同「真实数据触发不到的上限，判据必须能构造出来」那条）。
+        _iday, _iwhy = None, None
+        if intraday:
+            _named = not isinstance(intraday, bool)
+            _d, _iwhy = _ob.can_advance_intraday(
+                end, day=(intraday if _named else None), root=root,
+                explicit=_named)
+            if _iwhy is None:
+                _iday = _d
+                feed = _ob.IntradayFeed(feed, _iday, end, root=root)
         # ★ `mod` 上面已经加载过（为了读 DATALAKE）—— 不要再 `_load` 一次：
         #   那会把策略文件的顶层代码**执行两遍**。
         eng = _GatedEngine(mod, feed, cash=cash, cost=cost,
                            params=params)
-        return eng, {'start': start, 'end': end, 'cash': cash, 'sha': sha,
+        return eng, {'start': start,
+                     'end': (_iday or end), 'panel_end': end,
+                     'intraday_day': _iday, 'intraday_why': _iwhy,
+                     'intraday_feed': (feed if _iday else None),
+                     'engine': eng,
+                     'cash': cash, 'sha': sha,
                      'main_sha256': row.get('main_sha256'), 'params': params,
                      'data_fingerprint': fp, 'key': k,
                      # ★ 数据源与成本一样**直接决定结果**，所以要带出去

@@ -215,6 +215,37 @@ def lots_asof(rows, day):
 
 
 
+def sellable_asof(aid, day, datalake=None):
+    """**成交日那天**能卖多少 —— 「记一笔」卖出下拉框的唯一判据。
+
+    用户 2026-09-22：「选择卖的时候，只能从当前持仓中选择，交易的数量不能
+    超过持仓的数量。」
+
+    🔴 **判据是「成交日那天」的持仓，不是「今天」的。** 照字面用当前持仓会
+      **误伤补录**：昨天清仓了、今天持仓 0，去补录昨天那笔卖出时下拉框就是
+      **空的** —— 一笔真实成交录不进去，而它不报错，只是那个票"不在列表里"。
+    ★ 与服务端那道校验**同源**：`add_fill` 的 `replay_violation` 是把新记录
+      放进账本**重放**一遍、任何时点为负就拒，而这里走的是同一个
+      `lots_asof`。各写一份的话会出现"UI 说能卖、服务端说不能"，
+      那种分歧最难查（同「两处实现必然分叉」）。
+    ★ 名称由**服务端**补（`px.names_of`）—— 前端没有面板，补不了。
+    """
+    rows = _base.fills(aid)
+    lots = lots_asof(rows, day)
+    items = []
+    for c, ls in sorted(lots.items()):
+        sh = int(round(sum(l['shares'] for l in ls)))
+        if sh > 0:
+            items.append({'code': c, 'shares': sh})
+    try:
+        nm = _px.names_of([x['code'] for x in items]) or {}
+    except Exception:                                       # noqa: BLE001
+        nm = {}
+    for x in items:
+        x['name'] = nm.get(x['code'], '')
+    return {'date': str(_base._d(day)), 'items': items}
+
+
 def cash_asof(init_cash, rows, day, flows=()):
     day = _base._d(day)
     v = float(init_cash or 0)

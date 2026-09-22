@@ -85,6 +85,10 @@ def positions_valued(aid, datalake=None):
         rtp = _rt.latest(list(book), root=datalake)
     except Exception:                                       # noqa: BLE001
         rtp = {}
+    # ★ 账户级的"今天"只算一次 —— 逐只循环里那个 `today` 是按每只的
+    #   `rt_at` 定的，账户级必须有一个统一口径，否则合计与分项对不上。
+    d_now = max([str(v.get('at'))[:10] for v in rtp.values() if v.get('at')]
+                or [day.isoformat()])
     mv = cst = cst_net = 0.0
     for c, lots in sorted(book.items()):
         sh = sum(l['shares'] for l in lots)
@@ -177,8 +181,96 @@ def positions_valued(aid, datalake=None):
     # 当日盈亏汇总：有一只算不出来（无价 / 无昨收）就整体给 None ——
     # 少了一只的合计看着像个正常数字，而它是错的。
     dv = [x['pnl_day'] for x in out['items']]
-    out['pnl_day'] = (round(sum(dv), 2) if dv and all(x is not None for x in dv)
-                      else None)
+    # ---- 🔴 当日盈亏还差两块：【今天卖掉的】与【今天的费用】----------------
+    # 用户 2026-09-22 报：「今天 FROEC-TRADE 开盘竞价卖出了 300980，但开盘
+    # 竞价的涨幅未被计算进去」。根因是上面那个循环只遍历 `book`（**当前持仓**）
+    # —— 今天卖掉的批次已经不在里面，于是**卖出实现的那部分一分都没算**。
+    # 与涨跌方向无关：涨着卖漏的是正的，跌着卖漏的是负的（把当日盈亏报高）。
+    #
+    # 会计恒等式（这也是判据的来处）：
+    #   Δ权益 = Σ持仓×(现价−基准) + Σ今日卖出×(卖价−基准) − 今日费用
+    # 实测今天 froec：662.00 + 460.00 − 38.51 = 1083.49，与 `equity_curve`
+    # 的 `day_pnl` **逐分相同**。
+    #
+    # ★ 基准与持仓那半**同一套**：那批是今天买的就用买入成交价，否则用昨收。
+    #   A 股 T+1 下"今天买今天卖"只可能来自补录，所以那一支平时走不到 ——
+    #   但仍按 FIFO 算出来（今日卖出里超过昨日收盘持仓的那部分才算今天买的），
+    #   并在真走到时记一笔日志，**不静默**。
+    realized = fee_day = _same_day = 0.0
+    sold = []
+    _ok_day = True
+    _rows = _pos.active_fills(_base.fills(aid))
+    _tod = [r for r in _rows if str(r.get('trade_date'))[:10] == d_now]
+    if _tod:
+        # 昨日收盘时各只的持仓股数 —— 用来判"今天卖的是不是今天买的"
+        _prev = {}
+        try:
+            _pd = feed.prev_trading_day(datetime.date.fromisoformat(d_now)) \
+                if hasattr(feed, 'prev_trading_day') else None
+        except Exception:                                   # noqa: BLE001
+            _pd = None
+        if _pd is None:
+            _dd = [x for x in feed.trading_days
+                   if x.isoformat() < d_now]
+            _pd = _dd[-1] if _dd else None
+        if _pd is not None:
+            for c2, ls in (_pos.lots_asof(_rows, _pd) or {}).items():
+                _prev[c2] = sum(l['shares'] for l in ls)
+        _sold_codes = sorted({r['code'] for r in _tod if r['side'] == 'sell'})
+        _px2 = _last_px(feed, _sold_codes, day) if _sold_codes else {}
+        _rt2 = {}
+        if _sold_codes:
+            try:
+                from assay import realtime as _rt2m
+                _rt2 = _rt2m.latest(_sold_codes, root=datalake) or {}
+            except Exception:                               # noqa: BLE001
+                _rt2 = {}
+        _nm2 = _sig._names(feed, _sold_codes, day) if _sold_codes else {}
+        # 今天每只的买入均价（给"今买今卖"那一支用）
+        _bavg = {}
+        for r in _tod:
+            if r['side'] == 'buy':
+                a_, s_ = _bavg.get(r['code'], (0.0, 0.0))
+                _bavg[r['code']] = (a_ + float(r['shares']) * float(r['price']),
+                                    s_ + float(r['shares']))
+        for r in _tod:
+            fee_day += float(r.get('fee') or 0)
+            if r['side'] != 'sell':
+                continue
+            c2, sh2, p2 = r['code'], float(r['shares']), float(r['price'])
+            rr = _rt2.get(c2) or {}
+            pc2 = rr.get('preclose') or (_px2.get(c2, (None,))[0])
+            left = _prev.get(c2, 0.0)
+            from_old = min(left, sh2)
+            _prev[c2] = left - from_old
+            from_new = sh2 - from_old
+            if pc2 is None and from_old > 0:
+                _ok_day = False          # 取不到昨收 -> 整体给 None，不猜
+                break
+            g_old = from_old * (p2 - float(pc2)) if from_old else 0.0
+            g_new = 0.0
+            if from_new > 0:
+                amt, s_ = _bavg.get(c2, (0.0, 0.0))
+                if not s_:
+                    _ok_day = False
+                    break
+                g_new = from_new * (p2 - amt / s_)
+                _same_day += from_new      # 可感知：页面能说出来，不静默
+            realized += g_old + g_new
+            sold.append({'code': c2, 'name': _nm2.get(c2, ''), 'shares': sh2,
+                         'price': round(p2, 4),
+                         'preclose': (round(float(pc2), 3) if pc2 else None),
+                         'pnl_day': round(g_old + g_new, 2)})
+    out['pnl_day_hold'] = (round(sum(dv), 2)
+                           if dv and all(x is not None for x in dv) else None)
+    out['pnl_day_realized'] = round(realized, 2) if _ok_day else None
+    out['pnl_day_fee'] = round(-fee_day, 2)
+    out['sold_today'] = sold
+    out['same_day_sell'] = _same_day
+    # ★ 合计 = 持仓 + 今日实现 − 今日费用。三块都给出去，页面必须能说清
+    #   构成 —— 否则"合计 != 各行之和"看着像算错了（本项目最怕的静默错值）。
+    out['pnl_day'] = (round(out['pnl_day_hold'] + realized - fee_day, 2)
+                      if (out['pnl_day_hold'] is not None and _ok_day) else None)
     out['market_value'] = round(mv, 2)
     out['cost'] = round(cst, 2)                 # 成交额（不含费）
     out['cost_net'] = round(cst_net, 2)         # 摊薄成本额（含买入费）
