@@ -2235,12 +2235,41 @@ def t_factor_page():
         assert 'id=' + fid in pg.url, '详情没进 URL：%s' % pg.url
         notes.append('详情 %s：2 张表' % fid)
 
-        # ---- ⑤ 四处入口 + 指标广场，逐个【真的点过去】 ----
-        #   只查 href 在不在的话，路由坏了照样绿（同「点了没反应」那条）
-        ent = [('/', '首页参考'), ('/#/runs', '回测归档'),
-               ('/#/picks', '选中的规则'), ('/#/sync', '数据同步'),
-               ('/indicators.html', '指标广场')]
-        for url, nm in ent:
+        # ---- ⑤ 入口：主入口要【首屏可见的按钮】，交叉引用点得通即可 ----
+        #   🔴 第一版判据只验"存在且点得动" —— 而我把 #/runs 那个放在了
+        #     目录树【下面】那段灰字 note 里（几百行之后），用户当场问
+        #     "因子广场的入口在哪里，点击回测看不到"。**判据比要证的事宽**。
+        #   ★ 两档分开，别混：回测域的两页要【看得见能点】（顶栏按钮），
+        #     而首页参考行 / 数据同步 / 指标广场是**交叉引用**，
+        #     刻意不做成一块（同「首页每块只给摘要 + 一个入口」那条）。
+        for url, nm in [('/#/runs', '回测归档'), ('/#/picks', '选中的规则')]:
+            p2 = br.new_page(viewport={'width': 1440, 'height': 900})
+            p2.goto(U + url, wait_until='networkidle')
+            try:
+                p2.wait_for_selector('#top a[href="/factors.html"]', timeout=25000)
+            except Exception:
+                raise AssertionError(
+                    '%s（%s）的【顶栏】里没有因子广场按钮 —— 埋在正文说明里'
+                    '等于没有入口' % (nm, url))
+            g = p2.eval_on_selector('#top a[href="/factors.html"]', '''e=>{
+                const r = e.getBoundingClientRect(), c = getComputedStyle(e);
+                return {top: r.top, h: r.height, w: r.width,
+                        cur: c.cursor, bd: c.borderTopWidth};
+            }''')
+            # 可量的视觉事实：首屏之内 + 看得出能点（不是"有没有那个 class"）
+            assert 0 <= g['top'] < 900 and g['h'] > 8 and g['w'] > 8, \
+                '%s 的因子广场入口不在首屏或量不出来：%s' % (nm, g)
+            assert g['cur'] == 'pointer', '%s 的入口没有手型光标' % nm
+            p2.click('#top a[href="/factors.html"]')
+            p2.wait_for_selector('table.lvt tbody tr', timeout=60000)
+            assert p2.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length') > 0, \
+                '%s 点过去是空的' % nm
+            p2.close()
+        notes.append('顶栏入口 2 处首屏可见')
+
+        # 交叉引用三处：点得通即可
+        for url, nm in [('/', '首页参考'), ('/#/sync', '数据同步'),
+                        ('/indicators.html', '指标广场')]:
             p2 = br.new_page(viewport={'width': 1440, 'height': 900})
             p2.goto(U + url, wait_until='networkidle')
             try:
@@ -2254,7 +2283,7 @@ def t_factor_page():
             assert p2.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length') > 0, \
                 '%s 点过去是空的' % nm
             p2.close()
-        notes.append('入口 %d 处全点得通' % len(ent))
+        notes.append('交叉引用 3 处全点得通')
 
         # ---- ⑥ 两个广场互相指得到，且各自说清"我不是另一个" ----
         pg.goto(U + '/factors.html', wait_until='networkidle')

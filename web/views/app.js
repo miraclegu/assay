@@ -143,9 +143,22 @@ function syncHead(){
   const [key,title]=HEADS[seg]||HEADS[''];
   /* 过滤/全部展开只在【回测归档目录】上有意义 —— 别的视图里它们是噪声。 */
   const onRuns = seg==='runs';
+  /* 🔴 因子广场的入口要在【顶栏】，不是正文说明里的一个灰字链接。
+     第一版我把它放在目录树【下面】那段 note 里 —— 而那棵树有几百行，
+     等于"要滚到底才看得见"，加上它长得和旁边的说明文字一样，
+     两条老纪律一起踩：「看不出能点的入口 = 没有入口」
+     「跳过去落在一棵全折叠的树上 = 把入口做成摆设」。
+     用户当场问"因子广场的入口在哪里，点击回测看不到"。
+     ★ 与「★ 选中的规则」并排：它们是回测域的两个子页，同一类东西。
+     ★ 仍然【不进 NAV】—— 它是回测的子页，不单占顶栏入口
+       （同「板块与对比是子页」「指标广场不单占入口」那两条）。 */
+  const onPicks = seg==='picks';
+  const facBtn = '<a class="btn" href="/factors.html"'
+    + ' title="单个因子的横截面预测力：IC / IR / 分位超额 / 换手">🧪 因子广场</a>';
   pageHead(key, title, onRuns ? `
     <input id="filter" placeholder="过滤：策略 / 分组 / run_id / 参数">
     <button class="btn" id="expand">全部展开</button>
-    <a class="btn" href="#/picks" title="只看被标星的规则">★ 选中的规则</a>` : '');
+    <a class="btn" href="#/picks" title="只看被标星的规则">★ 选中的规则</a>${facBtn}`
+    : (onPicks ? facBtn : ''));
   if(onRuns) wireCatalogControls();
 }
