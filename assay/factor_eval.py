@@ -163,9 +163,70 @@ def _year_ic(con, h):
           FROM j)
         SELECT factor_id, date, corr(rv, rf) AS ic, count(*) AS n,
                avg(CASE WHEN q = 1 THEN fw END) AS q_lo,
-               avg(CASE WHEN q = %(nq)d THEN fw END) AS q_hi
+               avg(CASE WHEN q = %(nq)d THEN fw END) AS q_hi,
+               -- 🔴 当日横截面**等权平均**收益 —— 超额的基准。
+               --   分位组本身是等权的，拿等权全市场比才是同口径；
+               --   拿指数比会混进市值加权与成分差异（同「不拿 ETF 当指数用」）。
+               avg(fw) AS mkt
         FROM rk GROUP BY 1, 2 HAVING count(*) >= %(mn)d
     """ % {'h': h, 'nq': NQ, 'mn': MIN_XS}).df()
+
+
+# ============================ 分位换手率 ============================
+#: 换手按【调仓日】采样：每 h 个交易日一次。
+#: 🔴 逐日算出来的是**另一个量**（"今天的 top 组与昨天差多少"），
+#:   而「换手率」问的是"每次调仓要换掉百分之几" —— 两者差一个数量级。
+def _turnover(con, h, fglob):
+    """(factor_id, date, to_lo, to_hi) —— 相邻两个调仓日的分位成分变化率。
+
+    换手 = 1 − |A ∩ B| / |A|，A 是本次调仓日的该分位成分、B 是上一次的。
+    ★ 只读**调仓日**那几天的面板（5761 个交易日里每 h 天一个），
+      所以这一步很便宜 —— 逐日读的话要多算 h 倍而结果并不更准。
+    🔴 调仓日历是**全局**的、不按年切：按年切的话每年头一次调仓找不到
+      上一次，于是每年少一个点**而它不报错**。
+    """
+    con.execute("""
+        CREATE OR REPLACE TABLE rbd AS
+        SELECT date, row_number() OVER (ORDER BY date) - 1 AS i
+        FROM (SELECT DISTINCT date FROM fwd) ORDER BY date""")
+    con.execute("CREATE OR REPLACE TABLE rb AS "
+                "SELECT date, i / %d AS k FROM rbd WHERE i %% %d = 0" % (h, h))
+    cols = [d[0] for d in con.execute(
+        "SELECT * FROM read_parquet('%s') LIMIT 0" % fglob).description]
+    fac = [c for c in cols if c not in ('jq_code', 'date')]
+    lst = ', '.join(fac)
+    con.execute("""
+        CREATE OR REPLACE TABLE mem AS
+        WITH lg AS (
+          SELECT jq_code, date, factor_id, val FROM (
+            SELECT jq_code, date, UNPIVOT_NAME AS factor_id, UNPIVOT_VAL AS val
+            FROM (SELECT jq_code, date, %s FROM read_parquet('%s')
+                  WHERE date IN (SELECT date FROM rb))
+            UNPIVOT (UNPIVOT_VAL FOR UNPIVOT_NAME IN (%s))
+          ) WHERE val IS NOT NULL),
+        j AS (SELECT l.* FROM lg l JOIN fwd f USING (jq_code, date)),
+        q AS (SELECT factor_id, date, jq_code,
+                     ntile(%d) OVER (PARTITION BY date, factor_id ORDER BY val) AS q
+              FROM j)
+        SELECT q.factor_id, rb.k, q.jq_code, q.q
+        FROM q JOIN rb ON rb.date = q.date
+        WHERE q.q IN (1, %d)
+    """ % (lst, fglob, lst, NQ, NQ))
+    return con.execute("""
+        WITH cur AS (SELECT factor_id, k, q, count(*) n FROM mem GROUP BY 1,2,3),
+        keep AS (
+          SELECT a.factor_id, a.k, a.q, count(*) AS same
+          FROM mem a JOIN mem b
+            ON b.factor_id = a.factor_id AND b.q = a.q
+           AND b.k = a.k - 1 AND b.jq_code = a.jq_code
+          GROUP BY 1,2,3)
+        SELECT c.factor_id, rb.date, c.q, c.n,
+               1.0 - coalesce(k.same, 0) * 1.0 / c.n AS turn
+        FROM cur c
+        LEFT JOIN keep k USING (factor_id, k, q)
+        JOIN (SELECT DISTINCT k, date FROM rb) rb ON rb.k = c.k
+        WHERE c.k > 0
+    """).df()
 
 
 def build(root=None, quiet=False):
@@ -178,7 +239,7 @@ def build(root=None, quiet=False):
     t0 = time.time()
     _fwd(con, panel)
     if not quiet:
-        print('前瞻收益 + 横截面排名  %.0fs' % (time.time() - t0))
+        print('前瞻收益 + 横截面排名  %.0fs' % (time.time() - t0), flush=True)
     frames = []
     import pandas as pd
     for i, fp in enumerate(years, 1):
@@ -189,16 +250,38 @@ def build(root=None, quiet=False):
             d['h'] = h
             frames.append(d)
         if not quiet:
-            print('  %s  %4.0fs' % (os.path.basename(fp)[7:11], time.time() - t))
+            print('  %s  %4.0fs' % (os.path.basename(fp)[7:11], time.time() - t),
+                  flush=True)
     ic = pd.concat(frames, ignore_index=True)
     os.makedirs(OUT, exist_ok=True)
     p = os.path.join(OUT, 'factor_ic.parquet')
     tmp = p + '.tmp'
     ic.to_parquet(tmp, index=False)
     os.replace(tmp, p)
+
+    # ---- 分位换手：全局调仓日历，不按年切 ----
+    # 🔴 **换手这一步是大头，而且极不均匀**：实测 fwd1 2103s / fwd5 237s /
+    #   fwd20 46s，fwd1 一个就占全程 70%%。原因是 h=1 -> 每个交易日都是调仓日
+    #   （5761 个），自连接的规模比 fwd20 大 20 倍。
+    #   ★ 所以进度行要**逐个 h 打**，不然人看到的是"卡了 35 分钟"。
+    tos = []
+    for h in HORIZONS:
+        t = time.time()
+        d = _turnover(con, h, fglob)
+        d['h'] = h
+        tos.append(d)
+        if not quiet:
+            print('  换手 fwd%-3d %6d 行  %4.0fs' % (h, len(d), time.time() - t),
+                  flush=True)
+    to = pd.concat(tos, ignore_index=True)
+    pt = os.path.join(OUT, 'factor_turnover.parquet')
+    to.to_parquet(pt + '.tmp', index=False)
+    os.replace(pt + '.tmp', pt)
     m = {'built_at': time.strftime('%Y-%m-%d %H:%M:%S'),
          'factor_panel_sig': _sig(fglob), 'pool': POOL, 'horizons': list(HORIZONS),
-         'nq': NQ, 'min_xs': MIN_XS, 'rows': len(ic),
+         'nq': NQ, 'min_xs': MIN_XS, 'rows': len(ic), 'turnover_rows': len(to),
+         'excess_base': '当日横截面等权平均收益（不是指数）',
+         'annualize': '(1 + 区间内 h 日超额均值) ^ (244/h) − 1',
          'fwd': 'close_hfq[t+h] / close_hfq[t] - 1  (后复权 close-to-close)'}
     with open(META, 'w') as f:
         json.dump(m, f, ensure_ascii=False, indent=1)
@@ -207,7 +290,39 @@ def build(root=None, quiet=False):
     return ic
 
 
-def summary(h=20, root=None):
+#: 页面上那几个时间段。★ 存的是**逐日**的 IC 与逐次调仓的换手，
+#: 所以区间聚合是查询时做的 —— 换一个区间不用重算。
+WINDOWS = [('3m', '近 3 月', 63), ('6m', '近 6 月', 122), ('1y', '近 1 年', 244),
+           ('3y', '近 3 年', 732), ('5y', '近 5 年', 1220), ('all', '全部', None)]
+TRADING_DAYS = 244
+
+
+def _win_start(dates, n):
+    """区间起点：按**交易日**倒数 n 天，不是按自然日。
+
+    ★ 按自然日推的话"近 3 月"会随节假日漂（春节那个月只有 15 个交易日）——
+      同实盘业绩页那条，只是方向相反：那边要按自然日、这边要按交易日，
+      因为这里的样本单位就是交易日。
+    """
+    if n is None:
+        return None
+    u = sorted(set(dates))
+    return u[-n] if len(u) > n else u[0]
+
+
+def summary(h=20, win='all', root=None):
+    """按区间聚合 -> 页面要的那几列。
+
+    返回列（与 `factors.xlsx` 那 7 列对齐）：
+      ic / ir / q_lo_ex_ann / q_hi_ex_ann / to_lo / to_hi / spread / nday / npos
+
+    🔴 **超额的基准是「当日横截面等权平均」，不是指数** —— 而
+      `factors.xlsx` 用什么基准**未知**，所以两边的数值**不可比大小**，
+      只能比符号与序（同「别人的股息率里藏着别人的窗口」）。页面要写出来。
+    🔴 **年化**：`(1 + r̄)^(244/h) − 1`，r̄ 是区间内 h 日超额的均值。
+      ⚠ h 日窗口是**重叠**的，所以 r̄ 无偏但样本不独立 —— 这个年化是
+        "平均每 h 天赚这么多，折成一年"，**不是一条可实现的净值曲线**。
+    """
     import numpy as np
     import pandas as pd
     p = os.path.join(OUT, 'factor_ic.parquet')
@@ -215,18 +330,42 @@ def summary(h=20, root=None):
         raise SystemExit('还没算过 —— 先跑一次 python3 assay/factor_eval.py')
     ic = pd.read_parquet(p)
     ic = ic[ic['h'] == h]
+    n = dict((k, d) for k, _, d in WINDOWS).get(win, None)
+    d0 = _win_start(ic['date'], n)
+    if d0 is not None:
+        ic = ic[ic['date'] >= d0]
     g = ic.groupby('factor_id')
+    ex_lo = g.apply(lambda s: (s['q_lo'] - s['mkt']).mean(), include_groups=False)
+    ex_hi = g.apply(lambda s: (s['q_hi'] - s['mkt']).mean(), include_groups=False)
+    k = TRADING_DAYS / float(h)
     out = pd.DataFrame({
         'nday': g['ic'].size(),
         'ic': g['ic'].mean(),
         'ic_sd': g['ic'].std(),
         'pos': g['ic'].apply(lambda s: (s > 0).mean()),
-        'spread': (g['q_hi'].mean() - g['q_lo'].mean()),
+        'spread': g['q_hi'].mean() - g['q_lo'].mean(),
+        # 🔴 年化用 (1+r)^k −1 而不是 r×k：h=1 时 k=244，线性折算会把
+        #   日均 0.1% 说成 24.4% 而复利是 27.6% —— 差得看得见。
+        'q_lo_ex_ann': (1 + ex_lo) ** k - 1,
+        'q_hi_ex_ann': (1 + ex_hi) ** k - 1,
     })
     out['ir'] = out['ic'] / out['ic_sd']
     out['t_naive'] = out['ir'] * np.sqrt(out['nday'])
     # 🔴 重叠窗口：有效样本按 N/h 折。粗，但方向对；不折的话 t 虚高 √h 倍。
     out['t_adj'] = out['ir'] * np.sqrt(out['nday'] / float(h))
+
+    # ---- 换手（逐次调仓，单独一张表）----
+    pt = os.path.join(OUT, 'factor_turnover.parquet')
+    if os.path.isfile(pt):
+        to = pd.read_parquet(pt)
+        to = to[to['h'] == h]
+        if d0 is not None:
+            to = to[to['date'] >= d0]
+        piv = to.pivot_table(index='factor_id', columns='q', values='turn',
+                             aggfunc='mean')
+        out['to_lo'] = piv.get(1)
+        out['to_hi'] = piv.get(NQ)
+        out['nreb'] = to[to['q'] == 1].groupby('factor_id')['turn'].size()
     return out.reset_index()
 
 
@@ -279,6 +418,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--build', action='store_true', help='强制重算')
     ap.add_argument('--h', type=int, default=20, choices=HORIZONS)
+    ap.add_argument('--win', default='all',
+                    choices=[k for k, _, _ in WINDOWS], help='时间段')
     ap.add_argument('--top', type=int, default=15)
     ap.add_argument('--factor', help='看一个因子的逐年表现')
     ap.add_argument('--vs-xlsx', action='store_true',
@@ -316,7 +457,7 @@ def main():
     if a.vs_xlsx:
         return vs_xlsx(a.h, cat)
 
-    s = summary(a.h)
+    s = summary(a.h, a.win)
     cn = pd.read_parquet(cat, columns=['factor_id', 'name_cn', 'group_cn',
                                    'unit', 'xs_comparable'])
     s = s.merge(cn, on='factor_id', how='left')
@@ -327,16 +468,23 @@ def main():
         #   下面把个数与入口都说出来（同「删了要留痕」）。
         s = s[s['xs_comparable']]
     s = s.reindex(s['t_adj'].abs().sort_values(ascending=False).index)
-    print('\nfwd%d  按 |t_adj| 排序（🔴 t_adj 已按 N/h 折重叠窗口；'
-          't_naive 虚高约 √%d = %.1f 倍）\n' % (a.h, a.h, a.h ** 0.5))
-    print('%-16s %-14s %7s %7s %7s %8s %8s %9s'
-          % ('因子', '中文名', 'IC均值', 'IR', '正比例', 't_adj', 't_naive', '多空差'))
+    wl = dict((k, t) for k, t, _ in WINDOWS)[a.win]
+    print('\nfwd%d · %s  按 |t_adj| 排序（🔴 t_adj 已按 N/h 折重叠窗口；'
+          't_naive 虚高约 √%d = %.1f 倍）\n' % (a.h, wl, a.h, a.h ** 0.5))
+    print('%-16s %-12s %7s %7s %9s %9s %7s %7s %8s'
+          % ('因子', '中文名', 'IC均值', 'IR',
+             '最小分位', '最大分位', '低换手', '高换手', 't_adj'))
+    print('%-16s %-12s %7s %7s %9s %9s %7s %7s %8s'
+          % ('', '', '', '', '超额年化', '超额年化', '', '', ''))
     for _, r in s.head(a.top).iterrows():
         # 🔴 横截面不可比的单独标出来 —— 它的 IC 是在量纲上算出来的
-        mk = '' if r.get('xs_comparable', True) else '  🔴量纲'
-        print('%-16s %-14s %+7.4f %+7.3f %6.1f%% %+8.2f %+8.2f %+9.4f%s'
-              % (r['factor_id'], str(r['name_cn'])[:14], r['ic'], r['ir'],
-                 100 * r['pos'], r['t_adj'], r['t_naive'], r['spread'], mk))
+        mk = '' if r.get('xs_comparable', True) else ' 🔴量纲'
+        f = lambda v: '—' if pd.isna(v) else '%+8.2f%%' % (100 * v)
+        g = lambda v: '—' if pd.isna(v) else '%6.1f%%' % (100 * v)
+        print('%-16s %-12s %+7.4f %+7.3f %9s %9s %7s %7s %+8.2f%s'
+              % (r['factor_id'], str(r['name_cn'])[:12], r['ic'], r['ir'],
+                 f(r.get('q_lo_ex_ann')), f(r.get('q_hi_ex_ann')),
+                 g(r.get('to_lo')), g(r.get('to_hi')), r['t_adj'], mk))
     if not a.with_abs and n_abs:
         print('\n🔴 另有 %d 个【没有列出来】：单位是 元/股/元每天，横截面不可比。'
               % n_abs)
@@ -346,6 +494,9 @@ def main():
         print('   要看就 --with-abs（会标「🔴量纲」）；要拿它们做横截面，')
         print('   得先除以价格/成交额或做市值中性化 —— 那是下一层的事。')
     print('\n口径：%s' % POOL)
+    print('超额基准：当日横截面【等权平均】收益（不是指数）—— '
+          'factors.xlsx 用什么基准未知，两边数值【不可比大小】，只能比符号与序')
+    print('换手：每 %d 个交易日调一次仓，相邻两次该分位成分变了百分之几' % a.h)
     print('前瞻：close_hfq[t+%d]/close_hfq[t] − 1（后复权 close-to-close，'
           '【不可实现】，要问能赚多少得去回测）' % a.h)
     return 0

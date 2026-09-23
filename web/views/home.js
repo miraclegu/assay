@@ -62,7 +62,8 @@ async function showHome(){
 function homeRef(){
   return `<div class="lvwhy" style="margin-top:14px;text-align:center">
     参考 · <a href="#/docs">📖 口径字典</a>（数据字段怎么算的）
-    · <a href="/indicators.html">📊 指标广场</a>（有哪些指标、怎么算、能用在哪）
+    · <a href="/indicators.html">📊 指标广场</a>（看盘：单只票的时间序列）
+    · <a href="/factors.html">🧪 因子广场</a>（选股：全市场的横截面打分）
     · <a href="#/runs">📚 回测归档</a></div>`;
 }
 

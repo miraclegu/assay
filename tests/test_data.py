@@ -2138,3 +2138,133 @@ def t_factor_artifacts():
     return ('%d 个因子：目录表 / 面板列 / 公式指纹(%s) 三者一致；'
             '跨 3 个 hash 种子顺序相同；其中横截面不可比 %d 个'
             % (len(ids), now, n_abs))
+
+
+@case('因子广场：整页照服务端清单渲染，且四处入口一个都不许断', tag='web')
+def t_factor_page():
+    """这一页与指标广场是**同一条纪律的两次应用**，判据也照抄那几条。
+
+    🔴 **四件事都不报错**，所以四条都要单独钉：
+
+    | 坏法 | 表现 |
+    |---|---|
+    | 前端硬编码区间/族清单 | 服务端加一个区间或一个因子族，页面上**不会出现** |
+    | 三条口径不印出来 | 人拿这一页的 −19.86% 去跟 `factors.xlsx` 比大小 —— 而那是两个基准 |
+    | 量纲不可比的默认列出来 | 前 12 名里 7 个是"股价×上市以来分红拆细"，**排序排的不是因子** |
+    | 入口断链 | 从哪儿都点不进来，**而那不报错，只是从此没人找得到** |
+
+    ★ 与指标广场**互相指得到**且各自说清"我不是另一个"：名字太像，
+      不说的话人会在指标广场找"哪个因子选股有效"（那一页一个横截面的数都没有）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import json
+    import threading
+    from http.server import ThreadingHTTPServer
+    from assay import server as sv
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    U = 'http://127.0.0.1:%d' % port
+    from assay.srv import factors as fsrv
+    meta = fsrv.api_factors_meta({})
+    notes = []
+
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        pg = br.new_page(viewport={'width': 1440, 'height': 900})
+        errs = []
+        pg.on('pageerror', lambda e: errs.append(str(e)))
+
+        # ---- ① 清单照服务端给的渲染（三份都比，不是"有几个按钮"）----
+        pg.goto(U + '/factors.html', wait_until='networkidle')
+        pg.wait_for_selector('table.lvt tbody tr', timeout=60000)
+        assert not errs, '页面报错：%s' % errs
+        wl = pg.eval_on_selector_all('a[data-nav="win"]',
+                                     'a=>a.map(x=>x.textContent.trim())')
+        assert wl == [x['label'] for x in meta['windows']], \
+            '区间清单与服务端对不上：%s vs %s' % (wl, [x['label'] for x in meta['windows']])
+        hl = pg.eval_on_selector_all('a[data-nav="h"]', 'a=>a.map(x=>x.dataset.v)')
+        assert hl == [str(x) for x in meta['horizons']], '前瞻清单对不上：%s' % hl
+        gv = pg.eval_on_selector_all('#facg option',
+                                     'a=>a.map(x=>x.value).filter(v=>v)')
+        assert gv == [x['group_key'] for x in meta['groups']], \
+            '族清单对不上：%s vs %s' % (gv, [x['group_key'] for x in meta['groups']])
+        # 反向自证：这三份清单**真的有内容**，否则上面三条是"空 == 空"
+        assert len(wl) >= 3 and len(hl) >= 2 and len(gv) >= 4, \
+            '清单太短，上面三条等于空转：%d/%d/%d' % (len(wl), len(hl), len(gv))
+        notes.append('清单 %d 区间 / %d 前瞻 / %d 族' % (len(wl), len(hl), len(gv)))
+
+        # ---- ② 三条口径【原样】印出来 ----
+        body = pg.inner_text('#pg')
+        for c in meta['caveats']:
+            key = c[:14]
+            assert key in body, '口径没印出来：%s…' % key
+        # 文案里不许有 markdown 星号（HTML 渲染不了，原样显示给用户）
+        assert '**' not in body, '页面上有 markdown 星号'
+
+        # ---- ③ 量纲不可比的默认不列，而且要【说出来】 ----
+        n0 = pg.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length')
+        assert meta['n_abs'] > 0, '构造不成立：没有任何横截面不可比的因子'
+        import re as _re
+        assert _re.search(r'另有\s*%d\s*个' % meta['n_abs'], body), \
+            '隐藏了 %d 个却没在页面上说' % meta['n_abs']
+        pg.check('#facab')
+        pg.wait_for_selector('table.lvt tbody tr', timeout=60000)
+        n1 = pg.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length')
+        assert n1 > n0, '勾上"含量纲"之后行数没变多：%d -> %d' % (n0, n1)
+        notes.append('默认 %d 行、含量纲 %d 行（藏了 %d）' % (n0, n1, meta['n_abs']))
+
+        # ---- ④ 点名称进详情：公式 / 各区间 / 逐年，一块都不许少 ----
+        pg.goto(U + '/factors.html', wait_until='networkidle')
+        pg.wait_for_selector('table.lvt tbody tr td.tx a', timeout=60000)
+        fid = pg.eval_on_selector('table.lvt tbody tr td.tx a',
+                                  'a=>new URL(a.href).searchParams.get("id")')
+        pg.click('table.lvt tbody tr td.tx a')
+        pg.wait_for_selector('.fcode', timeout=60000)
+        d = pg.inner_text('#pg')
+        assert pg.eval_on_selector('.fcode', 'e=>e.textContent.trim().length') > 3, \
+            '详情页没有公式'
+        assert '各区间的表现' in d and '逐年表现' in d, '详情页缺块'
+        assert '**' not in d and 'undefined' not in d and 'NaN' not in d, \
+            '详情页有星号/undefined/NaN'
+        # id 要进 URL —— 这一页的地址是拿去分享的
+        assert 'id=' + fid in pg.url, '详情没进 URL：%s' % pg.url
+        notes.append('详情 %s：2 张表' % fid)
+
+        # ---- ⑤ 四处入口 + 指标广场，逐个【真的点过去】 ----
+        #   只查 href 在不在的话，路由坏了照样绿（同「点了没反应」那条）
+        ent = [('/', '首页参考'), ('/#/runs', '回测归档'),
+               ('/#/picks', '选中的规则'), ('/#/sync', '数据同步'),
+               ('/indicators.html', '指标广场')]
+        for url, nm in ent:
+            p2 = br.new_page(viewport={'width': 1440, 'height': 900})
+            p2.goto(U + url, wait_until='networkidle')
+            try:
+                p2.wait_for_selector('a[href="/factors.html"]', timeout=25000)
+            except Exception:
+                raise AssertionError(
+                    '%s（%s）上没有因子广场入口 —— 从这儿走不到那一页，'
+                    '而那不报错，只是从此没人找得到' % (nm, url))
+            p2.click('a[href="/factors.html"]')
+            p2.wait_for_selector('table.lvt tbody tr', timeout=60000)
+            assert p2.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length') > 0, \
+                '%s 点过去是空的' % nm
+            p2.close()
+        notes.append('入口 %d 处全点得通' % len(ent))
+
+        # ---- ⑥ 两个广场互相指得到，且各自说清"我不是另一个" ----
+        pg.goto(U + '/factors.html', wait_until='networkidle')
+        pg.wait_for_selector('a[href="/indicators.html"]', timeout=30000)
+        assert '时间序列' in pg.inner_text('#pg'), '因子广场没说清"我不是指标广场"'
+        p3 = br.new_page()
+        p3.goto(U + '/indicators.html', wait_until='networkidle')
+        p3.wait_for_selector('a[href="/factors.html"]', timeout=30000)
+        t3 = p3.inner_text('#pg')
+        assert '横截面' in t3, '指标广场没说清"我不是因子广场"'
+        p3.close()
+        br.close()
+    return ' · '.join(notes)

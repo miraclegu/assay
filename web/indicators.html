@@ -163,6 +163,10 @@ function head(k, ind) {
         hfq: '历史不随新事件变 —— <b>回测与特征用的是它</b>；'
              + '代价是纵轴上的数与券商看到的价对不上。'}[FQ] || '')
     + '</div>'
+    + '<div class="lvwhy" style="margin:2px 0 6px">这一页是<b>看盘</b>用的：'
+    + '一个指标 = <b>单只票的一条时间序列</b>（这根 K 线上的 MACD 是多少）。'
+    + '要问"哪个量在<b>全市场横截面</b>上能选出跑赢的票"，'
+    + '那是另一件事，去 <a href="/factors.html">🧪 因子广场</a>。</div>'
     + (err ? '<div class="lvmsg bad">示例图取不到：' + esc(err)
              + '（指标定义仍然照常列出）</div>' : '')
     + '<div id="tabs">' + T.map(([kk, t, c, why]) =>

@@ -38,10 +38,13 @@ from urllib.parse import parse_qs, urlparse
 from .srv import base
 # ★ 这几个名字指的是 `srv/` 下的**路由模块**，不是 assay/live.py 那些业务模块
 #   （业务模块一律通过 base 里的延迟导入封装拿：base._live() / base._rt() …）
-from .srv import docs, live, market, rt, runs, stock, sync, watch
+from .srv import docs, factors, live, market, rt, runs, stock, sync, watch
 
 
 ROUTES = {
+    '/api/factors': factors.api_factors,
+    '/api/factor': factors.api_factor,
+    '/api/factors/meta': factors.api_factors_meta,
     '/api/docs': docs.api_docs,
     '/api/doc': docs.api_doc,
     '/api/runs': runs.api_runs,

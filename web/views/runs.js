@@ -205,7 +205,8 @@ function renderCatalog(){
   $('#cat').innerHTML=fpBar()+pickBar()+'<div class="lvtags" id="cmpbar"></div>'+'<div class="lvtags" id="delbar"></div>'+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
     `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
       所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
-      回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;
+      回测按<b>运行时间</b>倒序。目录可任意嵌套。<br>
+      挑规则之前先看<a href="/factors.html">🧪 因子广场</a>：那里是【单个因子】的横截面预测力（IC / IR / 分位超额），而这里是【一整套规则】跑出来的净值 —— 两件事，别互相代替。</div>`;
   document.querySelectorAll('.vopen[data-ver]').forEach(e=>e.onclick=ev=>{
     ev.stopPropagation();          // 否则会连带切换所在节点的展开状态
     location.hash='#/ver/'+e.dataset.ver;});
@@ -299,7 +300,7 @@ function showPicks(){
     <h2>★ 选中的规则（${ms.length}）</h2>
     <div class="note">★ 标在【单次回测】上 —— run 记录了策略 + 参数 + 区间 + 成本口径
       + 数据指纹，才是完整的一条规则；同一策略换个参数就是另一条规则。
-      点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。${nDiff>1?
+      点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。单个因子的横截面效果在 <a href="/factors.html">🧪 因子广场</a>。${nDiff>1?
       ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致 —— 与多数行不同的那几行标了「口径不同」，'
       +'跨行比年化前先看清（本项目两次栽在拿滑点 0 的数字比含滑点的基准上）。</b>':''}</div>
     <div class="lvtags" id="cmpbar"></div>

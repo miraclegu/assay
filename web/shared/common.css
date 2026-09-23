@@ -961,3 +961,20 @@ h4.psect{margin:14px 0 6px;font-size:12px;font-weight:600;color:var(--dim);
 body.hasidx{padding-bottom:30px}
 #idxbar .ixw a#idxcfg{margin-left:8px;text-decoration:none;opacity:.75}
 #idxbar .ixw a#idxcfg:hover{opacity:1}
+
+/* ---- 因子广场 /factors.html ------------------------------------------
+   🔴 **不作用域化**（不写成 `#fac .dim`）—— `.pw` 的 overflow-x 当初只定义在
+     `#pk` 下面，别的页面写了 class 却没有滚动，而 class 名看着"已经处理过了"。
+     这几个都是通用件，谁用都该生效。 */
+.dim{color:var(--dim)}
+.warn2{color:var(--warn)}
+th.srt{cursor:pointer;user-select:none}
+th.srt:hover{color:var(--accent)}
+/* 公式可能很长 —— pre-wrap + break 让它自己折行，
+   而不是把整个 body 撑出横滚（窄屏那条） */
+.fcode{margin:6px 0 10px;background:#12161b;border:1px solid var(--line);
+  border-radius:6px;padding:10px 13px;white-space:pre-wrap;word-break:break-word;
+  font:12px/1.75 "SF Mono",Menlo,monospace;color:#cbd4de}
+.fsel,.fq{padding:4px 8px;background:var(--panel2);color:var(--fg);
+  border:1px solid var(--line);border-radius:5px;font-size:12px}
+.fsel:focus,.fq:focus{outline:none;border-color:var(--accent)}

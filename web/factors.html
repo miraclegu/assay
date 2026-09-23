@@ -1,0 +1,324 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>因子广场 · assay</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/shared/common.css">
+<div id="app">
+  <div id="top"></div>
+  <div class="page" id="pg"></div>
+</div>
+<div id="tip"></div>
+<script src="/shared/common.js"></script>
+<script>
+/* ============ 因子广场 ============
+   回答三件事：都有哪些因子、每个的效果怎么样、它是怎么算的。
+
+   🔴 整页照【服务端】那份清单渲染（/api/factors/meta 给区间 / 前瞻 / 族，
+     /api/factors 给行）—— 页面里没有任何一个因子名、也没有任何一个区间。
+     所以加一个因子（datalake/build/factors/ 注册一条 Spec），广场上自动就有，
+     而前端硬编码一份的话新因子页面上不会出现，**而那不报错**
+     （同「加一个指标，广场上自动就有」「/api/sector/kinds 说有几类」那两条）。
+
+   🔴 它是【回测域的子页】—— 顶栏点亮「📚 回测」而不单占一个入口：
+     因子是做策略时用的，看盘用的是「📊 指标广场」。两者互相有交叉链接，
+     且各自说清「我不是另一个」—— 名字太像，不说的话人会以为走错了地方。
+
+   🔴 三条口径（caveats）由服务端给并【原样印出来】：这一页每个数都带着
+     "不是可实现收益 / 超额基准是等权平均 / t 值重叠虚高"三个前提，
+     不写出来的话人会拿这里的 −19.86% 去跟别处的数比大小
+     （同「别人的『股息率』里藏着别人的窗口与去重规则」）。
+
+   命名：顶层一律 FAC / fac 前缀（FQ 已被个股页的复权口径占用）。
+*/
+
+// ---- 列定义写【一处】：表头 / 排序 / 单元格都读它 ----------------
+// 分三处写迟早"表头 8 列配 9 个数据"，而那不报错、只是整表错位一格
+//（同 LVPOS_COLS / COLS 那两条）。
+// 顺序按用户给的那串来：超额 -> 换手 -> IC -> IR。better 是"哪边更好"，
+// 换列排序时默认方向照它给 —— 一律降序会把最差的排最前面。
+const FCOL = [
+  {k:'name_cn',     t:'因子',            tx:1, srt:0},
+  {k:'q_lo_ex_ann', t:'最小分位超额年化', better:'hi', f:v=>facPct(v), col:1,
+   h:'最小分位（因子值最低的那 10%）相对当日横截面等权平均的超额，折年化'},
+  {k:'q_hi_ex_ann', t:'最大分位超额年化', better:'hi', f:v=>facPct(v), col:1,
+   h:'最大分位（因子值最高的那 10%）相对当日横截面等权平均的超额，折年化'},
+  {k:'to_lo',       t:'最小分位换手',     better:'lo', f:v=>pct(v,1),
+   h:'每 h 个交易日调一次仓，相邻两次该分位成分变了百分之几。越高交易成本越大'},
+  {k:'to_hi',       t:'最大分位换手',     better:'lo', f:v=>pct(v,1),
+   h:'同上，最大分位'},
+  {k:'ic',          t:'IC 均值',          better:'abs', f:v=>fmtN(v,4), col:1,
+   h:'每日因子值与前瞻收益的横截面 Spearman 秩相关，取区间均值。绝对值越大越有预测力'},
+  {k:'ir',          t:'IR',               better:'abs', f:v=>fmtN(v,3), col:1,
+   h:'IC 均值 / IC 标准差 —— 预测力的稳定程度'},
+  {k:'t_adj',       t:'t（折过）',         better:'abs', f:v=>fmtN(v,2), col:1,
+   h:'IC 的 t 值，已按 N/h 折掉重叠窗口的虚高；它仍偏乐观，别当显著性用'},
+];
+
+let FACM = null;      // 服务端给的可选项与口径
+let FACR = [];        // 当前这一份行
+let FACS = {k:'t_adj', d:-1};   // 排序：默认按 |t| 降序（与服务端一致）
+
+const facPct = v => v == null ? '—'
+  : (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+
+// ---- URL 就是状态：这一页的地址是拿去分享的 -----------------------
+const facQ = k => qs(k) || '';
+function facNav(kv) {
+  const u = new URL(location.href);
+  for (const k in kv) {
+    const v = kv[k];
+    if (v === '' || v == null) u.searchParams.delete(k);
+    else u.searchParams.set(k, v);
+  }
+  location.href = u.pathname + u.search;
+}
+
+// ================= 入口 =================
+async function facBoot() {
+  const id = facQ('id');
+  pageHead('runs', id ? '🧪 因子详情' : '🧪 因子广场');
+  try { FACM = await j('/api/factors/meta'); }
+  catch (e) { $('#pg').innerHTML = '<div class="warn">取不到因子目录：'
+    + esc(String(e)) + '<br>还没算过的话先跑一次 python3 assay/factor_eval.py</div>';
+    return; }
+  if (id) facDetail(id); else facList();
+}
+
+// ================= 列表 =================
+function facWin() { return facQ('win') || '1y'; }
+function facH()   { return facQ('h') || '20'; }
+
+function facBarHtml() {
+  const w = facWin(), h = facH(), g = facQ('group'), ab = facQ('abs');
+  const wins = FACM.windows.map(x =>
+    '<a href="#" class="lvtag rg' + (x.k === w ? ' on' : '') +
+    '" data-nav="win" data-v="' + esc(x.k) + '">' + esc(x.label) + '</a>').join('');
+  const hs = FACM.horizons.map(x =>
+    '<a href="#" class="lvtag rg' + (String(x) === h ? ' on' : '') +
+    '" data-nav="h" data-v="' + x + '">' + x + ' 日</a>').join('');
+  const gs = ['<option value="">全部族（' + FACM.n_factors + ' 个因子）</option>']
+    .concat(FACM.groups.map(x => '<option value="' + esc(x.group_key) + '"' +
+      (x.group_key === g ? ' selected' : '') + '>' + esc(x.group_cn) +
+      '（' + x.n + '）</option>')).join('');
+  return '<div class="lvtags" style="gap:14px;flex-wrap:wrap;align-items:center">' +
+    '<span><b class="dim">看多久</b> ' + wins + '</span>' +
+    '<span><b class="dim">前瞻</b> ' + hs + '</span>' +
+    '<select id="facg" class="fsel">' + gs + '</select>' +
+    '<input id="facq" class="fq" placeholder="搜名称 / 编码 / 公式" value="' +
+      esc(facQ('q')) + '" style="width:190px">' +
+    '<label style="cursor:pointer"><input type="checkbox" id="facab"' +
+      (ab ? ' checked' : '') + '> 含量纲不可比的</label>' +
+    '</div>';
+}
+
+function facSortRows() {
+  const c = FCOL.find(x => x.k === FACS.k) || FCOL[0];
+  const rows = FACR.slice();
+  rows.sort((a, b) => {
+    let x = a[c.k], y = b[c.k];
+    if (c.better === 'abs') { x = x == null ? null : Math.abs(x);
+                              y = y == null ? null : Math.abs(y); }
+    // null 一律排最后（不管升降序）—— 当 0 参与排序的话它会混在正负之间，
+    // 看着像"这个因子不好不坏"，而事实是【没有数据】（同 LVSORT 那条）
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    if (typeof x === 'string') return FACS.d * x.localeCompare(y);
+    return FACS.d * (x - y);
+  });
+  return rows;
+}
+
+function facTable() {
+  const rows = facSortRows();
+  const th = FCOL.map(c => {
+    const on = FACS.k === c.k;
+    return '<th class="' + (c.tx ? 'tx' : 'rt') + (c.srt === 0 ? '' : ' srt') +
+      '" data-k="' + c.k + '"' + (c.h ? ' title="' + esc(c.h) + '"' : '') + '>' +
+      esc(c.t) + (on ? (FACS.d < 0 ? ' ↓' : ' ↑') : '') + '</th>';
+  }).join('');
+  const tr = rows.map(r => '<tr>' + FCOL.map(c => {
+    if (c.k === 'name_cn') return '<td class="tx">' + facName(r) + '</td>';
+    const v = r[c.k];
+    const sty = c.col && v != null ? ' style="color:' + upc(v) + '"' : '';
+    return '<td class="rt"' + sty + '>' + c.f(v) + '</td>';
+  }).join('') + '</tr>').join('');
+  return '<div class="pw"><table class="lvt"><thead><tr>' + th +
+    '</tr></thead><tbody>' + tr + '</tbody></table></div>';
+}
+
+// 名称 + 小字编码放同一格（同 cnCell 那条：名称是人扫的，编码是机读的），
+// 两者【都】可点 —— 只有编码可点的话，习惯认名字的人会以为不能点
+function facName(r) {
+  const u = '/factors.html?id=' + encodeURIComponent(r.factor_id) +
+            '&h=' + encodeURIComponent(facH()) + '&win=' + encodeURIComponent(facWin());
+  return '<a href="' + u + '">' + esc(r.name_cn || r.factor_id) + '</a>' +
+    '<span class="cd"><a href="' + u + '">' + esc(r.factor_id) + '</a>' +
+    ' · ' + esc(r.group_cn || '') +
+    (r.xs_comparable ? '' : ' · <span class="warn2">量纲</span>') +
+    (r.src_dup ? ' · <span class="dim" title="与另一个因子秩相关 >= 0.999，' +
+      '多半是同一件事的两种写法">近似重复</span>' : '') + '</span>';
+}
+
+async function facList() {
+  const w = facWin(), h = facH();
+  $('#pg').innerHTML = '<h2>🧪 因子广场</h2><div class="note">读取中…</div>';
+  let o;
+  try {
+    o = await j('/api/factors?win=' + encodeURIComponent(w) + '&h=' + encodeURIComponent(h) +
+      (facQ('group') ? '&group=' + encodeURIComponent(facQ('group')) : '') +
+      (facQ('abs') ? '&abs=1' : ''));
+  } catch (e) {
+    $('#pg').innerHTML = '<div class="warn">取不到因子列表：' + esc(String(e)) + '</div>';
+    return;
+  }
+  if (o.error) { $('#pg').innerHTML = '<div class="warn">' + esc(o.error) + '</div>'; return; }
+  const q = facQ('q').trim().toLowerCase();
+  FACR = !q ? o.rows : o.rows.filter(r =>
+    (r.factor_id + ' ' + (r.name_cn || '') + ' ' + (r.group_cn || '')).toLowerCase().includes(q));
+
+  const wl = (FACM.windows.find(x => x.k === w) || {}).label || w;
+  let head = '<h2>🧪 因子广场</h2>' +
+    '<div class="note">一个因子 = 一列横截面打分。这一页回答「都有哪些、' +
+    '效果怎么样」—— 点名称或编码看它是怎么算的。' +
+    '<b>看盘用的技术指标在 <a href="/indicators.html">📊 指标广场</a></b>，' +
+    '那是【单只票的时间序列】；这里是【全市场同一天的横截面】，两码事。</div>' +
+    facBarHtml() +
+    '<div class="note">当前：<b>' + esc(wl) + '</b> · 前瞻 <b>' + esc(h) +
+    ' 个交易日</b> · 列出 <b>' + FACR.length + '</b> 个' +
+    (q ? '（搜「' + esc(q) + '」）' : '') +
+    (o.n_abs_hidden ? ' · 另有 <b>' + o.n_abs_hidden +
+      '</b> 个因子【横截面不可比】没有列出来（它们的量纲随股价与复权因子变，' +
+      '排序排的是"股价×上市以来分红拆细"不是因子本身）—— 勾上开关可以看' : '') +
+    '</div>';
+  if (!FACR.length) {
+    head += '<div class="note">没有匹配的因子。</div>';
+    $('#pg').innerHTML = head + facCaveats();
+  } else {
+    $('#pg').innerHTML = head + facTable() + facCaveats();
+  }
+  facWire();
+}
+
+// 三条口径原样印出来（服务端给），不是我这儿编的
+function facCaveats() {
+  return '<div class="lvsec"><h3>怎么读这几个数</h3><ul class="note">' +
+    FACM.caveats.map(x => '<li>' + esc(x) + '</li>').join('') +
+    '<li>股票池：' + esc(FACM.pool) + '</li>' +
+    '<li>超额的基准：' + esc(FACM.excess_base) + '</li>' +
+    '<li>前瞻收益：' + esc(FACM.fwd) + '</li>' +
+    '<li>换手：' + esc(FACM.turnover) + '</li>' +
+    '</ul></div>';
+}
+
+function facWire() {
+  // 事件委托挂在 #pg 上 —— 这一整块是 innerHTML 填进去的，
+  // 逐个绑的话换一次就没有 handler 了（点了没反应，且不报错）
+  $('#pg').onclick = e => {
+    const a = e.target.closest('a[data-nav]');
+    if (a) { e.preventDefault(); facNav({[a.dataset.nav]: a.dataset.v}); return; }
+    const th = e.target.closest('th.srt');
+    if (th) {
+      const c = FCOL.find(x => x.k === th.dataset.k);
+      if (!c) return;
+      // 换列时默认方向按【哪边更好】给 —— 一律升序会把最差的排最前面
+      if (FACS.k === c.k) FACS.d = -FACS.d;
+      else { FACS.k = c.k; FACS.d = c.better === 'lo' ? 1 : -1; }
+      $('#pg').querySelector('.pw').outerHTML = facTable();
+      facWire();
+    }
+  };
+  const g = $('#facg'); if (g) g.onchange = () => facNav({group: g.value});
+  const ab = $('#facab'); if (ab) ab.onchange = () => facNav({abs: ab.checked ? 1 : ''});
+  const q = $('#facq');
+  if (q) {
+    let t = null;
+    q.oninput = () => { clearTimeout(t); t = setTimeout(() => facNav({q: q.value.trim()}), 300); };
+    q.onkeydown = e => { if (e.key === 'Enter') { clearTimeout(t); facNav({q: q.value.trim()}); } };
+  }
+}
+
+// ================= 详情 =================
+async function facDetail(id) {
+  $('#pg').innerHTML = '<div class="note">读取中…</div>';
+  let o;
+  try { o = await j('/api/factor?id=' + encodeURIComponent(id) + '&h=' + encodeURIComponent(facH())); }
+  catch (e) { $('#pg').innerHTML = '<div class="warn">取不到：' + esc(String(e)) + '</div>'; return; }
+  if (!o) {
+    $('#pg').innerHTML = '<div class="warn">没有这个因子：' + esc(id) +
+      '<br><a href="/factors.html">回因子广场 ›</a></div>';
+    return;
+  }
+  const i = o.info, back = '/factors.html?win=' + encodeURIComponent(facWin()) +
+    '&h=' + encodeURIComponent(facH());
+  const dep = (i.deps || '').split(',').filter(x => x);
+  let s = '<h2>' + esc(i.name_cn || i.factor_id) +
+    ' <span class="dim" style="font-size:14px">' + esc(i.factor_id) + '</span></h2>' +
+    '<div class="lvtags">' +
+    '<span class="lvtag">' + esc(i.group_cn) + '</span>' +
+    '<span class="lvtag">单位 ' + esc(i.unit || '—') + '</span>' +
+    '<span class="lvtag" title="exact=与行情软件口径逐位对过；std=标准定义；' +
+      'own=本项目自己的定义">口径 ' + esc(i.tier_cn || i.tier) + '</span>' +
+    (i.xs_comparable ? '' : '<span class="lvtag warn2" title="它的量纲随股价与' +
+      '复权因子变，横截面排序排的是股价而不是因子本身">横截面不可比</span>') +
+    '<a class="btn" href="' + back + '">‹ 回因子广场</a>' +
+    '</div>';
+
+  s += '<div class="lvsec"><h3>干什么用的</h3><div class="note">' +
+    esc(i.desc || '（还没写说明）') + '</div>' +
+    '<h3>怎么算的</h3><pre class="fcode">' + esc(i.formula || '—') + '</pre>' +
+    '<div class="note">依赖 ' + (dep.length ? dep.map(x =>
+      '<code>' + esc(x) + '</code>').join(' · ') : '—') +
+    ' · 预热 <b>' + esc(i.warm_eff != null ? i.warm_eff : i.warm) + '</b> 根' +
+    '<span class="dim">（算第一个有效值之前要先喂这么多根 K 线；' +
+    'Wilder 递推那类永远记着起点，少喂一点不报错、只是数悄悄变了）</span>' +
+    (i.note ? '<br>' + esc(i.note) : '') + '</div></div>';
+
+  // 各区间对比 —— 「近 3 月好、全程不好」这种事一眼要看得见
+  if (o.windows && o.windows.length) {
+    s += '<div class="lvsec"><h3>各区间的表现（前瞻 ' + esc(String(o.h)) + ' 日）</h3>' +
+      '<div class="pw"><table class="lvt"><thead><tr><th class="tx">区间</th>' +
+      '<th class="rt">天数</th><th class="rt">IC 均值</th><th class="rt">IR</th>' +
+      '<th class="rt">最小分位超额年化</th><th class="rt">最大分位超额年化</th>' +
+      '<th class="rt">最小分位换手</th><th class="rt">最大分位换手</th>' +
+      '<th class="rt">t（折过）</th></tr></thead><tbody>' +
+      o.windows.map(w => '<tr><td class="tx">' + esc(w.label) + '</td>' +
+        '<td class="rt">' + (w.nday == null ? '—' : w.nday) + '</td>' +
+        '<td class="rt" style="color:' + upc(w.ic) + '">' + fmtN(w.ic, 4) + '</td>' +
+        '<td class="rt" style="color:' + upc(w.ir) + '">' + fmtN(w.ir, 3) + '</td>' +
+        '<td class="rt" style="color:' + upc(w.q_lo_ex_ann) + '">' + facPct(w.q_lo_ex_ann) + '</td>' +
+        '<td class="rt" style="color:' + upc(w.q_hi_ex_ann) + '">' + facPct(w.q_hi_ex_ann) + '</td>' +
+        '<td class="rt">' + pct(w.to_lo, 1) + '</td>' +
+        '<td class="rt">' + pct(w.to_hi, 1) + '</td>' +
+        '<td class="rt" style="color:' + upc(w.t_adj) + '">' + fmtN(w.t_adj, 2) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
+      '<div class="note">短区间的样本天数少，IC 抖动大 —— ' +
+      '拿「近 3 月」的排名去挑因子，挑到的多半是噪声。</div></div>';
+  }
+
+  // 逐年 —— 「优势几乎全来自单年」这种事只有逐年看得出来
+  if (o.years && o.years.length) {
+    s += '<div class="lvsec"><h3>逐年表现</h3>' +
+      '<div class="pw"><table class="lvt"><thead><tr><th class="tx">年</th>' +
+      '<th class="rt">天数</th><th class="rt">IC 均值</th>' +
+      '<th class="rt">IC 为正的天数占比</th>' +
+      '<th class="rt">最小分位超额（每 ' + esc(String(o.h)) + ' 日）</th>' +
+      '<th class="rt">最大分位超额（每 ' + esc(String(o.h)) + ' 日）</th></tr></thead><tbody>' +
+      o.years.map(y => '<tr><td class="tx">' + y.year + '</td>' +
+        '<td class="rt">' + y.nday + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ic) + '">' + fmtN(y.ic, 4) + '</td>' +
+        '<td class="rt">' + pct(y.pos, 1) + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ex_lo) + '">' + facPct(y.ex_lo) + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ex_hi) + '">' + facPct(y.ex_hi) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
+      '<div class="note">逐年那两列是【每 ' + esc(String(o.h)) +
+      ' 日】的超额均值，没有折年化 —— 折了会把"这一年里平均每期赚多少"' +
+      '读成"这一年赚了多少"，而重叠窗口下后者算不出来。</div></div>';
+  }
+  s += facCaveats();
+  $('#pg').innerHTML = s;
+}
+
+facBoot();
+</script>
