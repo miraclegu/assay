@@ -129,6 +129,27 @@ def t_docs():
         assert not re.search(r'\|\s*-{3,}', bare), '%s 表格分隔行没吃掉' % x['key']
         assert '**' not in bare, '%s 裸 ** 漏出' % x['key']
         assert not re.search(r'^#{1,6} ', bare, re.M), '%s 裸 # 漏出' % x['key']
+
+        # 🔴 **一行切出来的格子比表头多 = 多出的那几格被【静默丢掉】**
+        #   （`_md` 按 `range(len(head))` 取，超出的直接不渲染）。
+        #   实测成因是文档里的 `\|`（转义竖线）：renderer 原来裸 `split('|')`，
+        #   9 行被切碎。**裸 ** 那条只在加粗恰好跨过竖线时才抓得到** ——
+        #   而内容被吃掉是每一行都在发生的（同「悄悄截断比查不出来更糟」）。
+        src = open(sv._doc_path(x['rel']), encoding='utf-8',
+                   errors='replace').read().split('\n')
+        j, m = 0, len(src)
+        while j < m:
+            if re.match(r'^\s*\|.*\|\s*$', src[j]) and j + 1 < m \
+                    and re.match(r'^\s*\|[\s:|-]+\|\s*$', src[j + 1]):
+                nh = len(sv._cells(src[j])); j += 2
+                while j < m and re.match(r'^\s*\|.*\|\s*$', src[j]):
+                    nc = len(sv._cells(src[j]))
+                    assert nc <= nh, ('%s 第 %d 行切出 %d 格而表头只有 %d 格，'
+                                      '多出的会被静默丢掉: %s'
+                                      % (x['key'], j + 1, nc, nh, src[j].strip()[:80]))
+                    j += 1
+                continue
+            j += 1
         n_tab += h.count('<table')
         n_row += h.count('<tr')
     assert sv.api_doc({'key': 'nope_不存在'}) is None, '未知 key 应返回 None -> 404'

@@ -15,6 +15,13 @@ _DOCS = [
     ('trap',    '4 · 按陷阱',      '数据字典（索引）', 'datalake/docs/数据字典/4-按陷阱索引.md'),
     ('extapi',  '5 · 外部行情接口', '数据字典（索引）', 'datalake/docs/数据字典/5-外部行情接口.md'),
     ('dictix',  '索引说明',        '数据字典（索引）', 'datalake/docs/数据字典/README.md'),
+    # ★ 顺序 = 读的顺序：能不能 -> 怎么算 -> 放哪。
+    #   🔴 新增文档必须在这里加一行，否则「🔄 数据 → 数据字典」页上根本没有
+    #     它的入口 —— **而那不报错**，只是从看板走不到（同「合并的风险不是
+    #     少两个按钮，是把功能藏起来」那条）。
+    ('fcan',    '能不能复现',      '因子',                 'datalake/docs/因子清单-可复现性.md'),
+    ('fspec',   '怎么算（公式）',  '因子',                 'datalake/docs/因子实现规格.md'),
+    ('fmod',    '模块设计',        '因子',                 'datalake/docs/因子模块设计.md'),
     ('jq',      '聚宽接口备忘',    '原文出处',             'datalake/docs/聚宽接口备忘.md'),
     ('jqfactor', '聚宽因子口径',   '原文出处',             'datalake/docs/jqfactor-口径.md'),
     ('qmt',     'QMT 探针实测',    '原文出处',             'assay/qmt/PROBE_FINDINGS.md'),
@@ -108,6 +115,27 @@ def _md_inline(t):
 
 
 
+def _cells(ln):
+    """按【未转义】的 `|` 切表格单元格，并把 `\\|` 还原成 `|`。
+
+    🔴 原来是裸 `split('|')`，于是文档里写 `MAD = |TP - MA|` 这种必须转义的
+      竖线时，那一行被切成多出几列 —— **而它不报错**：页面上只是多几个空格子、
+      正文里多出一个反斜杠。更糟的是**加粗跨过竖线**时
+      （`**... Sigma(MF \\| TP up) ...**`）开闭标记落进不同的格子，
+      **裸 ** 直接漏到页面上** —— 那条守卫正是这么抓到的（实测 9 行受影响）。
+    ★ 不处理 `\\\\|`（转义的反斜杠后面跟竖线）：文档里没有，
+      而为一个没出现过的形状加分支只会让这里更难读。
+    """
+    s = ln.strip()
+    # 🔴 首尾那对边框竖线不能用 `strip('|')` 去 —— 行尾恰好是 `\\|` 时它会把
+    #   竖线吃掉、剩一个裸反斜杠。
+    if s.startswith('|'):
+        s = s[1:]
+    if s.endswith('|') and not s.endswith('\\|'):
+        s = s[:-1]
+    return [c.replace('\\|', '|').strip() for c in re.split(r'(?<!\\)\|', s)]
+
+
 def _md(text):
     """够用就好的 markdown -> html：标题 / 表格 / 代码块 / 列表 / 引用 / 分隔线。
 
@@ -131,11 +159,11 @@ def _md(text):
 
         if re.match(r'^\s*\|.*\|\s*$', ln) and i + 1 < n \
                 and re.match(r'^\s*\|[\s:|-]+\|\s*$', lines[i + 1]):
-            head = [c.strip() for c in ln.strip().strip('|').split('|')]
+            head = _cells(ln)
             i += 2
             body = []
             while i < n and re.match(r'^\s*\|.*\|\s*$', lines[i]):
-                body.append([c.strip() for c in lines[i].strip().strip('|').split('|')])
+                body.append(_cells(lines[i]))
                 i += 1
             t = ['<div class="dtw"><table class="dt"><thead><tr>']
             t += ['<th>%s</th>' % _md_inline(c) for c in head]
