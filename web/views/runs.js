@@ -193,20 +193,39 @@ function renderNode(node,depth,keyPrefix,auto){
   });
   return h;
 }
+/* 🔴🔴 因子广场的入口在【回测内容区的顶部】，不在顶栏。
+   踩过两版才对（用户两次都当场指出来）：
+
+     v1  塞在目录树【下面】那段灰字 note 里
+         -> "因子广场的入口在哪里，点击回测看不到"（树几百行，要滚到底）
+     v2  挪进顶栏 pageHead 的 extra
+         -> "不是要把这个入口放到回测里吗？怎么暴露在最外面？"
+            （顶栏是**全局导航**，域内子页塞进去层级就乱了）
+     v3  内容区顶部的按钮带 —— **首屏可见 + 层级正确**，两件事一起满足
+
+   ★ 它同时解释「与回测有什么不同」：因子是单个量的横截面预测力，
+     回测是一整套规则跑出来的净值 —— 两件事，别互相代替。
+   ★ 空态（过滤不中）也要有它：入口不该跟着过滤结果消失。 */
+function facBar(){
+  return '<div class="lvtags" id="facbar" style="margin:0 0 10px">'
+    + '<a class="btn" href="/factors.html">🧪 因子广场</a>'
+    + '<span class="lvwhy">挑规则之前先看：那里是【单个因子】的横截面预测力'
+    + '（IC / IR / 分位超额 / 换手），而这里是【一整套规则】跑出来的净值 —— '
+    + '两件事，别互相代替。</span></div>';
+}
 function renderCatalog(){
   /* 过滤框只在回测归档视图里存在（顶栏随 hash 变）—— 没有它时当空过滤。 */
   const fe=$('#filter');
   const q=(fe?fe.value:'').trim().toLowerCase();
   const rs=RUNS.filter(r=>!q||((r.strategy_path||'')+' '+r.strategy+' '+r.run_id+' '+r.code_sha+' '+
       Object.entries(r.params||{}).map(([k,v])=>k+'='+v).join(' ')).toLowerCase().includes(q));
-  if(!rs.length){$('#cat').innerHTML='<div class="note" style="padding:40px 0;text-align:center">'+
+  if(!rs.length){$('#cat').innerHTML=facBar()+'<div class="note" style="padding:40px 0;text-align:center">'+
     (RUNS.length?'没有匹配的回测':'还没有归档 —— 先跑一次 <code>python3 run.py ...</code>')+'</div>';return;}
   const auto=!!q;            // 过滤时自动展开，否则默认全收起
-  $('#cat').innerHTML=fpBar()+pickBar()+'<div class="lvtags" id="cmpbar"></div>'+'<div class="lvtags" id="delbar"></div>'+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
+  $('#cat').innerHTML=facBar()+fpBar()+pickBar()+'<div class="lvtags" id="cmpbar"></div>'+'<div class="lvtags" id="delbar"></div>'+'<div class="tree">'+renderNode(buildTree(rs),0,'',auto)+'</div>'+
     `<div class="note">策略身份 = <b>文件内容哈希</b>：同一路径改一个字符就是另一个策略，
       所以版本（⌗）是独立的一层；只有一个版本时会跳过这层。
-      回测按<b>运行时间</b>倒序。目录可任意嵌套。<br>
-      挑规则之前先看<a href="/factors.html">🧪 因子广场</a>：那里是【单个因子】的横截面预测力（IC / IR / 分位超额），而这里是【一整套规则】跑出来的净值 —— 两件事，别互相代替。</div>`;
+      回测按<b>运行时间</b>倒序。目录可任意嵌套。</div>`;
   document.querySelectorAll('.vopen[data-ver]').forEach(e=>e.onclick=ev=>{
     ev.stopPropagation();          // 否则会连带切换所在节点的展开状态
     location.hash='#/ver/'+e.dataset.ver;});
@@ -298,9 +317,10 @@ function showPicks(){
       title="点击按此列排序">${t} ${arrow(k)}</th>`;
   $('#main').innerHTML=`<div id="pk">
     <h2>★ 选中的规则（${ms.length}）</h2>
+    ${facBar()}
     <div class="note">★ 标在【单次回测】上 —— run 记录了策略 + 参数 + 区间 + 成本口径
       + 数据指纹，才是完整的一条规则；同一策略换个参数就是另一条规则。
-      点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。单个因子的横截面效果在 <a href="/factors.html">🧪 因子广场</a>。${nDiff>1?
+      点<b>行</b>进入该次回测详情；点<b>表头</b>排序；本金与成本口径在<b>行的 tooltip</b> 里。${nDiff>1?
       ' <b style="color:var(--warn)">⚠ 这些规则的成本口径不一致 —— 与多数行不同的那几行标了「口径不同」，'
       +'跨行比年化前先看清（本项目两次栽在拿滑点 0 的数字比含滑点的基准上）。</b>':''}</div>
     <div class="lvtags" id="cmpbar"></div>

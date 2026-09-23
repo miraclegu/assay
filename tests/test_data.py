@@ -2235,37 +2235,52 @@ def t_factor_page():
         assert 'id=' + fid in pg.url, '详情没进 URL：%s' % pg.url
         notes.append('详情 %s：2 张表' % fid)
 
-        # ---- ⑤ 入口：主入口要【首屏可见的按钮】，交叉引用点得通即可 ----
-        #   🔴 第一版判据只验"存在且点得动" —— 而我把 #/runs 那个放在了
-        #     目录树【下面】那段灰字 note 里（几百行之后），用户当场问
-        #     "因子广场的入口在哪里，点击回测看不到"。**判据比要证的事宽**。
-        #   ★ 两档分开，别混：回测域的两页要【看得见能点】（顶栏按钮），
-        #     而首页参考行 / 数据同步 / 指标广场是**交叉引用**，
-        #     刻意不做成一块（同「首页每块只给摘要 + 一个入口」那条）。
+        # ---- ⑤ 入口：主入口要【内容区顶部 + 首屏可见】的按钮 ----
+        #   两版都被用户当场指出来，判据因此要钉【两件事】，缺一不可：
+        #     v1 埋在目录树下面的灰字 note 里 -> "点击回测看不到"
+        #        （树几百行，要滚到底）-> 判据①：首屏可见 + 手型光标
+        #     v2 挪进顶栏 pageHead 的 extra -> "怎么暴露在最外面？"
+        #        （顶栏是全局导航，域内子页塞进去层级就乱）
+        #        -> 判据②：**不许在 #top 里**
+        #   ★ 只钉①的话它会飘上顶栏、只钉②的话它会沉回树底 —— 分工别记反。
         for url, nm in [('/#/runs', '回测归档'), ('/#/picks', '选中的规则')]:
             p2 = br.new_page(viewport={'width': 1440, 'height': 900})
             p2.goto(U + url, wait_until='networkidle')
             try:
-                p2.wait_for_selector('#top a[href="/factors.html"]', timeout=25000)
+                p2.wait_for_selector('#facbar a[href="/factors.html"]', timeout=25000)
             except Exception:
                 raise AssertionError(
-                    '%s（%s）的【顶栏】里没有因子广场按钮 —— 埋在正文说明里'
+                    '%s（%s）的内容区顶部没有因子广场按钮 —— 埋在正文说明里'
                     '等于没有入口' % (nm, url))
-            g = p2.eval_on_selector('#top a[href="/factors.html"]', '''e=>{
+            # ② 不许飘到顶栏（全局导航区只放那 7 个域入口）
+            # 🔴 **反向自证**：顶栏得真的渲染了，否则这条在"顶栏整个空掉"
+            #   时也成立 —— 而我就这么干过一次（块替换把 `pageHead(...)`
+            #   整段删了，node --check 通过、这条用例全绿、截图还看着正常）。
+            #   同「整段替换代码时夹在中间的东西会被一起删掉」那条。
+            top = p2.inner_text('#top')
+            assert 'assay' in top and '回测' in top, \
+                '%s：顶栏没渲染（pageHead 没被调？）—— 那下面那条"不许飘到' \
+                '顶栏"就是空转：%r' % (nm, top[:80])
+            if nm == '回测归档':
+                for want in ('全部展开', '★ 选中的规则'):
+                    assert want in top, '顶栏少了这一页专属的控件：%s' % want
+            assert not p2.query_selector('#top a[href="/factors.html"]'), \
+                '%s：因子广场跑到【顶栏】去了 —— 它是回测的子页，' \
+                '不该与实盘/买点/盘面那排全局入口并列' % nm
+            g = p2.eval_on_selector('#facbar a[href="/factors.html"]', '''e=>{
                 const r = e.getBoundingClientRect(), c = getComputedStyle(e);
-                return {top: r.top, h: r.height, w: r.width,
-                        cur: c.cursor, bd: c.borderTopWidth};
+                return {top: r.top, h: r.height, w: r.width, cur: c.cursor};
             }''')
-            # 可量的视觉事实：首屏之内 + 看得出能点（不是"有没有那个 class"）
+            # ① 可量的视觉事实：首屏之内 + 看得出能点
             assert 0 <= g['top'] < 900 and g['h'] > 8 and g['w'] > 8, \
                 '%s 的因子广场入口不在首屏或量不出来：%s' % (nm, g)
             assert g['cur'] == 'pointer', '%s 的入口没有手型光标' % nm
-            p2.click('#top a[href="/factors.html"]')
+            p2.click('#facbar a[href="/factors.html"]')
             p2.wait_for_selector('table.lvt tbody tr', timeout=60000)
             assert p2.eval_on_selector_all('table.lvt tbody tr', 'a=>a.length') > 0, \
                 '%s 点过去是空的' % nm
             p2.close()
-        notes.append('顶栏入口 2 处首屏可见')
+        notes.append('内容区入口 2 处首屏可见且不在顶栏')
 
         # 交叉引用三处：点得通即可
         for url, nm in [('/', '首页参考'), ('/#/sync', '数据同步'),
