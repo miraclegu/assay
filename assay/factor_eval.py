@@ -259,7 +259,7 @@ def vs_xlsx(h, cat):
     #   对上的那一行未必是同一个因子（同「光看中文名分不出来」）。
     m = m[m['src_ic'].notna() & (~m['src_dup'])]
     print('与 factors.xlsx 的 IC 符号对数（fwd%d）—— 只比符号与序，'
-          '**绝对值不可比**\n' % h)
+          '【绝对值不可比】\n' % h)
     print('%-22s %5s %9s %9s' % ('', '个数', '符号一致', '秩相关'))
     for lab, sub in [('全部', m),
                      ('✓ 横截面可比', m[m['xs_comparable']]),
@@ -338,16 +338,16 @@ def main():
               % (r['factor_id'], str(r['name_cn'])[:14], r['ic'], r['ir'],
                  100 * r['pos'], r['t_adj'], r['t_naive'], r['spread'], mk))
     if not a.with_abs and n_abs:
-        print('\n🔴 另有 %d 个**没有列出来**：单位是 元/股/元每天，横截面不可比。'
+        print('\n🔴 另有 %d 个【没有列出来】：单位是 元/股/元每天，横截面不可比。'
               % n_abs)
         print('   hfq_factor 跨票 1.00~5899.9，它们的"排第几"排的是'
               '「股价 × 上市以来分红拆细」而不是信号；实测与 factors.xlsx')
-        print('   符号对不上的 19 个**全部**落在这几种单位里。')
+        print('   符号对不上的 19 个【全部】落在这几种单位里。')
         print('   要看就 --with-abs（会标「🔴量纲」）；要拿它们做横截面，')
         print('   得先除以价格/成交额或做市值中性化 —— 那是下一层的事。')
     print('\n口径：%s' % POOL)
     print('前瞻：close_hfq[t+%d]/close_hfq[t] − 1（后复权 close-to-close，'
-          '**不可实现**，要问能赚多少得去回测）' % a.h)
+          '【不可实现】，要问能赚多少得去回测）' % a.h)
     return 0
 
 
