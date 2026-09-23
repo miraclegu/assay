@@ -66,7 +66,13 @@ import time
 import duckdb
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(HERE)
+REPO = os.path.dirname(HERE)                    # assay 仓库根
+#: 🔴 `factors.xlsx` 在**工作区根**（assay 的再上一层）—— 而 `__file__`
+#:   在 `assay/assay/` 里比直觉深一层，剥两次 dirname 只到 assay 仓库根。
+#:   这个坑本项目记过三次（拆 srv/ 时 `/api/marks` 返回 {}、拆 lv/ 时账本
+#:   写进真目录、`lv/px.py` 那句注释就是物证）。★ 判据是**文件在不在**，
+#:   不是数层数 —— 所以下面那句 `isfile` 检查不能省。
+WS = os.path.dirname(REPO)                      # 工作区根（datalake 与 assay 的父目录）
 sys.path.insert(0, REPO)
 
 from assay import paths                                     # noqa: E402
@@ -240,7 +246,7 @@ def vs_xlsx(h, cat):
     c = pd.read_parquet(cat, columns=['factor_id', 'name_cn', 'src_dup',
                                       'xs_comparable'])
     s = s.merge(c, on='factor_id')
-    xl = os.path.join(REPO, 'factors.xlsx')
+    xl = os.path.join(WS, 'factors.xlsx')
     if not os.path.isfile(xl):
         raise SystemExit('没找到 %s' % xl)
     x = pd.read_excel(xl)
