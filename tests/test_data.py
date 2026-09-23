@@ -2010,3 +2010,131 @@ def t_etf_price_precision():
     return ('最近20日 %.1f%% 带第3位(基线 %.1f%%) · 持平 %.2f%%(基线 %.2f%%) · '
             '滚动窗口 %d 日覆盖÷10那种坏法 + 塌陷往回扩 + 链条 + 退役守卫'
             % (p_new, p_base, f_new, f_base, fx.WINDOW_DAYS))
+
+
+# ====================== 因子层（datalake/build/factors） ======================
+
+@case('因子层：与 indicators 逐值对数 + 试跑==落盘，两条自证命令必须绿', tag='fast')
+def t_factor_selfproofs():
+    """把因子模块那两条**手动**守卫接进来。
+
+    🔴 它们此前一条都不在 selftest 里 —— 而接进来的当天就发现**两条都已经
+      坏了**：加财务族之后 `deps` 里出现了 as-of 才有的 `b_*` 列，
+      而这两个脚本各自拼 SELECT，于是
+
+          check_vs_indicators  -> NameError: b_total_current_assets
+          factor_try --selftest -> Binder Error: 没有 b_account_receivable 这一列
+
+      两份同时坏、坏法还一样（同「两处实现必然分叉」）。修法不是各补一次：
+      取数搬进 `factors/load.py` 一处，三个调用方都用它。
+      ★ 重构是**值中性**的：与盘上那份逐位比，43,428 行 × 162 列完全相同。
+
+    ★ 走**子进程**而不是 import：这两条要证的就是"那两条命令还能跑"，
+      而人真去跑的时候敲的就是这个（同「模板要逐条真跑」那条）。
+    """
+    import subprocess
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    outs = {}
+    for name, argv in [
+            ('对数', ['python3', 'build/factors/tools/check_vs_indicators.py']),
+            ('自证', ['python3', 'build/factor_try.py', '--selftest'])]:
+        r = subprocess.run(argv, cwd=dl, capture_output=True, text=True,
+                           timeout=600)
+        assert r.returncode == 0, \
+            '%s 退出码 %d：\n%s' % (name, r.returncode, (r.stdout + r.stderr)[-900:])
+        outs[name] = r.stdout
+    # 🔴 判据不是"退出码 0" —— 脚本自己的总判定里有 🔴 就是红的
+    for name, s in outs.items():
+        assert '🔴' not in s.split('总判定')[-1], \
+            '%s 的总判定是红的：%s' % (name, s.split('总判定')[-1][:300])
+    # 🔴 **条数不许写死**（报告串会说谎）：对数脚本自己印跑了几项，
+    #   这里只要求它 >= 25 且与"因子里确实有这么多个"对得上。
+    m = re.search(r'✓ (\d+) 项与 indicators\.py', outs['对数'])
+    assert m and int(m.group(1)) >= 25, '对数项数读不出来或少于 25：%s' % outs['对数'][-300:]
+    return '对数 %s 项全过；试跑==Spec==族文件手写三者同一条路（含反向自证）' % m.group(1)
+
+
+@case('因子层：注册表与盘上产物必须一致（公式改了而没重建 = 静默过期）', tag='fast')
+def t_factor_artifacts():
+    """注册表是正本，目录表与因子面板是产物 —— 它们对不上就是**静默过期**。
+
+    🔴 三种对不上，表现各不相同、**没有一种会报错**：
+
+    | 对不上什么 | 表现 |
+    |---|---|
+    | 目录表少了某个因子 | 页面/查询里那个因子"不存在"，而面板里其实有它 |
+    | 面板少了某一列 | 那个因子**整列没落盘**，读它的人拿到 KeyError 或空 |
+    | `spec_sig` 变了 | **公式改了而没重建** —— 盘上的值按旧公式算，
+    |              | 而它长得和新的一模一样 |
+
+    ★ 第三条正是 `_meta.json` 存 `spec_sig` 的全部理由；这条用例就是它的消费方。
+    """
+    import json
+    import sys as _sys
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    bd = os.path.join(dl, 'build')
+    if bd not in _sys.path:
+        _sys.path.insert(0, bd)
+    for m in [k for k in list(_sys.modules) if k == 'factors' or k.startswith('factors.')]:
+        del _sys.modules[m]                      # 拿当前磁盘上的那份
+    from factors import all_specs, GROUPS        # noqa: E402
+
+    specs = all_specs()
+    ids = [s.id for s in specs]
+    assert len(ids) == len(set(ids)), '因子编号有重复'
+    assert all(s.group in GROUPS for s in specs)
+
+    # ---- ① 目录表 ----
+    import pandas as _pd
+    cat_p = os.path.join(dl, 'mart', 'factor_catalog.parquet')
+    assert os.path.isfile(cat_p), '没有目录表 —— 跑 build_factor_catalog.py'
+    cat = _pd.read_parquet(cat_p)
+    assert set(cat['factor_id']) == set(ids), (
+        '目录表与注册表对不上：目录多 %s / 少 %s —— 跑 build_factor_catalog.py'
+        % (sorted(set(cat['factor_id']) - set(ids))[:5],
+           sorted(set(ids) - set(cat['factor_id']))[:5]))
+
+    # ---- ② 因子面板的列 ----
+    import glob as _g
+    ys = sorted(_g.glob(os.path.join(dl, 'mart', 'factor_daily', 'factor_*.parquet')))
+    assert ys, '没有因子面板 —— 跑 build_factor_daily.py'
+    import duckdb as _d
+    cols = set(d[0] for d in _d.connect(':memory:').execute(
+        "SELECT * FROM read_parquet('%s') LIMIT 0" % ys[-1]).description)
+    miss = set(ids) - cols
+    assert not miss, ('因子面板少了这几列（它们【整列没落盘】）：%s —— '
+                      '跑 build_factor_daily.py --force' % sorted(miss)[:8])
+
+    # ---- ③ 公式指纹：改了公式而没重建 ----
+    meta = json.load(open(os.path.join(dl, 'mart', 'factor_daily', '_meta.json')))
+    import importlib.util as _iu
+    _sp = _iu.spec_from_file_location('_bfd', os.path.join(bd, 'build_factor_daily.py'))
+    _bfd = _iu.module_from_spec(_sp)
+    _sp.loader.exec_module(_bfd)
+    now = _bfd._spec_sig()
+    assert meta.get('spec_sig') == now, (
+        '公式指纹对不上（盘上 %s / 当前 %s）—— 有人改了公式没重建，'
+        '盘上那 %s 的值是按【旧公式】算的。跑 build_factor_daily.py --force'
+        % (meta.get('spec_sig'), now, '%.1f GB' % (
+            sum(v['bytes'] for v in meta.get('years', {}).values()) / 1e9)))
+
+    # ---- ④ 🔴 跨进程可复现：注册表顺序不许依赖 set 的迭代顺序 ----
+    #   本项目为「回测跨进程不可复现」栽过一次（PYTHONHASHSEED）。
+    #   同一个进程里读两遍只证明进程内一致，什么都没证 —— 必须跨进程。
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r)\n"
+            "from factors import all_specs\n"
+            "print(','.join(s.id for s in all_specs()))" % bd)
+    seen = set()
+    for seed in ('0', '1', '12345'):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        r = subprocess.run(['python3', '-c', code], capture_output=True,
+                           text=True, env=env, timeout=120)
+        assert r.returncode == 0, r.stderr[-400:]
+        seen.add(r.stdout.strip())
+    assert len(seen) == 1, '注册表顺序跨进程会变（%d 种）—— 有地方依赖了 set 的迭代顺序' % len(seen)
+
+    n_abs = int((~cat['xs_comparable']).sum())
+    return ('%d 个因子：目录表 / 面板列 / 公式指纹(%s) 三者一致；'
+            '跨 3 个 hash 种子顺序相同；其中横截面不可比 %d 个'
+            % (len(ids), now, n_abs))
