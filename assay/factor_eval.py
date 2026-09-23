@@ -303,11 +303,41 @@ def _win_start(dates, n):
     ★ 按自然日推的话"近 3 月"会随节假日漂（春节那个月只有 15 个交易日）——
       同实盘业绩页那条，只是方向相反：那边要按自然日、这边要按交易日，
       因为这里的样本单位就是交易日。
+
+    🔴 `sorted(set(dates))` 是**逐元素 Python 迭代** —— 对 90 万行的
+      datetime 列，profile 显示 `datetimes.__iter__` 被调 450 万次，
+      占整个 `summary` 的 **85%**（2.20s / 2.58s）。`pd.unique` 是 C 实现。
+      ★ 去重 + 排序的**语义一个字没变**，等价性靠 18 项指纹逐位比。
     """
+    import numpy as np
+    import pandas as pd
     if n is None:
         return None
-    u = sorted(set(dates))
+    u = np.sort(pd.unique(np.asarray(dates)))
     return u[-n] if len(u) > n else u[0]
+
+
+_PQ = {}
+
+
+def _load(path):
+    """按 (路径, mtime) 缓存 parquet —— `summary` 原来**每次都重读整份**
+    （factor_ic 94.6 MB，实测 0.06s × 每次调用；详情页要 6 个区间）。
+
+    🔴 **每个路径各自记 mtime**，重算之后自己失效。
+      ⚠ 第一版我写成「key 变了就 `_PQ.clear()`」—— 而这里有**两张表**
+        （factor_ic / factor_turnover），交替读就互相清空、缓存恒空。
+        那正是 `srv/factors.py` 那个 `_summary` 刚修掉的 bug 的翻版：
+        **「每次 miss 就清空」这个写法我连犯了两次**。
+    ★ 返回的是**同一个 DataFrame 对象**，所以调用方只许读、不许原地改；
+      `summary` 里全是 `ic = ic[...]` 这种产生新对象的写法，已核对。
+    """
+    import pandas as pd
+    mt = os.path.getmtime(path)
+    hit = _PQ.get(path)
+    if hit is None or hit[0] != mt:
+        _PQ[path] = (mt, pd.read_parquet(path))
+    return _PQ[path][1]
 
 
 def summary(h=20, win='all', root=None):
@@ -328,21 +358,26 @@ def summary(h=20, win='all', root=None):
     p = os.path.join(OUT, 'factor_ic.parquet')
     if not os.path.isfile(p):
         raise SystemExit('还没算过 —— 先跑一次 python3 assay/factor_eval.py')
-    ic = pd.read_parquet(p)
+    ic = _load(p)
     ic = ic[ic['h'] == h]
     n = dict((k, d) for k, _, d in WINDOWS).get(win, None)
     d0 = _win_start(ic['date'], n)
     if d0 is not None:
         ic = ic[ic['date'] >= d0]
     g = ic.groupby('factor_id')
-    ex_lo = g.apply(lambda s: (s['q_lo'] - s['mkt']).mean(), include_groups=False)
-    ex_hi = g.apply(lambda s: (s['q_hi'] - s['mkt']).mean(), include_groups=False)
+    # 🔴 这三个原来是 `groupby.apply(lambda …)` —— **逐组 Python 回调**，
+    #   实测占 summary 的一半（0.33s / 0.86s，profile 定位，不是猜）。
+    #   向量化成「先算逐行的量、再按 factor_id 求均值」，结果逐位相同
+    #   （改前存了 18 项指纹，改后全部对上）。
+    _fid = ic['factor_id']
+    ex_lo = (ic['q_lo'] - ic['mkt']).groupby(_fid).mean()
+    ex_hi = (ic['q_hi'] - ic['mkt']).groupby(_fid).mean()
     k = TRADING_DAYS / float(h)
     out = pd.DataFrame({
         'nday': g['ic'].size(),
         'ic': g['ic'].mean(),
         'ic_sd': g['ic'].std(),
-        'pos': g['ic'].apply(lambda s: (s > 0).mean()),
+        'pos': (ic['ic'] > 0).groupby(_fid).mean(),
         'spread': g['q_hi'].mean() - g['q_lo'].mean(),
         # 🔴 年化用 (1+r)^k −1 而不是 r×k：h=1 时 k=244，线性折算会把
         #   日均 0.1% 说成 24.4% 而复利是 27.6% —— 差得看得见。
@@ -357,7 +392,7 @@ def summary(h=20, win='all', root=None):
     # ---- 换手（逐次调仓，单独一张表）----
     pt = os.path.join(OUT, 'factor_turnover.parquet')
     if os.path.isfile(pt):
-        to = pd.read_parquet(pt)
+        to = _load(pt)
         to = to[to['h'] == h]
         if d0 is not None:
             to = to[to['date'] >= d0]

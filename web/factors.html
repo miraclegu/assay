@@ -203,7 +203,23 @@ async function facList() {
 
 // 三条口径原样印出来（服务端给），不是我这儿编的
 function facCaveats() {
+  // 🔴 t 那一列光靠列头的 tooltip 说不清 —— 用户直接问了「最后一列的 t
+  //   是什么意思」，那就是"不自我解释"的证据。而且**这张表默认按 |t| 排序**，
+  //   页面上原本一个字都没说（同「人自己数出来的数字不带口径，页面印出来的
+  //   可以带」那条）。
   return '<div class="lvsec"><h3>怎么读这几个数</h3><ul class="note">' +
+    '<li><b>IC 均值</b>：每日「因子值 vs 未来收益」的横截面秩相关，取区间平均。' +
+    '正 = 因子值越大未来收益越高；负 = 反向因子。绝对值越大越有预测力。</li>' +
+    '<li><b>IR</b> = IC 均值 ÷ IC 标准差 —— 预测力<b>稳不稳</b>，' +
+    '而不是有多强。</li>' +
+    '<li><b>t（折过）</b> = IR × √(有效样本数)，回答「这个因子的 IC ' +
+    '<b>稳定地不是 0</b> 吗」。“折过”折的是<b>重叠窗口</b>：前瞻 20 日时' +
+    '今天算 t→t+20、明天算 t+1→t+21，共用 19 天的未来收益，' +
+    'N 个交易日并不是 N 个独立样本 —— 有效样本按 N ÷ 前瞻天数折，' +
+    '不折的话 t 会虚高约 √20 ≈ 4.5 倍。' +
+    '🔴 它<b>仍然偏乐观</b>（粗校正，不是 Newey-West），' +
+    '所以只用来<b>排除</b>连粗校正都过不了的，<b>不用来"证明"什么</b>。' +
+    '前瞻 1 日不重叠，折不折一样。<b>这张表默认就按 |t| 降序排。</b></li>' +
     FACM.caveats.map(x => '<li>' + esc(x) + '</li>').join('') +
     '<li>股票池：' + esc(FACM.pool) + '</li>' +
     '<li>超额的基准：' + esc(FACM.excess_base) + '</li>' +
@@ -301,13 +317,14 @@ async function facDetail(id) {
   if (o.years && o.years.length) {
     s += '<div class="lvsec"><h3>逐年表现</h3>' +
       '<div class="pw"><table class="lvt"><thead><tr><th class="tx">年</th>' +
-      '<th class="rt">天数</th><th class="rt">IC 均值</th>' +
+      '<th class="rt">天数</th><th class="rt">IC 均值</th><th class="rt">IR</th>' +
       '<th class="rt">IC 为正的天数占比</th>' +
       '<th class="rt">最小分位超额（每 ' + esc(String(o.h)) + ' 日）</th>' +
       '<th class="rt">最大分位超额（每 ' + esc(String(o.h)) + ' 日）</th></tr></thead><tbody>' +
       o.years.map(y => '<tr><td class="tx">' + y.year + '</td>' +
         '<td class="rt">' + y.nday + '</td>' +
         '<td class="rt" style="color:' + upc(y.ic) + '">' + fmtN(y.ic, 4) + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ir) + '">' + fmtN(y.ir, 3) + '</td>' +
         '<td class="rt">' + pct(y.pos, 1) + '</td>' +
         '<td class="rt" style="color:' + upc(y.ex_lo) + '">' + facPct(y.ex_lo) + '</td>' +
         '<td class="rt" style="color:' + upc(y.ex_hi) + '">' + facPct(y.ex_hi) + '</td></tr>').join('') +

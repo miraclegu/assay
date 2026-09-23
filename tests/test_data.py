@@ -2170,8 +2170,36 @@ def t_factor_page():
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     U = 'http://127.0.0.1:%d' % port
     from assay.srv import factors as fsrv
+    fe = fsrv._eval()
     meta = fsrv.api_factors_meta({})
+
+
     notes = []
+
+    # ---- ⓪ `_win_start` 向量化之后必须与朴素写法等价 ----------------
+    #   它原本是 `sorted(set(dates))[-n]` —— 对 90 万行做逐元素 Python
+    #   迭代，占 summary 的 85%。改成 `np.sort(pd.unique(...))` 是纯粹的
+    #   提速，**语义一个字不许变**。
+    #   ★ 期望值用**被替换掉的那个朴素实现**现算（不是抄一份新的），
+    #     所以这条对"将来又有人动它"仍然有效。
+    import pandas as _pd
+    import datetime as _dt
+    _days = [_dt.date(2020, 1, 1) + _dt.timedelta(days=i) for i in range(40)]
+    import random as _rnd
+    _shuf = _days[:] * 3
+    _rnd.Random(0).shuffle(_shuf)                          # 🔴 必须乱序
+    for _src in (_pd.Series(_pd.to_datetime(_shuf)),       # 乱序 + 有重复
+                 _pd.Series(_pd.to_datetime(_days * 3)),   # 有序 + 有重复
+                 _pd.Series(_pd.to_datetime(_days[:5]))):  # 比 n 还短
+        for _n in (None, 1, 7, 40, 999):
+            got = fe._win_start(_src, _n)
+            want = None
+            if _n is not None:
+                u = sorted(set(_src))
+                want = u[-_n] if len(u) > _n else u[0]
+            assert (got is None and want is None) or _pd.Timestamp(got) == _pd.Timestamp(want), \
+                '_win_start(n=%s) 与朴素实现不等价：%s vs %s' % (_n, got, want)
+    notes.append('_win_start 向量化与朴素写法等价')
 
     with sync_playwright() as pw:
         br = pw.chromium.launch()
@@ -2218,6 +2246,18 @@ def t_factor_page():
         assert n1 > n0, '勾上"含量纲"之后行数没变多：%d -> %d' % (n0, n1)
         notes.append('默认 %d 行、含量纲 %d 行（藏了 %d）' % (n0, n1, meta['n_abs']))
 
+        # ---- ③b 缓存必须真的攒住：bug 的指纹就是"只剩 1 项" ----
+        #   🔴 判据用**缓存里有几项**，不用耗时 —— 时间判据在机器忙时会偶发。
+        #     第一版 `_summary` 每次 miss 就 clear()，于是 6 个区间逐个
+        #     miss 逐个清空，缓存最多留 1 项 -> 每次进详情重算 6 遍（2.7 秒）。
+        fsrv._SUM.clear()
+        fsrv.api_factor({'id': 'arbr', 'h': '20'})
+        nwin = len(meta['windows'])
+        assert len(fsrv._SUM) >= nwin, \
+            '详情页算了 %d 个区间，缓存里却只有 %d 项 —— 缓存没攒住，' \
+            '每次进详情都重算一遍' % (nwin, len(fsrv._SUM))
+        notes.append('缓存攒住 %d/%d 个区间' % (len(fsrv._SUM) - 1, nwin))
+
         # ---- ④ 点名称进详情：公式 / 各区间 / 逐年，一块都不许少 ----
         pg.goto(U + '/factors.html', wait_until='networkidle')
         pg.wait_for_selector('table.lvt tbody tr td.tx a', timeout=60000)
@@ -2225,14 +2265,38 @@ def t_factor_page():
                                   'a=>new URL(a.href).searchParams.get("id")')
         pg.click('table.lvt tbody tr td.tx a')
         pg.wait_for_selector('.fcode', timeout=60000)
-        d = pg.inner_text('#pg')
+        d0 = pg.inner_text('#pg')
         assert pg.eval_on_selector('.fcode', 'e=>e.textContent.trim().length') > 3, \
             '详情页没有公式'
-        assert '各区间的表现' in d and '逐年表现' in d, '详情页缺块'
-        assert '**' not in d and 'undefined' not in d and 'NaN' not in d, \
+        assert '各区间的表现' in d0 and '逐年表现' in d0, '详情页缺块'
+        assert '**' not in d0 and 'undefined' not in d0 and 'NaN' not in d0, \
             '详情页有星号/undefined/NaN'
         # id 要进 URL —— 这一页的地址是拿去分享的
         assert 'id=' + fid in pg.url, '详情没进 URL：%s' % pg.url
+
+        # 逐年表要有 IR（用户："逐年表现只有 ic，没有 ir"），
+        # 且**与主表同口径** —— 独立算一遍比，不拿被测对象的输出当期望
+        import pandas as _pd
+        d = fsrv.api_factor({'id': fid, 'h': 20})
+        assert d['years'] and all('ir' in y for y in d['years']), '逐年没给 IR'
+        _ic = _pd.read_parquet(os.path.join(fe.OUT, 'factor_ic.parquet'))
+        _ic = _ic[(_ic['factor_id'] == fid) & (_ic['h'] == 20)]
+        _ic = _ic.assign(y=_pd.to_datetime(_ic['date']).dt.year)
+        for y in d['years']:
+            sub = _ic[_ic['y'] == y['year']]['ic']
+            want = sub.mean() / sub.std()
+            assert abs(y['ir'] - want) < 1e-9, \
+                '%d 年 IR 对不上：%s vs %s（口径要与主表一致）' % (
+                    y['year'], y['ir'], want)
+        ths = pg.eval_on_selector_all(
+            '#pg table.lvt:last-of-type thead th', 'a=>a.map(x=>x.textContent.trim())')
+        assert 'IR' in ths, '逐年表的表头里没有 IR：%s' % ths
+        notes.append('逐年 %d 年带 IR 且与主表同口径' % len(d['years']))
+
+        # t 那一列要在页面上说清楚（用户问过「最后一列的 t 是什么意思」），
+        # 而且要说出**这张表按它排序** —— 只放在列头 tooltip 里等于没说
+        for kw in ('重叠', '不用来', '按 |t| 降序排'):
+            assert kw in d0, 't 的说明缺「%s」' % kw
         notes.append('详情 %s：2 张表' % fid)
 
         # ---- ⑤ 入口：主入口要【内容区顶部 + 首屏可见】的按钮 ----

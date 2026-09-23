@@ -87,9 +87,16 @@ def _summary(fe, h, win):
     """
     import os as _os
     mt = _os.path.getmtime(_os.path.join(fe.OUT, 'factor_ic.parquet'))
-    k = (h, win, mt)
+    # 🔴 只在【文件变了】时整份丢掉。第一版写成"每次 miss 就 clear()" ——
+    #   于是缓存**最多只留 1 项**，而详情页要 6 个区间、逐个 miss 逐个清空，
+    #   等于没有缓存（实测每次进详情都重算 6 遍 = 2.7 秒，用户报"卡顿"）。
+    #   ⚠ 当时的注释写的是"换了**文件**就丢掉"，而代码写的是"换了 **key**
+    #     就丢掉" —— **注释是对的，代码不是**（同「代码在和自己的注释打架」）。
+    if _SUM.get('_mt') != mt:
+        _SUM.clear()
+        _SUM['_mt'] = mt
+    k = (h, win)
     if k not in _SUM:
-        _SUM.clear()          # 换了文件就整份丢掉，不留旧 mtime 的残骸
         _SUM[k] = fe.summary(h, win)
     return _SUM[k]
 
@@ -158,8 +165,12 @@ def api_factor(q):
     if not ic.empty:
         g = ic.assign(y=pd.to_datetime(ic['date']).dt.year).groupby('y')
         for y, sub in g:
+            # 🔴 IR 与主表**同一个口径**（`summary` 里 ir = ic / ic_sd，
+            #   pandas std 默认 ddof=1）—— 另写一套的话"主表 IR 与逐年 IR
+            #   对不上"，而它不报错（同「两处实现必然分叉」）。
             yrs.append({'year': int(y), 'nday': int(len(sub)),
                         'ic': _f(sub['ic'].mean()),
+                        'ir': _f(sub['ic'].mean() / sub['ic'].std()),
                         'pos': _f((sub['ic'] > 0).mean()),
                         'ex_lo': _f((sub['q_lo'] - sub['mkt']).mean()),
                         'ex_hi': _f((sub['q_hi'] - sub['mkt']).mean())})
