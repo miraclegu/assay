@@ -27,3 +27,9 @@ live/**/__pycache__/
 # 删了也不丢东西：下次打开选股理由页会自动重算（见 srv/live.py `_explain_kick`）。
 live/*/signals/_explain/
 live/*/_bench/
+
+# ---- 因子评价 ----
+# `factors/` 是【产物】不是源码：IC 序列由 factor_eval.py 从 datalake 的因子
+# 面板重算，口径（股票池 / 前瞻 / 分组数）一变就必须整份重来。
+# 换口径之后留着旧的反而危险 —— 两套口径的 IC 比大小是在比两个不同的量。
+factors/
