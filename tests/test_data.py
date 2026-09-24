@@ -2174,7 +2174,7 @@ def t_factor_page():
     |---|---|
     | 前端硬编码区间/族清单 | 服务端加一个区间或一个因子族，页面上**不会出现** |
     | 三条口径不印出来 | 人拿这一页的 −19.86% 去跟 `factors.xlsx` 比大小 —— 而那是两个基准 |
-    | 量纲不可比的默认列出来 | 前 12 名里 7 个是"股价×上市以来分红拆细"，**排序排的不是因子** |
+    | 量纲不可比的默认列出来 | 前 12 名里 3 个是【成交量(股)】，**排序排的是股本不是因子** |
     | 入口断链 | 从哪儿都点不进来，**而那不报错，只是从此没人找得到** |
 
     ★ 与指标广场**互相指得到**且各自说清"我不是另一个"：名字太像，
@@ -2703,3 +2703,136 @@ def t_factor_missing():
     notes.append('页面 %d 行 / %d 组，两档分得开；手工加/删走通' % (
         nrow, len(api['reasons'])))
     return ' · '.join(notes)
+
+
+@case('因子「横截面可不可比」：判据是单位表，而单位要分得开价格与金额', tag='fast')
+def t_factor_xs_units():
+    """🔴🔴 用户 2026-09-24 问：「为什么『市值』『6日成交金额的移动平均值』
+    『20日资金流量』『流通市值』这些因子横截面不可比？」—— **他是对的，
+    那 6 个（连同 `a_ma20` 共 7 个规模/流动性因子）被误判了。**
+
+    原来的判据是 `ABS_UNITS = ('元','股','元/天')` **一刀切**，把 72 个判成
+    不可比。它是从一条**真实发现**推出来的：`ma20` 这类后复权价格均线，
+    横截面排序排的是「股价 × 上市以来分红拆细」（`hfq_factor` 跨票
+    1.00~5899.9）。发现没错，**按单位外推就推过头了** ——
+
+        元(价格)  股价与派生量      标度是股本与拆股史 -> 任意 -> 真不可比
+        股        成交量水平        标度是股本         -> 任意 -> 真不可比
+        元/天     回归斜率          标度是股价         -> 任意 -> 真不可比
+        ───────────────────────────────────────────────────────────
+        元(金额)  市值/成交额/财务   **元是全市场共同标度** -> 可比
+
+    🔴 **自相矛盾的铁证（不用测数据就成立）**：`ln_mv = log(totalmv)` 判为
+      可比、`mv = totalmv` 判为不可比 —— log 单调、这里算的是**秩相关**，
+      同一个排序判成两档。而 `ln_mv` 自己的描述里白纸黑字写着「取对数
+      **不改变序**，所以它与市值的横截面 IC 完全相同」——
+      **代码在和自己的注释打架**（本项目记过的老毛病）。
+    🔴 代价是可量的：`froec` 的第三层就是**按流通市值升序取 10**、
+      ETF-P1 的池子就是**成交额前 40**，而这两个因子在广场上**默认看不见**
+      （同「合并的风险不是少两个按钮，是把功能藏起来」）。
+
+    判据五段，**分工别记反**：
+
+        A 单位表是唯一判据，且**未登记的单位拒绝注册**（新因子写错会响亮失败）
+        B 粗单位 `元` 不许回来 —— 它同时装着"价格水平"与"经济规模"两种东西
+        C 两档都非空且分对：`元(金额)` 全可比 / `元(价格)` 全不可比
+        D 目录表与注册表**逐行**一致（改了单位忘了重建 catalog = 页面上是旧分档）
+        E 单调变换对（`log(X)` 与 `X`）必须同档 —— 正是上面那个矛盾
+
+    ⚠ E **不能**用"IC 逐位相同"去判：实测 `mv` 与 `ln_mv` 的 13 项里只有
+      6 项逐位相同，其余 7 项差 1e-9~3e-6 —— float64 把两个极近的 `totalmv`
+      的 log 压成相等，在并列处翻了几下。所以 E 钉的是**公式的形状**。
+    """
+    import sys as _sys
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    bd = os.path.join(dl, 'build')
+    if bd not in _sys.path:
+        _sys.path.insert(0, bd)
+    for m in [k for k in list(_sys.modules) if k == 'factors' or k.startswith('factors.')]:
+        del _sys.modules[m]
+    import factors as _F                          # noqa: E402
+    specs = _F.all_specs()
+
+    # ---- A 单位表是唯一判据；未登记的单位必须被拒 ----
+    assert isinstance(_F.UNITS, dict) and _F.UNITS, '没有 UNITS 表'
+    unk = sorted({s.unit for s in specs} - set(_F.UNITS))
+    assert not unk, '这些单位没在 UNITS 里登记：%r' % unk
+    for s in specs:
+        assert s.xs_comparable == _F.UNITS[s.unit], \
+            '%s 的可比性没有照单位表走' % s.id
+    try:
+        _F.Spec('_probe', '探针', 'ma', 'x', '', '升', ('close_hfq',), 1,
+                lambda x: None)
+    except AssertionError as e:
+        assert '未登记的单位' in str(e), '拒了，但报错指不到原因：%s' % e
+    else:
+        raise AssertionError(
+            '未登记的单位居然注册成功了 —— 新因子写个没见过的单位会被'
+            '**静默**归档，而"归错档"正是这条用例存在的理由')
+
+    # ---- B 粗单位 `元` 不许回来 ----
+    assert '元' not in _F.UNITS, \
+        ('`元` 又回到单位表里了 —— 它同时装着「价格水平」与「经济规模」，'
+         '正是 2026-09-24 那次误判 35 个因子的根')
+    assert not [s.id for s in specs if s.unit == '元'], \
+        '还有因子在用粗单位 `元`：%r' % [s.id for s in specs if s.unit == '元'][:5]
+
+    # ---- C 两档都非空、且分对 ----
+    money = [s for s in specs if s.unit == '元(金额)']
+    price = [s for s in specs if s.unit == '元(价格)']
+    assert money and price, \
+        '构造不对：元(金额) %d 个 / 元(价格) %d 个 —— 有一档是空的，判据空转' \
+        % (len(money), len(price))
+    bad = [s.id for s in money if not s.xs_comparable]
+    assert not bad, '元(金额) 里有被判成不可比的：%r' % bad[:5]
+    bad = [s.id for s in price if s.xs_comparable]
+    assert not bad, '元(价格) 里有被判成可比的：%r' % bad[:5]
+    # 规模 / 流动性那一批必须在「可比」这边（用户点名的就是它们）；
+    # 而价格水平那批必须仍在「不可比」那边 —— **两头都钉，少一头就往另一边飘**。
+    # ★ `ln_mv` **故意不在这串里** —— 它归 E 段（单调变换对）管。
+    #   写进来的话 M7 那条变异会被这里抓掉，E 就永远测不到，
+    #   而"哪条判据在起作用"说不清（同「别把功劳记在错的那句上」）。
+    for fid in ('mv', 'mv_float', 'a_ma6', 'a_ma20', 'a_std6', 'a_std20',
+                'mf_sum20'):
+        assert _F.by_id(fid).xs_comparable, \
+            '%s 被判成横截面不可比 —— 元是全市场共同标度，它可比' % fid
+    for fid in ('ma20', 'ema20', 'boll_up', 'close_bfq', 'atr14',
+                'v_ema5', 'slope6'):
+        assert not _F.by_id(fid).xs_comparable, \
+            ('%s 被判成可比 —— 它的标度由个股自己决定（股价 / 股本），'
+             '"排第几"排的是量纲' % fid)
+
+    # ---- D 目录表与注册表逐行一致（不只是 id 集合）----
+    import pandas as _pd
+    cat_p = os.path.join(dl, 'mart', 'factor_catalog.parquet')
+    assert os.path.isfile(cat_p), '没有目录表 —— 跑 build_factor_catalog.py'
+    cat = _pd.read_parquet(cat_p).set_index('factor_id')
+    diff = [(s.id, s.unit, cat.at[s.id, 'unit'],
+             s.xs_comparable, bool(cat.at[s.id, 'xs_comparable']))
+            for s in specs if s.id in cat.index
+            and (s.unit != cat.at[s.id, 'unit']
+                 or s.xs_comparable != bool(cat.at[s.id, 'xs_comparable']))]
+    assert not diff, \
+        ('目录表与注册表对不上 %d 条（头一条 %r）—— `_spec_sig` 只盖'
+         '「公式/预热/依赖」，**改了单位它不会变**，于是页面上还是旧分档'
+         '而没有任何地方报错。跑一次 build_factor_catalog.py' % (len(diff), diff[0]))
+
+    # ---- E 单调变换对必须同档 ----
+    byf = {s.formula: s for s in specs}
+    pairs = [(s, byf['log(%s)' % s.formula]) for s in specs
+             if 'log(%s)' % s.formula in byf]
+    assert pairs, \
+        '构造不对：一对「log(X) 与 X」都找不到，这条判据是空转的'
+    for a, b in pairs:
+        assert a.xs_comparable == b.xs_comparable, \
+            ('%s(%s) 与 %s(%s) 是同一个量的单调变换，而广场算的是**秩相关** '
+             '—— 两者是同一个排序，不许判成两档（2026-09-24 就是这么把 mv '
+             '判成不可比、ln_mv 判成可比的）' % (a.id, a.unit, b.id, b.unit))
+
+    n_abs = sum(1 for s in specs if not s.xs_comparable)
+    return ('%d 个因子：单位表 %d 档是唯一判据、未登记单位被拒；'
+            '粗单位 `元` 已拆成 元(价格)%d / 元(金额)%d；'
+            '目录表与注册表逐行一致；单调变换对 %d 组同档；'
+            '横截面不可比 %d 个（此前一刀切是 72 个）'
+            % (len(specs), len(_F.UNITS), len(price), len(money),
+               len(pairs), n_abs))
