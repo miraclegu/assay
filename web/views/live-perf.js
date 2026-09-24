@@ -275,8 +275,12 @@ function renderPerf(aid){
     LP_TABS.forEach(([k], i) => {
       const e = $('#lpp' + i);
       if (!e) return;
-      e.innerHTML = (k === 'exec') ? '<div id="lp_exec" class="lpbox"></div>'
-        : (k === 'why') ? '<div id="lp_why" class="lpbox"></div>' : _empty;
+      /* 🔴 这三块**不依赖权益曲线**（执行差异比的是信号与成交、选股理由看
+         的是信号、公司行动读的是账本与 gbbq）—— 一律给 `_empty` 的话，
+         刚建的账户点进去就是一句与它们毫无关系的"还没有权益曲线"，
+         那正是「合并的风险是把功能藏起来」那条。 */
+      const _free = {exec: 'lp_exec', why: 'lp_why', corp: 'lp_corp'};
+      e.innerHTML = _free[k] ? `<div id="${_free[k]}" class="lpbox"></div>` : _empty;
     });
     document.querySelectorAll('#lptabs div').forEach(
       e => e.onclick = () => lpTab(+e.dataset.i));
@@ -285,6 +289,7 @@ function renderPerf(aid){
     if (LPXD) renderExec(aid);
     const _k0 = LP_TABS[LPTAB] && LP_TABS[LPTAB][0];
     if (_k0 === 'why') { LPDONE.why = 1; renderWhy(aid); }
+    if (_k0 === 'corp') { LPDONE.corp = 1; renderCorp(aid); }
     return;
   }
   const n = o.dates.length;
@@ -364,6 +369,7 @@ function renderPerf(aid){
     fills: '<div id="lp_fill" class="lpbox"></div>',
     trips: '<div id="lp_trip" class="lpbox"></div>',
     top: '<div id="lp_top" class="lpbox"></div>',
+    corp: '<div id="lp_corp" class="lpbox"></div>',
     why: '<div id="lp_why" class="lpbox"></div>'};
   LP_TABS.forEach(([k], i) => { const e = $('#lpp' + i);
     if (e) e.innerHTML = _PANE[k] || ''; });
@@ -1096,6 +1102,7 @@ function xdSection(it){
 const LP_TABS = [['chart', '业绩曲线'], ['detail', '业绩明细'],
                  ['hold', '每日持仓'], ['fills', '交易明细'],
                  ['trips', '清仓记录'], ['top', '盈亏榜'],
+                 ['corp', '公司行动'],
                  ['why', '选股理由'], ['exec', '执行差异']];
 let LPTAB = 0;
 
@@ -1125,7 +1132,7 @@ function lpTab(i) {
      （同「列定义写一处」那条）。 */
 const LPLAZY = {hold: aid => renderHoldings(aid), fills: aid => renderFills(aid),
                 trips: aid => renderTrips(aid), top: aid => renderTops(aid),
-                why: aid => renderWhy(aid)};
+                corp: aid => renderCorp(aid), why: aid => renderWhy(aid)};
 
 let LPAID = null;                  // 当前账户（页签懒渲染要用）
 let LPQ = null;                    // 进页面时的查询参数（?tab= / ?d= / ?all=）
@@ -1391,6 +1398,86 @@ async function renderTops(aid) {
       所以往返笔数少时<b>列不满十条</b>，那是事实不是少算了。
       完整的一笔一笔在「清仓记录」，逐笔买卖操作在「交易明细」。</div>
     ${lpTopHtml(t)}`;
+}
+
+/* 公司行动（除权除息 / 送转 / 配股）——「我的成本与股数为什么变了」。
+
+   🔴 它**单独一个页签**而不是挤在持仓表下面那一行。v1 就是横排铺开的，
+      用户当场指出「如果行动项很多的话可能会排列有点拥挤」——
+      持有一年十几二十条分红，那一行会绕成好几排小字，而且**没法纵向扫**
+      （同「要横向比较 N 条东西，就得是表格，不能是卡片」那条）。
+
+   ★ 这一页比主视图那行摘要多两样，正是"明细"的理由：
+       · **已清仓的票也在**（它在除权那天还持有着）—— 持仓表里早没有它了
+       · 逐条给出**股数前后**与**派回多少**，送转与配股才看得出来
+   ★ 与主视图同一个 `corp_summary`，不是第二份实现。 */
+async function renderCorp(aid) {
+  const el = $('#lp_corp');
+  if (!el) return;
+  let c;
+  try { c = await j(`/api/live/corp?id=${encodeURIComponent(aid)}`); }
+  catch (e) { el.innerHTML = `<div class="lvmsg bad">${esc(String(e))}</div>`; return; }
+  if (!$('#lp_corp')) return;        /* 人已经走开（见 renderChart 那条） */
+  const ev = (c.events || []).slice().reverse();   /* 新的在上 */
+  const st = c.status || {};
+  /* 🔴 数据落后要**说出来**：落后的表现是「这几天除权的票不会被调」，
+       而那不报错（同「拒单必须可见」）。它是要人去做事的，走 lvwarn。 */
+  const warn = (st.exists === false || st.stale)
+    ? `<div class="lvwarn" style="margin-bottom:8px">⚠ 公司行动数据${
+        st.exists === false ? '<b>不在</b>（没跑过导出）'
+        : `只覆盖到 <b>${esc(st.max_ex_date || '?')}</b>，落后 ${num(st.stale_days)} 天`
+      } —— 这期间除权的票，成本与股数<b>不会</b>被调，而那不报错。跑一次
+      <code>datalake/sync_daily.sh</code> 即可。</div>` : '';
+  const conf = c.conflict
+    ? `<div class="lvwarn" style="margin-bottom:8px">⚠ ${esc(c.conflict.why)}</div>` : '';
+  const up = (c.upcoming || []).length
+    ? `<div class="note">即将除权（已公告、还没到除权日，所以<b>还没调</b>）：${
+        c.upcoming.map(e => esc(e.date.slice(5)) + ' ' + esc(e.name || e.code)
+          + ' ' + esc(e.what)).join('　·　')}</div>` : '';
+  if (!ev.length) {
+    el.innerHTML = '<div class="ttl">公司行动</div>' + warn + conf + up
+      + '<div class="none">持有期间还没有发生过除权除息 / 送转 / 配股。'
+      + '发生了会在这里逐条列出，持仓表里那只票的名称后面也会带一个标记。</div>';
+    return;
+  }
+  const cash = ev.reduce((s, e) => s + (e.cash || 0), 0);
+  const kind = e => {
+    const t = [];
+    if (e.cash_per_share) t.push('派现');
+    if (e.split_per_share) t.push('送转');
+    /* ★ 配股**没有自动执行**（要掏钱、可以放弃），所以必须标出来 ——
+         只列一个「配股」会被读成"已经配了"，而股数一列又没变，自相矛盾。 */
+    if (e.rights_per_share) t.push('配股<span class="dim">（未执行）</span>');
+    return t.join(' + ') || '—';
+  };
+  const per = e => {
+    const t = [];
+    if (e.cash_per_share) t.push('派现 ' + num(e.cash_per_share, 4));
+    if (e.split_per_share) t.push('送转 ' + num(e.split_per_share, 4));
+    if (e.rights_per_share) t.push('配股 ' + num(e.rights_per_share, 4));
+    return t.join('　') || '—';
+  };
+  el.innerHTML = `<div class="ttl">公司行动
+      <span class="lvwhy">${ev.length} 次${cash ? ' · 派回 ' + num(cash, 2) + ' 元' : ''}</span></div>
+    ${warn}${conf}
+    <div class="note">账本记的是<b>不复权</b>价，而除权当天股价真的掉下去 ——
+      所以成本与股数按这几条<b>调过了</b>（摊薄成本降、送转让股数涨）。
+      现金按<b>税前</b>加，与券商到账口径一致：A 股红利税是卖出时按持有期补扣的，
+      那笔钱会出现在卖出成交的费用里。数据源是通达信 gbbq，随每日同步自动到。</div>
+    ${up}
+    <div class="pw"><table class="lvt">
+      <tr><th class="tx">除权日</th><th class="tx">名称</th><th class="tx">类型</th>
+          <th class="tx">每股</th><th>股数</th><th>派回现金</th></tr>
+      ${ev.map(e => `<tr>
+        <td class="tx">${esc(e.date)}</td>
+        <td class="tx">${cnCell(e.code, e.name)}</td>
+        <td class="tx">${kind(e)}</td>
+        <td class="tx">${esc(per(e))}</td>
+        <td class="rt">${e.shares_after === e.shares_before
+          ? num(e.shares_before)
+          : `<b>${num(e.shares_before)} → ${num(e.shares_after)}</b>`}</td>
+        <td class="rt">${e.cash ? num(e.cash, 2) : '—'}</td></tr>`).join('')}
+    </table></div>`;
 }
 
 async function renderTrips(aid) {

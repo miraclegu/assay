@@ -75,6 +75,18 @@ def tdx_kline_sql(kind, root=None):
     return "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (datalake(root), pat)
 
 
+# 公司行动（除权除息 / 送转 / 配股）。由 `datalake/build/load_tdx_gbbq.py`
+# 从 tdx 的 `raw_gbbq` 导出（`sync_daily.sh` 10/12）。
+# 🔴 **assay 侧一律读这份 parquet，不连 tdx.db** —— 那个库会被 cron 持有写锁。
+GBBQ_REL = 'raw/tdx/gbbq.parquet'
+
+
+def tdx_gbbq_sql(root=None):
+    """公司行动表的 duckdb 读法。与因子表**成对**：因子是"价格缩了多少"，
+    gbbq 是"为什么缩" —— 前者用来复权，后者用来给实盘账本调成本与股数。"""
+    return "read_parquet('%s/%s')" % (datalake(root), GBBQ_REL)
+
+
 def tdx_factor_sql(root=None):
     """复权因子表。★ 与日线**成对**出现（后复权 = close × coalesce(f,1)），
     所以放一起 —— 分开两处写，下次加一类就会漏掉其中一处。"""

@@ -621,6 +621,13 @@ table.pkt.rk td.rt,table.pkt.rk th.rt{white-space:nowrap;width:1%}
   border:1px solid var(--line);border-radius:50%;font-size:9px;color:var(--dim);
   cursor:help;vertical-align:1px}
 .lvq:hover{color:var(--fg);border-color:var(--accent)}
+/* 公司行动标记（2026-09-24）：hover 给**这只票**的除权除息 / 送转 / 配股。
+   ★ 与 `.lvq` 形态**刻意不同**：那个是可点的（跳到选股理由那一期），
+     而这个只是提示 —— 描成同样的圆圈按钮的话人会去点它，
+     而它点了没反应（同「给一个点了没反应的按钮比不给更糟」那条）。
+     所以不描边、只一个符号 + `cursor:help`。 */
+.cmark{color:var(--dim);cursor:help;font-size:11px;vertical-align:1px}
+.cmark:hover{color:var(--accent)}
 .lvbadge{display:inline-block;font-size:10px;padding:0 5px;border-radius:3px;
   border:1px solid var(--line);color:var(--dim);white-space:nowrap;margin-right:5px}
 /* 状态徽章后面还跟着策略集合的 chip（备选/目标池），要留空隙 —— 

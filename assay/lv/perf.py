@@ -25,6 +25,63 @@ from assay import symbols as _SYM   # 取价/取名的唯一正本
 from assay import paths as _paths   # 路径与读法的唯一解析
 
 
+def corp_summary(aid, datalake=None):
+    """这本账上发生过哪些公司行动 —— **留痕给排查用**。
+
+    🔴 这一块回答的是「我的成本/股数为什么变了」。不给的话，人看到摊薄成本
+      比自己记的低就只能猜，而"猜"正是本项目反复吃亏的地方。
+
+    给四样：
+      events    逐条（除权日 / 代码 / 每股派现与送转 / 这本账实收多少 / 前后股数）
+      cash      合计派回来多少现金（税前）
+      status    gbbq 这份数据覆盖到哪天、落后没有 —— 🔴 落后的表现是
+                「今天除权的那几只不会被调」，那是不报错的那种坏
+      upcoming  未来 15 天已公告未除权的（提前知道要除权）
+      conflict  手工分红流水与自动派现撞车了（有就说出来，不替人合并）
+    """
+    from . import corp as _corp
+    rows = _base.fills(aid)
+    evs = []
+    book = {}
+    try:
+        # 🔴 **一次重放拿两样**（事件 + 当前持仓）—— 第一版调了两遍
+        #   `fifo_lots`，加上 `corp_conflict` 里那遍，一次渲染就把整条重放
+        #   跑了 3~4 遍。不报错，只是慢，而"慢"把侧栏那个既有竞态的窗口
+        #   撑宽了（实测打挂了一条页面用例）。
+        book = _pos.fifo_lots(rows, root=datalake, events=evs)
+    except Exception:                                       # noqa: BLE001
+        evs = []
+    out = []
+    # 🔴 **名称要在这里补**，不能让页面拿"当前持仓"去配 —— 事件里含
+    #   **已经清仓**的票（它在除权那天还持有着），而那几只早就不在持仓表里了。
+    #   页面侧配不上就只能显示一串代码（同「ETF 那一列空的」那条）。
+    #   ★ 走 `px.names_of` 这个唯一正本（面板 -> ETF/指数快照回落、清 U+FFFD）。
+    try:
+        _nm = _px.names_of(sorted({e['act']['code'] for e in evs}),
+                           datalake=datalake) if evs else {}
+    except Exception:                                       # noqa: BLE001
+        _nm = {}
+    for e in evs:
+        a = e['act']
+        got = sum(x['cash'] for x in e['lots'])
+        sh0 = sum(x['shares_before'] for x in e['lots'])
+        sh1 = sum(x['shares_after'] for x in e['lots'])
+        out.append({'date': a['ex_date'].isoformat(), 'code': a['code'],
+                    'name': _nm.get(a['code']) or a['code'],
+                    'cash_per_share': round(a['cash'], 6) or None,
+                    'split_per_share': round(a['split'], 6) or None,
+                    'rights_per_share': round(a['rights'], 6) or None,
+                    'what': _corp.describe(a),
+                    'cash': round(got, 2), 'shares_before': sh0,
+                    'shares_after': sh1})
+    return {'events': out, 'cash': round(sum(x['cash'] for x in out), 2),
+            'status': _corp.status(datalake),
+            'upcoming': [{'date': a['ex_date'].isoformat(), 'code': a['code'],
+                          'what': _corp.describe(a)}
+                         for a in _corp.upcoming(list(book), root=datalake)],
+            'conflict': _pos.corp_conflict(aid)}
+
+
 def _last_px(feed, codes, day):
     """{code: (最新收盘, 那天的日期, 那天的昨收)}，按 <= day 取最近一条。
 
@@ -37,6 +94,30 @@ def _last_px(feed, codes, day):
         return {}
     return _SYM.last_px(feed.root, codes, day, con=feed.con)
 
+
+
+
+def _prev_close(tpl, day_str):
+    """从 `_last_px` 那个三元组 `(收盘, 那天的日期, 那天的昨收)` 里取出
+    **`day_str` 那天的昨收**。
+
+    🔴 这里必须按日期判，不能写死取哪一位（2026-09-24 实测踩到）：
+
+        面板日 <  day_str   盘中，面板停在昨天 -> 昨收就是面板那天的**收盘**
+        面板日 == day_str   收盘后已同步进来 -> 昨收要取面板那行的 **preclose**
+
+    原来两处都写死取 `[0]`（收盘）。盘中有实时价、`preclose` 从快照来，
+    所以回落那一支平时走不到；而**收盘后实时为空**时它就走到了 ——
+    于是「今天卖出」那部分的已实现拿**当天收盘**当基准，
+    卖在收盘价上算出来正好是 **0**，**而它不报错**
+    （用户 2026-09-22 要修的就是这个数）。
+    """
+    if not tpl:
+        return None
+    close, d, pre = (list(tpl) + [None, None, None])[:3]
+    if d is not None and getattr(d, 'isoformat', None):
+        d = d.isoformat()
+    return close if (d and day_str and str(d) < str(day_str)) else pre
 
 
 def positions_valued(aid, datalake=None):
@@ -59,8 +140,16 @@ def positions_valued(aid, datalake=None):
       `pnl_net`（全平落袋）。两者相减不会重复计费 —— 买入费只在成本里出现
       一次，卖出费只在 pnl_net 里出现一次。
 
-    ★ 都不含【已收分红】：broker 里 entry_price 在除权时不缩，就是为了让
-      价差与分红分开记。分红到账走 cashflows。
+    🔴 **`cost_net` 含【已收分红】的扣减**（2026-09-23 改）。原来这里写的是
+      「都不含已收分红：broker 里 entry_price 在除权时不缩」——
+      **那句话是【后复权】语境下的规则，搬到账本这边就反了**：
+      引擎跑后复权、除权日价不掉，所以它不用缩；而账本记**不复权**价，
+      除权当天价真的掉下去，成本不跟着调就是"浮盈被系统性报低"
+      （实测红利混合-M 三次除权合计 3,560 元，**而总资产那一格看着正常**）。
+      正本在 `lv/corp.py`，`fifo_lots` 的重放里交错处理。
+
+    ★ `cost`（成交均价）**仍然不含** —— 它是喂给引擎 `entry_price` 的口径，
+      动了实盘走的就不是策略自己的代码路径了。**两个数分工不同，别记反。**
     """
     book = _pos.fifo_lots(_base.fills(aid))
     money = _pos.cash(aid)
@@ -94,7 +183,13 @@ def positions_valued(aid, datalake=None):
         sh = sum(l['shares'] for l in lots)
         avg = sum(l['shares'] * l['price'] for l in lots) / sh
         buy_fee = sum(l.get('fee') or 0 for l in lots)
-        avg_net = (sh * avg + buy_fee) / sh          # 摊薄成本
+        # 🔴 摊薄成本用**实付本金** `paid`，不是 `shares × price`：
+        #   派现减 paid、送转只涨 shares，两种公司行动都自动对。
+        #   老批次没有这个字段（历史账本），退回 `shares × price`
+        #   —— 那时也没有任何公司行动作用过它，两者相等。
+        paid = sum(l.get('paid', l['shares'] * l['price']) for l in lots)
+        div_got = sum(l.get('div_gross') or 0 for l in lots)
+        avg_net = (paid + buy_fee) / sh              # 摊薄成本
         p, pd_, pc = px.get(c, (None, None, None))
         rt_src = rt_at = None
         r = rtp.get(c)
@@ -104,7 +199,7 @@ def positions_valued(aid, datalake=None):
             #   那一天**的昨收（面板到 09-02 时它是 09-01 收盘），而实时价
             #   是 09-03 的，基准差一天。正确基准：快照自带的 preclose，
             #   退一步用面板最新那天的**收盘**（= 今天的昨收）。
-            pc = r.get('preclose') or (px.get(c, (None,))[0])
+            pc = r.get('preclose') or _prev_close(px.get(c), today)
         v = (sh * p) if p else None
         pnl = (v - sh * avg_net) if v is not None else None
         # ★ 当日盈亏 = Σ 每一批 × (现价 − 基准)，基准分两种：
@@ -133,6 +228,10 @@ def positions_valued(aid, datalake=None):
             'code': c, 'name': nm.get(c, ''), 'shares': sh,
             'cost': round(avg, 4),                  # 成交均价（引擎口径）
             'cost_net': round(avg_net, 4),          # 摊薄成本（含买入费）
+            # ★ 留痕：这只票持有期内收到多少分红（税前）。没有就给 0 而不是
+            #   省略 —— 页面按固定的键取值，少一个键是 undefined，而
+            #   undefined 在屏幕上和"这只票没分过红"长得一模一样。
+            'div_got': round(div_got, 2),
             'buy_fee': round(buy_fee, 2),
             'price': (round(p, 3) if p else None),
             'px_date': (pd_.isoformat() if pd_ else None),
@@ -239,7 +338,7 @@ def positions_valued(aid, datalake=None):
                 continue
             c2, sh2, p2 = r['code'], float(r['shares']), float(r['price'])
             rr = _rt2.get(c2) or {}
-            pc2 = rr.get('preclose') or (_px2.get(c2, (None,))[0])
+            pc2 = rr.get('preclose') or _prev_close(_px2.get(c2), d_now)
             left = _prev.get(c2, 0.0)
             from_old = min(left, sh2)
             _prev[c2] = left - from_old
@@ -267,6 +366,11 @@ def positions_valued(aid, datalake=None):
     out['pnl_day_fee'] = round(-fee_day, 2)
     out['sold_today'] = sold
     out['same_day_sell'] = _same_day
+    # ★ 公司行动留痕（用户 2026-09-23：「发生分红、拆股等等事项时，需要在
+    #   实盘的某个地方记录下来，以便后续排查」）。这里给的是**派生**结果，
+    #   不写回账本 —— gbbq 会被修正（tdx 数据修过好几轮），存一份下来就会
+    #   过期，而它看着仍然像个正常数字（同「每档只存你填的那个，另一个现算」）。
+    out['corp'] = corp_summary(aid, datalake=datalake)
     # ★ 合计 = 持仓 + 今日实现 − 今日费用。三块都给出去，页面必须能说清
     #   构成 —— 否则"合计 != 各行之和"看着像算错了（本项目最怕的静默错值）。
     out['pnl_day'] = (round(out['pnl_day_hold'] + realized - fee_day, 2)

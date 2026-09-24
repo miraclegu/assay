@@ -814,6 +814,20 @@ def api_live_trips(q):
         aid, offset=q.get('offset') or 0, limit=q.get('limit') or 100))
 
 
+def api_live_corp(q):
+    """GET /api/live/corp?id= —— 这本账上发生过的公司行动（除权除息/送转/配股）。
+
+    ★ 业绩页那个页签**懒渲染**，所以给一个独立端点 —— 塞进
+      `/api/live/account` 的话，天天要看的主视图得为一份"偶尔查的历史"
+      多算一遍（同「一次取全，页签在本地切」的反面：这份不是每次都要）。
+    ★ 主视图那一行摘要仍从 `pos.corp` 来（它本来就在算），
+      两者**同一个** `corp_summary`，不是第二份实现。
+    """
+    m = _live()
+    aid = (q.get('id') or '').strip()
+    return _live_err(lambda: m.corp_summary(aid))
+
+
 def api_live_trade_stats(q):
     """GET /api/live/trade_stats?id=&top= —— 往返交易的统计与盈亏排行。
 

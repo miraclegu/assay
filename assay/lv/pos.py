@@ -158,8 +158,24 @@ def add_fill(aid, trade_date, code, side, shares, price=None, fee=None,
 #   binding）。看账单佣金那行是 5.00 且规费另列（另收口径），
 #   还是 佣金+规费 = 5.00（含规费口径）。大额单测不出来。
 
-def fifo_lots(rows):
-    """成交流水 -> {code: [ {shares, date, price, fee} ]}，FIFO 冲减。
+# 🔴 `fifo_lots` 的返回形状是**对外契约**（31 处按 dict 用它），所以现金增量
+#   不塞进返回值，放这个单槽 —— `corp_cash_of()` 紧跟着读。
+#   ★ 单线程重放，读写紧挨着；要并发的话得改成返回值。
+_corp_cash = [0.0]
+
+
+def corp_cash_of(rows, asof=None, root=None):
+    """这本账到 asof 为止，公司行动一共派回来多少现金（税前）。
+
+    ★ 走一遍 `fifo_lots` 现算，**不另写一套重放** —— 两处实现必然分叉，
+      而分叉的表现是「现金对不上而没人知道是哪边错」。
+    """
+    fifo_lots(rows, asof=asof, root=root)
+    return _corp_cash[0]
+
+
+def fifo_lots(rows, asof=None, root=None, events=None, viol=None):
+    """成交流水 -> {code: [ {shares, date, price, fee, paid, ...} ]}，FIFO 冲减。
 
     ★ 用 FIFO 而不是平均成本：引擎本身就是分批 FIFO（红利税按持有期分档、
       T+1 只锁当日买入那批），平均成本会让重建出来的持仓与引擎语义不一致。
@@ -172,22 +188,81 @@ def fifo_lots(rows):
     ★ `price` 仍是**成交价**（不含费）—— 它要喂给引擎的 `entry_price`
       （止损、吊灯、红利税档位都读它）。**这个不能动**：动了实盘走的就
       不是策略自己的代码路径了。摊薄成本是另算一个数，不是改这个。
+
+    🔴 **重放里还要交错【公司行动】**（除权除息 / 送转），正本在 `lv/corp.py`。
+      账本记的是**不复权**价，而除权当天股价真的掉下去 —— 成本不跟着调
+      就是「浮盈被系统性报低」，**而总资产那一格看着完全正常**
+      （实测红利混合-M 三次除权合计 3,560 元）。所以每批多两个字段：
+
+          paid       该批剩余部分的**实付本金**。派现减它、送转不动它
+          div_gross  累计收到的**税前**分红（排查与红利税档位要用）
+
+      摊薄成本因此是 `(paid + fee) / shares` —— 派现降 paid、送转涨 shares，
+      两种都自动对。`price` 一个字没动，所以 `sig._seed` 那条路不受影响
+      （它是 `price × factor(建仓日)`，而因子本来就含着这些事件）。
+
+    🔴 **同一天：先行动、后成交。** 分红归**登记日收盘**（= 除权日前一天）
+      的持有人 —— 所以除权日当天**买入**的那批拿不到，而当天**卖出**的
+      拿得到。反过来写的话两种都错，**而它不报错**。
+
+    ★ `asof` 不传 = 算到今天（当前持仓那条路）；`lots_asof` 会把它按日切。
+      不传 `asof` 而去算历史某天，会把那天之后的除权也算进去 —— 未来函数。
     """
+    import datetime as _dt
+    from . import corp as _corp
     book = {}
+    asof = _base._d(asof) if asof else _dt.date.today()
     # ★ 同一天同一秒的多笔要有确定顺序，否则 FIFO 批次不可复现。
     #   tiebreak 用【文件里的插入顺序】，**不能用 uid** —— uid 是随机 hex，
     #   拿它排序会让同秒的买卖顺序随机翻转（实测：卖排到买前面，
     #   于是重放报"持仓变负"，而账本本身没问题）。
-    for _i, r in sorted(_indexed(active_fills(rows)),
-                        key=lambda t: (t[1]['trade_date'], t[1]['ts'], t[0])):
+    seq = sorted(_indexed(active_fills(rows)),
+                 key=lambda t: (t[1]['trade_date'], t[1]['ts'], t[0]))
+    # 公司行动**一次取全**（一条 SQL），再按日期喂进重放 —— 逐日查的话
+    # 每个交易日一次往返（同「抓取范围合并去重」那条）。
+    acts, ai = [], 0
+    if seq:
+        d0 = _base._d(seq[0][1]['trade_date'])
+        acts = _corp.actions({r['code'] for _i, r in seq}, d0, asof, root=root)
+    _corp_cash[0] = 0.0
+
+    def _upto(day):
+        """把除权日 <= day 的行动全部作用掉（同日先行动、后成交）。"""
+        nonlocal ai
+        while ai < len(acts) and acts[ai]['ex_date'] <= day:
+            a = acts[ai]; ai += 1
+            lots_ = book.get(a['code'])
+            if not lots_:
+                continue
+            per = {'act': a, 'lots': []}
+            for l in lots_:
+                ev = _corp.apply_lot(l, a)
+                _corp_cash[0] += ev['cash']
+                per['lots'].append(ev)
+            if events is not None:
+                events.append(per)
+
+    for _i, r in seq:
         c = r['code']
+        _upto(_base._d(r['trade_date']))
         lots = book.setdefault(c, [])
         if r['side'] == 'buy':
-            lots.append({'shares': int(r['shares']), 'date': _base._d(r['trade_date']),
-                         'price': float(r['price']),
-                         'fee': float(r.get('fee') or 0)})
+            sh0, px0 = int(r['shares']), float(r['price'])
+            lots.append({'shares': sh0, 'date': _base._d(r['trade_date']),
+                         'price': px0, 'fee': float(r.get('fee') or 0),
+                         'paid': sh0 * px0, 'div_gross': 0.0})
         else:
             left = int(r['shares'])
+            # 🔴 「持仓变负」的判定**就在这条重放上**（`viol`），不另写一遍 ——
+            #   原来 `replay_violation` 自己数了一份 `held[code] += / -=`，
+            #   那是**第四份重放**，而它不认识公司行动：10 送 10 之后券商
+            #   账户里是 2000 股，人照实录一笔卖 2000，这道校验却按 1000 判、
+            #   **当场拒掉**（"当时只有 1000 股"）—— 一笔真实成交录不进去，
+            #   而那句报错还指不到真正的原因。实测就是这么被抓出来的。
+            if viol is not None:
+                have = sum(l['shares'] for l in lots)
+                if left > have:
+                    viol.append((c, r['trade_date'], have, left, r))
             while left > 0 and lots:
                 if lots[0]['shares'] <= left:
                     left -= lots[0]['shares']
@@ -197,21 +272,35 @@ def fifo_lots(rows):
                     #   买入费也只剩一半算在成本里。整批卖掉时连费用一起
                     #   出账（pop）—— 那部分已经变成已实现盈亏的一部分。
                     keep = lots[0]['shares'] - left
-                    lots[0]['fee'] = lots[0].get('fee', 0.0) * keep / lots[0]['shares']
+                    # 🔴 `paid` / `div_gross` 要和 `fee` 走**同一个比例** ——
+                    #   漏掉 paid 的话，卖掉一半之后摊薄成本会翻倍，
+                    #   而它不报错（同「列定义写一处」那类）。
+                    rat = keep / lots[0]['shares']
+                    for k in ('fee', 'paid', 'div_gross'):
+                        if k in lots[0]:
+                            lots[0][k] = lots[0][k] * rat
                     lots[0]['shares'] = keep
                     left = 0
+    # 账本最后一笔之后到 asof 之间的行动（常态：今天之前刚除权过）
+    _upto(asof)
     return {c: v for c, v in book.items() if v}
 
 
 
-def lots_asof(rows, day):
+def lots_asof(rows, day, root=None):
     """截至 day（含）的真实持仓。重放 warmup 时每天都要用。
 
     ★ 先按日期切、再交给 fifo_lots（它内部会剔掉已冲正的成对记录）。
       顺序不能反 —— 冲正记录可能晚于 day，那时原记录仍然有效。
+
+    🔴 **`asof` 必须传下去。** 不传的话 `fifo_lots` 默认算到**今天**，于是
+      历史某天的持仓会被"那天之后才发生的除权"调过 —— **未来函数**，
+      而它不报错，只是那一天的成本与股数悄悄用了未来的信息
+      （equity_curve / hist / sig._replay 三条路都走这里）。
     """
     day = _base._d(day)
-    return fifo_lots([r for r in rows if _base._d(r['trade_date']) <= day])
+    return fifo_lots([r for r in rows if _base._d(r['trade_date']) <= day],
+                     asof=day, root=root)
 
 
 
@@ -246,10 +335,19 @@ def sellable_asof(aid, day, datalake=None):
     return {'date': str(_base._d(day)), 'items': items}
 
 
-def cash_asof(init_cash, rows, day, flows=()):
+def cash_asof(init_cash, rows, day, flows=(), root=None):
+    """截至 day（含）的现金。与 `cash()` **同一口径**，只是按日切。
+
+    🔴 公司行动派现也要算进来 —— 漏掉的话权益曲线在除权日会**掉一截**
+      （市值跌了、现金没回来），而那看着像"那天亏了"。
+    ★ 手工录过 `dividend` 流水时不自动加（双计），判据与 `cash()` 同一条。
+    """
     day = _base._d(day)
     v = float(init_cash or 0)
+    manual_div = False
     for r in flows:
+        if (r.get('kind') or 'deposit') == 'dividend':
+            manual_div = True
         if _base._d(r['date']) <= day:
             v += float(r.get('signed') or 0)
     for r in active_fills(rows):
@@ -257,6 +355,8 @@ def cash_asof(init_cash, rows, day, flows=()):
             continue
         amt = r['shares'] * r['price']
         v += (-amt if r['side'] == 'buy' else amt) - float(r.get('fee') or 0)
+    if not manual_div:
+        v += corp_cash_of(rows, asof=day, root=root)
     return v
 
 
@@ -302,7 +402,7 @@ def active_fills(rows):
 
 
 
-def replay_violation(rows):
+def replay_violation(rows, root=None):
     """重放整个账本，返回第一个「持仓变负」的违规，没有则返回 None。
 
     ★ 为什么不能只看「当前持仓」（原实现就是这么做的，有两个洞）：
@@ -315,21 +415,16 @@ def replay_violation(rows):
          的卖出会被放行，而重放时那一刻持仓是负的。
 
     返回 (code, date, 该时点持仓, 想卖的股数, 违规记录)。
+
+    🔴 **重放只有一份**（`fifo_lots`，2026-09-24 收的）。原来这里自己数了
+      一遍 `held[code] += / -=` —— 那份**不认识公司行动**：10 送 10 之后
+      券商账户里是 2000 股，照实录一笔卖 2000 会被它按 1000 判、当场拒掉。
+      上一轮扫同类时漏了它，因为它不调 `fifo_lots`，grep 找不到
+      （同「改一处之前先扫同类」那条 —— 判据要按**语义**扫，不是按调用扫）。
     """
-    held = {}
-    # 排序键带 uid：同一天同一秒的多笔要有确定顺序，否则 FIFO 批次不可复现
-    for _i, r in sorted(_indexed(active_fills(rows)),
-                        key=lambda t: (t[1]['trade_date'], t[1]['ts'], t[0])):
-        c = r['code']
-        n = int(r['shares'])
-        if r['side'] == 'buy':
-            held[c] = held.get(c, 0) + n
-        else:
-            cur = held.get(c, 0)
-            if n > cur:
-                return (c, r['trade_date'], cur, n, r)
-            held[c] = cur - n
-    return None
+    v = []
+    fifo_lots(rows, root=root, viol=v)
+    return v[0] if v else None
 
 
 
@@ -390,24 +485,63 @@ def add_cashflow(aid, date, amount, kind='deposit', note=''):
 
 
 def cash(aid, asof=None):
-    """现金 = 初始资金 + 现金流水 − 买入额 − 费用 + 卖出额。
+    """现金 = 初始资金 + 现金流水 − 买入额 − 费用 + 卖出额 **+ 公司行动派现**。
 
-    分红**按你录的 dividend 流水计**，不自动推 —— 没有数据源能确认到账日
-    与实际税后金额。不录就是不计，此时现金是【下界】。
+    🔴 最后那一项是 2026-09-23 加的。原来写的是「分红按你录的 dividend 流水
+      计，不自动推 —— 没有数据源能确认到账日」——**那个前提已经不成立**：
+      tdx 的 `gbbq` 随 cron 每天到、带除权日与每股派现（正本 `lv/corp.py`）。
+      而"不录就是不计"的代价是实测的：红利混合-M 少了 **3,560 元**，
+      **且总资产那一格看着完全正常**。
+
+    ★ 按**税前**加，与券商到账口径一致 —— A 股红利税是**卖出时**按持有期
+      补扣的，那笔钱会出现在卖出成交的费用里（照账单录进去就已经扣过）。
+      这里再扣一次就是双计。
+
+    🔴 **手工录过 `dividend` 流水的账户不自动加** —— 否则同一笔算两遍，
+      **而它不报错**。这时返回值仍是手工那份，并由 `corp_conflict()`
+      把冲突说给页面听（报出来，别替人决定）。
     """
     acct = _base.get_account(aid)
     v = float(acct.get('init_cash') or 0)
     lim = _base._d(asof) if asof else None
+    manual_div = False
     for r in cashflows(aid):
+        if (r.get('kind') or 'deposit') == 'dividend':
+            manual_div = True
         if lim and _base._d(r['date']) > lim:
             continue
         v += float(r.get('signed') or 0)
-    for r in active_fills(_base.fills(aid)):
+    rows = _base.fills(aid)
+    for r in active_fills(rows):
         if lim and _base._d(r['trade_date']) > lim:
             continue
         amt = r['shares'] * r['price']
         v += (-amt if r['side'] == 'buy' else amt) - float(r.get('fee') or 0)
+    if not manual_div:
+        v += corp_cash_of(rows, asof=asof)
     return v
+
+
+def corp_conflict(aid):
+    """手工 `dividend` 流水与自动派现**同时存在**吗 —— 有就得说出来。
+
+    ★ 不替人合并、也不静默二选一：两边的口径（税前/税后、到账日）本来就
+      可能不同，猜一个"看着合理的"正是本项目反复吃亏的那类
+      （同「拿不到分红那一格标查不到，不猜一个数」）。
+    """
+    man = [f for f in cashflows(aid) if (f.get('kind') or 'deposit') == 'dividend']
+    if not man:
+        return None                 # ★ 先判有没有手工那几条（读一个小文件），
+                                    #   没有就不去跑整条重放 —— 绝大多数账户
+                                    #   走的都是这一支
+    auto = corp_cash_of(_base.fills(aid))
+    if auto <= 0:
+        return None
+    return {'manual_n': len(man),
+            'manual_amount': round(sum(float(f.get('signed') or 0) for f in man), 2),
+            'auto_amount': round(auto, 2),
+            'why': '这个账户手工录过分红流水，所以【没有】自动加公司行动派现 '
+                   '—— 两边同时算就是双计。要改成自动的，先冲掉那几条手工流水。'}
 
 
 # ============================ 权益与收益 ============================

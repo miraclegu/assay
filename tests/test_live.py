@@ -200,10 +200,25 @@ def t_live_core():
                          fee=0, force_price=True)
         assert r3['fee'] == 0 and not r3.get('fee_estimated'), \
             '明确填 0 不该被当成"没填"而去估算'
+        # 🔴 现金里还有【公司行动派现】那一项（2026-09-23 加）——
+        #   这个构造买的 601857 在 2026-09-16 除权 0.26 元/股，持 1000 股
+        #   -> +260.00。**失败的是断言不是产品**：原来的期望式漏了这一项。
+        #   ★ 期望值从**正本**取（`corp.actions`），不写死 260 ——
+        #     写死的话分红数据一变它就假失败；而更糟的是反过来：
+        #     `corp` 要是静默返回 0，写死的期望**照样绿**（等于没测）。
+        import datetime as _dt
+        from assay.lv import corp as _corp
+        _acts = _corp.actions(['601857.XSHG'], '2026-08-20', '2026-12-31')
+        _div = sum(1000 * a['cash'] for a in _acts if a['ex_date'] <= _dt.date.today())
+        assert _div > 0, ('构造不对：601857 在这段里没有除权，'
+                          '那"派现要进现金"这条就是空转的')
         exp = 100000 - (1000 * 11.42 + r1['fee']) - (100 * 48.78 + 3.21) \
-            - (200 * 16.69)
+            - (200 * 16.69) + _div
         assert abs(lv.cash('t_fee') - exp) < 1e-6, \
-            '现金没把费用扣进去：%.2f vs %.2f' % (lv.cash('t_fee'), exp)
+            '现金没把费用扣进去或漏了公司行动派现：%.2f vs %.2f' % (lv.cash('t_fee'), exp)
+        # ★ 反向自证：没有公司行动的那只票，现金里不许凭空多出什么。
+        assert not _corp.actions(['600012.XSHG'], '2026-08-22', '2026-12-31'), \
+            '600012 这段里有公司行动了 —— 下面那条对照失效，换一只'
         # ★ 费率是【账户级】的（FEE_DEFAULT / acct['fee']），不再等于引擎 Cost
         #   —— 引擎默认万2.5+最低5元是**回测口径**（刻意保守），真实账户是
         #   万0.8含规费+过户费万0.1、无最低。所以这里核的是
@@ -1971,9 +1986,21 @@ def t_live_ui():
             pg.wait_for_selector('#rfill', timeout=8000)
             _lv_rec_fill(pg, '601857.XSHG', '1000', price='11.42', fee='7.77', date='2026-09-02')
             pg.wait_for_timeout(1500)
-            paid = round(b4 - _cash() - 11420, 2)
+            # 🔴 现金差里还夹着【公司行动派现】：这一笔买的 601857 在 2026-09-16
+            #   除权 0.26 元/股，持 1000 股 -> 现金 +260，于是 `b4 - 现在` 会
+            #   **少 260**。**失败的是断言不是产品**（2026-09-23）。
+            #   ★ 期望从正本取、且**反向自证它非 0** —— 写死 260 的话，
+            #     corp 静默返回 0 时这条照样绿（等于把新功能测没了）。
+            from assay.lv import corp as _corp
+            import datetime as _dt2
+            _div2 = sum(1000 * a['cash'] for a in
+                        _corp.actions(['601857.XSHG'], '2026-09-02', '2026-12-31')
+                        if a['ex_date'] <= _dt2.date.today())
+            assert _div2 > 0, ('构造不对：601857 在这段里没有除权，'
+                               '那"派现进现金"这条在页面上是空转的')
+            paid = round(b4 - _cash() - 11420 + _div2, 2)
             assert abs(paid - 7.77) < 0.011, \
-                '手填费用应优先于费率：填 7.77 实得 %.2f' % paid
+                '手填费用应优先于费率：填 7.77 实得 %.2f（已扣掉派现 %.2f）' % (paid, _div2)
 
             # ---- 价格留空 = 成交日开盘价（竞价买入）----
             #   ★ 很多策略是集合竞价买入，而 A 股开盘价就是竞价成交价，
@@ -2476,8 +2503,12 @@ def t_live_perf_tabs():
             #     "业绩曲线、业绩明细、每日持仓、交易明细、清仓记录、
             #      盈亏榜、选股理由、执行差异"
             #   —— **执行差异挪到最后、选股理由在它前面**，那是他的使用顺序。
+            #   2026-09-24：「公司行动」插在盈亏榜与选股理由之间 ——
+            #     主视图那行原来把逐条事件**横排**铺开，用户指出
+            #     「如果行动项很多的话可能会排列有点拥挤」，所以明细搬来这里
+            #     （会越来越长的复盘信息都归业绩页，同「成交流水并进来」那条）。
             WANT = ['业绩曲线', '业绩明细', '每日持仓', '交易明细',
-                    '清仓记录', '盈亏榜', '选股理由', '执行差异']
+                    '清仓记录', '盈亏榜', '公司行动', '选股理由', '执行差异']
             assert tabs == WANT, '页签顺序/命名不对：%s（要 %s）' % (tabs, WANT)
             # 「业绩」（KPI 板）**一直置顶**，不进页签
             g = pg.evaluate("""() => {
@@ -2556,6 +2587,69 @@ def t_live_perf_tabs():
                      '一笔往返至少要有一买一卖' % (n_fill, n_trip))
                 notes.append('清仓记录 %d 笔往返（逐笔 %d >= 往返×2）'
                              % (n_trip, n_fill))
+
+            # ---- ④b 公司行动那一页签（2026-09-24 新增）----
+            #   🔴 它**不依赖权益曲线**，而且要列**已清仓**的票 ——
+            #     那正是主视图那行摘要给不出来的两样（持仓表里早没有它们了）。
+            #   🔴 **这一段自己挑账户**：上面那个是按"有买有卖"挑的，而
+            #     发生过公司行动的是另一个 —— 沿用它的话整段空转
+            #     （第一版就是这样，靠它自己那句"没验到"暴露出来的；
+            #      同「断言要在能触发的构造上跑」那条）。
+            _cid, _ce = None, []
+            for _a in lv.load_accounts():
+                _e = lv.corp_summary(_a['id'])['events']
+                if _e:
+                    _cid, _ce = _a['id'], _e
+                    break
+            assert _cid, ('构造不对：没有一个账户发生过公司行动 —— '
+                          '那这一页签的判据全是空转的')
+            # 顺带把「?tab=corp 真的落到这一页」一起验了（主视图摘要的入口）
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf?tab=corp' % (port, _cid),
+                    wait_until='domcontentloaded')
+            pg.wait_for_selector('#lptabs div', timeout=30000)
+            pg.wait_for_timeout(2500)
+            _on = pg.evaluate(
+                "() => [...document.querySelectorAll('#lptabs div')]"
+                ".filter(e => e.classList.contains('on')).map(e => e.textContent.trim())")
+            assert _on == ['公司行动'], \
+                '?tab=corp 没落到公司行动那一页：%s' % _on
+            assert pg.evaluate(_VISJS) == 1, '切到公司行动之后有多个 pane 同时显示'
+            _rows = pg.evaluate("""() => [...document.querySelectorAll(
+                '[id^=lpp].on table.lvt tr')].slice(1)
+                .map(tr => [...tr.children].map(td => td.textContent.trim()))""")
+            _txt = pg.evaluate(
+                "() => document.querySelector('[id^=lpp].on').innerText")
+            assert len(_rows) == len(_ce), \
+                ('公司行动页签列了 %d 行，而账上发生过 %d 次' % (len(_rows), len(_ce)))
+            _by_date = {r[0]: r for r in _rows}
+            for _e in _ce:
+                assert _e['date'] in _txt, '明细里缺 %s 那一条' % _e['date']
+                # 🔴 **股数那一列要逐格对**：送转会把它变成 `1000 → 1480`，
+                #   而派现是一个数。不验的话把整列删掉照样绿（M9 实测漏过），
+                #   而那一列正是"送转改了股数"唯一看得出来的地方。
+                _r = _by_date.get(_e['date'])
+                assert _r and len(_r) == 6, '明细表列数不对：%s' % (_r,)
+                _want = (format(_e['shares_before'], ',')
+                         if _e['shares_after'] == _e['shares_before']
+                         else '%s → %s' % (format(_e['shares_before'], ','),
+                                           format(_e['shares_after'], ',')))
+                assert _r[4] == _want, \
+                    ('%s 那一行的股数列是 %r，应是 %r'
+                     % (_e['date'], _r[4], _want))
+                # 🔴 名称要是**名称**不是代码 —— 事件里含已清仓的票，页面拿
+                #   "当前持仓"去配是配不上的（那正是要在服务端补名的理由）
+                assert _e['name'] in _txt and _e['name'] != _e['code'], \
+                    '明细里 %s 只有代码没有名称' % _e['code']
+                if _e['cash']:
+                    assert num_ok(_txt, _e['cash']), \
+                        '明细没写出 %s 派回多少（%.2f）' % (_e['code'], _e['cash'])
+            assert '**' not in _txt, '页面文案里有 markdown 星号'
+            notes.append('公司行动 %d 条逐条成表（?tab=corp 直达、名称与金额都在）'
+                         % len(_ce))
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid),
+                    wait_until='domcontentloaded')
+            pg.wait_for_selector('#lptabs div', timeout=30000)
+            pg.wait_for_timeout(1500)
 
             # ---- ⑤ 🔴🔴 冲正**必须在这里**（2026-09-22 起流水独立页并了进来）
             #   这条断言原来是反的（"业绩页不许有冲正，它属于流水页那条链"）
@@ -8052,6 +8146,11 @@ def t_record_side_inputs():
             % (len(want), d0, back_day, gone[:6], n_before))
 
 
+def num_ok(txt, v):
+    """页面上的金额带千分位，所以两种写法都认（`1,482.00` / `1482.00`）。"""
+    return format(v, ',.2f') in txt or ('%.2f' % v) in txt
+
+
 @case('实盘页每个账户都要真的渲染出来（不许卡在"读取中"）', tag='web')
 def t_live_pages_render():
     """🔴🔴 用户 2026-09-22：「貌似直接把 froea 实盘账户跑挂了，一直在读取中」。
@@ -8116,6 +8215,34 @@ def t_live_pages_render():
         assert _pv0.get('pnl_day_realized'), \
             ('构造没生效：当天卖出的已实现是 %s —— 下面那几条会空转'
              % _pv0.get('pnl_day_realized'))
+        # 🔴🔴 已实现要**逐分对得上**，不能只判"非 0"（2026-09-24 实测）：
+        #   今日卖出的基准原来写死取 `_last_px` 三元组的 `[0]`（**当天收盘**），
+        #   而那一位只有"面板停在昨天"时才等于昨收。收盘后实时为空时它就
+        #   走到了 —— 卖在收盘价上算出来正好是 **0**，**而它不报错**
+        #   （正是用户 2026-09-22 要修的那个数）。
+        #   ★ 期望从**面板独立算**，不拿 `positions_valued` 自己的输出当期望。
+        # 🔴 `_prev_close` 的两支要**各构造一次** —— 盘中那一支（面板停在
+        #   昨天）在收盘后的真实数据上**走不到**，光靠上面那条断言的话
+        #   "一律给 preclose" 这种变异抓不到（实测就是无效变异）。
+        import datetime as _dt3
+        from assay.lv.perf import _prev_close as _pcf
+        _tp = (15.43, _dt3.date(2026, 9, 23), 15.36)
+        assert _pcf(_tp, '2026-09-24') == 15.43, \
+            '盘中（面板停在昨天）：昨收就是面板那天的【收盘】'
+        assert _pcf(_tp, '2026-09-23') == 15.36, \
+            '收盘后（面板已含当天）：昨收要取那一行的【preclose】'
+        assert _pcf(None, '2026-09-23') is None, '取不到就给 None，不猜'
+        import duckdb as _dd
+        from assay import paths as _pth
+        _pcq = _dd.connect().execute(
+            "SELECT close_bfq, preclose FROM %s WHERE jq_code = ? AND date = ?"
+            % _pth.panel_sql(), [code0, day]).fetchone()
+        if _pcq and _pcq[1]:
+            _want = round(100 * (px0 - float(_pcq[1])), 2)
+            assert abs(_pv0['pnl_day_realized'] - _want) < 0.02, \
+                ('今日卖出的已实现基准不对：实得 %.2f，按【昨收 %.4f】'
+                 '算应是 %.2f —— 多半是拿【当天收盘】当基准了'
+                 % (_pv0['pnl_day_realized'], float(_pcq[1]), _want))
 
         httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
         port = httpd.server_address[1]
@@ -8185,6 +8312,70 @@ def t_live_pages_render():
                     ('持仓表下面没有「今天卖出」那一行 —— 当日盈亏的合计含'
                      '已实现，必然不等于持仓表各行之和，不列出来就是个'
                      '对不上的数')
+                # ---- 公司行动要【留痕】（用户 2026-09-23）----
+                #   🔴 判据落在**服务端真的给了事件**的那个账户上，而且
+                #     两头都钉：有事件的必须显示、事件里那几只必须点得出
+                #     名字与金额。只查"有没有那几个字"的话，事件为空时
+                #     渲染一句空话照样命中（判据比要证的事宽）。
+                cid = None
+                for a in accs:
+                    ev = (lv.positions_valued(a['id']).get('corp') or {}).get('events')
+                    if ev:
+                        cid = (a['id'], ev)
+                        break
+                assert cid, ('构造不对：没有一个账户发生过公司行动 —— '
+                             '那"留痕"这条在页面上是空转的')
+                pg.goto('http://127.0.0.1:%d/#/live/%s' % (port, cid[0]),
+                        wait_until='domcontentloaded')
+                pg.wait_for_selector('#lvkpi', timeout=25000)
+                pg.wait_for_timeout(900)
+                mt = pg.inner_text('#main')
+                # 🔴 **主视图那里只许有一行摘要**（2026-09-24 改）。v1 把逐条
+                #   横排铺开，用户指出「行动项很多的话可能会排列有点拥挤」。
+                #   判据因此是**可量的事实**：那一块的行数与字数都有上界，
+                #   而"公司行动"这四个字仍必须在（藏起来同样不行）。
+                assert '公司行动' in mt, \
+                    ('持仓表下面没有「公司行动」那一行 —— 成本与股数被调过了'
+                     '却不说为什么，人只能猜（而猜正是本项目反复吃亏的地方）')
+                _sum = pg.evaluate(
+                    "() => {const a = [...document.querySelectorAll('#lvbody .lvwhy')]"
+                    ".filter(e => e.textContent.indexOf('公司行动') === 0);"
+                    " return a.length ? {t: a[0].innerText,"
+                    "   href: (a[0].querySelector('a')||{}).getAttribute"
+                    "     ? a[0].querySelector('a').getAttribute('href') : null} : null}")
+                assert _sum, '找不到那行摘要'
+                assert '\n' not in _sum['t'].strip(), \
+                    '摘要不许换行（逐条铺开了？）：%r' % _sum['t']
+                assert len(_sum['t']) < 120, \
+                    ('摘要太长（%d 字）—— 逐条铺开的话行动项一多就绕成几排：%r'
+                     % (len(_sum['t']), _sum['t']))
+                # 逐条的日期**不许**出现在主视图（那是明细页的事）
+                for e in cid[1]:
+                    assert e['date'][5:] not in _sum['t'], \
+                        '摘要里铺开了逐条事件（%s）' % e['date']
+                # 🔴 但**必须给得出入口** —— 只收起不给入口就是把明细藏起来
+                assert _sum['href'] and 'tab=corp' in _sum['href'], \
+                    '摘要那行没有去明细的入口：%r' % _sum['href']
+                # 汇总的现金要在（那 3,560 元在屏幕上得有出处）
+                _cash = sum(e['cash'] or 0 for e in cid[1])
+                if _cash:
+                    assert num_ok(_sum['t'], _cash), \
+                        '摘要没写出一共派回多少钱（%.2f）：%r' % (_cash, _sum['t'])
+                # 持仓行上的 ⊙：hover 给**这只票**的
+                _held = {x['code'] for x in
+                         lv.positions_valued(cid[0])['items']}
+                _mk = pg.evaluate(
+                    "() => [...document.querySelectorAll('.lvpos .cmark')]"
+                    ".map(e => e.getAttribute('title'))")
+                _want = len({e['code'] for e in cid[1]} & _held)
+                assert len(_mk) == _want, \
+                    ('持仓行的 ⊙ 个数不对：%d 个，而持仓里发生过公司行动的有 %d 只'
+                     % (len(_mk), _want))
+                if _mk:
+                    assert any(c in ''.join(_mk) for c in ('派现', '送转', '配股')), \
+                        '⊙ 的 title 里没写发生了什么：%r' % _mk[:1]
+                assert '**' not in mt, '页面文案里有 markdown 星号（HTML 渲染不了）'
+                n_corp = len(cid[1])
         finally:
             httpd.shutdown()
     finally:
@@ -8194,7 +8385,9 @@ def t_live_pages_render():
         shutil.rmtree(tmp, ignore_errors=True)
     return ('%d 个账户逐个渲染、0 个 JS 报错、无「读取中」残留；'
             '当日盈亏副标题只有一个百分比（%s）、构成在 title 里、'
-            '表下有「今天卖出」' % (n_ok, sub))
+            '表下有「今天卖出」；公司行动 %d 条收成一行摘要（带入口、带合计、'
+            '不铺开）+ 持仓行 ⊙'
+            % (n_ok, sub, n_corp))
 
 
 @case('信号重算的提示：分清「你已成交」与「清单真变了」（playwright）', tag='web')
@@ -9000,3 +9193,213 @@ def t_perf_merge():
         shutil.rmtree(tmp, ignore_errors=True)
     assert not errs, '页面报错：%r' % errs[:3]
     return '；'.join(msg)
+
+
+@case('公司行动：除权调成本、送转调股数、配股只留痕（实盘账本）', tag='fast')
+def t_corp_actions():
+    """🔴🔴 用户 2026-09-23：「分红后现金增加，对应的股的成本也应该降低」
+    「不仅仅是分红，如果有拆股等等，都要能正确的计算价格、股数」。
+
+    实测红利混合-M 三次除权合计 **3,560 元**：股价除权当天真的掉下去，
+    而账本记的成本一分没动 -> 逐只浮盈系统性偏低，**而总资产那一格看着
+    完全正常**（现金那半在券商那边加回来了）。正本 `lv/corp.py`。
+
+    🔴 **送转与配股在真实账本里一条都没有**（实测 34 只持仓票只有 3 笔
+      现金分红）—— 所以那两条路**必须构造**，否则整段空转
+      （同「断言要在能触发的构造上跑」）。夹具取真实的历史事件：
+
+        688399.XSHG 2026-07-10  纯送转 0.48/股（10 送转 4.8）
+        001388.XSHE 2026-07-17  派现 0.50 + 送转 0.48（验"先派现后送转"）
+        300176.XSHE 2026-08-21  配股 0.40/股 @ 3.36（**不许自动执行**）
+    """
+    import datetime as _dt
+    import shutil
+    import tempfile
+
+    from assay import live as lv
+    from assay.lv import corp as _corp
+    from assay.lv import pos as _pos
+
+    # ---- 0) 夹具必须真的存在 —— 反向自证，不然下面全是空转 ----
+    FX = {'688399.XSHG': ('2026-07-10', 0.0, 0.48, 0.0),
+          '001388.XSHE': ('2026-07-17', 0.5, 0.48, 0.0),
+          '300176.XSHE': ('2026-08-21', 0.0, 0.0, 0.4)}
+    for c, (d, c1, c3, c4) in FX.items():
+        got = [a for a in _corp.actions([c], d, d)]
+        assert len(got) == 1, '夹具没了：%s 在 %s 没有公司行动' % (c, d)
+        a = got[0]
+        assert abs(a['cash'] - c1) < 1e-6 and abs(a['split'] - c3) < 1e-6 \
+            and abs(a['rights'] - c4) < 1e-6, \
+            '夹具变了：%s %s -> %s' % (c, (c1, c3, c4), (a['cash'], a['split'], a['rights']))
+
+    real = lv.LIVE
+    tmp = tempfile.mkdtemp(prefix='selftest_corp_')
+    # 🔴 selftest 不许写生产账本 —— 重定向（同 `lv.LIVE` 那条纪律）
+    lv.LIVE = os.path.join(tmp, 'live')
+    os.makedirs(lv.LIVE, exist_ok=True)
+    try:
+        lv.upsert_account('t_corp', name='corp', init_cash=1000000)
+
+        def _buy(code, d, sh, px):
+            return lv.add_fill('t_corp', d, code, 'buy', sh, px,
+                               fee=0, force_price=True)
+
+        # ---- 1) 纯送转：股数按比例涨，实付本金不动 ----
+        _buy('688399.XSHG', '2026-07-01', 1000, 30.0)
+        b = _pos.fifo_lots(lv.fills('t_corp'))
+        lot = b['688399.XSHG'][0]
+        assert lot['shares'] == 1480, '10 送转 4.8：1000 股应变 1480，实得 %s' % lot['shares']
+        assert abs(lot['paid'] - 30000.0) < 1e-6, \
+            '送转没有新钱投进去，实付本金不该变：%s' % lot['paid']
+        assert abs(lot['price'] - 30.0) < 1e-9, \
+            '🔴 `price` 是喂给引擎 entry_price 的口径，一个字都不能动'
+
+        # ---- 2) 派现 + 送转同日：**先派现后送转** ----
+        #     反过来的话分红会按送转【之后】的股数算 -> 凭空翻倍
+        _buy('001388.XSHE', '2026-07-01', 1000, 20.0)
+        b = _pos.fifo_lots(lv.fills('t_corp'))
+        lot = b['001388.XSHE'][0]
+        assert lot['shares'] == 1480, '送转后应是 1480 股，实得 %s' % lot['shares']
+        assert abs(lot['div_gross'] - 500.0) < 1e-6, \
+            ('分红要按【除权前】的 1000 股算 = 500 元；实得 %.2f'
+             '（%.2f 说明顺序反了：按送转后的 1480 股算了）'
+             % (lot['div_gross'], 740.0))
+        assert abs(lot['paid'] - (20000.0 - 500.0)) < 1e-6, \
+            '实付本金要按到手现金往下调：%s' % lot['paid']
+        # 🔴 「price 不许动」要钉在**真收到过现金**的那一批上 —— 钉在
+        #   688399（c1=0）上是空转的：`price -= cash` 对它是空操作
+        #   （变异 M9 第一轮就是这么漏的，判据比要证的事窄）。
+        assert abs(lot['price'] - 20.0) < 1e-9, \
+            ('🔴 `price` 是喂给引擎 entry_price 的口径（止损/吊灯/红利税档位都'
+             '读它），派现不许动它：%s' % lot['price'])
+
+        # ---- 3) 配股【不自动执行】：要掏钱且可以放弃 ----
+        _buy('300176.XSHE', '2026-08-01', 1000, 5.0)
+        b = _pos.fifo_lots(lv.fills('t_corp'))
+        lot = b['300176.XSHE'][0]
+        assert lot['shares'] == 1000, \
+            '🔴 配股不许自动执行（要掏钱、可以放弃），股数不该变：%s' % lot['shares']
+        assert abs(lot['paid'] - 5000.0) < 1e-6
+        # 但必须**留痕**：页面要说得出这件事发生过
+        summ = lv.positions_valued('t_corp')['corp']
+        rg = [e for e in summ['events'] if e['code'] == '300176.XSHE']
+        assert rg and rg[0]['rights_per_share'], \
+            '配股不自动执行，但必须留痕 —— 说了不能做就得让人知道它发生过'
+        assert '配' in rg[0]['what'], '留痕要说清是什么事：%s' % rg[0]['what']
+
+        # ---- 3b) 部分卖出：paid / div_gross 要和 fee 走【同一个比例】 ----
+        #     不缩 paid 的话，卖掉一半之后摊薄成本会翻倍，**而它不报错**。
+        #     🔴 这条必须构造 —— 上面几步全是只买不卖，那条路一步都没走到
+        #       （变异 M10 第一轮就是这么漏的）。
+        lv.add_fill('t_corp', '2026-09-01', '001388.XSHE', 'sell', 740,
+                    price=20.0, fee=0, force_price=True)
+        b = _pos.fifo_lots(lv.fills('t_corp'))
+        lh = b['001388.XSHE'][0]
+        assert lh['shares'] == 740, '卖掉一半应剩 740 股：%s' % lh['shares']
+        assert abs(lh['paid'] - (20000.0 - 500.0) / 2) < 1e-6, \
+            ('🔴 部分卖出后实付本金要按剩余股数比例缩（应 %.2f，实得 %.2f）'
+             '—— 不缩的话摊薄成本会翻倍，而它不报错'
+             % ((20000.0 - 500.0) / 2, lh['paid']))
+        assert abs(lh['div_gross'] - 250.0) < 1e-6, \
+            '已收分红也要按比例缩（红利税按批定档要用它）：%s' % lh['div_gross']
+
+        # ---- 3b2) 🔴🔴 送转之后【卖得出去】：那道校验也要认识公司行动 ----
+        #   券商账户里 10 送 10 之后是 1480 股，人照实录一笔卖 1480 ——
+        #   而 `replay_violation` 原来自己数了一份 `held`（**第四份重放**，
+        #   不认识公司行动），按 1000 判、**当场拒掉**：
+        #     「这笔卖出会让 … 持仓变负：当时只有 1000 股，要卖 1480 股」
+        #   一笔真实成交录不进去，而那句报错还指不到真正的原因。
+        #   ★ 反向自证：卖**超过**真实股数的仍然要被拒，别矫枉过正。
+        lv.upsert_account('t_corp4', name='corp4', init_cash=1000000)
+        lv.add_fill('t_corp4', '2026-07-01', '688399.XSHG', 'buy', 1000, 30.0,
+                    fee=0, force_price=True)
+        _r = lv.add_fill('t_corp4', '2026-09-02', '688399.XSHG', 'sell', 1480,
+                         price=30.0, fee=0, force_price=True)
+        assert _r and int(_r['shares']) == 1480, \
+            '送转后卖出全部 1480 股被拒了 —— 那是券商账户里真实的股数'
+        try:
+            lv.add_fill('t_corp4', '2026-09-03', '688399.XSHG', 'sell', 100,
+                        price=30.0, fee=0, force_price=True)
+            raise AssertionError('已经清仓了还能再卖 —— 那道校验被放宽过头了')
+        except lv.LiveError:
+            pass
+
+        # ---- 3c) 🔴 **已清仓的票也要留在事件里** ----
+        #   它在除权那天还持有着，那笔分红是真发生过的。而持仓表里早就没有
+        #   它了 —— 所以"明细"那一页能给出的东西比主视图那行摘要多这一样。
+        #   ★ 这条只能在**数据层**构造：页面那条用例读的是真账本，
+        #     不许往里写（同「selftest 不许写生产账本」）。
+        lv.add_fill('t_corp', '2026-09-02', '001388.XSHE', 'sell', 740,
+                    price=20.0, fee=0, force_price=True)
+        assert '001388.XSHE' not in _pos.fifo_lots(lv.fills('t_corp')), \
+            '构造不对：001388 应该已经清仓了'
+        _ev = lv.positions_valued('t_corp')['corp']['events']
+        assert any(e['code'] == '001388.XSHE' for e in _ev), \
+            ('🔴 清仓之后那次派现/送转从留痕里消失了 —— 它是真发生过的，'
+             '而持仓表里已经没有这只票，明细页是唯一能查到它的地方')
+
+        # ---- 4) 同一天：先行动、后成交（除权日当天【买入】拿不到分红）----
+        #     分红归**登记日收盘**（= 除权日前一天）的持有人
+        lv.upsert_account('t_corp2', name='corp2', init_cash=1000000)
+        lv.add_fill('t_corp2', '2026-07-17', '001388.XSHE', 'buy', 1000, 20.0,
+                    fee=0, force_price=True)
+        b2 = _pos.fifo_lots(lv.fills('t_corp2'))
+        l2 = b2['001388.XSHE'][0]
+        assert abs(l2.get('div_gross') or 0) < 1e-9, \
+            '🔴 除权日当天买入的拿不到这次分红（登记日是前一天），实得 %s' % l2.get('div_gross')
+        assert l2['shares'] == 1000, \
+            '除权日当天买的就是除权后的股数，不该再送一次：%s' % l2['shares']
+
+        # ---- 5) 没有未来函数：除权日【前一天】的持仓必须还是原样 ----
+        rows = lv.fills('t_corp')
+        pre = _pos.lots_asof(rows, '2026-07-09')['688399.XSHG'][0]
+        assert pre['shares'] == 1000, \
+            ('🔴 `lots_asof` 把 asof 传下去了没有 —— 2026-07-09 的持仓被'
+             '07-10 才发生的送转调过了（未来函数）：%s' % pre['shares'])
+        post = _pos.lots_asof(rows, '2026-07-10')['688399.XSHG'][0]
+        assert post['shares'] == 1480, '除权当日就该生效：%s' % post['shares']
+
+        # ---- 6) 现金：三笔的派现合计要进现金，且与逐条留痕对得上 ----
+        exp_div = 1000 * 0.5          # 只有 001388 派现（688399/300176 都没有）
+        s2 = lv.positions_valued('t_corp')['corp']
+        assert abs(s2['cash'] - exp_div) < 1e-6, \
+            '留痕的合计对不上：%.2f vs %.2f' % (s2['cash'], exp_div)
+        c_now = lv.cash('t_corp')
+        c_naive = 1000000 - 30000 - 20000 - 5000 + 740 * 20.0 + 740 * 20.0
+        assert abs(c_now - (c_naive + exp_div)) < 1e-6, \
+            '现金没把公司行动派现加进来：%.2f vs %.2f' % (c_now, c_naive + exp_div)
+
+        # ---- 7) 手工录过分红流水就【不自动加】（双计），并且要说出来 ----
+        lv.add_cashflow('t_corp', '2026-07-17', 400.0, kind='dividend',
+                        note='手工录的')
+        assert abs(lv.cash('t_corp') - (c_naive + 400.0)) < 1e-6, \
+            '🔴 手工录过分红就不许再自动加一遍 —— 那是双计'
+        cf = _pos.corp_conflict('t_corp')
+        assert cf and cf['manual_n'] == 1 and cf['auto_amount'] > 0, \
+            '撞车了要说出来（报出来，别替人决定）：%s' % cf
+
+        # ---- 8) 反向自证：没有公司行动的账户，一个数都不许变 ----
+        lv.upsert_account('t_corp3', name='corp3', init_cash=500000)
+        lv.add_fill('t_corp3', '2026-09-22', '600012.XSHG', 'buy', 100, 16.69,
+                    fee=1.0, force_price=True)
+        assert not _corp.actions(['600012.XSHG'], '2026-09-22', '2026-12-31'), \
+            '600012 这段有公司行动了 —— 换一只没有的当对照'
+        assert abs(lv.cash('t_corp3') - (500000 - 100 * 16.69 - 1.0)) < 1e-6, \
+            '没有公司行动的账户现金不许变'
+        l3 = _pos.fifo_lots(lv.fills('t_corp3'))['600012.XSHG'][0]
+        assert l3['shares'] == 100 and abs(l3['paid'] - 1669.0) < 1e-6
+
+        # ---- 9) 数据新鲜度要能说出来（落后 = 那几天除权的不会被调，不报错）----
+        st = _corp.status()
+        assert st['exists'] and st['max_ex_date'], 'gbbq 导出不在：%s' % st
+        assert st['stale_days'] is not None and not st['stale'], \
+            ('公司行动数据落后 %s 天 —— 跑一次 datalake/sync_daily.sh'
+             % st['stale_days'])
+        return ('送转 1000->1480 股且实付本金不动；同日先派现后送转（500 不是 740）；'
+                '配股不自动执行但留痕；除权日当天买入拿不到分红；'
+                'lots_asof 无未来函数；现金 +%.0f 且与留痕对得上；'
+                '手工分红不双计并报冲突；无行动账户逐位不变；gbbq 覆盖到 %s'
+                % (exp_div, st['max_ex_date']))
+    finally:
+        lv.LIVE = real
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -320,6 +320,92 @@ function lvSoldToday(P){
     + '</div>';
 }
 
+/* 公司行动留痕（2026-09-23）。用户：「发生分红、拆股等等事项时，需要在实盘的
+   某个地方记录下来，以便后续排查」。
+
+   🔴 它回答的是「我的成本/股数为什么变了」—— 不说的话，人看到摊薄成本比
+      自己记的低就只能猜，而猜正是本项目反复吃亏的地方。
+   ★ 放在持仓表下面的一行，**不新开一块** —— 主视图的信息架构就两块
+      (今日待办 + 当前持仓)，selftest 钉着 secs 长度。完整历史在业绩页。
+   🔴 什么都没发生时整块不渲染 —— 常驻一条"一切正常"等于教人忽略这个位置。
+   🔴 落后 / 撞车走 lvwarn (要人去做事)，已发生与预告走 lvwhy (只是解释)
+      —— 警告不许混进解释里，混了就没人看警告了。 */
+function lvCorpMap(P){
+  const m = {};
+  ((P.corp || {}).events || []).forEach(e => { (m[e.code] = m[e.code] || []).push(e); });
+  return m;
+}
+
+/* 持仓行名称后的那个标记：hover 给**这只票**的公司行动。
+   ★ 它出现在「我的成本为什么比记的低」那个位置上 —— 那才是人会去看的地方
+     （同「备注不占一列：有备注的行名称后面带 ✎、原文在 title 里」）。
+   🔴 title 里的换行只能写 `&#10;`，而且要**逐段 esc 完再拼** ——
+     先拼后 esc 会把 `&#10;` 里的 `&` 也转义掉，屏幕上就是一串字面量。 */
+function lvCorpMark(evs){
+  if(!evs || !evs.length) return '';
+  const lines = evs.map(e => e.date.slice(5) + ' ' + e.what
+      + (e.cash ? '　派回 ' + num(e.cash, 2) + ' 元' : '')
+      + (e.shares_after !== e.shares_before
+         ? '　股数 ' + num(e.shares_before) + ' → ' + num(e.shares_after) : ''));
+  return ' <span class="cmark" title="'
+    + [esc('持有期间的公司行动（成本与股数已按它调过）：')]
+        .concat(lines.map(esc)).join('&#10;')
+    + '">⊙</span>';
+}
+
+/* 公司行动留痕。**主视图这里永远只有一行**（2026-09-24 改）。
+
+   v1 把逐条事件横排在持仓表下面（小字、`·` 分隔），用户当场指出
+   「如果行动项很多的话可能会排列有点拥挤」—— 确实：持有一年十几二十条
+   分红，那一行会绕成好几排，而且**没法纵向扫**
+   （同「要横向比较 N 条东西，就得是表格，不能是卡片」那条）。
+
+   v2 拆成三处，各自回答一个问题：
+     这只票的成本为什么低了 -> 持仓行的 `⊙`（hover 给这只票的）
+     一共派回来多少现金     -> **这一行**摘要（条数再多也只有一行）
+     完整历史 / 已清仓的票  -> 业绩页「公司行动」页签的表格
+   🔴 摘要那一行**必须带入口**，否则就是把明细藏起来了
+     （同「合并的风险不是少两个按钮，是把功能藏起来」）。
+   🔴 什么都没发生时整块不渲染 —— 常驻一条"一切正常"等于教人忽略这个位置。
+   🔴 落后/撞车走 `lvwarn`（要人去做事），摘要与预告走 `lvwhy`（只是解释）
+     —— 警告不许混进解释里，混了就没人看警告了。 */
+function lvCorpNote(P, aid){
+  const C = P.corp || {}, ev = C.events || [], up = C.upcoming || [];
+  const st = C.status || {}, cf = C.conflict;
+  let h = '';
+  if(ev.length){
+    const cash = ev.reduce((s, e) => s + (e.cash || 0), 0);
+    const nsh = ev.filter(e => e.shares_after !== e.shares_before).length;
+    h += '<div class="lvwhy" style="margin-top:8px">公司行动 <b>' + num(ev.length)
+      + '</b> 次'
+      + (cash ? ' · 派回 <b>' + num(cash, 2) + '</b> 元（税前）' : '')
+      + (nsh ? ' · <b>' + num(nsh) + '</b> 次改了股数' : '')
+      + ' · 成本与股数已按它调过　'
+      + '<a href="#/live/' + encodeURIComponent(aid) + '/perf?tab=corp">明细 ›</a>'
+      + '　<span class="lvwhy">名称后的 <b>⊙</b> 是这只票的</span></div>';
+  }
+  if(up.length){
+    h += '<div class="lvwhy" style="margin-top:6px">即将除权：'
+      + up.map(e => esc(e.date.slice(5)) + ' <b>' + esc(e.name || e.code) + '</b> '
+                    + esc(e.what)).join('　·　')
+      + '（已公告、还没到除权日，所以还没调）</div>';
+  }
+  if(st.exists === false || st.stale){
+    h += '<div class="lvwarn" style="margin-top:6px">⚠ 公司行动数据'
+      + (st.exists === false ? '<b>不在</b>（没跑过导出）'
+         : '只覆盖到 <b>' + esc(st.max_ex_date || '?') + '</b>，落后 '
+           + num(st.stale_days) + ' 天')
+      + ' —— 这期间除权的票，成本与股数<b>不会</b>被调，而那不报错。'
+      + '跑一次 <code>datalake/sync_daily.sh</code> 即可。</div>';
+  }
+  if(cf){
+    h += '<div class="lvwarn" style="margin-top:6px">⚠ ' + esc(cf.why)
+      + '（手工 ' + num(cf.manual_n) + ' 条 / 合计 ' + num(cf.manual_amount, 2)
+      + ' 元　vs　自动可算出 ' + num(cf.auto_amount, 2) + ' 元）</div>';
+  }
+  return h;
+}
+
 /* 当日盈亏的构成：持仓浮动 / 当天卖出已实现 / 当天费用。
    ★ 只在真有后两项时才展开 —— 没有卖出也没费用的日子，
      合计就等于持仓表各行之和，多写一行是噪声。 */
@@ -558,7 +644,7 @@ async function loadLive(aid, quiet){
          于是这一排只剩**要做的事**：记一笔（录）· 业绩（看）·〔推进〕· 设置。
          ★ 两个旧 hash 仍然可达（app.js 里 redirect），书签一个没失效。 -->
     <a class="btn" href="#/live/${a.id}/perf" id="lvperf"
-       title="业绩曲线 / 业绩明细 / 每日持仓 / 交易明细 / 清仓记录 / 盈亏榜 / 选股理由 / 执行差异">📊 业绩</a>
+       title="业绩曲线 / 业绩明细 / 每日持仓 / 交易明细 / 清仓记录 / 盈亏榜 / 公司行动 / 选股理由 / 执行差异">📊 业绩</a>
     ${a.paper?`<button class="btn" id="lvadv" ${ro?'disabled':''}
        title="按绑定策略跑到最新数据日，把新成交写进账本（幂等，没新交易日就什么都不做）"
        >▷ 推进</button>`:''}
@@ -575,11 +661,13 @@ async function loadLive(aid, quiet){
     ${it.length?`<div class="pw"><table class="lvt lvpos">
       <tr>${LVPOS_COLS.map(c => LVSORT_COLS[c.k] ? lvSortTh(c.k, LVSORT_COLS[c.k])
         : `<th class="${c.tx ? 'tx' : 'rt'}">${esc(c.t || LVPOS_TH[c.k] || c.k)}</th>`).join('')}</tr>
-      ${lvSortRows(it).map(x=>`<tr>${LVPOS_COLS.map(c =>
-        c.rt ? lvRtd(c.k, x, P) : lvPosTd(c, x, aid)).join('')}</tr>`).join('')}
+      ${(()=>{ const _cm = lvCorpMap(P); return lvSortRows(it).map(x=>
+        `<tr>${LVPOS_COLS.map(c => c.rt ? lvRtd(c.k, x, P)
+          : lvPosTd(c, x, aid, _cm[x.code])).join('')}</tr>`).join(''); })()}
       </table></div>
       <!-- 持仓表包在 .pw 里，见本文件顶部注释 -->
       ${lvSoldToday(P)}
+      ${lvCorpNote(P, aid)}
       ${P.fee_estimated_n?'<div class="lvwhy" style="margin-top:6px">'
         +'⚠ 有 <b>'+P.fee_estimated_n+'</b> 笔买入的费用是<b>估算</b>的，'
         +'成本跟着也是估算 —— 对完账单可在流水页「冲正 + 重录」填实际值。'
@@ -824,12 +912,12 @@ const LVPOS_COLS = [
 ];
 
 /* 一行的静态格（实时那几个走 `lvRtd`，它是刷新与渲染的唯一定义）。 */
-function lvPosTd(c, x, aid) {
+function lvPosTd(c, x, aid, corp) {
   switch (c.k) {
     case 'name':
       /* 名称 + 小字代码**同一格**（`cnCell`，全站唯一定义）——
          原来代码与名称各占一列，而这张表已经十来列了。 */
-      return `<td class="tx">${cnCell(x.code, x.name)}${lvHoldMark(aid, x.code)}</td>`;
+      return `<td class="tx">${cnCell(x.code, x.name)}${lvHoldMark(aid, x.code)}${lvCorpMark(corp)}</td>`;
     case 'cost':
       return `<td class="rt" title="摊薄成本（含买入费 ${num(x.buy_fee, 2)}）—— 浮盈按它算。&#10;成交均价 ${num(x.cost, 4)}（引擎 entry_price 用的是这个，不含费）。&#10;保本价 ${x.breakeven == null ? '—' : num(x.breakeven, 3)}（含估算卖出费 ${x.exit_fee_est == null ? '—' : num(x.exit_fee_est, 2)}）">${num(x.cost_net, 3)}</td>`;
     case 'shares': return `<td class="rt">${num(x.shares)}</td>`;

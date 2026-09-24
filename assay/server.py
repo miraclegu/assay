@@ -74,6 +74,7 @@ ROUTES = {
     '/api/live/sellable': live.api_live_sellable,
     '/api/live/trips': live.api_live_trips,
     '/api/live/trade_stats': live.api_live_trade_stats,
+    '/api/live/corp': live.api_live_corp,
     '/api/live/intraday': live.api_live_intraday,
     '/api/live/trades_of': live.api_live_trades_of,
     '/api/live/bench': live.api_live_bench,

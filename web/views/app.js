@@ -102,7 +102,7 @@ function route(){
           if(q.get('all')==='1') ps.push('all=1');
           location.replace('#/live/'+wm[1]+'/perf?'+ps.join('&')); return; }
   /* 业绩页是**独立页**：主视图只留「今日待办 + 当前持仓」，其余八个页签
-     （曲线 / 明细 / 持仓 / 交易 / 清仓 / 盈亏榜 / 选股理由 / 执行差异）
+     （曲线 / 明细 / 持仓 / 交易 / 清仓 / 盈亏榜 / 公司行动 / 选股理由 / 执行差异）
      都是复盘时才看的。`?tab=` 只在进页面时读一次（见 showPerf）。 */
   const pm=/^#\/live\/([\w-]+)\/perf(?:\?(.*))?$/.exec(location.hash||'');
   if(pm){ showPerf(pm[1], new URLSearchParams(pm[2]||'')); return; }
