@@ -96,7 +96,12 @@ def _paths(root=None):
     dl = paths.datalake(root)
     return (os.path.join(dl, 'mart', 'panel_daily', 'panel_*.parquet'),
             os.path.join(dl, 'mart', 'factor_daily', 'factor_*.parquet'),
-            os.path.join(dl, 'mart', 'factor_catalog.parquet'))
+            os.path.join(dl, 'mart', 'factor_catalog.parquet'),
+            # 🔴 目录表的【另一半】：原清单里算不出来的那些，带原因。
+            #   路径只在这一处拼 —— 8 处各数一遍 dirname 那种事已经栽过
+            #   （同 assay/paths.py 那一轮）。
+            os.path.join(dl, 'mart', 'factor_missing.parquet'),
+            os.path.join(dl, 'mart', 'factor_reasons.json'))
 
 
 def _sig(fglob):
@@ -230,7 +235,7 @@ def _turnover(con, h, fglob):
 
 
 def build(root=None, quiet=False):
-    panel, fglob, _ = _paths(root)
+    panel, fglob, _, _, _ = _paths(root)
     import glob as _g
     years = sorted(_g.glob(fglob))
     if not years:
@@ -463,7 +468,7 @@ def main():
                     help='连横截面不可比的（单位 元/股/元每天）一起列')
     a = ap.parse_args()
 
-    _, fglob, cat = _paths()
+    _, fglob, cat, _, _ = _paths()
     need = a.build
     if not need:
         try:

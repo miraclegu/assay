@@ -232,9 +232,12 @@ tr.marked td{border-top:1px solid rgba(242,199,68,.25);border-bottom:1px solid r
    分组各用一张 table 时列宽各算各的 —— 上下两个表的"年化"列对不齐，
    而这一页存在的唯一理由就是纵向比较。分组改成表内的一条带子行。 */
 #pk .pw{border:1px solid var(--line);border-radius:6px;margin:14px 0;overflow-x:auto}
-#pk tr.grp td{background:#1b2331;padding:6px 10px;
+/* 🔴 **不作用域化**（原来写成 `#pk tr.grp`）：因子广场那张「算不出来的」
+   表也按原因分组，照搬一份的话两处的带子行迟早长得不一样 ——
+   而那不报错（同 `.pw` 的 overflow-x 只定义在 `#pk` 下面那次）。 */
+tr.grp td{background:#1b2331;padding:6px 10px;
   border-bottom:1px solid var(--line);border-top:1px solid var(--line)}
-#pk tr.grp .gb{font-size:12.5px;font-weight:600;color:var(--fg)}
+tr.grp .gb{font-size:12.5px;font-weight:600;color:var(--fg)}
 /* ★ 一行一条规则的【对比表】，不是一条一张卡。
    卡片式横排的毛病不是挤，是**没法纵向扫**：每张卡各自排版，
    同一个指标在不同卡里横坐标都不一样，10 条规则根本比不了。
@@ -985,3 +988,15 @@ th.srt:hover{color:var(--accent)}
 .fsel,.fq{padding:4px 8px;background:var(--panel2);color:var(--fg);
   border:1px solid var(--line);border-radius:5px;font-size:12px}
 .fsel:focus,.fq:focus{outline:none;border-color:var(--accent)}
+/* 「算不出来的」那张表：原因带子行里的"为什么"是整段话，要能折行；
+   ★ 做不了 / 还没做 用两种颜色分开 —— 混成一个样式的话，65 个只差有人
+   去写的因子会被读成"这东西算不了"（同「警告不许混进解释里」）。 */
+tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
+  line-height:1.65;color:var(--dim);white-space:normal}
+.mblk{color:var(--warn)}
+.mtodo{color:var(--dim)}
+/* 手工那条的删除：看得出能点（手型 + hover 变警告色），
+   而注册表那些**根本不给这个按钮** —— 摆一个点了必然报错的 × 更糟。 */
+.mdel{color:var(--dim);cursor:pointer;text-decoration:none;padding:0 4px;
+  font-size:13px;line-height:1}
+.mdel:hover{color:var(--up)}

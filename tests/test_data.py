@@ -197,7 +197,23 @@ def t_docs_ui():
             pg.on('console',
                   lambda m: errs.append(m.text) if m.type == 'error' else None)
             pg.goto('http://127.0.0.1:%d/#/docs/trap' % port)
-            pg.wait_for_timeout(1500)
+            # 🔴 **不许固定等待**（原来是 `wait_for_timeout(1500)`）——
+            #   2026-09-24 全量跑时它 2.9 秒就报「侧栏只有 0 条」，而单跑
+            #   6.9 秒通过：机器忙的时候 1500ms 读到的是**半截页面**，
+            #   于是报出来像是产品坏了（同「等固定时间在机器忙时会读到
+            #   半截表」那条 —— 那一条当初就是为这个写的，这里漏了）。
+            #   ★ 调大那个数不是修法：它只是把阈值往后挪一点。
+            try:
+                pg.wait_for_function(
+                    "() => document.querySelectorAll('.ditem').length >= 8"
+                    " && document.querySelectorAll('#dc table.dt tbody tr').length > 30"
+                    " && document.querySelector('#dc .dsrc')", timeout=30000)
+            except Exception:                               # noqa: BLE001
+                raise AssertionError(
+                    '数据字典页没渲染完：侧栏 %d 条 / 表格 %d 行 / 控制台 %s'
+                    % (pg.locator('.ditem').count(),
+                       pg.locator('#dc table.dt tbody tr').count(),
+                       (errs[0][:120] if errs else '无')))
             n_side = pg.locator('.ditem').count()
             assert n_side >= 8, '侧栏只有 %d 条' % n_side
             src = pg.locator('#dc .dsrc').inner_text()
@@ -206,7 +222,15 @@ def t_docs_ui():
             assert tot > 30, '表格只渲染出 %d 行' % tot
 
             pg.fill('#dq', 'report_type')
-            pg.wait_for_timeout(2200)
+            # ★ 过滤有 260ms 防抖 + 跨篇统计要打接口 —— 等**结果**（真的有行
+            #   被藏起来），不等一个拍脑袋的毫秒数。
+            try:
+                pg.wait_for_function(
+                    "n => document.querySelectorAll("
+                    "  '#dc table.dt tbody tr:not([style*=\"display: none\"])'"
+                    ").length < n", arg=tot, timeout=30000)
+            except Exception:                               # noqa: BLE001
+                pass            # 让下面那条断言去报（它的措辞更准）
             vis = pg.locator('#dc table.dt tbody tr:visible').count()
             assert 0 < vis < tot, '过滤没生效（%d/%d）' % (vis, tot)
             assert pg.locator('#dc .dhi').count() > 0, '命中处没高亮'
@@ -2375,4 +2399,307 @@ def t_factor_page():
         assert '横截面' in t3, '指标广场没说清"我不是因子广场"'
         p3.close()
         br.close()
+    return ' · '.join(notes)
+
+
+@case('因子：算不出来的那些也要有名有姓，且"做不了"与"还没写"不许混成一句', tag='web')
+def t_factor_missing():
+    """原清单 278 个名字，广场只列得出有值的那些 —— 剩下的此前**在页面上
+    根本不存在**，于是「我要的那个因子呢」没有任何地方答得了。
+
+    🔴 **四件事都不报错**，所以四条各钉各的：
+
+    | 坏法 | 表现 |
+    |---|---|
+    | 清单手工维护、与注册表分叉 | 实现了却忘了从 MISSING 删 -> 两边都列；原清单加一行 -> 它**静默地哪一半都不在** |
+    | 覆盖自证挪到写盘之后 | 对不上照样把表写出去了，页面上是一份缺了角的清单 |
+    | "做不了"与"还没写"混成一句 | 65 个只差有人去写的因子被读成"这东西算不了" |
+    | 入口断链 / 画成标签 | 从广场走不到这份清单，**而那不报错，只是从此没人找得到** |
+
+    ★ 计数一律与**注册表/接口**比，不写死 117/65 —— 实现一个因子那两个数
+      就变，写死的话下次是断言在说谎（同「数字自己算」那条）。
+    """
+    import sys as _sys
+
+    dlb = os.path.join(os.path.dirname(REPO), 'datalake', 'build')
+    if dlb not in _sys.path:
+        _sys.path.insert(0, dlb)
+    import factors as fac
+    import pandas as pd
+
+    notes = []
+
+    # ---- ① 覆盖自证：两半必须正好分完原清单 ----------------------
+    xlsx = os.path.join(os.path.dirname(REPO), 'factors.xlsx')
+    assert os.path.isfile(xlsx), '构造不对：没有 factors.xlsx，这条判据没法跑'
+    names = list(dict.fromkeys(
+        pd.read_excel(xlsx)['因子名称'].astype(str).str.strip()))
+    ok, msg = fac.covered_by(names)
+    assert ok, '因子清单两半对不上 —— %s' % msg
+    notes.append(msg)
+
+    # 🔴 **反向自证**：三种烂法各报各的。`covered_by` 恒返回 True 的话
+    #   上面那条就是空转，而那正是"清单慢慢烂掉"的样子。
+    impl = sorted(s.name_cn for s in fac.all_specs())
+    miss = [r['name_cn'] for r in fac.all_missing()]
+    bad = {}
+    bad['neither'] = fac.covered_by(names + ['__原清单新加的一行__'])
+    bad['extra'] = fac.covered_by([n for n in names if n != miss[0]])
+    _save = fac.MISSING
+    try:
+        fac.MISSING = _save + ((impl[0], 'todo'),)
+        bad['both'] = fac.covered_by(names)
+    finally:
+        fac.MISSING = _save
+    for k, (o2, m2) in bad.items():
+        assert not o2, '覆盖自证放过了「%s」—— 它等于没有' % k
+    assert '哪一半都不在' in bad['neither'][1], \
+        '「原清单加了一行」没被点名：%s' % bad['neither'][1]
+    assert '原清单里没有' in bad['extra'][1], \
+        '「MISSING 里有而原清单没有」没被点名：%s' % bad['extra'][1]
+    assert '又列在 MISSING' in bad['both'][1], \
+        '「实现了却还留在 MISSING 里」没被点名：%s' % bad['both'][1]
+    assert fac.covered_by(names)[0], '还原之后覆盖自证必须回到真'
+    notes.append('三种烂法各报各的')
+
+    # ---- ② 每条都有原因，且两档都非空 ---------------------------
+    rows = fac.all_missing()
+    assert rows, '构造不对：MISSING 是空的'
+    for r in rows:
+        assert r['reason_key'] in fac.MISS_REASONS, \
+            '%s 的原因不认识：%s' % (r['name_cn'], r['reason_key'])
+        assert r['reason_cn'] and r['reason_why'], \
+            '%s 没有原因文案' % r['name_cn']
+        for f in ('name_cn', 'reason_cn', 'reason_why', 'detail'):
+            assert '**' not in (r[f] or ''), \
+                '%s 的 %s 里有 markdown 星号（页面上会原样显示）' % (r['name_cn'], f)
+    nb = sum(1 for r in rows if r['blocked'])
+    nt = len(rows) - nb
+    # 反向自证：两档都得有货，否则"分两档"那几条断言在空转
+    assert nb and nt, '构造不对：做不了 %d / 还没写 %d —— 有一档是空的' % (nb, nt)
+
+    # ---- ③ 建目录表时【先自证再写盘】，不过就拒绝写出 -------------
+    #   判据走 AST 比**真实语句的行号**，不查字符串 ——
+    #   查字符串会命中我自己写的注释（这条本项目踩过四次）。
+    import ast
+    bp = os.path.join(dlb, 'build_factor_catalog.py')
+    tree = ast.parse(io.open(bp, encoding='utf-8').read())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    chk = [n.lineno for n in ast.walk(fn)
+           if isinstance(n, ast.Call) and getattr(n.func, 'id', '') == 'covered_by']
+    ret2 = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Return)
+            and isinstance(n.value, ast.Constant) and n.value.value == 2]
+    wr = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
+          and getattr(n.func, 'attr', '') == 'to_parquet']
+    assert chk, 'build_factor_catalog.main() 里没有覆盖自证'
+    assert ret2, '覆盖自证不过时没有 return 2 —— 那就是"报了一句然后照样写出去"'
+    assert wr, '构造不对：main() 里找不到 to_parquet'
+    assert max(ret2) < min(wr), \
+        '覆盖自证的 return 2 排在写盘之后（第 %s 行 vs %s 行）—— ' \
+        '对不上照样把表写出去了，而它只在日志里说了一句' % (ret2, wr)
+    notes.append('先自证再写盘')
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return ' · '.join(notes) + '（页面部分跳过：无 playwright）'
+
+    import shutil
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+    from assay import factor_missing as fm
+    from assay import server as sv
+    from assay.srv import factors as fsrv
+
+    # 🔴 **selftest 不许写生产账本**（同 `lv.LIVE` 那条）。顺带这也让计数
+    #   变成可控的：手工那半为空，下面那些"页面几行 vs 注册表几条"的判据
+    #   才不依赖"真账本里恰好没有手工条目"（同「判据不许依赖真实数据碰巧
+    #   如此」那条）。
+    _live0, _allow0 = fm.LIVE, sv.ALLOW_LIVE
+    _tmpdir = tempfile.mkdtemp(prefix='factor_miss_')
+    fm.LIVE = _tmpdir
+    sv.ALLOW_LIVE = True
+
+    # 🔴 一路 try/finally —— 断言失败时也得把 `fm.LIVE` 与
+    #   `sv.ALLOW_LIVE` 还回去。不还的话**后面的用例**跑在一个
+    #   临时账本与"可写"模式上，而那不报错（同「变异的还原被
+    #   __pycache__ 静默吃掉」那类：污染留在了别人身上）。
+    try:
+        api = fsrv.api_factors_missing({})
+        assert api['n'] == len(rows), '接口给的条数与注册表对不上：%d vs %d' % (
+            api['n'], len(rows))
+
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        U = 'http://127.0.0.1:%d' % port
+
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            # ---- ④ 入口：首屏【看得见】且【看得出能点】-----------------
+            #   判据取可量的视觉事实（可见 / 有边框 / 手型光标），不是查 class ——
+            #   后者在样式被改暗时照样命中（同因子广场入口那条）。
+            pg.goto(U + '/factors.html', wait_until='networkidle')
+            pg.wait_for_selector('table.lvt tbody tr', timeout=60000)
+            sel = '#pg a[href*="missing=1"]'
+            el = pg.query_selector(sel)
+            assert el, '因子广场上没有「算不出来的」入口 —— 而那不报错，' \
+                       '只是那 %d 个因子从此没人找得到' % api['n']
+            g = pg.eval_on_selector(sel, '''e=>{const r=e.getBoundingClientRect(),
+                s=getComputedStyle(e);return {top:r.top,w:r.width,
+                cur:s.cursor,bw:parseFloat(s.borderTopWidth)};}''')
+            assert g['w'] > 0 and 0 <= g['top'] < 900, \
+                '「算不出来的」入口不在首屏：%s' % g
+            assert g['cur'] == 'pointer' and g['bw'] >= 1, \
+                '入口被画成了标签（光标 %s / 边框 %s）—— 一个能点的东西看着' \
+                '不像能点，等于没有入口' % (g['cur'], g['bw'])
+            # 🔴 光验"有边框 + 手型光标"**不够**：`.lvtag` 两样都有，
+            #   改成 .lvtag 照样全绿（变异实测漏过一次）。真正要证的是
+            #   「它与旁边那些标签长得不一样」—— 拿同一页上一个真 .lvtag 去比。
+            _sty = ('e=>{const s=getComputedStyle(e);'
+                   'return [s.color,s.fontSize,s.paddingLeft,s.fontFamily];}')
+            a1 = pg.eval_on_selector(sel, _sty)
+            a2 = pg.eval_on_selector('#pg a[data-nav="win"]', _sty)
+            assert a1 != a2, \
+                '「算不出来的」入口与旁边的标签长得一模一样（%s）—— ' \
+                '一个能点的东西被画成了标签，本项目犯过两次' % a1
+            assert str(api['n']) in pg.inner_text(sel), \
+                '入口上没写清有几个 —— 人不知道值不值得点进去'
+
+            # ---- ⑤ 那一页：照服务端清单渲染，两档分得开 ---------------
+            pg.goto(U + '/factors.html?missing=1', wait_until='networkidle')
+            pg.wait_for_selector('tr.grp', timeout=60000)
+            assert not errs, '页面报错：%s' % errs
+            nrow = pg.eval_on_selector_all('table.lvt tbody tr:not(.grp)', 'a=>a.length')
+            assert nrow == api['n'], '页面列了 %d 行，服务端说有 %d 个' % (nrow, api['n'])
+            # 带子行【逐条】对服务端，不是"有几条" —— 只比个数的话，
+            # 页面自己拼一套原因文案也算通过
+            got = pg.eval_on_selector_all(
+                'tr.grp .gwhy', 'a=>a.map(x=>x.textContent.trim())')
+            want = [r['why'] for r in api['reasons']]
+            assert got == want, '原因文案不是服务端那份：\n页面 %s\n服务端 %s' % (
+                got[:2], want[:2])
+            # 🔴 两档必须【看得出来是两档】：判据是可量的颜色，不是有没有那个 class
+            cb = pg.eval_on_selector_all(
+                'tr.grp .mblk', 'a=>a.map(x=>getComputedStyle(x).color)')
+            ct = pg.eval_on_selector_all(
+                'tr.grp .mtodo', 'a=>a.map(x=>getComputedStyle(x).color)')
+            # 🔴 期望从**注册表**算，不从 `api['reasons']` 算 —— 后者是被测
+            #   对象自己的输出，服务端把 blocked 一律设成 True 时它跟着变，
+            #   于是两边永远相等、判据空转（变异实测漏过一次）。
+            kb = {r['reason_key'] for r in rows if r['blocked']}
+            kt = {r['reason_key'] for r in rows} - kb
+            gb, gt = len(kb), len(kt)
+            assert (len(cb), len(ct)) == (gb, gt), \
+                '两档的【组数】对不上：页面 %d/%d，服务端 %d/%d' % (
+                    len(cb), len(ct), gb, gt)
+            assert (api['n_blocked'], api['n_todo']) == (nb, nt), \
+                '两档的【条数】接口与注册表对不上：%d/%d vs %d/%d' % (
+                    api['n_blocked'], api['n_todo'], nb, nt)
+            assert set(cb) & set(ct) == set(), \
+                '「做不了」与「还没写」是同一个颜色（%s）—— 揉成一句的话，' \
+                '%d 个只差有人去写的因子会被读成"这东西算不了"' % (cb[:1], nt)
+            txt = pg.inner_text('#pg')
+            assert '不是算不出来' in txt, \
+                '页面没说清最后那一档不是"算不出来" —— 那就是在说谎'
+
+            # ---- ⑥ 搜不到时要分得出「没这个名字」和「它算不出来」------
+            #   两个分支**各构造一次**：只测一头的话，"永远说算不出来"或
+            #   "永远说没有"都全绿（同「判据两个方向都要」那条）。
+            hit = rows[0]['name_cn']
+            pg.goto(U + '/factors.html?q=' + hit, wait_until='networkidle')
+            pg.wait_for_function(
+                "()=>document.querySelector('#pg').innerText.includes('没有匹配')",
+                timeout=30000)
+            t1 = [x for x in pg.inner_text('#pg').split('\n') if '没有匹配' in x][0]
+            # 🔴 判据要认准**分得出两个分支**的那句话。第一版查的是
+            #   「'算不出来' in t1」—— 而"也不在那 N 个算不出来的里面"这句
+            #   **也含这四个字**，于是两个分支都命中，判据空转（变异实测）。
+            assert '对得上' in t1 and hit in t1, \
+                '搜一个【算不出来】的因子，页面没点名它在那份清单里 —— ' \
+                '人会以为自己名字打错了：%s' % t1
+            assert '也不在' not in t1, '两个分支的话混在一起了：%s' % t1
+            pg.goto(U + '/factors.html?q=zzz-%E6%B2%A1%E8%BF%99%E4%B8%AA-zzz',
+                    wait_until='networkidle')
+            pg.wait_for_function(
+                "()=>document.querySelector('#pg').innerText.includes('没有匹配')",
+                timeout=30000)
+            t2 = [x for x in pg.inner_text('#pg').split('\n') if '没有匹配' in x][0]
+            assert '也不在' in t2 and '对得上' not in t2, \
+                '两边都没有时页面没说"也不在那份清单里" —— ' \
+                '那句话才把"打错了"与"算不出来"分开：%s' % t2
+            assert not errs, '页面报错：%s' % errs
+
+            # ---- ⑦ 手工加一条：名字撞了要【说清撞在哪一半】--------------
+            #   静默覆盖的话，注册表里那条逐条定案的原因被一句手写的话盖住，
+            #   而页面上看不出是哪一条（同「锚点必须命中恰好一次，否则抛」）。
+            pg.on('dialog', lambda d: d.accept())
+            pg.goto(U + '/factors.html?missing=1', wait_until='networkidle')
+            try:
+                pg.wait_for_selector('#mfopen', timeout=30000)
+            except Exception:
+                raise AssertionError(
+                    '这一页上没有「手工加一条」的入口 —— 那份清单就只能看、'
+                    '加不进去；而它不报错，只是从此没人往里记东西')
+            eb = pg.eval_on_selector('#mfopen', 'e=>e.getBoundingClientRect().top')
+            assert 0 <= eb < 900, \
+                '「手工加一条」不在首屏（top=%s）—— %d 行的表，摆在表尾等于' \
+                '要滚到底才看得见（同因子广场入口沉在归档树底下那次）' % (eb, api['n'])
+            pg.click('#mfopen')
+            pg.wait_for_selector('#mfn', timeout=15000)
+            impl0 = sorted(x.name_cn for x in fac.all_specs())[0]
+            for nm, want in ((impl0, '已经算得出来'),
+                             (rows[0]['name_cn'], '已经在注册表')):
+                pg.fill('#mfn', nm)
+                pg.fill('#mfd', '测试')
+                pg.click('#mfok')
+                try:
+                    pg.wait_for_selector('#mfmsg.warn', timeout=15000)
+                except Exception:
+                    raise AssertionError(
+                        '撞名的「%s」被【静默加进去了】—— 注册表里那条逐条'
+                        '定案的原因会被一句手写的话盖住，而页面上看不出'
+                        '是哪一条' % nm)
+                got = pg.inner_text('#mfmsg')
+                assert want in got, \
+                    '加一条撞名的「%s」，报错没说清撞在哪一半：%s' % (nm, got)
+
+            NEW = '自检·测试因子'
+            pg.fill('#mfn', NEW)
+            pg.fill('#mfd', '这一条是自检加的')
+            pg.click('#mfok')
+            pg.wait_for_function(
+                "n=>document.querySelector('#pg').innerText.includes(n)",
+                arg=NEW, timeout=20000)
+            cur = fm.current()
+            assert [r['name_cn'] for r in cur] == [NEW], \
+                '账本里没有刚加的那条：%s' % cur
+            n2 = pg.eval_on_selector_all('table.lvt tbody tr:not(.grp)', 'a=>a.length')
+            assert n2 == api['n'] + 1, '加完页面是 %d 行，应该是 %d' % (n2, api['n'] + 1)
+            dels = pg.eval_on_selector_all('a.mdel', 'a=>a.map(x=>x.dataset.n)')
+            assert dels == [NEW], \
+                '删除按钮不是【只给手工那条】：%s —— 注册表里的是代码，' \
+                '摆一个点了必然报错的 × 比不摆更糟' % dels[:5]
+
+            pg.click('a.mdel')
+            pg.wait_for_function(
+                "n=>!document.querySelector('#pg').innerText.includes(n)",
+                arg=NEW, timeout=20000)
+            assert fm.current() == [], '删完账本里还有：%s' % fm.current()
+            assert len(fm.log()) == 2, \
+                '账本不是 append-only（该是 add + remove 两条，实得 %d）' % len(fm.log())
+            assert not errs, '页面报错：%s' % errs
+            br.close()
+    finally:
+        fm.LIVE, sv.ALLOW_LIVE = _live0, _allow0
+        shutil.rmtree(_tmpdir, ignore_errors=True)
+
+    notes.append('页面 %d 行 / %d 组，两档分得开；手工加/删走通' % (
+        nrow, len(api['reasons'])))
     return ' · '.join(notes)

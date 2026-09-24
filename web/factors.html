@@ -76,13 +76,193 @@ function facNav(kv) {
 
 // ================= 入口 =================
 async function facBoot() {
-  const id = facQ('id');
-  pageHead('runs', id ? '🧪 因子详情' : '🧪 因子广场');
+  const id = facQ('id'), ms = facQ('missing');
+  pageHead('runs', ms ? '🧪 算不出来的因子' : id ? '🧪 因子详情' : '🧪 因子广场');
   try { FACM = await j('/api/factors/meta'); }
   catch (e) { $('#pg').innerHTML = '<div class="warn">取不到因子目录：'
     + esc(String(e)) + '<br>还没算过的话先跑一次 python3 assay/factor_eval.py</div>';
     return; }
-  if (id) facDetail(id); else facList();
+  if (ms) facMissing(); else if (id) facDetail(id); else facList();
+}
+
+// ================= 算不出来的那些 =================
+/* 🔴 原清单 278 个名字，广场只列得出有值的那 161 个 —— 剩下 117 个此前
+   **在页面上根本不存在**。而"查不到"与"本地根本算不了"在屏幕上长得一模一样
+   （同「删了要留痕，否则空与本来就没有分不出来」那条）。
+
+   🔴🔴 **两档必须分开说**：no_data / calib_failed / no_spec / ambiguous /
+   sparse / const_undef 是【做不了或要先定案】；todo 是【可复现、只是还没写】。
+   揉成一句"暂时无法计算"的话，65 个只差有人去写的因子会被读成"这东西算不了"。
+   分档由**服务端**给（`blocked`），页面不认识任何一个原因 key ——
+   加一档原因，这一页自动就有（同「整页照服务端清单渲染」）。 */
+let FACMS = null;
+
+async function facMissing() {
+  $('#pg').innerHTML = '<h2>🧪 算不出来的因子</h2><div class="note">读取中…</div>';
+  try { FACMS = await j('/api/factors/missing'); }
+  catch (e) { $('#pg').innerHTML = '<div class="warn">取不到：' + esc(String(e)) + '</div>'; return; }
+  facMsRender();
+}
+
+function facMsRender() {
+  const o = FACMS, back = '/factors.html?win=' + encodeURIComponent(facWin()) +
+    '&h=' + encodeURIComponent(facH());
+  if (!o.n) {
+    $('#pg').innerHTML = '<h2>🧪 算不出来的因子</h2><div class="warn">' +
+      esc(o.why_empty || '这份清单还没建出来') + '</div>' +
+      '<div class="lvtags"><a class="btn" href="' + back + '">‹ 回因子广场</a></div>';
+    return;
+  }
+  const q = facQ('q').trim().toLowerCase();
+  const hit = r => !q || ((r.name_cn || '') + ' ' + (r.detail || '') + ' ' +
+    (r.reason_cn || '')).toLowerCase().includes(q);
+
+  let body = '';
+  let shown = 0;
+  o.reasons.forEach(g => {
+    const rows = o.rows.filter(r => r.reason_key === g.key && hit(r));
+    if (!rows.length) return;
+    shown += rows.length;
+    body += '<tr class="grp"><td colspan="2"><span class="gb">' +
+      '<span class="' + (g.blocked ? 'mblk' : 'mtodo') + '">' +
+      (g.blocked ? '做不了 / 要先定案' : '还没做') + '</span> · ' +
+      esc(g.label) + '　<span class="dim">' + rows.length +
+      (rows.length === g.n ? '' : ' / ' + g.n) + ' 个</span>' +
+      '<span class="gwhy">' + esc(g.why) + '</span></span></td></tr>';
+    // 行号与「手工加的」都是**名称后面的小字注解**，与 cnCell 的代码
+    // 同一件事，所以用同一个 `.cd`（2026-09-24 那次改名之后它才是干净的：
+    // 在那之前日历格子也叫 .cd，把边框与手型光标加到了它身上）。
+    body += rows.map(r => '<tr><td class="tx">' + esc(r.name_cn) +
+      (r.src_row ? '<span class="cd">原清单第 ' + r.src_row + ' 行</span>' : '') +
+      (r.source === 'manual' ? '<span class="cd">手工加的</span>' : '') +
+      // 空着 = 组头那句话就是全部原因。填一句"按上面那条"的话，
+      // 117 行里有 100 行是同一句废话，真正有补充的那 17 条反而被淹没
+      '</td><td class="tx">' + (r.detail ? esc(r.detail) : '') +
+      // 🔴 **只有手工那条给删除**：注册表里的是代码，页面删不动 ——
+      //   摆一个点了必然报错的 × 在那儿，比不摆更糟（同 backLink 那条）。
+      (r.source === 'manual'
+        ? ' <a href="#" class="mdel" data-n="' + esc(r.name_cn) +
+          '" title="从手工清单里删掉（账本 append-only，删的是一条 remove）">×</a>'
+        : '') +
+      '</td></tr>').join('');
+  });
+
+  $('#pg').innerHTML = '<h2>🧪 算不出来的因子</h2>' +
+    '<div class="lvtags"><a class="btn" href="' + back + '">‹ 回因子广场</a>' +
+    '<span class="lvtag">做不了 / 要先定案 <b>' + o.n_blocked + '</b></span>' +
+    '<span class="lvtag">只是还没写 <b>' + o.n_todo + '</b></span>' +
+    '<input id="facq" class="fq" placeholder="搜名称 / 原因" value="' +
+      esc(facQ('q')) + '" style="width:190px">' +
+    (FACMF ? '' : '<a href="#" class="btn" id="mfopen">+ 手工加一条</a>') +
+    '</div>' +
+    '<div class="note">' + esc(o.note) + '</div>' +
+    '<div class="note">' + esc(o.todo_note) + '</div>' +
+    '<div class="note">右边那一列<b>空着</b>表示：上面那条带子里的原因' +
+    '就是全部原因，这一条没有额外的话要说。</div>' +
+    facMsForm() +
+    (shown ? '<div class="pw"><table class="lvt"><thead><tr>' +
+      '<th class="tx">因子（原清单里的名字）</th>' +
+      '<th class="tx" title="只列【这一条特有的】补充；空着表示' +
+      '上面那条带子里的原因就是全部原因">这一条特有的补充</th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>'
+    : '<div class="note">没有匹配「' + esc(q) + '」的。</div>') +
+    '<div class="note">上面带「手工加的」标记的那些在 ' +
+    '<code>live/factor_missing.jsonl</code>（append-only，删一条是追加一条' +
+    ' remove）；其余是注册表里的，<b>页面删不动</b> —— 要让它从这份清单里' +
+    '消失，只有去 <code>datalake/build/factors/</code> 写一条 Spec。' +
+    '两者是同一份名单的两半，建目录表时有覆盖自证（必须正好分完原清单，' +
+    '不重不漏，不过就拒绝写出）。</div>' +
+    (o.warn ? '<div class="warn">' + esc(o.warn) + '</div>' : '');
+
+  const qi = $('#facq');
+  if (qi) {
+    let t = null;
+    qi.oninput = () => { clearTimeout(t); t = setTimeout(() => facNav({q: qi.value.trim()}), 300); };
+    qi.onkeydown = e => { if (e.key === 'Enter') { clearTimeout(t); facNav({q: qi.value.trim()}); } };
+  }
+  facMsWire();
+}
+
+/* ---- 手工加一条 --------------------------------------------------
+   🔴 表单**默认折起**：它有三个输入框，常驻会把这一页撑满，而"看清单"
+     才是天天要做的事（同「+ 新增费率」那条）。
+   🔴 原因下拉**照服务端那份全量原因表**渲染（含一条因子都没有的档）——
+     照"清单里出现过的"去拼的话，某一档被实现光了它就静默从下拉里消失。
+   ★ 按钮**一律不设 disabled**：只读模式下照样可点，点了把原因和下一步
+     说清楚（disabled 的元素连 title 都不触发）。 */
+let FACMF = false;
+
+function facMsForm() {
+  const o = FACMS;
+  if (!FACMF) return '';   // 折起时只有顶上那排里的按钮，见 facMsRender
+  const opt = (o.options || []).map(r =>
+    '<option value="' + esc(r.key) + '">' +
+    (r.blocked ? '做不了 / 要先定案' : '还没做') + ' · ' + esc(r.label) +
+    '（现有 ' + r.n + ' 个）</option>').join('');
+  return '<div class="lvsec" id="mform"><h3>手工加一条</h3>' +
+    '<div class="note">原清单里没有、但你想记下来的因子 —— 记进 ' +
+    '<code>live/factor_missing.jsonl</code>（append-only）。' +
+    (o.can_write ? '' : '　🔴 服务是 <b>--readonly</b> 起的，加不进去：' +
+      '去掉那个参数重启一次。') + '</div>' +
+    '<div class="lvtags" style="flex-wrap:wrap;gap:10px">' +
+    '<label>因子名 <input id="mfn" class="fq" style="width:210px" ' +
+      'placeholder="原清单里的名字，或你自己起的"></label>' +
+    '<label>为什么算不出来 <select id="mfr" class="fsel">' + opt + '</select></label>' +
+    '<label style="flex:1;min-width:260px">这一条特有的补充 ' +
+      '<input id="mfd" class="fq" style="width:100%" ' +
+      'placeholder="缺哪个数据 / 哪一步没定案 —— 只有名字的话，这份清单等于没说为什么"></label>' +
+    '<a href="#" class="btn" id="mfok">加进清单</a>' +
+    '<a href="#" class="lvtag" id="mfno">取消</a>' +
+    '</div><div class="note" id="mfmsg"></div></div>';
+}
+
+function facMsWire() {
+  const open = $('#mfopen');
+  if (open) open.onclick = e => { e.preventDefault(); FACMF = true; facMsRender(); };
+  const no = $('#mfno');
+  if (no) no.onclick = e => { e.preventDefault(); FACMF = false; facMsRender(); };
+  const ok = $('#mfok');
+  if (ok) ok.onclick = async e => {
+    e.preventDefault();
+    const msg = $('#mfmsg');
+    msg.className = 'note';
+    msg.textContent = '提交中…';
+    const r = await facMsPost({act: 'add', name: $('#mfn').value,
+      reason: $('#mfr').value, detail: $('#mfd').value});
+    if (r) { FACMF = false; FACMS = r; facMsRender(); }
+  };
+  $('#pg').querySelectorAll('a.mdel').forEach(a => {
+    a.onclick = async e => {
+      e.preventDefault();
+      const n = a.dataset.n;
+      if (!confirm('把「' + n + '」从手工清单里删掉？\n\n' +
+                   '账本是 append-only 的 —— 删的是追加一条 remove，' +
+                   '原来那条记录还在日志里。')) return;
+      const r = await facMsPost({act: 'remove', name: n});
+      if (r) { FACMS = r; facMsRender(); }
+    };
+  });
+}
+
+async function facMsPost(b) {
+  let r;
+  try { r = await post('/api/factors/missing', b); }
+  catch (e) { r = {error: String(e)}; }
+  if (r && r.error) {
+    // 🔴 报错要留在表单旁边 —— 扔到页面别处去的话，人盯着输入框却看不到
+    //   为什么被退回来（同「参数校验的提示挪进弹窗内部」那条）
+    const m = $('#mfmsg');
+    if (m) { m.className = 'warn'; m.textContent = r.error; }
+    else alert(r.error);
+    return null;
+  }
+  return r;
+}
+
+// 「算不出来的」那一页的地址（带着当前区间/前瞻，回来时还在原处）
+function facMsHref() {
+  return '/factors.html?missing=1&win=' + encodeURIComponent(facWin()) +
+    '&h=' + encodeURIComponent(facH());
 }
 
 // ================= 列表 =================
@@ -191,9 +371,31 @@ async function facList() {
     (o.n_abs_hidden ? ' · 另有 <b>' + o.n_abs_hidden +
       '</b> 个因子【横截面不可比】没有列出来（它们的量纲随股价与复权因子变，' +
       '排序排的是"股价×上市以来分红拆细"不是因子本身）—— 勾上开关可以看' : '') +
-    '</div>';
+    '</div>' +
+    // 🔴 「算不出来的」那份清单必须有个**看得见的入口** —— 原清单 278 个名字里
+    //   有 117 个本地没有值，它们此前在这一页上根本不存在，于是"我搜的那个
+    //   因子呢"没有任何地方答得了（同「一个只能摸到的入口等于没有入口」、
+    //   同「删了要留痕」）。画成 .btn 不是 .lvtag：标签与旁边的说明文字一个样，
+    //   而"一个能点的东西被画成了标签"这条本项目犯过两次。
+    (FACM.n_missing ? '<div class="lvtags" style="margin:2px 0 10px">' +
+      '<a class="btn" href="' + facMsHref() + '">📋 还有 ' + FACM.n_missing +
+      ' 个因子算不出来 —— 看为什么 ›</a>' +
+      '<span class="dim">原清单 ' + (FACM.n_factors + FACM.n_missing) +
+      ' 个名字，这一页列得出 ' + FACM.n_factors + ' 个</span></div>' : '');
   if (!FACR.length) {
-    head += '<div class="note">没有匹配的因子。</div>';
+    // 🔴 "没有匹配"与"它在【算不出来】的清单里"是两件事，混成一句的话
+    //   人会以为自己名字打错了（同「拿不到分红那一格标『查不到』，不猜一个数」）。
+    //   所以这里拿服务端给的那份名字对一遍，命中就直接点名。
+    const ms = (FACM.missing_names || []).filter(
+      n => n.toLowerCase().includes(q));
+    head += '<div class="note">没有匹配「' + esc(q) + '」的因子。' +
+      (ms.length ? '　🔴 但<b>' + ms.length + '</b> 个【算不出来】的因子对得上：' +
+        ms.slice(0, 6).map(esc).join('、') + (ms.length > 6 ? ' …' : '') +
+        '　<a href="' + facMsHref() + '&q=' + encodeURIComponent(q) +
+        '">看为什么算不出来 ›</a>'
+      : (FACM.n_missing ? '　也不在<a href="' + facMsHref() +
+        '">那 ' + FACM.n_missing + ' 个算不出来的</a>里面。' : '')) +
+      '</div>';
     $('#pg').innerHTML = head + facCaveats();
   } else {
     $('#pg').innerHTML = head + facTable() + facCaveats();

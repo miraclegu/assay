@@ -4,6 +4,29 @@
     /api/factors          列表：code / 名称 / 分位超额年化 / 分位换手 / IC / IR
     /api/factor           详情：介绍 / 公式 / 依赖 / 逐年表现 / 各区间对比
     /api/factors/meta     可选项：时间段、前瞻窗口、族、口径说明
+    /api/factors/missing  算不出来的那些：名字 + 为什么（POST 同址：手工加/删）
+
+## 🔴 「算不出来的」也要有名有姓 —— 否则"查不到"与"本来就没有"分不开
+
+原清单 278 个名字，这一页只列得出实现了的那 161 个。剩下 117 个此前
+**在广场上根本不存在** —— 人搜一个名字搜不到，分不出是"名字打错了"、
+"被量纲开关藏起来了"还是"本地根本算不了"（同「删了要留痕」
+「拿不到分红那一格标『查不到』，不猜一个数」那两条）。
+
+★ 清单与原因的**正本在 `datalake/build/factors/__init__.py` 的 `MISSING`**，
+  与 `FACTORS` 是同一份名单的两半，建目录表时有覆盖自证（两半必须正好分完
+  原清单，不过就拒绝写出）。这边只负责读出来给页面。
+🔴 `blocked` 那一位必须带到页面上：`todo` 那 65 个**不是算不出来**，
+  只是还没写 —— 混成一句"暂时无法计算"就是在说谎。
+
+## 🔴 清单有【两个来源】，每条都要说清自己是哪来的
+
+    registry  注册表那 117 个（代码里的正本，对着 factors.xlsx 逐条定案）
+    manual    人在页面上加的（`live/factor_missing.jsonl`，append-only）
+
+合成一份给页面，但 `source` 必须带出去 —— 页面上只有 manual 那些给删除
+按钮。不分的话人会去删一条注册表里的，**而那删不掉**
+（同「给一个点了没反应的按钮比不给更糟」）。
 
 ## 🔴 可选清单由服务端给，页面不认识任何一个因子名
 
@@ -27,6 +50,7 @@
 """
 import os
 
+from . import base
 from .base import _repo_root
 
 
@@ -43,14 +67,94 @@ def _eval():
 
 def _cat(fe):
     import pandas as pd
-    _, _, cat = fe._paths()
+    _, _, cat, _, _ = fe._paths()
     return pd.read_parquet(cat)
+
+
+_MCOLS = ['name_cn', 'reason_key', 'reason_cn', 'reason_why', 'detail',
+          'blocked', 'src_row', 'source']
+
+
+def _reg_miss(fe):
+    """注册表那一半。表还没建出来时返回空表 —— 只是这一块不显示，
+    不该让整个因子广场打不开（同「外部挂了退回本地那份，不让整页打不开」）。"""
+    import os as _os
+
+    import pandas as pd
+    _, _, _, mp, _ = fe._paths()
+    if not _os.path.isfile(mp):
+        return pd.DataFrame(columns=_MCOLS)
+    d = pd.read_parquet(mp)
+    d['source'] = 'registry'
+    return d
+
+
+def _reasons(fe):
+    """全量原因表（含一条因子都没有的那些档）。
+
+    🔴 不照"清单里出现过的 key"去拼 —— 某一档被实现光了它就**静默从
+      下拉里消失**，而那不报错（同「存的是隐藏哪些、不是显示哪些」）。
+    ★ 文件缺了就退回按行去重，并在返回里说一句 —— 不让整页打不开。
+    """
+    import json
+    import os as _os
+    _, _, _, _, rp = fe._paths()
+    if _os.path.isfile(rp):
+        with open(rp, encoding='utf-8') as fh:
+            return json.load(fh), None
+    return None, ('没有 mart/factor_reasons.json（跑一次 '
+                  'python3 datalake/build/build_factor_catalog.py）'
+                  ' —— 原因清单退回按已有的行去重，'
+                  '一条因子都没有的那些档这次不会出现在下拉里')
+
+
+def _manual():
+    import sys
+    r = _repo_root()
+    if r not in sys.path:
+        sys.path.insert(0, r)
+    from assay import factor_missing as fm
+    return fm
+
+
+def _miss(fe):
+    """两个来源合成一份：注册表那 117 个 + 人在页面上加的。
+
+    🔴 原因文案（label / why / blocked）只有注册表那份有 —— 手工那条只存
+      `reason_key`，文案在这里**按 key join 回去**。两边各存一份文案的话，
+      改一句 `MISS_REASONS` 之后手工那些还挂着旧话，而它不报错。
+    ★ 手工那条的 key 在注册表里已经不用了（比如那一档被清空了）也**不丢**：
+      照实显示 key 并说一句"这个原因注册表里已经没有了"，
+      不静默改成别的（同「拿不到分红那一格标查不到，不猜一个数」）。
+    """
+    import pandas as pd
+    reg = _reg_miss(fe)
+    txt = {}
+    for _, r in reg.iterrows():
+        txt.setdefault(r['reason_key'],
+                       (r['reason_cn'], r['reason_why'], bool(r['blocked'])))
+    rows = []
+    for m in _manual().current():
+        lab, why, blk = txt.get(m['reason_key'], (
+            m['reason_key'],
+            '这个原因在注册表的 MISS_REASONS 里已经没有了 —— '
+            '这一条是它还在的时候加的。', True))
+        rows.append({'name_cn': m['name_cn'], 'reason_key': m['reason_key'],
+                     'reason_cn': lab, 'reason_why': why, 'detail': m['detail'],
+                     'blocked': blk, 'src_row': None, 'source': 'manual'})
+    man = pd.DataFrame(rows, columns=_MCOLS)
+    if not len(reg):
+        return man
+    if not len(man):
+        return reg
+    return pd.concat([reg, man], ignore_index=True)
 
 
 def api_factors_meta(_q):
     """页面渲染要的那几份清单 + 口径说明。"""
     fe = _eval()
     cat = _cat(fe)
+    miss = _miss(fe)
     grp = (cat.groupby(['group_key', 'group_cn']).size()
               .reset_index(name='n').to_dict('records'))
     return {
@@ -59,6 +163,11 @@ def api_factors_meta(_q):
         'groups': grp,
         'n_factors': int(len(cat)),
         'n_abs': int((~cat['xs_comparable']).sum()),
+        # 🔴 名字也给 —— 页面搜不到时要能说出「你搜的这个在【算不出来】那份
+        #   清单里」。只给计数的话，"没有匹配"与"算不出来"在屏幕上一个样。
+        #   117 个名字约 1.5 KB，而这一页本来就要拉一张上百行的表。
+        'n_missing': int(len(miss)),
+        'missing_names': [str(x) for x in miss['name_cn']],
         'pool': fe.POOL,
         'excess_base': '当日横截面【等权平均】收益（不是指数）',
         'turnover': '每 h 个交易日调一次仓，相邻两次该分位成分变了百分之几',
@@ -176,6 +285,99 @@ def api_factor(q):
                         'ex_hi': _f((sub['q_hi'] - sub['mkt']).mean())})
     return {'info': info, 'h': h, 'windows': wins, 'years': yrs,
             'meta': api_factors_meta({})}
+
+
+def api_factors_missing(_q):
+    """算不出来的那些：按原因分组，每组带「为什么」，每条带细节。
+
+    ★ 分组顺序照注册表里 `MISS_REASONS` 的声明顺序（做不了的在前、
+      "还没写"的在最后）—— 页面不认识任何一个原因 key，照给的顺序渲染。
+    """
+    import pandas as pd
+    fe = _eval()
+    m = _miss(fe)
+    if not len(m):
+        return {'n': 0, 'reasons': [], 'rows': [],
+                'why_empty': '还没建 mart/factor_missing.parquet —— '
+                             '跑一次 python3 datalake/build/build_factor_catalog.py'}
+    full, warn = _reasons(fe)
+    if full is None:
+        full, seen = [], []
+        for k in m['reason_key']:
+            if k in seen:
+                continue
+            seen.append(k)
+            r0 = m[m['reason_key'] == k].iloc[0]
+            full.append({'key': k, 'label': str(r0['reason_cn']),
+                         'why': str(r0['reason_why']),
+                         'blocked': bool(r0['blocked'])})
+    used = list(m['reason_key'])
+    reasons, opts = [], []
+    for r in full:
+        n = int(sum(1 for k in used if k == r['key']))
+        opts.append(dict(r, n=n))
+        if n:
+            reasons.append(dict(r, n=n))
+    # 注册表里已经没有、而手工那条还挂着的 key：照实列出来，不静默丢
+    for k in used:
+        if k not in [r['key'] for r in full] and k not in [r['key'] for r in reasons]:
+            r0 = m[m['reason_key'] == k].iloc[0]
+            reasons.append({'key': k, 'label': str(r0['reason_cn']),
+                            'why': str(r0['reason_why']),
+                            'blocked': bool(r0['blocked']),
+                            'n': int(sum(1 for x in used if x == k))})
+    rows = m.where(pd.notna(m), None).to_dict('records')
+    for r in rows:
+        r['blocked'] = bool(r['blocked'])
+        r['src_row'] = None if r['src_row'] is None else int(r['src_row'])
+    return {
+        'n': int(len(m)),
+        'n_blocked': int(m['blocked'].sum()),
+        'n_todo': int((~m['blocked'].astype(bool)).sum()),
+        'n_manual': int((m['source'] == 'manual').sum()),
+        'reasons': reasons,
+        # 🔴 「手工加一条」那个下拉照它渲染 —— 含 n=0 的档，见 `_reasons`
+        'options': opts,
+        'can_write': bool(base.ALLOW_LIVE),
+        'warn': warn,
+        'rows': rows,
+        # 这两句与列表页那三条 caveats 同一条纪律：口径由服务端给、页面原样印
+        'note': '原清单（factors.xlsx）有 278 个不同的名字，这一页列的是其中'
+                '【本地还没有值】的那些。它与因子广场那张表是同一份名单的两半，'
+                '建目录表时有覆盖自证：两半必须正好分完原清单，不重不漏。',
+        'todo_note': '🔴 最后那一档【不是算不出来】—— 数据齐、公式也确定，'
+                     '只是注册表里还没有这一条。别把它读成"这东西算不了"。',
+    }
+
+
+def api_factors_missing_act(_q, body):
+    """POST /api/factors/missing —— 手工加一条 / 删一条。
+
+    ★ 归 --live 管：它写 `live/` 下的账本（同 alerts / watchlist 那两条）。
+    🔴 **只删得掉手工那一半**。注册表里的是代码，页面删不动 —— 所以那边
+      根本不给删除按钮，而这里再挡一道：前端漏拦的话，报错也要说得出
+      "去写一条 Spec"这个下一步，不是一句 500（同「说了不能做就得给下一步」）。
+    """
+    if not base.ALLOW_LIVE:
+        return {'error': '服务以只读模式启动 —— 去掉 --readonly 再起一次'}
+    fe = _eval()
+    fm = _manual()
+    b = body or {}
+    act = (b.get('act') or 'add').strip()
+    try:
+        if act == 'remove':
+            fm.remove(b.get('name') or '')
+        elif act == 'add':
+            reg = _reg_miss(fe)
+            cat = _cat(fe)
+            fm.add(b.get('name') or '', (b.get('reason') or '').strip(),
+                   b.get('detail') or '',
+                   known=list(reg['name_cn']), implemented=list(cat['name_cn']))
+        else:
+            return {'error': 'act 只能是 add / remove，收到 %r' % act}
+    except fm.MissError as e:
+        return {'error': str(e)}
+    return dict(api_factors_missing({}), ok=True)
 
 
 def _f(v):
