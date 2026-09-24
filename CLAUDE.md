@@ -210,7 +210,10 @@ web/                        ← 🔴 **.html 全在根目录**，见下
   shared/                   跨【所有】页面共享（含 6 个独立 .html）
     common.css   共享样式（所有页面 <link> 它）
     common.js    $ / esc / j / post / 数字格式化 / cell / helpIcon /
-                 normCode / boardTag / 顶栏导航 NAV / mountSearch / 自选星
+                 normCode / boardTag / 顶栏导航 NAV / mountSearch / 自选星 /
+                 **tbl**（通用可排序表格）
+    chart.js     lineChart / barChart / perfBuckets / drawdownSeries /
+                 **calGrid**（日历方格）/ _hcol / _sn / _legend
     kchart.js    Canvas 画图：drawKChart（K线+量+副图+事件）/ drawLines（多股）
 
   views/                    只服务 index.html 的 hash 视图
@@ -5546,6 +5549,60 @@ datalake/build/factors/__init__.py
   格），那时 pointer 是**对的** —— 判了会天天误报（同「假告警看多了就不看
   告警」）。判据落在**边框与最小高度**上，那才是"被画成卡片"的指纹。
 ★ 反向自证：全站 `.cd` 总数必须 > 0（实测 108 个），否则那条判据空转。
+
+### 🔴 日历网格与通用表格：第五、六个正本（2026-09-24）
+
+用户问「日历这种算是通用工具，有没有剥离出一些通用的工具类之类的」——
+普查 web 层，**共享层本来就有一层**（`common.js` 719 行 / `chart.js` 369 /
+`kchart.js` 489 / `stockpop.js` 442 / `common.css` 1016），上一轮也确实抽过
+（`run-detail.js:324` 那句注释：「_hcol / _sn / _legend 搬到 shared/chart.js」）
+—— **格子里画什么颜色抽走了，格子本身留下了**。
+
+| | 毛病 | 物证 |
+|---|---|---|
+| 日历网格 | `shared/chart.js` 的 `calGrid` 与 `views/run-detail.js` 的 `drawCal` **几何逐行相同**（lead 偏移 / pad 格 / 非交易日 / 计数），连 `['一','二',…,'日']` 那行都是两份 | 上一轮把格子从 `.cd` 改名成 `.cday`，**两个文件都要动** |
+| `tbl()` | 不是重复，是**放错了地方**：定义在 `views/run-detail.js`，被 `views/live-perf.js` 跨域引用 3 处 —— 域文件拥有一个通用件 | — |
+
+现在 `calGrid` 多两个开关（`head(ntd,nt)` 给网格**上方**的 HTML、
+`note:false` 不追加下方计数行），`drawCal` 只负责把「这个月哪几天是交易日、
+每天什么值、悬浮里说什么」整理成它的入参；`tbl()` 搬进 `common.js`。
+
+★ **普查里有四项判定为"不该动"**，理由都是同一条（看**谁在用、当什么用**，
+  不是看两份内容像不像）：
+
+    .hc 热力格     三处内联，但形状不同（三层下钻 vs 一层），硬并收益小
+    浮层开关       modal() 在 views/app.js，而 6 个独立 .html 没有它 ——
+                   共享的是 `.stmodal` 的**样式**，不是开关逻辑
+    点表头排序     共享的是【规则】（首点按"哪边更好"给方向、null 排最后），
+                   而列定义 / 默认方向 / null 语义各不同
+    nav() 分页     4 个独立页各一份，都是"改 URL 参数再跳"，参数各不同
+
+🔴 **`.thq` 跟着 `tbl` 一起去作用域化。** 那条样式原本写成
+`#main th .thq`，而 **`#main` 只有 index.html 有** —— `tbl()` 进了共享层之后
+独立页面也画得出带 ⓘ 的表头，而那个 ⓘ **拿不到样式且不报错**
+（同「`.pw` 的 overflow-x 当初只定义在 `#pk` 下面」那条）。
+
+#### ★ 判据四段，分工别记反；9 条变异全抓到
+
+    A 源码  drawCal 必须调 calGrid + 星期表头字面量全站恰好 1 处
+    B 源码  `function tbl(` 全站恰好 1 处，且在 shared/
+    C 行为  calGrid 的几何：周一为第一列 / pad 数 == lead / head+note 两个开关
+    D 行为  在【独立页面】上 tbl 真的可用、ⓘ 真的有样式、点表头真的排序
+
+★ D 那段是**构造**出来的：目前还没有独立 .html 用 `tbl()`，所以"它到底有没有
+  真的进共享层"在现网**不可观测** —— 不构造的话这条判据要等将来有人用它才
+  生效（同「真实数据触发不到的上限，判据必须能构造出来」）。
+
+🔴🔴 **两处判据毛病，都是自己抓到的：**
+
+| 毛病 | 表现 |
+|---|---|
+| **判据比要证的事宽** | `.thq` 那条第一版写 `fs < 12` —— 把规则改回 `#main th .thq` 之后 ⓘ 继承 th 的 **11px，仍然 < 12**，变异当场漏过。改成钉那条规则**自己声明的值**（10px + `vertical-align:top`） |
+| **变异脚本的"抓到"判据自己错了** | `ok = ' 1 通过 / 0 失败' in stdout` 多了个前导空格 -> 永远不匹配 -> **一条真漏掉的被报成"抓到"**。改成「必须真的出现 ✗ 那一行」才算抓到 —— 同「别把没抓到的说成抓到了」，这次是脚本层面的 |
+
+★ 还踩了一个：`getComputedStyle` 返回的是**活对象**，`box.remove()` 之后
+  `fontSize` 变成空串、`parseFloat` 给 NaN —— 那看着像"样式没生效"，
+  而其实是判据自己量错了时候。**尺寸要在元素还在文档里的时候量。**
 
 ## 🔴🔴 记账口径不该漏到页面上：份额与价格一律展示【不复权】（2026-09-14）
 

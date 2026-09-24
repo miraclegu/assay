@@ -3475,15 +3475,15 @@ def t_live_perf_ui():
                 '默认读数该是「两者」（收益率 + 金额）'
             assert pg.locator('#lp_tbl .calg').count() == 1, \
                 '日粒度该画自然日历方格（.calg）'
-            n_td = pg.locator('#lp_tbl .cd:not(.off):not(.pad)').count()
+            n_td = pg.locator('#lp_tbl .cday:not(.off):not(.pad)').count()
             assert n_td > 0, '日历里没有交易日格子'
-            assert pg.locator('#lp_tbl .cd.off').count() > 0, \
-                '非交易日该打斜纹（.cd.off）—— 不然看不出哪天没开市'
+            assert pg.locator('#lp_tbl .cday.off').count() > 0, \
+                '非交易日该打斜纹（.cday.off）—— 不然看不出哪天没开市'
             assert pg.locator('#lp_tbl .lgd').count() == 1, \
                 ('要有图例 —— 🔴 弱强度格子的底色近乎透明，'
                  '方向全靠数字前的 +/- 号，图例得说明这件事')
             #   一格里两个读数都要有
-            c0 = pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+            c0 = pg.locator('#lp_tbl .cday:not(.off):not(.pad)').first
             both = ' '.join(c0.inner_text().split())
             assert '%' in both, '「两者」模式该显示收益率：%s' % both
             assert any(ch.isdigit() for ch in both.split('%')[-1]), \
@@ -3495,13 +3495,13 @@ def t_live_perf_ui():
             pg.locator('#lp_tbl a.lps[data-s="pnl"]').click()
             pg.wait_for_timeout(250)
             only_pnl = ' '.join(
-                pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+                pg.locator('#lp_tbl .cday:not(.off):not(.pad)').first
                 .inner_text().split())
             assert '%' not in only_pnl, '「金额」模式不该有 %%：%s' % only_pnl
             pg.locator('#lp_tbl a.lps[data-s="ret"]').click()
             pg.wait_for_timeout(250)
             only_ret = ' '.join(
-                pg.locator('#lp_tbl .cd:not(.off):not(.pad)').first
+                pg.locator('#lp_tbl .cday:not(.off):not(.pad)').first
                 .inner_text().split())
             assert '%' in only_ret and ',' not in only_ret, \
                 '「收益率」模式该只有百分比：%s' % only_ret

@@ -389,39 +389,30 @@ function paneYear(){
 function drawCal(S){
   const box=$('#cal'); if(!box) return;
   if(!MSEL){box.innerHTML='';return;}
-  const [Y,M]=MSEL.split('-').map(Number);
-  const first=new Date(Date.UTC(Y,M-1,1)), ndays=new Date(Date.UTC(Y,M,0)).getUTCDate();
-  const lead=(first.getUTCDay()+6)%7;          // 周一为第一列
-  const e=DATA.eq;
-  let cells='';
-  for(let i=0;i<lead;i++) cells+='<div class="cd pad"></div>';
-  let nt=0,ntd=0,best=null,worst=null;
-  for(let d=1;d<=ndays;d++){
-    const ds=`${Y}-${String(M).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    const i=S.idx[ds];
-    if(i===undefined){cells+=`<div class="cd off"><div class="d">${d}</div></div>`;nt++;continue;}
-    ntd++;
-    const v=S.dr[ds];
+  const [Y,M]=MSEL.split('-').map(Number), e=DATA.eq;
+  /* 🔴 网格本身交给 shared/chart.js 的 calGrid —— 这里只负责把「这个月的哪几天
+     是交易日、每天什么值、悬浮里说什么」整理成它的入参。几何（周一起始 /
+     pad 格 / 非交易日 / 计数）此前在两处各写一遍，见 calGrid 的注释。 */
+  const items={}; let best=null,worst=null;
+  Object.keys(S.idx).forEach(ds=>{
+    if(!ds.startsWith(MSEL)) return;
+    const i=S.idx[ds], v=S.dr[ds];
     if(v!=null){ if(best==null||v>best[1])best=[ds,v]; if(worst==null||v<worst[1])worst=[ds,v]; }
     const pos=e.cash_pct?(1-e.cash_pct[i]):null;
-    cells+=`<div class="cd ${DSEL===ds?'on':''}" data-d="${ds}"
-      style="background:${_hcol(v,12)}"
-      title="${ds}  ${v==null?'首日无前值':'日收益 '+pct(v,2)}
+    items[ds]={ret:v, tip:`${v==null?'首日无前值':'日收益 '+pct(v,2)}
 仓位 ${pos==null?'—':pct(pos,1)}   持仓 ${e.n_positions?e.n_positions[i]:'—'} 只
-点击看当日持仓与买卖">
-      <div class="d">${d}</div>
-      <div class="v">${_sn(v,2)}</div></div>`;
-  }
-  box.innerHTML=`<h3 class="sec">${Y} 年 ${M} 月 · 日热力
+点击看当日持仓与买卖`};
+  });
+  box.innerHTML=calGrid(MSEL, items, o=>_sn(o.ret,2), {
+    scale:12, sel:DSEL, note:false,      // 计数已经写在 head 那一行里了
+    head:(ntd,nt)=>`<h3 class="sec">${Y} 年 ${M} 月 · 日热力
      <span style="float:right;font-weight:400">交易日 ${ntd} 天 / 非交易日 ${nt} 天
      ${best?`　最好 ${best[0].slice(8)}日 <span class="pos">${pct(best[1],2)}</span>`:''}
      ${worst?`　最差 ${worst[0].slice(8)}日 <span class="neg">${pct(worst[1],2)}</span>`:''}
-     </span></h3>
-   <div class="calg">${['一','二','三','四','五','六','日']
-     .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`;
-  box.querySelectorAll('.cd[data-d]').forEach(c=>c.onclick=()=>{
+     </span></h3>`});
+  box.querySelectorAll('.cday[data-d]').forEach(c=>c.onclick=()=>{
     DSEL=(DSEL===c.dataset.d)?null:c.dataset.d;
-    box.querySelectorAll('.cd').forEach(x=>x.classList.toggle('on',x.dataset.d===DSEL));
+    box.querySelectorAll('.cday').forEach(x=>x.classList.toggle('on',x.dataset.d===DSEL));
     drawDay(S);});
   drawDay(S);
 }
@@ -488,52 +479,8 @@ async function drawDay(S){
   ],'收盘持仓 '+o.holdings.length+' 只');
 }
 
-/* ============ 通用表格（可排序） ============ */
-/* opt.group: 按该列分组，值变化时插一条粘性分隔行（同组行必须相邻，由后端排序保证）。
-   opt.groupNote(rows) 给分隔行右侧加汇总。点列头排序会打散分组，此时自动关掉分隔行。 */
-function tbl(el,rows,cols,note,opt){
-  opt=opt||{};
-  if(!rows.length){el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
-    '<div class="note">无数据</div>';return;}
-  let sk=null,sd=-1;
-  const body=rs=>{
-    let out='',last=null;
-    const grp=opt.group&&!sk;   // 排序后分组无意义（同组行不再相邻）
-    rs.forEach(r=>{
-      if(grp&&r[opt.group]!==last){
-        last=r[opt.group];
-        const same=rs.filter(x=>x[opt.group]===last);
-        out+=`<tr class="dayhd"><td colspan="${cols.length}">${last}`+
-             `<span>${opt.groupNote?opt.groupNote(same):same.length+' 只'}</span></td></tr>`;
-      }
-      out+='<tr>'+cols.map(c=>{const v=r[c.k];
-        const f=c.f?c.f(v,r):(v==null?'—':v);
-        return `<td class="${c.l?'l':''} ${c.s?sign(v):''}">${f}</td>`;}).join('')+'</tr>';
-    });
-    return out;
-  };
-  const draw=()=>{
-    let rs=rows.slice();
-    if(sk) rs.sort((a,b)=>{const x=a[sk],y=b[sk];
-      if(x==null)return 1; if(y==null)return -1;
-      return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sd;});
-    el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
-     `<div class="tw"><table><thead><tr>${cols.map(c=>
-        `<th data-k="${c.k}" class="${c.l?'l':''}${c.h?' hasH':''}"${
-          c.h?` title="${c.h.replace(/"/g,'&quot;')}"`:''}>${c.t}${
-          c.h?'<span class="thq">ⓘ</span>':''}${
-          sk===c.k?(sd>0?' ▲':' ▼'):''}</th>`).join('')}
-      </tr></thead><tbody>${body(rs)}</tbody></table></div>`;
-    el.querySelectorAll('th').forEach(t=>t.onclick=()=>{
-      const k=t.dataset.k; sd=(sk===k)?-sd:-1; sk=k; draw();});
-    // 日期分隔行要贴在表头【下方】，而表头高度取决于字号/padding/浏览器 ——
-    // 与其估一个 px 值（估错就会重叠或留缝），渲染后量出来写进 CSS 变量。
-    const th=el.querySelector('th');
-    if(th) el.querySelector('.tw').style.setProperty('--thh',
-      Math.round(th.getBoundingClientRect().height)+'px');
-  };
-  draw();
-}
+/* 通用表格 `tbl()` 在 shared/common.js —— 它与回测无关（实盘业绩页的
+   每日持仓 / 清仓记录也在用），留在这个域文件里就是"域文件拥有一个通用件"。 */
 /* 「股票」格：名称 + 小字代码，点开**速览浮层**并定位到这一行的日期。
    ★ 与实盘持仓同一个交互（点了不跳走）。`run` 必须带上 —— ETF 回测跑在
      平行的 etf_lake 上，不带的话浮层去主面板找，一行都取不到、画出一片空白。

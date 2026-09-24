@@ -436,6 +436,57 @@ function cvPrep(cv) {
 }
 
 
+/* ============ 通用表格（可排序，带分组分隔行）============
+   原来定义在 `views/run-detail.js` 里，而 `views/live-perf.js` 跨域引用它
+   —— 域文件拥有一个通用件，等于"谁先写谁就是家"。2026-09-24 搬来这里。
+   ★ 只依赖 `sign()`（本文件），列的格式化函数由调用方给，所以它对
+     "表里装的是什么"一无所知 —— 那正是它能被两个域共用的原因。 */
+/* opt.group: 按该列分组，值变化时插一条粘性分隔行（同组行必须相邻，由后端排序保证）。
+   opt.groupNote(rows) 给分隔行右侧加汇总。点列头排序会打散分组，此时自动关掉分隔行。 */
+function tbl(el,rows,cols,note,opt){
+  opt=opt||{};
+  if(!rows.length){el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
+    '<div class="note">无数据</div>';return;}
+  let sk=null,sd=-1;
+  const body=rs=>{
+    let out='',last=null;
+    const grp=opt.group&&!sk;   // 排序后分组无意义（同组行不再相邻）
+    rs.forEach(r=>{
+      if(grp&&r[opt.group]!==last){
+        last=r[opt.group];
+        const same=rs.filter(x=>x[opt.group]===last);
+        out+=`<tr class="dayhd"><td colspan="${cols.length}">${last}`+
+             `<span>${opt.groupNote?opt.groupNote(same):same.length+' 只'}</span></td></tr>`;
+      }
+      out+='<tr>'+cols.map(c=>{const v=r[c.k];
+        const f=c.f?c.f(v,r):(v==null?'—':v);
+        return `<td class="${c.l?'l':''} ${c.s?sign(v):''}">${f}</td>`;}).join('')+'</tr>';
+    });
+    return out;
+  };
+  const draw=()=>{
+    let rs=rows.slice();
+    if(sk) rs.sort((a,b)=>{const x=a[sk],y=b[sk];
+      if(x==null)return 1; if(y==null)return -1;
+      return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sd;});
+    el.innerHTML=(note?`<div class="note">${note}</div>`:'')+
+     `<div class="tw"><table><thead><tr>${cols.map(c=>
+        `<th data-k="${c.k}" class="${c.l?'l':''}${c.h?' hasH':''}"${
+          c.h?` title="${c.h.replace(/"/g,'&quot;')}"`:''}>${c.t}${
+          c.h?'<span class="thq">ⓘ</span>':''}${
+          sk===c.k?(sd>0?' ▲':' ▼'):''}</th>`).join('')}
+      </tr></thead><tbody>${body(rs)}</tbody></table></div>`;
+    el.querySelectorAll('th').forEach(t=>t.onclick=()=>{
+      const k=t.dataset.k; sd=(sk===k)?-sd:-1; sk=k; draw();});
+    // 日期分隔行要贴在表头【下方】，而表头高度取决于字号/padding/浏览器 ——
+    // 与其估一个 px 值（估错就会重叠或留缝），渲染后量出来写进 CSS 变量。
+    const th=el.querySelector('th');
+    if(th) el.querySelector('.tw').style.setProperty('--thh',
+      Math.round(th.getBoundingClientRect().height)+'px');
+  };
+  draw();
+}
+
 /* ============ 盘中炸板提示（全局浮窗）============
    🔴 **任何页面都要能看到** —— 所以挂在 common.js 里（6 个独立 .html 与
      index.html 都加载它）。挂在实盘页的话，人正在看个股/盘面时就漏掉了，

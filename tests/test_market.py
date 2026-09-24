@@ -653,6 +653,7 @@ def t_kchart_pan_select():
             #   靠先后决胜负 —— `.lvtag.on` 把 `.rg.on` 的深色字覆盖成 accent，
             #   而背景还是 accent：那个按钮整个看不见（实测个股页「1年」、
             #   对比页同样）。判据扫全站，不是只看这一处。
+            n_cd = 0
             for u in _pages():
                 pg.goto('http://127.0.0.1:%d%s' % (port, u), wait_until='networkidle')
                 pg.wait_for_timeout(1800)
@@ -663,7 +664,34 @@ def t_kchart_pan_select():
                   .map(a => a.className + '|' + a.textContent.trim().slice(0, 8))""")
                 assert not same, \
                     ('%s 上这些标签前景色 == 背景色（整个看不见）：%s' % (u, same))
-            notes.append('6 个页面上没有"同色不可见"的标签')
+
+                # ---- ⑥ 🔴 名称后的小字注解【不许被画成卡片/按钮】----
+                #   `.cd` 曾经**同时**是「名称后的小字代码」（cnCell）与
+                #   「日历里一个可点的方格」，两份都没作用域化 -> 后一份把
+                #   `border:1px` + `cursor:pointer` + `min-height:46px`
+                #   加到了**全站每一个小字代码**上：屏幕上是一个看着能点、
+                #   点了没反应的框（实测 factors.html 90 个、alerts 12 个）。
+                #   🔴 那是「跨文件顶层重名」在 CSS 里的同款 —— 两条规则
+                #   各自合法，浏览器照单全收，**不报错**。
+                #   ★ 判据是**可量的视觉事实**（边框 / 最小高度），不是
+                #     "CSS 里有没有那一行" —— 后者换个写法就绕过去了。
+                #   ⚠ 不判 cursor：小字常常整个包在一个 <a> 里（自选/买点的
+                #     名称格），那时 pointer 是**对的**，判了会天天误报。
+                boxy = pg.evaluate('''() => [...document.querySelectorAll('.cd')]
+                    .filter(e => {const s = getComputedStyle(e);
+                      return parseFloat(s.borderTopWidth) > 0
+                          || parseFloat(s.minHeight) > 0;})
+                    .map(e => e.textContent.trim().slice(0, 12))''')
+                assert not boxy, \
+                    '%s 上这些【小字注解】被画成了卡片（有边框或最小高度）：'\
+                    '%s —— 它只是注解，看着能点而点了没反应' % (u, boxy[:5])
+                n_cd += pg.evaluate("() => document.querySelectorAll('.cd').length")
+            # 反向自证：真有小字注解可查，否则上面那条是空转
+            assert n_cd > 0, \
+                '构造不对：%d 个页面上一个 .cd 都没有 —— 那条判据什么都没证' \
+                % len(_pages())
+            notes.append('6 个页面上没有"同色不可见"的标签；'
+                         '%d 个小字注解都不是卡片' % n_cd)
             assert not errs, 'JS 报错：%s' % errs[:3]
             br.close()
     finally:

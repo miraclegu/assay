@@ -261,8 +261,17 @@ function _legend(){
 /* 自然日历方格（周一为第一列，非交易日打斜纹）。
    items: {'YYYY-MM-DD': {ret, pnl, ...}}   —— 没有这一天的键 = 非交易日
    fmt:   (o) => 格子里显示的字符串
-   opt:   {scale, title, sel, cls}
-   ★ 与回测的 drawCal 同一套 class（.calg/.cd/.wd），所以视觉完全一致。 */
+   opt:   {scale, sel, head, note}
+     head: (交易日数, 非交易日数) => 网格【上方】的 HTML（回测详情页的 h3 用它）
+     note: false 时不追加下方那行计数（头里已经写过就别写第二遍）
+   🔴 **这是日历网格的唯一一份实现**（2026-09-24 合并）：回测详情页的
+     `drawCal` 与业绩页的收益明细共用它。此前两处各写一遍几何（lead 偏移 /
+     pad 格 / 非交易日 / 星期表头 / 计数），连 `['一','二',…]` 那行都是两份 ——
+     改一次 class 名（`.cd` -> `.cday`）就要动两个文件，**而漏一处不报错**，
+     只是两页的日历从此长得不一样。
+   🔴 格子是 `.cday` 不是 `.cd` —— 后者是「名称后的小字代码」（cnCell），
+     两个东西共用过一个名字，于是日历的边框与手型光标被加到了全站每一个
+     小字代码上（2026-09-24 改名，见 common.css 那段）。 */
 function calGrid(ym, items, fmt, opt){
   opt=opt||{};
   const [Y,M]=ym.split('-').map(Number);
@@ -270,22 +279,24 @@ function calGrid(ym, items, fmt, opt){
   const ndays=new Date(Date.UTC(Y,M,0)).getUTCDate();
   const lead=(first.getUTCDay()+6)%7;
   let cells='', nt=0, ntd=0;
-  for(let i=0;i<lead;i++) cells+='<div class="cd pad"></div>';
+  for(let i=0;i<lead;i++) cells+='<div class="cday pad"></div>';
   for(let d=1;d<=ndays;d++){
     const ds=`${Y}-${String(M).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const o=items[ds];
     if(o===undefined){
-      cells+=`<div class="cd off"><div class="d">${d}</div></div>`; nt++; continue;
+      cells+=`<div class="cday off"><div class="d">${d}</div></div>`; nt++; continue;
     }
     ntd++;
-    cells+=`<div class="cd ${opt.sel===ds?'on':''}" data-d="${ds}"
+    cells+=`<div class="cday ${opt.sel===ds?'on':''}" data-d="${ds}"
       style="background:${_hcol(o.ret, opt.scale||12)}"
       title="${ds}${o.tip?'\n'+o.tip:''}">
       <div class="d">${d}</div><div class="v">${fmt(o)}</div></div>`;
   }
-  return `<div class="calg">${['一','二','三','四','五','六','日']
-      .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`
-    + `<div class="note">交易日 ${ntd} 天 / 非交易日 ${nt} 天</div>`;
+  const grid = `<div class="calg">${['一','二','三','四','五','六','日']
+      .map(w=>`<div class="wd">${w}</div>`).join('')}${cells}</div>`;
+  return (opt.head ? opt.head(ntd, nt) : '') + grid
+    + (opt.note === false ? ''
+       : `<div class="note">交易日 ${ntd} 天 / 非交易日 ${nt} 天</div>`);
 }
 
 

@@ -54,6 +54,9 @@ a{color:var(--accent);text-decoration:none}
 .runs tbody tr:hover{background:var(--panel2)}
 .runs td{border-bottom:1px solid #20262e}
 .mono{font-family:"SF Mono",Menlo,monospace;font-size:11px}
+/* 名称后面那一格小字（代码 / 行号 / 一句标记）。**只是注解，不是按钮** ——
+   不许有边框与手型光标，否则它看着能点而点了没反应（日历格子曾经叫
+   `.cd`，就是那样把边框加到了它身上）。selftest 里两头都钉着。 */
 .cd{color:var(--dim);font-size:10.5px;font-family:"SF Mono",Menlo,monospace;margin-left:5px}
 .cd0{font-family:"SF Mono",Menlo,monospace;font-size:11.5px}
 .pill{font-size:10px;padding:1px 6px;border-radius:3px;background:#243040;color:var(--dim);
@@ -157,21 +160,32 @@ svg{display:block;width:100%;overflow:visible}
 .calg{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;
   background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:10px}
 .calg .wd{color:var(--dim);font-size:11px;text-align:center;padding:2px 0}
-.cd{border:1px solid var(--line);border-radius:5px;min-height:46px;padding:4px 5px;
+/* 🔴🔴 日历格子叫 `.cday`，**不叫 `.cd`**（2026-09-24 改名）。
+   原来两个完全不同的东西共用 `.cd`：57 行那份是「名称后的小字代码」
+   （`cnCell`），这一份是日历里一个可点的方格。两份**都没作用域化**，
+   于是后一份把边框与手型光标加到了前一份身上 ——
+   **全站每一个小字代码都渲染成一个看着能点、点了没反应的框**
+   （实测 factors.html 90 个、alerts.html 12 个）。
+
+   ★ 这是「跨文件顶层重名 = 整页 SyntaxError」在 CSS 里的同款，
+     只是它**不报错**：两条规则各自合法，浏览器照单全收。
+   ★ 改名的是**日历**这一半（用它的只有 chart.js 与 run-detail.js 两处），
+     不是小字那一半（`cnCell` 全站在用）—— 动静小的那边改。 */
+.cday{border:1px solid var(--line);border-radius:5px;min-height:46px;padding:4px 5px;
   font-size:11px;line-height:1.35;cursor:pointer;
   outline:2px solid transparent;outline-offset:-2px}
-.cd:hover{outline-color:var(--dim)}
-.cd.on{outline-color:var(--accent)}
-.cd .d{color:#d2dae4;font-size:10px}
-.cd .v{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--fg)}
+.cday:hover{outline-color:var(--dim)}
+.cday.on{outline-color:var(--accent)}
+.cday .d{color:#d2dae4;font-size:10px}
+.cday .v{font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--fg)}
 /* 「点了也没用」的标签：变淡但**仍然可点、仍然有 title** ——
    设 disabled 的话连提示都不触发，人连"为什么点不动"都看不到。 */
 .lvtag.off{opacity:.45}
-.cd.off{opacity:.3;cursor:default;background:repeating-linear-gradient(135deg,
+.cday.off{opacity:.3;cursor:default;background:repeating-linear-gradient(135deg,
   transparent 0 5px,var(--line) 5px 6px)}
-.cd.off:hover{outline-color:transparent}
-.cd.pad{border:0;background:none;cursor:default}
-.cd.pad:hover{outline-color:transparent}
+.cday.off:hover{outline-color:transparent}
+.cday.pad{border:0;background:none;cursor:default}
+.cday.pad:hover{outline-color:transparent}
 #day{margin-top:14px}
 #day .tw{max-height:none}
 /* ---- 表 ---- */
@@ -696,7 +710,7 @@ svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
   color:#0f1216;font-weight:600}
 /* 方格里的第二行读数（金额）—— 比主读数小一号、压暗，
    不然一格里两个同样大的数字会互相抢。 */
-.cd .cd2,.hc .cd2{display:block;font-size:10px;color:var(--dim);
+.cday .cd2,.hc .cd2{display:block;font-size:10px;color:var(--dim);
   font-variant-numeric:tabular-nums}
 
 /* 盘中炸板提示：右下角浮窗。★ 固定定位 + 高 z-index —— 它要盖在任何页面
@@ -805,7 +819,10 @@ a.spl.accent{color:var(--accent)}
    ★ 必须有个可见标记 —— 光挂 title 的话没人会去悬停（同「看不出能点的
      入口 = 没有入口」）。 */
 #main th.hasH{cursor:help}
-#main th .thq{font-size:10px;color:var(--dim);margin-left:2px;vertical-align:top}
+/* 🔴 不作用域化：`tbl()` 搬进 common.js 之后，独立页面也画得出带 ⓘ 的表头，
+   而 `#main` 只有 index.html 有 —— 作用域化的样式最容易这样漏，且不报错
+   （同 `.pw` 的 overflow-x 当初只定义在 `#pk` 下面那次）。 */
+th .thq{font-size:10px;color:var(--dim);margin-left:2px;vertical-align:top}
 /* 持仓表可排序的表头。★ 必须看得出能点 —— 光能点不给提示的话没人会去点
    （同「看不出能点的入口 = 没有入口」）。 */
 #main th.lvsth{cursor:pointer;user-select:none}

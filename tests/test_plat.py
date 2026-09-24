@@ -397,14 +397,30 @@ def t_ui():
             pg.locator('#p2 .hm.m .hc[data-m]').first.click(); pg.wait_for_timeout(500)
             mk = pg.evaluate('MSEL')
             nd = _cal.monthrange(int(mk[:4]), int(mk[5:7]))[1]
-            cal_days = pg.locator('#cal .cd:not(.pad)').count()
-            cal_off = pg.locator('#cal .cd.off').count()
+            cal_days = pg.locator('#cal .cday:not(.pad)').count()
+            cal_off = pg.locator('#cal .cday.off').count()
             real = sum(1 for d in eqj['d'] if d[:7] == mk)
             assert cal_days == nd, '日历格 %d != 当月天数 %d' % (cal_days, nd)
             assert cal_days - cal_off == real, \
                 '日历交易日 %d != 曲线里的 %d' % (cal_days - cal_off, real)
+            # 🔴 日历格子必须【仍然是一个可点的方格】。
+            #   它 2026-09-24 从 `.cd` 改名成 `.cday` —— 原因是 `.cd`
+            #   同时还是「名称后的小字代码」（cnCell），两份都没作用域化，
+            #   于是这一份的边框与手型光标被加到了**全站每一个小字代码**上。
+            #   ★ 这一条与「小字代码不许有边框」那条**分工别记反**：
+            #     只钉那一条的话，把这一整块样式删掉也全绿（格子变成一片
+            #     裸文字），而那同样不报错。
+            _c = pg.evaluate(
+                '''() => {const e = document.querySelector('#cal .cday[data-d]');
+                   if (!e) return null; const s = getComputedStyle(e);
+                   return [parseFloat(s.borderTopWidth), s.cursor,
+                           parseFloat(s.minHeight)];}''')
+            assert _c and _c[0] >= 1 and _c[1] == 'pointer' and _c[2] >= 20, \
+                '日历格子不再是一个可点的方格（边框/光标/高 = %s）—— ' \
+                '多半是 .cday 那段样式被删了或又改回 .cd' % (_c,)
+
             # 点某一天 -> 当日持仓/买卖（读 /api/day，仍是现有归档）
-            cd0 = pg.locator('#cal .cd[data-d]').first
+            cd0 = pg.locator('#cal .cday[data-d]').first
             cd0.scroll_into_view_if_needed(); cd0.click(); pg.wait_for_timeout(1200)
             dsel = pg.evaluate('DSEL')
             nh = pg.locator('#d_hold tbody tr').count()
@@ -4638,3 +4654,173 @@ def t_runs_delete_api():
         _sh.rmtree(os.path.dirname(_marks_p), ignore_errors=True)
     return ('dry 不动文件；漏 confirm 被拒；认不出的单独报；标星默认不删、'
             'force 才删；结论 %d 条含指标；剩 %d 个' % (len(rows), n_left))
+
+
+@case('日历网格与通用表格各只有一份实现（calGrid / tbl）', tag='web')
+def t_shared_widgets_single_source():
+    """🔴 两个"通用件"此前各有各的毛病，**两种都不报错**：
+
+    ① **日历网格写了两份**：`shared/chart.js` 的 `calGrid` 与
+       `views/run-detail.js` 的 `drawCal` —— 几何（周一起始的 lead 偏移 /
+       pad 格 / 非交易日 / 星期表头 / 交易日计数）**逐行相同**，连
+       `['一','二','三','四','五','六','日']` 那行都是两份。物证是
+       2026-09-24 把日历格子从 `.cd` 改名成 `.cday` 时**两个文件都要动** ——
+       漏一处的表现是"两页的日历从此长得不一样"，而它不报错。
+
+    ② **`tbl()` 定义在 `views/run-detail.js`，被 `views/live-perf.js`
+       跨域引用** —— 不是重复，是**放错了地方**：域文件拥有一个通用件，
+       等于"谁先写谁就是家"。它与回测无关（实盘业绩页的每日持仓 /
+       清仓记录也在用），所以 2026-09-24 搬进 `shared/common.js`。
+
+    判据四段，**分工别记反**（少一段就往另一边飘）：
+
+        A 源码  drawCal 必须调 calGrid + 星期表头字面量全站恰好 1 处
+        B 源码  `function tbl(` 全站恰好 1 处，且在 shared/
+        C 行为  calGrid 的几何：周一为第一列 / pad 数 == lead / head+note 两个开关
+        D 行为  在【独立页面】上 tbl 真的可用、ⓘ 真的有样式、点表头真的排序
+
+    🔴 D 那段是**构造**出来的：目前还没有独立 .html 用 `tbl()`，所以
+      "它到底有没有真的进共享层"在现网是**不可观测**的 —— 不构造的话这条
+      判据要等到将来有人用它才生效，而那时才发现就晚了（同「真实数据触发
+      不到的上限，判据必须能构造出来」）。顺带它也钉住 `.thq` 不作用域化：
+      那条样式原本写成 `#main th .thq`，而 `#main` **只有 index.html 有**。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import calendar as _cal
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    web = os.path.join(REPO, 'web')
+    src = {f: io.open(os.path.join(web, f), encoding='utf-8').read()
+           for f in _web_files(web, '.js') + _web_files(web, '.html')}
+
+    # ---- A 日历网格只有一份 ----
+    rd = src['views/run-detail.js']
+    i = rd.index('function drawCal(S){')
+    body = rd[i:rd.index('\n  drawDay(S);\n}\n', i)]
+    assert 'calGrid(' in body, \
+        ('`drawCal` 没有调 `calGrid` —— 网格几何又被抄了第二份，'
+         '而两份分叉不报错，只是两页的日历慢慢长得不一样')
+    wd = "['一','二','三','四','五','六','日']"
+    hit = [f for f, s in src.items() if wd in s]
+    assert hit, '构造不对：全站找不到星期表头那行字面量（是不是换了写法？）'
+    assert hit == ['shared/chart.js'], \
+        ('星期表头字面量出现在 %r —— 只许 `shared/chart.js` 有一处，'
+         '多一处就是网格又被写了一遍' % hit)
+
+    # ---- B tbl 只在共享层 ----
+    owns = [f for f, s in src.items() if 'function tbl(' in s]
+    assert owns == ['shared/common.js'], \
+        ('`tbl()` 定义在 %r —— 它被回测详情页与实盘业绩页【两个域】调用，'
+         '必须住在 shared/；留在某个域文件里就是"谁先写谁就是家"' % owns)
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1400, 'height': 1000})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+
+            # ---- C calGrid 的几何（index.html 才加载 chart.js）----
+            pg.goto('http://127.0.0.1:%d/' % port, wait_until='networkidle')
+            ym = '2026-02'
+            nd = _cal.monthrange(2026, 2)[1]
+            lead = _cal.weekday(2026, 2, 1)          # 周一 = 0，与 calGrid 同口径
+            geo = pg.evaluate(
+                """([ym, nd]) => {
+                  const mk = o => {
+                    const d = document.createElement('div');
+                    d.innerHTML = calGrid(ym, {}, x => '', o);
+                    return d;
+                  };
+                  const plain = mk({scale: 12});
+                  const noNote = mk({scale: 12, note: false});
+                  const withHead = mk({scale: 12, note: false,
+                                       head: (a, b) => '<h3 id="_gh">' + a + '/' + b + '</h3>'});
+                  const wd = [...plain.querySelectorAll('.calg .wd')].map(e => e.textContent);
+                  return {wd: wd,
+                          pad: plain.querySelectorAll('.cday.pad').length,
+                          days: plain.querySelectorAll('.cday:not(.pad)').length,
+                          note: plain.querySelectorAll('.note').length,
+                          noteOff: noNote.querySelectorAll('.note').length,
+                          head: (withHead.querySelector('#_gh') || {}).textContent || '',
+                          headFirst: withHead.firstElementChild.id};}""",
+                [ym, nd])
+            assert geo['wd'] == ['一', '二', '三', '四', '五', '六', '日'], \
+                ('星期表头不是周一起始：%r —— 换成周日起始的话整张日历'
+                 '每一格都挪了位，而它不报错' % geo['wd'])
+            assert geo['pad'] == lead, \
+                '%s 的 pad 格 %d != 周一起始偏移 %d' % (ym, geo['pad'], lead)
+            assert geo['days'] == nd, \
+                '%s 的日格 %d != 当月天数 %d' % (ym, geo['days'], nd)
+            # 两个开关各自生效：note 默认追加计数行、note:false 不追加、
+            # head 给了就出现在网格【上方】（回测详情页那个 h3 靠它）
+            assert geo['note'] == 1 and geo['noteOff'] == 0, \
+                'note 开关没生效：默认 %d 个 / 关掉 %d 个' % (geo['note'], geo['noteOff'])
+            assert geo['head'] == '%d/%d' % (0, nd), \
+                ('head 拿到的交易日/非交易日计数不对：%r（空 items 下应是 0/%d）'
+                 % (geo['head'], nd))
+            assert geo['headFirst'] == '_gh', \
+                'head 没排在网格上方 —— 回测详情页那个标题会掉到日历下面'
+
+            # ---- D 独立页面上 tbl 真的能用 ----
+            pg.goto('http://127.0.0.1:%d/market.html' % port,
+                    wait_until='networkidle')
+            out = pg.evaluate(
+                """() => {
+                  if (typeof tbl !== 'function') return {no: 1};
+                  const box = document.createElement('div');
+                  document.body.appendChild(box);
+                  tbl(box, [{a: 3, b: 'x'}, {a: 1, b: 'y'}, {a: 2, b: 'z'}],
+                      [{k: 'a', t: '值', h: '这一列的口径说明'}, {k: 'b', t: '名', l: 1}]);
+                  const col = () => [...box.querySelectorAll('tbody tr')]
+                      .map(r => r.children[0].textContent.trim());
+                  const q = box.querySelector('th .thq');
+                  // 🔴 尺寸要在元素【还在文档里】的时候量：getComputedStyle
+                  //   返回的是活对象，box.remove() 之后 fontSize 变成空串，
+                  //   parseFloat 给出 NaN —— 那看着像"样式没生效"，而其实
+                  //   是判据自己量错了时候（第一版就这么假失败了一次）。
+                  const _cs = q ? getComputedStyle(q) : null;
+                  const fs = _cs ? parseFloat(_cs.fontSize) : null;
+                  const va = _cs ? _cs.verticalAlign : null;
+                  const before = col();
+                  box.querySelectorAll('th')[0].click();
+                  const after = col();
+                  box.remove();
+                  return {before: before, after: after, fs: fs, va: va,
+                          hasQ: !!q};}""")
+            assert not out.get('no'), \
+                ('独立页面上没有 `tbl` —— 它没有真的进共享层'
+                 '（搬到另一个 views/ 文件里同样只有 index.html 看得到）')
+            assert out['before'] == ['3', '1', '2'], \
+                '默认行序应照传入顺序，实得 %r' % out['before']
+            assert out['after'] == ['3', '2', '1'], \
+                ('点表头没有排序（实得 %r）—— 首次点击给降序' % out['after'])
+            assert out['hasQ'], '列头的 ⓘ 没渲染出来（`c.h` 那条路断了）'
+            # 🔴 判据要**钉那条规则自己声明的值**，不是"比某个数小"。
+            #   第一版写的是 `fs < 12` —— 而把规则改回 `#main th .thq` 之后
+            #   ⓘ 继承 th 的 11px，**仍然 < 12**，变异当场漏过
+            #   （同「判据比要证的事宽」那条）。
+            assert out['fs'] == 10 and out['va'] == 'top', \
+                ('独立页面上 `.thq` 没拿到样式（字号 %r / vertical-align %r，'
+                 '应是 10px / top）—— 那条规则原本写成 `#main th .thq`，'
+                 '而 `#main` 只有 index.html 有。作用域化的样式最容易这样漏，'
+                 '而漏了不报错' % (out['fs'], out['va']))
+            assert not errs, '页面抛错：%r' % errs[:2]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return ('日历网格一份（drawCal 调 calGrid、星期表头全站 1 处）；'
+            'tbl 在 shared/common.js 一处；calGrid 几何 周一起始/pad %d/日格 %d、'
+            'head+note 两个开关各自生效；独立页面上 tbl 可用、点表头排序、'
+            'ⓘ 字号 %spx' % (lead, nd, out['fs']))
