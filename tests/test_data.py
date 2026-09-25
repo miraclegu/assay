@@ -20,13 +20,24 @@ def t_fingerprint():
     a = feed.fingerprint()
     b = feed.fingerprint()
     assert a == b, '同一份数据两次指纹不同 —— 不稳定'
-    assert set(a['parts']) == {'panel', 'std', 'index'}, '缺部件: %s' % list(a['parts'])
+    # 🔴 判据是**最小必需集 ⊆ 实际**，不是写死的相等 —— 写死的话加一个
+    #   部件（2026-09-24 加 `factor`）就要手改一次，而"忘了改"的表现是
+    #   假失败；反过来如果写成"随便几个都行"，**删掉**一个部件就没人发现，
+    #   而那正是「数据变了而指纹没变」的入口。两头都要：必需的一个不能少，
+    #   多出来的不拦。
+    need = {'panel', 'std', 'index', 'factor'}
+    got = set(a['parts'])
+    assert need <= got, '指纹少了部件 %s（现有 %s）' % (sorted(need - got), sorted(got))
+    #   声明与产出必须一致：`FINGERPRINT_PARTS` 里写了几个就该出来几个
+    assert got == {n for n, _ in PanelFeed.FINGERPRINT_PARTS}, \
+        '产出的部件与 FINGERPRINT_PARTS 声明的对不上：%s vs %s' \
+        % (sorted(got), sorted(n for n, _ in PanelFeed.FINGERPRINT_PARTS))
     for k, v in a['parts'].items():
         assert v['n_files'] > 0, '%s 部件没有文件' % k
         assert v['hash'], '%s 缺哈希' % k
-    return 'overall=%s (panel %d / std %d / index %d 文件)' % (
-        a['overall'], a['parts']['panel']['n_files'],
-        a['parts']['std']['n_files'], a['parts']['index']['n_files'])
+    return 'overall=%s (%s)' % (
+        a['overall'], ' / '.join('%s %d' % (k, a['parts'][k]['n_files'])
+                                 for k, _ in PanelFeed.FINGERPRINT_PARTS))
 
 
 @case('面板构建必须确定 + 失败面板拒绝加载')
@@ -2248,7 +2259,16 @@ def t_factor_page():
         # 反向自证：这三份清单**真的有内容**，否则上面三条是"空 == 空"
         assert len(wl) >= 3 and len(hl) >= 2 and len(gv) >= 4, \
             '清单太短，上面三条等于空转：%d/%d/%d' % (len(wl), len(hl), len(gv))
-        notes.append('清单 %d 区间 / %d 前瞻 / %d 族' % (len(wl), len(hl), len(gv)))
+        # 🔴 **池子选择器**同理照服务端那份清单渲染（2026-09-24 加）——
+        #   fast 那条守卫只能查源码里有没有 `FACM.pools`，**这里才是真判据**：
+        #   屏幕上真的列出了 n 个池子。
+        pv = pg.eval_on_selector_all('#facp option', 'a=>a.map(x=>x.value)')
+        assert pv == [x['key'] for x in meta['pools']], \
+            '池子清单对不上：%s vs %s' % (pv, [x['key'] for x in meta['pools']])
+        assert len(pv) >= 5, '池子太少，上面那条等于空转：%d' % len(pv)
+        assert 'all' in pv, '全市场（现状那一份）不见了 —— 它是别的池唯一的对照基准'
+        notes.append('清单 %d 区间 / %d 前瞻 / %d 族 / %d 池'
+                     % (len(wl), len(hl), len(gv), len(pv)))
 
         # ---- ② 三条口径【原样】印出来 ----
         body = pg.inner_text('#pg')
@@ -2705,6 +2725,115 @@ def t_factor_missing():
     return ' · '.join(notes)
 
 
+@case('因子详情页那六张图：真画出来了 / 净值给的是净值 / 口径说得清', tag='web')
+def t_factor_charts():
+    """详情页六张图（2026-09-25）。**五种坏法都不报错**，所以逐条钉：
+
+    | 坏法 | 表现 |
+    |---|---|
+    | 页面没引 `chart.js` / `stockpop.js` | `lineChart is not defined` 只在控制台里报，**页面照样渲染、只是那几块空着**（实测第一版就是 `spLink is not defined`，把「最大最小 20 只」整块打没了） |
+    | 服务端给"净值 − 1"而不是净值 | 对数轴那条路对负值做 clamp（压到 1e-6），**而图看着完全正常** |
+    | 详情页漏传 `pool` | 在沪深300 上点进因子，表格与图是**全市场**的数，而选择器还写着沪深300 —— 两个池长得一模一样 |
+    | 行业被归成 11 个大类 | 本地只有申万一级；归成 11 个必然掺进"谁定的口径"，而页面上看不出来 |
+    | 「衰减」被读成持仓重合度 | 别的看板那张图是 0.93~0.99（1 − 累计换手），这里是分位超额（千分之几）—— 混着读会得出相反结论 |
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+    from assay import server as sv
+    import assay.factor_eval as fe
+    from assay.srv import factors as sf
+
+    # ---- ① 服务端：净值必须是【净值】（恒 > 0），不是"净值 − 1" ----
+    o = sf.api_factor_charts({'id': 'mv', 'pool': 'all', 'h': '5', 'win': '1y'})
+    assert not o.get('error'), o.get('error')
+    allv = [v for x in o['nav']['series'] for v in x['nav'] if v is not None]
+    assert allv and min(allv) > 0, (
+        '净值序列里有 <= 0 的值（min=%s）—— 服务端给的多半是"净值 − 1"，'
+        '而对数轴会把负值 clamp 到 1e-6，图看着完全正常' % (min(allv) if allv else None))
+    assert len(o['nav']['series']) == o['nav']['nq'] + 1, (
+        '净值应该是 %d 个分位 + 1 条基准，实际 %d 条'
+        % (o['nav']['nq'], len(o['nav']['series'])))
+
+    # ---- ② 衰减是【分位超额】不是持仓重合度 ----
+    ex = [v for x in o['decay']['series'] for v in x['ex'] if v is not None]
+    assert ex and max(abs(v) for v in ex) < 0.1, (
+        '衰减的量级是 %.3f —— 0.9 那个量级是【持仓重合度】(1 − 累计换手)，'
+        '不是分位超额。两者都叫"衰减"，混了会得出相反的结论'
+        % max(abs(v) for v in ex))
+    assert '持仓重合度' in o['caveats']['decay'], '口径里没把这两件事分开说'
+
+    # ---- ③ 行业 IC 是申万一级，没有被归成 11 个大类 ----
+    n1y = len(sf.api_factor_charts({'id': 'mv', 'h': '5', 'win': '1y'})['ind'])
+    nall = len(o if False else sf.api_factor_charts(
+        {'id': 'mv', 'h': '5', 'win': 'all'})['ind'])
+    assert n1y >= 28, '近 1 年只有 %d 个行业 —— 申万一级该是 31 个左右' % n1y
+    assert nall > n1y, (
+        '全程 %d 个、近 1 年 %d 个 —— 行业名是 PIT 的（申万 2014/2021 改过版），'
+        '全程口径下必然多出已停用的名字；一样多说明那一层被写死了' % (nall, n1y))
+
+    # ---- ④ 页面：六块都真的画出来，且【一条控制台异常都没有】----
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    notes = []
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 1200})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/factors.html?id=mv&h=5&win=1y' % port,
+                    wait_until='networkidle')
+            try:
+                pg.wait_for_selector('#ch_tb table', timeout=90000)
+            except Exception:
+                raise AssertionError(
+                    '六张图没画全 —— 控制台异常 %s ｜ #facch 开头「%s」。'
+                    '这一类的指纹就是"页面照样渲染、只是那几块空着"'
+                    % (errs or '无', (pg.inner_text('#facch')[:60]
+                                      if pg.query_selector('#facch') else '没有容器')))
+            n = lambda sel: pg.eval_on_selector_all(sel, 'a=>a.length')
+            got = {'净值': n('#ch_nav svg path'), 'IC': n('#ch_ic svg path'),
+                   '行业': n('#ch_ind svg rect'), '换手': n('#ch_turn svg path'),
+                   '衰减': n('#ch_dec svg rect'), '最大最小': n('#ch_tb table tr')}
+            for k, v in got.items():
+                assert v > 0, '「%s」那块一个图元都没有（%s）' % (k, got)
+            assert got['净值'] == o['nav']['nq'] + 1, (
+                '净值画了 %d 条，服务端给了 %d 条' % (got['净值'], o['nav']['nq'] + 1))
+            assert got['最大最小'] == len(o['top_bottom']['top']) + \
+                len(o['top_bottom']['bottom']), '最大/最小两张表行数对不上'
+            assert not errs, '控制台有异常：%s' % errs[:2]
+
+            # 「全分位」关掉之后只剩 两端 + 基准 —— 只查"有这个按钮"的话，
+            # 点了不起作用照样绿
+            pg.click('#navctl a[data-allq]')
+            pg.wait_for_timeout(400)
+            n3 = n('#ch_nav svg path')
+            assert n3 == 3, '关掉「全分位」应只剩 3 条（两端 + 基准），实际 %d' % n3
+
+            # ⑤ 详情页必须带着池子 —— 这是修掉的一个现网 bug
+            hit = []
+            pg.on('request', lambda r: hit.append(r.url) if '/api/factor?' in r.url else None)
+            pg.goto('http://127.0.0.1:%d/factors.html?id=mv&h=5&win=1y&pool=hs300' % port,
+                    wait_until='networkidle')
+            pg.wait_for_timeout(1200)
+            assert hit and 'pool=hs300' in hit[0], (
+                '详情页那一发没带 pool（%s）—— 在沪深300 上点进因子会看到'
+                '【全市场】的数，而选择器还写着沪深300' % (hit[:1] or '一发都没有'))
+            notes.append('池子带过去了')
+            br.close()
+    finally:
+        httpd.shutdown()
+    return ('六块都画出来（%s）｜净值恒 > 0 ｜衰减量级 %.4f（不是重合度）｜'
+            '行业 全程 %d / 近1年 %d ｜%s'
+            % ('/'.join('%s=%d' % (k, v) for k, v in got.items()),
+               max(abs(v) for v in ex), nall, n1y, '、'.join(notes)))
+
+
 @case('因子「横截面可不可比」：判据是单位表，而单位要分得开价格与金额', tag='fast')
 def t_factor_xs_units():
     """🔴🔴 用户 2026-09-24 问：「为什么『市值』『6日成交金额的移动平均值』
@@ -2836,3 +2965,191 @@ def t_factor_xs_units():
             '横截面不可比 %d 个（此前一刀切是 72 个）'
             % (len(specs), len(_F.UNITS), len(price), len(money),
                len(pairs), n_abs))
+
+
+@case('因子分池：增量判据挂在【面板】上，IC 与换手盯的年份不同', tag='fast')
+def t_factor_pools():
+    """分池评价（2026-09-24）。**五件事都不报错**，所以五条都要单独钉：
+
+    | 坏法 | 表现 |
+    |---|---|
+    | 判据挂在**因子文件** mtime 上 | `build_factor_daily` 是 all-or-nothing，24 个年文件每天全被重写 -> 天天说"全脏" -> 增量退化成全量，每天白烧半小时 |
+    | IC 不盯 **Y+1** | 年末那 20 天的 IC 在次年数据到齐后不会被重算 —— 那几天永远缺 |
+    | 换手也盯 Y+1 | 白陪跑一年（它结构上不依赖未来：只比相邻两个调仓日） |
+    | 加一列 / 改口径而不动指纹 | 旧分片仍判"干净"，页面读到**旧口径** |
+    | `ntile` 没有 tie-break | 并列项谁在前取决于**物理行序**，换一种取数写法分位成分就变 |
+
+    🔴 最后一条是**既有缺陷**，这一轮才发现：A-A 实测同一份代码跑两次，
+      `q_lo` 2747 行不同（最大 1.87e-2）、`turn` 1902 行不同（最大 0.244）。
+      实测 `aroon_up` 某日 5092 行只有 26 个不同取值、56%% 都是 0.0。
+    """
+    import glob
+    import shutil
+    import tempfile
+    import assay.factor_eval as fe
+
+    # ---- ① 清单是正本：页面里不许出现任何一个池子名 ----
+    src = io.open(os.path.join(REPO, 'web', 'factors.html'), encoding='utf-8').read()
+    for k, label, col, nq, mn in fe.POOLS:
+        if k == 'all':
+            continue
+        assert ("'%s'" % k) not in src and ('"%s"' % k) not in src, (
+            '页面里写死了池子 key %s —— 清单必须由服务端给，'
+            '否则加一个池子页面上不会出现（而那不报错）' % k)
+        assert label not in src, '页面里写死了池子名 %s' % label
+    # 🔴 判据要**切到那个函数里**查 —— 只查全文有没有 `FACM.pools` 的话，
+    #   `facPm()` 里也有一处，把选择器改成 `[].map(...)` 照样命中
+    #   （变异 M10 实测漏过：**判据比要证的事宽**）。
+    ib = src.index('function facBarHtml(')
+    jb = src.index('\nfunction ', ib + 10)
+    assert 'FACM.pools' in src[ib:jb], (
+        '池子选择器不是照服务端那份清单渲染的 —— 加一个池子页面上不会出现，'
+        '而那不报错')
+
+    # ---- ② 判据的分工：面板 vs 因子文件、IC vs 换手 ----
+    pm = fe.pool_meta('all')
+    py = {2023: 'a', 2024: 'b', 2025: 'c', 2026: 'd'}
+    base_ic = fe._dep_sig(py, 2024, pm, 'S1', 'ic')
+    base_tn = fe._dep_sig(py, 2024, pm, 'S1', 'turn')
+    py2 = dict(py); py2[2025] = 'c!'                # 动 Y+1（年份是 int，
+    #   不能走 `dict(py, **{...})` —— `**` 的键必须是字符串）
+    assert fe._dep_sig(py2, 2024, pm, 'S1', 'ic') != base_ic, (
+        'IC 的依赖没盯 Y+1 —— 年末那 20 天在次年数据到齐后不会重算，'
+        '那几天永远缺，而它不报错')
+    assert fe._dep_sig(py2, 2024, pm, 'S1', 'turn') == base_tn, (
+        '换手盯了 Y+1 —— 它结构上不依赖未来（只比相邻两个调仓日），'
+        '盯了就是每天白陪跑一年。**两者的分工别记反**')
+    for y in (2023, 2024):                          # Y-1 / Y 两个都要盯
+        p3 = dict(py); p3[y] = py[y] + '!'
+        assert fe._dep_sig(p3, 2024, pm, 'S1', 'ic') != base_ic
+        assert fe._dep_sig(p3, 2024, pm, 'S1', 'turn') != base_tn
+    assert fe._dep_sig(py, 2024, pm, 'S2', 'ic') != base_ic, (
+        '因子口径 spec_sig 没进指纹 —— 改一条 Spec 的公式之后评价不会重算')
+    pm5 = fe.pool_meta('sz50')
+    assert fe._dep_sig(py, 2024, pm5, 'S1', 'ic') != base_ic, '池口径没进指纹'
+
+    # 🔴🔴 **判据不许挂在因子文件上** —— 构造：只动一个因子年文件的 mtime，
+    #   `plan()` 给出的"要重建哪几片"必须**一个字不变**。
+    #   ⚠ 第一版我把这条写成了 `x == x`（两边是同一个表达式）——
+    #     **空转而且看着绿**，正是「判据拿被测对象当期望」的极端形式。
+    panel, fglob, _, _, _ = fe._paths()
+    fs = sorted(glob.glob(fglob))
+    assert fs, '构造不对：本地没有因子面板'
+    pf = sorted(glob.glob(panel))
+    assert pf, '构造不对：本地没有面板'
+    # ★ 用 `plan` 给的**指纹表**而不是"要重建哪几片" —— 后者在首建时
+    #   **已经饱和**（全都要建），动什么都加不出差别，那条判据就是空转。
+    #   （第一版就是这么写的，反向自证当场把它抓了出来。）
+    before = fe.plan(pools=['all'])[1]['want']
+    st0 = os.stat(fs[-1])
+    os.utime(fs[-1], (st0.st_atime, st0.st_mtime + 7))
+    try:
+        after = fe.plan(pools=['all'])[1]['want']
+        assert after == before, (
+            '动一下因子年文件的 mtime，%d 片的依赖指纹就变了（共 %d 片）—— '
+            '判据挂在因子文件上了。`build_factor_daily` 是 all-or-nothing，'
+            '24 个年文件每天全被重写，这等于天天全量'
+            % (sum(1 for k in before if after.get(k) != before[k]), len(before)))
+    finally:
+        os.utime(fs[-1], (st0.st_atime, st0.st_mtime))
+    # 反向自证：动**面板**年文件，plan 必须跟着变（否则上面那条是空转）
+    st1 = os.stat(pf[-1])
+    os.utime(pf[-1], (st1.st_atime, st1.st_mtime + 7))
+    try:
+        moved = fe.plan(pools=['all'])[1]['want']
+        assert moved != before, (
+            '动了面板年文件而 plan 一点没变 —— 那上面那条"因子文件不算数"'
+            '就是空转的（面板变了本来就该重算）')
+    finally:
+        os.utime(pf[-1], (st1.st_atime, st1.st_mtime))
+
+    # ---- ③ 分片格式版本进指纹 ----
+    old = fe.SCHEMA_VER
+    try:
+        fe.SCHEMA_VER = old + 1
+        assert fe._dep_sig(py, 2024, pm, 'S1', 'ic') != base_ic, (
+            'SCHEMA_VER 没进指纹 —— 加一列 / 改一处 SQL 口径之后旧分片仍判'
+            '"干净"，页面读到的是旧口径，而它不报错')
+    finally:
+        fe.SCHEMA_VER = old
+
+    # ---- ④ ntile 必须有 tie-break：**构造**大面积并列，两种物理行序 ----
+    def _q(rev):
+        con = fe._con(threads=4)
+        codes = ['%06d.XSHE' % i for i in range(40)]
+        rows = [(c, '2024-01-02', 'f', 0.0 if i < 30 else float(i))
+                for i, c in enumerate(codes)]
+        if rev:
+            rows = rows[::-1]
+        con.execute('CREATE TABLE lng(jq_code VARCHAR, date DATE,'
+                    ' factor_id VARCHAR, val DOUBLE)')
+        con.executemany('INSERT INTO lng VALUES (?,?,?,?)', rows)
+        fw = [(c, '2024-01-02') + tuple([float(i) * 0.01] * len(fe.HORIZONS))
+              + tuple([i + 1] * len(fe.HORIZONS)) for i, c in enumerate(codes)]
+        cols = ', '.join('f%d DOUBLE' % h for h in fe.HORIZONS)
+        rks = ', '.join('r%d BIGINT' % h for h in fe.HORIZONS)
+        con.execute('CREATE TABLE fwd(jq_code VARCHAR, date DATE, %s, %s)' % (cols, rks))
+        con.executemany('INSERT INTO fwd VALUES (%s)'
+                        % ','.join(['?'] * (2 + 2 * len(fe.HORIZONS))), fw)
+        d = fe._year_ic(con, fe.HORIZONS[0], 10, 1)
+        con.close()
+        return float(d['q_lo'].iloc[0]), float(d['q_hi'].iloc[0])
+    a, b = _q(False), _q(True)
+    assert a == b, ('`ntile` 没有 tie-break：同一批数据换个物理行序，分位'
+                    '成分就变了（%s vs %s）。实测现网 A-A 跑两次 q_lo 有 '
+                    '2747 行不同、turn 有 1902 行不同' % (a, b))
+
+    # ---- ⑤ 小池子用**自己的**分位数 ----
+    assert pm5['nq'] != 10 and pm5['min_xs'] != 100, (
+        '上证50 该有自己的分位口径 —— 当日成分最少 36 只，照 10 组切每组'
+        '只有 3~5 只，分位收益是噪声')
+    fs = io.open(os.path.join(REPO, 'assay', 'factor_eval.py'), encoding='utf-8').read()
+    i = fs.index('def summary(')
+    j = fs.index('\ndef ', i + 10)
+    assert "piv.get(pm['nq'])" in fs[i:j], (
+        "summary 里换手那一列写死了 NQ —— 小池子只有 5 组，`piv.get(10)` "
+        '是个**空列**，页面上那一格永远是"—"，而它不报错')
+    # ---- ⑥ 分片落盘的 tmp 名必须【唯一】（这条链上没有锁） ----
+    #   写同一批分片的进程有两个来源：sync_daily.sh 的 13/13、以及人手工跑
+    #   一次 --build-only。固定 tmp 名时两个进程会交错写进同一个 tmp，
+    #   再把一个中间是垃圾的文件 rename 就位 —— 与 2026-09-07 realtime
+    #   那次同一种坏法，**而它不报错**（下次读那片才抛）。
+    iw = fs.index('def _write(')
+    jw = fs.index('\ndef ', iw + 10)
+    body = fs[iw:jw]
+    assert "path + '.tmp'" not in body, (
+        '分片的 tmp 名是固定的（path + .tmp）—— 两个进程同时写同一片会'
+        '交错写进同一个 tmp，rename 就位的是坏文件，而它不报错')
+    assert 'os.getpid()' in body and 'uuid' in body, (
+        'tmp 名里要带 pid + uuid 才跨进程唯一（同 realtime._tmp_path）')
+    assert 'os.replace(' in body, 'rename 就位那一步不能丢 —— 否则半截文件会被读到'
+    # 真跑一次：两份不同内容并发写同一片，最后那片必须是【完整的】其中一份
+    import pandas as _pd, threading as _th
+    _td = tempfile.mkdtemp(prefix='_shard_')
+    try:
+        _dst = os.path.join(_td, 'x.parquet')
+        _err = []
+
+        def _w(n):
+            try:
+                fe._write(_pd.DataFrame({'a': list(range(n))}), _dst)
+            except BaseException as e:      # noqa
+                _err.append(e)
+        _ts = [_th.Thread(target=_w, args=(k,)) for k in (2000, 3000, 4000)]
+        for t in _ts:
+            t.start()
+        for t in _ts:
+            t.join()
+        assert not _err, '并发写报错了：%r' % (_err[:1],)
+        _got = len(_pd.read_parquet(_dst))
+        assert _got in (2000, 3000, 4000), (
+            '并发写之后那片是 %d 行 —— 不是任何一份的完整内容，说明 tmp 被'
+            '交错写了' % _got)
+        assert not [x for x in os.listdir(_td) if x.endswith('.tmp')], \
+            '留下了 .tmp 垃圾'
+    finally:
+        shutil.rmtree(_td, ignore_errors=True)
+
+    return ('池子 %d 个 ｜ 判据分工 IC 盯 Y+1 / 换手不盯 ｜ tie-break 可复现'
+            ' ｜ 分片 tmp 名带 pid+uuid（3 线程并发写，落地 %d 行是完整的一份）'
+            % (len(fe.POOLS), _got))

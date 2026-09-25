@@ -375,3 +375,54 @@ function barChart(el, cats, series, opt){
   };
   svg.onmouseleave = () => { $('#tip').style.display = 'none'; hov.style.display = 'none'; };
 }
+
+/* 横向条形图 —— 类目多的时候用它，不用 barChart。
+   🔴 行业 IC 有 31 个类目：纵向的话每个只有 1160/31 = 37px，标签必然叠在
+   一起（而那不报错，只是看不清）。
+   ★ **不给 barChart 加一个方向开关**：它被「逐年对比」用着，改它的坐标系
+   有回归风险；而"横着画"是另一种图，不是同一件事的两种写法
+   （同「判断该不该合要看谁在用、当什么用」）。
+   rows: [{n: 名字, v: 值, t: 悬浮说明}]，opt: {h, title, fmt, c} */
+function hbarChart(el, rows, opt){
+  opt = opt || {};
+  const W = 1160, L = opt.L || 110, R = 60, RH = opt.rh || 20, T = 24;
+  const n = rows.length;
+  if(!n){ el.innerHTML = '<div class="note">无数据</div>'; return; }
+  const H = T + RH * n + 10;
+  let lo = 0, hi = 0;
+  rows.forEach(r => { if(r.v == null) return;
+    if(r.v < lo) lo = r.v; if(r.v > hi) hi = r.v; });
+  if(!(hi > lo)) hi = lo + 1;
+  const pad = (hi - lo) * 0.08;
+  if(hi > 0) hi += pad;
+  if(lo < 0) lo -= pad;
+  const X = v => L + (W - L - R) * (v - lo) / (hi - lo);
+  const fmt = opt.fmt || (v => (v == null ? '—' : v.toFixed(4)));
+  /* 🔴 配色走 common.js 的 `upc`（一处定义）—— 自己写 `v >= 0 ? 涨色`
+     会把【0 画成涨色】，等于凭空报了个涨（判据要 > 0 / < 0 两头夹）。 */
+  const col = opt.c || (v => upc(v) || 'var(--dim)');
+  let ticks = [];
+  for(let k = 0; k <= 4; k++) ticks.push(lo + (hi - lo) * k / 4);
+  el.innerHTML = `
+   ${opt.title ? `<div class="ttl">${opt.title}</div>` : ''}
+   <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">
+     ${ticks.map(v => `<line class="gl" y1="${T - 6}" y2="${H - 6}"
+        x1="${X(v).toFixed(1)}" x2="${X(v).toFixed(1)}"/>
+        <text class="ax" x="${X(v).toFixed(1)}" y="${T - 10}"
+          text-anchor="middle">${fmt(v)}</text>`).join('')}
+     <line class="zl" y1="${T - 6}" y2="${H - 6}"
+        x1="${X(0).toFixed(1)}" x2="${X(0).toFixed(1)}"/>
+     ${rows.map((r, i) => {
+        const y = T + RH * i, x0 = X(0), x1 = X(r.v == null ? 0 : r.v);
+        return `<text class="ax" x="${L - 8}" y="${(y + RH * 0.72).toFixed(1)}"
+            text-anchor="end">${esc(r.n)}</text>
+          <rect x="${Math.min(x0, x1).toFixed(1)}" y="${(y + 3).toFixed(1)}"
+            width="${Math.max(1, Math.abs(x1 - x0)).toFixed(1)}"
+            height="${(RH - 7).toFixed(1)}" fill="${col(r.v)}" opacity="0.85">
+            <title>${esc(r.t || (r.n + '  ' + fmt(r.v)))}</title></rect>
+          <text class="ax" x="${(x1 + (r.v < 0 ? -6 : 6)).toFixed(1)}"
+            y="${(y + RH * 0.72).toFixed(1)}"
+            text-anchor="${r.v < 0 ? 'end' : 'start'}">${fmt(r.v)}</text>`;
+      }).join('')}
+   </svg>`;
+}

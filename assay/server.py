@@ -44,6 +44,7 @@ from .srv import docs, factors, live, market, rt, runs, stock, sync, watch
 ROUTES = {
     '/api/factors': factors.api_factors,
     '/api/factor': factors.api_factor,
+    '/api/factor/charts': factors.api_factor_charts,
     '/api/factors/meta': factors.api_factors_meta,
     '/api/factors/missing': factors.api_factors_missing,
     '/api/docs': docs.api_docs,

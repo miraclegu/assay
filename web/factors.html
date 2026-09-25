@@ -10,6 +10,9 @@
 </div>
 <div id="tip"></div>
 <script src="/shared/common.js"></script>
+<script src="/shared/chart.js"></script>
+<script src="/shared/kchart.js"></script>
+<script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 因子广场 ============
    回答三件事：都有哪些因子、每个的效果怎么样、它是怎么算的。
@@ -261,13 +264,23 @@ async function facMsPost(b) {
 
 // 「算不出来的」那一页的地址（带着当前区间/前瞻，回来时还在原处）
 function facMsHref() {
-  return '/factors.html?missing=1&win=' + encodeURIComponent(facWin()) +
-    '&h=' + encodeURIComponent(facH());
+  return '/factors.html?missing=1' + facCtx();
 }
 
 // ================= 列表 =================
 function facWin() { return facQ('win') || '1y'; }
 function facH()   { return facQ('h') || '20'; }
+function facPool(){ return facQ('pool') || 'all'; }
+// 详情页 / 返回链接都要带着当前池子 —— 不带的话点进去看的是另一个池的数，
+// 而屏幕上两个池长得一模一样（同「⚖ 拉去对比要带着当前这只票过去」）
+function facCtx() {
+  return '&h=' + encodeURIComponent(facH()) + '&win=' + encodeURIComponent(facWin()) +
+         (facPool() === 'all' ? '' : '&pool=' + encodeURIComponent(facPool()));
+}
+// 这个池的口径（分几组 / 当日最少几只）—— 由服务端给，页面不写死
+function facPm() {
+  return (FACM.pools || []).find(x => x.key === facPool()) || {key:'all', label:'全市场', nq:10};
+}
 
 function facBarHtml() {
   const w = facWin(), h = facH(), g = facQ('group'), ab = facQ('abs');
@@ -277,11 +290,18 @@ function facBarHtml() {
   const hs = FACM.horizons.map(x =>
     '<a href="#" class="lvtag rg' + (String(x) === h ? ' on' : '') +
     '" data-nav="h" data-v="' + x + '">' + x + ' 日</a>').join('');
+  // 🔴 池子清单**照服务端给的那份**渲染，页面里没有任何一个池子名 ——
+  //   加一个池子广场上自动就有（同「加一个指标广场上自动就有」）。
+  //   没算过的**不藏起来**，标出来并说为什么（同「算不出来的要有名有姓」）。
+  const ps = (FACM.pools || []).map(x =>
+    '<option value="' + esc(x.key) + '"' + (x.key === facPool() ? ' selected' : '') +
+    '>' + esc(x.label) + (x.ready ? '' : '（还没算）') + '</option>').join('');
   const gs = ['<option value="">全部族（' + FACM.n_factors + ' 个因子）</option>']
     .concat(FACM.groups.map(x => '<option value="' + esc(x.group_key) + '"' +
       (x.group_key === g ? ' selected' : '') + '>' + esc(x.group_cn) +
       '（' + x.n + '）</option>')).join('');
   return '<div class="lvtags" style="gap:14px;flex-wrap:wrap;align-items:center">' +
+    '<span><b class="dim">池子</b> <select id="facp" class="fsel">' + ps + '</select></span>' +
     '<span><b class="dim">看多久</b> ' + wins + '</span>' +
     '<span><b class="dim">前瞻</b> ' + hs + '</span>' +
     '<select id="facg" class="fsel">' + gs + '</select>' +
@@ -331,14 +351,21 @@ function facTable() {
 // 名称 + 小字编码放同一格（同 cnCell 那条：名称是人扫的，编码是机读的），
 // 两者【都】可点 —— 只有编码可点的话，习惯认名字的人会以为不能点
 function facName(r) {
-  const u = '/factors.html?id=' + encodeURIComponent(r.factor_id) +
-            '&h=' + encodeURIComponent(facH()) + '&win=' + encodeURIComponent(facWin());
+  const u = '/factors.html?id=' + encodeURIComponent(r.factor_id) + facCtx();
   return '<a href="' + u + '">' + esc(r.name_cn || r.factor_id) + '</a>' +
     '<span class="cd"><a href="' + u + '">' + esc(r.factor_id) + '</a>' +
     ' · ' + esc(r.group_cn || '') +
     (r.xs_comparable ? '' : ' · <span class="warn2">量纲</span>') +
     (r.src_dup ? ' · <span class="dim" title="与另一个因子秩相关 >= 0.999，' +
-      '多半是同一件事的两种写法">近似重复</span>' : '') + '</span>';
+      '多半是同一件事的两种写法">近似重复</span>' : '') +
+    // 🔴 当日不同取值 < 分位数 -> 分位切点整个落在并列里，"最小分位超额"
+    //   与"换手"**不是有意义的数**（实测 aroon_up 某日 5092 行只有 26 个
+    //   取值、56% 都是 0.0）。不标的话那几行看着和别的一样可信。
+    (r.nuniq != null && r.nuniq < facPm().nq
+      ? ' · <span class="warn2" title="当日只有 ' + r.nuniq + ' 个不同取值，' +
+        '少于 ' + facPm().nq + ' 个分位 —— 切点整个落在并列里，' +
+        '分位收益与换手不是有意义的数（按代码定序只是让它可复现，不是让它对）"' +
+        '>并列</span>' : '') + '</span>';
 }
 
 async function facList() {
@@ -347,6 +374,7 @@ async function facList() {
   let o;
   try {
     o = await j('/api/factors?win=' + encodeURIComponent(w) + '&h=' + encodeURIComponent(h) +
+      '&pool=' + encodeURIComponent(facPool()) +
       (facQ('group') ? '&group=' + encodeURIComponent(facQ('group')) : '') +
       (facQ('abs') ? '&abs=1' : ''));
   } catch (e) {
@@ -424,6 +452,19 @@ function facCaveats() {
     '前瞻 1 日不重叠，折不折一样。<b>这张表默认就按 |t| 降序排。</b></li>' +
     FACM.caveats.map(x => '<li>' + esc(x) + '</li>').join('') +
     '<li>股票池：' + esc(FACM.pool) + '</li>' +
+    (function () {
+      const pm = facPm();
+      if (pm.key === 'all') return '';
+      // 🔴 小池子的分位数不一样（成分太少，照 10 组切每组只有几只），
+      //   必须**响亮地说出来** —— 不说的话两个池的"最小分位超额"摆在
+      //   一起看着可比，而它们不是（同「口径不一致要响亮地说出来」）。
+      return '<li>当前池子：<b>' + esc(pm.label) + '</b>，' +
+        '成分按<b>两步 ASOF</b> 的 PIT 语义取自面板' +
+        (pm.nq !== 10 ? '；🔴 这个池分 <b>' + pm.nq + '</b> 组、当日最少 <b>' +
+          pm.min_xs + '</b> 只（不是 10 组 / 100 只）—— 成分太少，' +
+          '照 10 组切每组只有几只，分位收益是噪声。' +
+          '<b>它的分位数与别的池不可直接比大小</b>' : '') + '</li>';
+    })() +
     '<li>超额的基准：' + esc(FACM.excess_base) + '</li>' +
     '<li>前瞻收益：' + esc(FACM.fwd) + '</li>' +
     '<li>换手：' + esc(FACM.turnover) + '</li>' +
@@ -447,6 +488,10 @@ function facWire() {
       facWire();
     }
   };
+  // 🔴 换池子要**回到第一屏的排序**吗？不 —— 排序是"我现在想看什么"，
+  //   池子变了那个诉求没变。但 `q`（搜索）保留、`group` 保留：它们是
+  //   "我在找哪一类"，跨池仍然成立。
+  const pp = $('#facp'); if (pp) pp.onchange = () => facNav({pool: pp.value});
   const g = $('#facg'); if (g) g.onchange = () => facNav({group: g.value});
   const ab = $('#facab'); if (ab) ab.onchange = () => facNav({abs: ab.checked ? 1 : ''});
   const q = $('#facq');
@@ -461,7 +506,7 @@ function facWire() {
 async function facDetail(id) {
   $('#pg').innerHTML = '<div class="note">读取中…</div>';
   let o;
-  try { o = await j('/api/factor?id=' + encodeURIComponent(id) + '&h=' + encodeURIComponent(facH())); }
+  try { o = await j('/api/factor?id=' + encodeURIComponent(id) + facCtx()); }
   catch (e) { $('#pg').innerHTML = '<div class="warn">取不到：' + esc(String(e)) + '</div>'; return; }
   if (!o) {
     $('#pg').innerHTML = '<div class="warn">没有这个因子：' + esc(id) +
@@ -535,8 +580,153 @@ async function facDetail(id) {
       ' 日】的超额均值，没有折年化 —— 折了会把"这一年里平均每期赚多少"' +
       '读成"这一年赚了多少"，而重叠窗口下后者算不出来。</div></div>';
   }
+  s += '<div id="facch"></div>';
   s += facCaveats();
   $('#pg').innerHTML = s;
+  facCharts(id);
+}
+
+/* ---------------- 详情页那六张图（2026-09-25） ----------------
+   与 /api/factor 分开取：那一发一回来表格就能画，而这六块要现算
+   （单因子约 6 秒，之后走缓存）。先把表格给人看，别一起等。 */
+let FACCH = null, FACLOG = 0, FACALLQ = 1;
+
+/* 分位配色：小 -> 大 走 红 -> 绿。基准单独一个中性色。
+   ★ 不用 upc()：那是"涨绿跌红"的语义，而这里的颜色表示的是【第几个分位】。 */
+function facQcol(q, nq) {
+  if (q === 0) return '#7d8596';   /* 基准：中性灰蓝，不落在红-绿那条带上 */
+  return 'hsl(' + Math.round(0 + 132 * (q - 1) / Math.max(1, nq - 1)) + ',62%,46%)';
+}
+
+async function facCharts(id) {
+  const el = $('#facch');
+  if (!el) return;
+  el.innerHTML = '<div class="lvsec"><div class="note">这几张图要现算 ' +
+    '（单因子约 6 秒，之后走缓存）…</div></div>';
+  let o;
+  try { o = await j('/api/factor/charts?id=' + encodeURIComponent(id) + facCtx()); }
+  catch (e) {
+    el.innerHTML = '<div class="lvsec"><div class="warn">这几张图取不到：' +
+      esc(String(e)) + '</div></div>';
+    return;
+  }
+  if (!o || o.error) {
+    el.innerHTML = '<div class="lvsec"><div class="warn">' +
+      esc((o && o.error) || '没有返回') + '</div></div>';
+    return;
+  }
+  FACCH = o;
+  el.innerHTML =
+    '<div class="lvsec"><h3>分位数净值曲线' +
+      helpIcon('nav', o.caveats.nav) + '</h3>' +
+      '<div class="lvtags" id="navctl">' +
+        '<a href="#" class="lvtag rg on" data-log="0">普通轴</a>' +
+        '<a href="#" class="lvtag rg" data-log="1">对数轴</a>' +
+        '<a href="#" class="lvtag" data-allq="1">全分位</a>' +
+      '</div><div id="ch_nav"></div>' +
+      '<div class="note" id="navnote"></div></div>' +
+    '<div class="lvsec"><h3>IC 时序图' + helpIcon('ic', o.caveats.ic) +
+      '</h3><div id="ch_ic"></div></div>' +
+    '<div class="lvsec"><h3>行业 IC' + helpIcon('ind', o.caveats.ind) +
+      '</h3><div id="ch_ind"></div></div>' +
+    '<div class="lvsec"><h3>换手率' + helpIcon('turn', o.caveats.turn) +
+      '</h3><div id="ch_turn"></div></div>' +
+    '<div class="lvsec"><h3>买入信号衰减分析' + helpIcon('dec', o.caveats.decay) +
+      '</h3><div id="ch_dec"></div>' +
+      '<div class="note">' + esc(o.caveats.decay) + '</div></div>' +
+    '<div class="lvsec"><h3>因子值最大 / 最小的那几只' +
+      helpIcon('tb', o.caveats.tb) + '</h3><div id="ch_tb"></div></div>';
+  bindHelp(el);
+  facChRender();
+  $('#navctl').onclick = e => {
+    const t = e.target.closest('a');
+    if (!t) return;
+    e.preventDefault();
+    if (t.dataset.log != null) FACLOG = +t.dataset.log;
+    else FACALLQ = FACALLQ ? 0 : 1;
+    [...$('#navctl').querySelectorAll('a')].forEach(a2 => {
+      if (a2.dataset.log != null) a2.classList.toggle('on', +a2.dataset.log === FACLOG);
+      else a2.classList.toggle('on', !!FACALLQ);
+    });
+    facChNav();
+  };
+}
+
+function facChNav() {
+  const o = FACCH, d = o.nav;
+  if (!d.dates.length) {
+    $('#ch_nav').innerHTML = '<div class="note">这个区间里没有数据</div>';
+    return;
+  }
+  const nq = d.nq;
+  const keep = q => FACALLQ || q === 0 || q === 1 || q === nq;
+  const ser = d.series.filter(x => keep(x.q)).map(x => ({
+    n: x.q === 0 ? '基准（池内等权）' :
+       (x.q === 1 ? '最小分位' : (x.q === nq ? '最大分位' : '第 ' + x.q + ' 分位')),
+    c: facQcol(x.q, nq), v: x.nav
+  }));
+  /* 🔴 净值恒 > 0，所以对数轴不需要对负值做 clamp —— 服务端给的就是净值
+     而不是"净值 − 1"（给收益率的话 log 那条路会把负值压到 1e-6，
+     **而图看着完全正常**）。 */
+  lineChart($('#ch_nav'), ser, {
+    dates: d.dates, h: 380,
+    pctAxis: FACLOG ? 0 : 1, log: FACLOG ? 1 : 0, ratioAxis: FACLOG ? 1 : 0
+  });
+  $('#navnote').textContent = FACLOG
+    ? '对数轴：纵轴是净值【倍数】（起点 1.0）—— 分位之间差几十倍时，普通轴会把除了最高那条以外的全压平。'
+    : '普通轴：纵轴是累计收益（起点 0%）。' + o.caveats.nav;
+}
+
+function facChRender() {
+  const o = FACCH;
+  facChNav();
+
+  const ic = o.ic;
+  if (ic.dates.length) {
+    lineChart($('#ch_ic'), [
+      { n: 'IC', c: '#6aa9e0', v: ic.ic },
+      { n: '22 日移动平均', c: '#e08a3c', v: ic.ma }
+    ], { dates: ic.dates, h: 300, zero: 0 });
+  } else { $('#ch_ic').innerHTML = '<div class="note">这个区间里没有 IC</div>'; }
+
+  if (o.ind.length) {
+    hbarChart($('#ch_ind'), o.ind.map(x => ({
+      n: x.ind, v: x.ic,
+      t: x.ind + '　IC ' + x.ic.toFixed(4) + '　计入 ' + x.nday + ' 天'
+    })), { fmt: v => (v == null ? '—' : v.toFixed(3)) });
+  } else { $('#ch_ind').innerHTML = '<div class="note">这个区间里算不出行业 IC</div>'; }
+
+  const tn = o.turn;
+  if (tn.dates.length) {
+    const nq = o.nav.nq;
+    lineChart($('#ch_turn'), tn.series.map(x => ({
+      n: x.q === 1 ? '最小分位' : '最大分位',
+      c: x.q === 1 ? '#6aa9e0' : '#e08a8a', v: x.turn
+    })), { dates: tn.dates, h: 280, zero: 0 });
+  } else { $('#ch_turn').innerHTML = '<div class="note">这个区间里没有换手</div>'; }
+
+  const dc = o.decay;
+  if (dc.series.length) {
+    const nq = dc.nq;
+    barChart($('#ch_dec'), dc.lags.map(k => 'lag' + k), dc.series.map(x => ({
+      n: x.q === 1 ? '最小分位' : '最大分位',
+      c: x.q === 1 ? '#6aa9e0' : '#7d8596', v: x.ex
+    })), { h: 260 });
+  } else { $('#ch_dec').innerHTML = '<div class="note">这个区间里算不出衰减</div>'; }
+
+  const tb = o.top_bottom;
+  const tbl2 = (rows, ttl) =>
+    '<div><h4 style="margin:0 0 6px">' + ttl + '</h4>' +
+    (rows.length ? '<div class="pw"><table class="lvt"><tbody>' +
+      rows.map(r => '<tr><td class="tx">' + cnCell(r.code, r.name) +
+        '</td><td class="rt">' + fmtN(r.val, 6) + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<div class="note">没有</div>') + '</div>';
+  $('#ch_tb').innerHTML = tb.date
+    ? '<div class="note">' + esc(tb.date) + ' 收盘，池内共 ' + tb.n_all + ' 只</div>' +
+      '<div class="pgrid" style="grid-template-columns:1fr 1fr;gap:16px">' +
+      tbl2(tb.top, '因子值最大的 ' + tb.top.length + ' 只') +
+      tbl2(tb.bottom, '因子值最小的 ' + tb.bottom.length + ' 只') + '</div>'
+    : '<div class="note">最新一天没有这个因子的值</div>';
 }
 
 facBoot();

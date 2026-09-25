@@ -160,6 +160,12 @@ def api_factors_meta(_q):
     return {
         'windows': [{'k': k, 'label': t} for k, t, _ in fe.WINDOWS],
         'horizons': list(fe.HORIZONS),
+        # 🔴 **池子清单由服务端给**，页面不写死任何一个池子名 —— 加一个池子
+        #   广场上自动就有；前端硬编码的话新池子**不会出现，而那不报错**
+        #   （同「可选清单由服务端给」「加一个指标广场上自动就有」）。
+        #   没算过的**不藏起来**，带 `ready=false` + why（同「算不出来的
+        #   因子也要有名有姓」）—— 藏了的话人分不出"不支持"与"还没算"。
+        'pools': fe.pools_ready(),
         'groups': grp,
         'n_factors': int(len(cat)),
         'n_abs': int((~cat['xs_comparable']).sum()),
@@ -169,7 +175,7 @@ def api_factors_meta(_q):
         'n_missing': int(len(miss)),
         'missing_names': [str(x) for x in miss['name_cn']],
         'pool': fe.POOL,
-        'excess_base': '当日横截面【等权平均】收益（不是指数）',
+        'excess_base': '当日横截面【等权平均】收益（不是指数）—— 基准是【这个池自己】的均值，所以两个池的超额不可直接比大小',
         'turnover': '每 h 个交易日调一次仓，相邻两次该分位成分变了百分之几',
         'fwd': 'close_hfq[t+h] / close_hfq[t] − 1（后复权 close-to-close）',
         # 🔴 这三句必须原样显示在页面上，见模块 docstring
@@ -187,38 +193,63 @@ def api_factors_meta(_q):
 _SUM = {}
 
 
-def _summary(fe, h, win):
-    """按 (h, win, 文件 mtime) 缓存 —— 一次 0.4 秒，而详情页要 6 个区间。
+def _shard_sig(fe, pool):
+    """这个池的分片清单指纹（文件名 + mtime）。
+
+    🔴 **带文件清单，不只是 mtime**：重建之后多出/少掉一年也要失效 ——
+      只盯"某一个文件的 mtime"的话，新增了一年的分片读不到，**而它不报错**
+      （同 `factor_eval._load_shards`）。
+    """
+    import glob as _g
+    import os as _os
+    d = _os.path.join(fe.OUT, 'ic', pool)
+    return tuple(sorted((_os.path.basename(f), _os.path.getmtime(f))
+                        for f in _g.glob(_os.path.join(d, '*.parquet'))))
+
+
+def _summary(fe, h, win, pool='all'):
+    """按 (池, h, win, 分片指纹) 缓存 —— 一次 0.4 秒，而详情页要 6 个区间。
 
     🔴 键里带 mtime 而不是"算过没有"：`factor_eval.py` 重算之后这份缓存
       必须自己失效，否则页面上是旧数而它不报错
       （同「判据永远是现在的状态，不是记录」）。
     """
-    import os as _os
-    mt = _os.path.getmtime(_os.path.join(fe.OUT, 'factor_ic.parquet'))
+    mt = _shard_sig(fe, pool)
     # 🔴 只在【文件变了】时整份丢掉。第一版写成"每次 miss 就 clear()" ——
     #   于是缓存**最多只留 1 项**，而详情页要 6 个区间、逐个 miss 逐个清空，
     #   等于没有缓存（实测每次进详情都重算 6 遍 = 2.7 秒，用户报"卡顿"）。
     #   ⚠ 当时的注释写的是"换了**文件**就丢掉"，而代码写的是"换了 **key**
     #     就丢掉" —— **注释是对的，代码不是**（同「代码在和自己的注释打架」）。
-    if _SUM.get('_mt') != mt:
-        _SUM.clear()
-        _SUM['_mt'] = mt
-    k = (h, win)
+    # ★ 逐池各记各的指纹 —— 一把全局 `_mt` 的话，切一次池子就把别的池
+    #   全部清掉（同「每次 miss 就 clear()」那个写法的变体）。
+    if _SUM.get(('_mt', pool)) != mt:
+        for kk in [x for x in _SUM if isinstance(x, tuple) and x[-1] == pool]:
+            del _SUM[kk]
+        _SUM[('_mt', pool)] = mt
+    k = (h, win, pool)
     if k not in _SUM:
-        _SUM[k] = fe.summary(h, win)
+        _SUM[k] = fe.summary(h, win, pool=pool)
     return _SUM[k]
 
 
 def api_factors(q):
-    """列表。参数：`win`（时间段）/ `h`（前瞻）/ `group` / `abs`（含不含量纲）。"""
+    """列表。参数：`win` / `h` / `group` / `abs`（含不含量纲）/ **`pool`**。"""
     import pandas as pd
     fe = _eval()
     win = (q.get('win') or 'all')
     h = int(q.get('h') or 20)
     if win not in [k for k, _, _ in fe.WINDOWS] or h not in fe.HORIZONS:
         return {'error': '不认识的 win/h'}
-    s = _summary(fe, h, win)
+    pool = (q.get('pool') or 'all')
+    if pool not in fe.POOL_KEYS:
+        return {'error': '不认识的池子：%s' % pool}
+    try:
+        s = _summary(fe, h, win, pool)
+    except SystemExit as e:
+        # 🔴 「这个池还没算过」要**说出来**，不是一个空表 —— 空表与
+        #   "这个池里没有因子" 在屏幕上一个样（同「删了要留痕」）。
+        return {'error': str(e), 'pool': pool}
+    pm = fe.pool_meta(pool)
     cat = _cat(fe)
     m = s.merge(cat, on='factor_id', how='left')
     if q.get('group'):
@@ -236,11 +267,11 @@ def api_factors(q):
     cols = ['factor_id', 'name_cn', 'group_key', 'group_cn', 'unit', 'tier',
             'tier_cn', 'xs_comparable', 'src_dup', 'ic', 'ir', 'pos',
             'q_lo_ex_ann', 'q_hi_ex_ann', 'to_lo', 'to_hi', 'spread',
-            't_adj', 't_naive', 'nday', 'nreb']
+            't_adj', 't_naive', 'nday', 'nreb', 'nuniq']
     have = [c for c in cols if c in m.columns]
     rows = m[have].where(pd.notna(m[have]), None).to_dict('records')
     return {'win': win, 'h': h, 'n': len(rows), 'n_abs_hidden': 0 if q.get('abs')
-            else n_abs, 'rows': rows}
+            else n_abs, 'rows': rows, 'pool': pm}
 
 
 def api_factor(q):
@@ -253,12 +284,16 @@ def api_factor(q):
     if row.empty:
         return None
     h = int(q.get('h') or 20)
+    pool = (q.get('pool') or 'all')
+    if pool not in fe.POOL_KEYS:
+        return {'error': '不认识的池子：%s' % pool}
+    pm = fe.pool_meta(pool)
     info = row.iloc[0].where(pd.notna(row.iloc[0]), None).to_dict()
 
     # 各区间横向对比 —— 「近 3 月好、全程不好」这种事一眼要看得见
     wins = []
     for k, label, _ in fe.WINDOWS:
-        s = _summary(fe, h, k)
+        s = _summary(fe, h, k, pool)
         r = s[s['factor_id'] == fid]
         if r.empty:
             continue
@@ -272,8 +307,9 @@ def api_factor(q):
                      'nday': int(r['nday']) if pd.notna(r.get('nday')) else None})
 
     # 逐年 —— 「优势几乎全来自单年」这种事只有逐年看得出来
-    ic = pd.read_parquet(os.path.join(fe.OUT, 'factor_ic.parquet'))
-    ic = ic[(ic['factor_id'] == fid) & (ic['h'] == h)]
+    ic = fe._load_shards('ic', pool)
+    ic = (ic[(ic['factor_id'] == fid) & (ic['h'] == h)]
+          if ic is not None else pd.DataFrame(columns=['date', 'ic']))
     yrs = []
     if not ic.empty:
         g = ic.assign(y=pd.to_datetime(ic['date']).dt.year).groupby('y')
@@ -287,8 +323,128 @@ def api_factor(q):
                         'pos': _f((sub['ic'] > 0).mean()),
                         'ex_lo': _f((sub['q_lo'] - sub['mkt']).mean()),
                         'ex_hi': _f((sub['q_hi'] - sub['mkt']).mean())})
-    return {'info': info, 'h': h, 'windows': wins, 'years': yrs,
+    return {'info': info, 'h': h, 'windows': wins, 'years': yrs, 'pool': pm,
             'meta': api_factors_meta({})}
+
+
+_CHARTS = {}
+
+
+def _data_fp(fe):
+    """**面板 + 因子面板**的指纹 —— 详情页那几张图是按需算的，读的是它们
+    （不是分片），所以缓存不能挂 `_shard_sig`。
+
+    🔴 挂错了不报错：分片没重建而面板变了时，页面上是**昨天的图**。
+    ★ 只 stat 不读内容（同 `feed.fingerprint`），一次 0.0 秒。
+    """
+    return (tuple(sorted(fe._panel_years(fe._paths()[0]).items())), fe._spec_sig())
+
+
+def _charts_cached(fe, key, fn):
+    """按 (键, 数据指纹) 缓存一张图。
+
+    🔴 **每个键各记各的指纹**，不是"miss 就 clear()" —— 后者在这一页上
+      尤其致命：一个详情页一次要六块，逐个 miss 逐个清空就等于没有缓存
+      （`_SUM` 那次实测 2.7 秒的卡顿就是这么来的）。
+    """
+    fp = _data_fp(fe)
+    hit = _CHARTS.get(key)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    v = fn()
+    _CHARTS[key] = (fp, v)
+    if len(_CHARTS) > 64:                 # 只是别无限长，不是"换一个就丢一批"
+        for k in list(_CHARTS)[:16]:
+            del _CHARTS[k]
+    return v
+
+
+#: 🔴 这几句必须**原样印在图上**。它们不是免责声明，是三种会读错的方式：
+#:   ① 净值是等权、不扣费 -> 拿它当"能赚多少"就错了；
+#:   ② 行业名是 PIT 的，申万改过版 -> 全程口径下会出现已停用的行业名；
+#:   ③ 「衰减」这个词在别的看板上常指**持仓重合度**（0.93~0.99），
+#:     而这里是**分位超额收益**（量级小两个数量级）—— 混着读会得出相反结论。
+CHART_CAVEATS = {
+    'nav': ('每 %(h)d 个交易日调一次仓、分位内【等权】、后复权逐日链乘；'
+            '【一分钱费用与滑点都没扣】，所以不是可实现收益。'
+            '基准是【同一个池子的全样本等权】，不是某个指数 —— '
+            '这一页别处的超额基准就是它，换成指数会变成同页两套基准。'),
+    'ind': ('行业取当日面板的【申万一级】（PIT）。申万 2014 / 2021 改过版，'
+            '所以"全部"口径下会出现已停用的行业名（如「采掘I」）；'
+            '近 1 年窗口下是 31 个。当日行业内不足 10 只的那一天不计入。'),
+    'decay': ('【分位收益衰减】：t 期形成分位，持有第 j 个 h 日窗口的收益，'
+              '减去当日横截面同一段的等权均值。'
+              '🔴 有些看板那张"衰减图"画的是【持仓重合度】（1 − 累计换手，'
+              '值在 0.93~0.99），与这里【不是一回事】—— 这里的量级是千分之几。'),
+    'turn': '相邻两个调仓日之间，该分位的成分换掉了百分之几。',
+    'ic': 'IC 是当日因子值与未来 h 日收益的【秩相关】（Spearman）。',
+    'tb': '最新一个有因子值的交易日，池内因子值最大 / 最小的那几只。',
+}
+
+
+def api_factor_charts(q):
+    """详情页那六张图。**与 `/api/factor` 分开**：它一发就够画表格，
+    而这六块要现算（实测单因子合计约 6 秒，之后走缓存）。
+
+    ★ 三块从分片切（IC 时序 / 换手时序），三块现算（净值 / 行业 IC / 衰减），
+      外加"最大最小 20 只"。
+    """
+    import pandas as pd
+    fe = _eval()
+    fid = q.get('id') or ''
+    pool = q.get('pool') or 'all'
+    if pool not in fe.POOL_KEYS:
+        return {'error': '不认识的池子：%s' % pool}
+    h = int(q.get('h') or 20)
+    if h not in fe.HORIZONS:
+        return {'error': '不认识的前瞻：%s（有的是 %s）'
+                         % (h, '/'.join(str(x) for x in fe.HORIZONS))}
+    win = q.get('win') or 'all'
+    if win not in [k for k, _, _ in fe.WINDOWS]:
+        return {'error': '不认识的区间：%s' % win}
+    cat = _cat(fe)
+    if fid not in set(cat['factor_id']):
+        return {'error': '没有这个因子：%s' % fid}
+    n0 = int(q.get('n') or 20)
+
+    # ---- 从分片切的两块（零成本）----
+    ic = fe._load_shards('ic', pool)
+    ics = {'dates': [], 'ic': [], 'ma': []}
+    if ic is not None:
+        d = ic[(ic['factor_id'] == fid) & (ic['h'] == h)].sort_values('date')
+        st = fe._win_start(d['date'], dict((k, n) for k, _, n in fe.WINDOWS).get(win))
+        if st is not None:
+            d = d[d['date'] >= st]
+        if not d.empty:
+            ma = d['ic'].rolling(22, min_periods=1).mean()
+            ics = {'dates': [str(x)[:10] for x in d['date']],
+                   'ic': [_f(x) for x in d['ic']],
+                   'ma': [_f(x) for x in ma]}
+    tn = fe._load_shards('turn', pool)
+    tns = {'dates': [], 'series': []}
+    if tn is not None:
+        d = tn[(tn['factor_id'] == fid) & (tn['h'] == h)].sort_values('date')
+        st = fe._win_start(d['date'], dict((k, n) for k, _, n in fe.WINDOWS).get(win))
+        if st is not None:
+            d = d[d['date'] >= st]
+        if not d.empty:
+            piv = d.pivot_table(index='date', columns='q', values='turn')
+            tns = {'dates': [str(x)[:10] for x in piv.index],
+                   'series': [{'q': int(c), 'turn': [_f(x) for x in piv[c]]}
+                              for c in sorted(piv.columns)]}
+
+    # ---- 现算的三块 + 最大最小 ----
+    ck = (fid, pool, h, win)
+    nav = _charts_cached(fe, ('nav',) + ck, lambda: fe.nav_curves(fid, pool, h, win))
+    ind = _charts_cached(fe, ('ind',) + ck, lambda: fe.industry_ic(fid, pool, h, win))
+    dec = _charts_cached(fe, ('dec',) + ck, lambda: fe.decay(fid, pool, h, win))
+    tb = _charts_cached(fe, ('tb', fid, pool, n0), lambda: fe.top_bottom(fid, pool, n0))
+
+    cav = dict(CHART_CAVEATS)
+    cav['nav'] = cav['nav'] % {'h': h}
+    return {'id': fid, 'pool': fe.pool_meta(pool), 'h': h, 'win': win,
+            'ic': ics, 'turn': tns, 'nav': nav, 'ind': ind, 'decay': dec,
+            'top_bottom': tb, 'caveats': cav}
 
 
 def api_factors_missing(_q):
