@@ -192,6 +192,12 @@ class PanelFeed:
         ('panel', _paths.PANEL_GLOB),
         ('std',   'std/*.parquet'),
         ('index', 'raw/tdx/kline/' + _paths.TDX_KLINE['index'] + '.parquet'),
+        # 🔴 因子面板**必须在这里**，否则「因子重算过而指纹没变」——
+        #   于是 tick 判「不用重算」、模拟盘判「不用推进」、归档去重把
+        #   两次不同因子数据的回测当成重复删掉一个，**三个都不报错**。
+        #   加它的那一刻起全局指纹会变一次（实测 e96fff8fa094 -> 78b031496223，另外三个部件逐位未变），
+        #   那是一次性的重算，不改变任何数值结果。
+        ('factor', _paths.FACTOR_GLOB),
     )
 
     def fingerprint(self):
@@ -446,6 +452,151 @@ class PanelFeed:
             keep = df.groupby('code')['seq'].count()
             df = df[df['code'].isin(set(keep[keep == periods].index))]
         return df.reset_index(drop=True)
+
+    # ---------- 因子：mart/factor_daily 的 162 个 ----------
+    #   与上面三个取数方法**同一条边界**：feed 只回答「这一天、这几个因子、
+    #   这些票的值是多少」，而阈值 / 分位 / 排序 / 截断仍然归策略
+    #   —— 后者是规则，本来就该看得见、改得动。
+    #
+    # 🔴 **PIT 是【面板本身】保证的，不是这里补的**：`factor_daily` 里
+    #   (code, date) 那一行只用了 <= date 的信息 —— 财务那半走
+    #   `factors/fin.asof_sql` 的 `ASOF ... fq.pub_date <= p.date`
+    #   （用 report_date 就是未来函数），价格那半是 <= date 的滚动窗口。
+    #   所以这一层要做的只有一件事：**不许问到今天及以后**，
+    #   那道防火墙在 `guard.GuardedFeed.factors` 里。
+    #
+    # ⚠ **「横截面可不可比」这里不拦**。`ma20` 这类因子的标度是个股自己的
+    #   股价与拆股史（跨票 1.00~5899.9），拿它做**横截面排序**排的是
+    #   "股价 × 上市以来分红拆细"；而同一个 `ma20` 拿来判**这一只票**
+    #   `close > ma20`（在势）完全正确 —— 两种用法只有策略自己知道。
+    #   所以 feed 只把这个事实给出来（`factor_meta()` 的 `xs_comparable`），
+    #   拦在这里会误伤后一种（同「判据比要证的事宽」那条）。
+
+    def _factor_catalog(self):
+        """目录表 DataFrame，按**文件 mtime**缓存。
+
+        🔴 缓存写成「miss 就整个 clear()」的话，多键时最多只留一项、
+          等于没有 —— 本项目为此犯过三次（`srv/factors._SUM`、
+          `factor_eval._PQ`、`corp.actions`）。这里只有一个键，
+          所以记 `(mtime, df)`；判据也落在 mtime 上而不是"取过没有"，
+          重建过因子目录必须自己失效。
+        """
+        f = os.path.join(self.root, _paths.FACTOR_CATALOG)
+        try:
+            mt = os.stat(f).st_mtime_ns
+        except OSError:
+            raise SystemExit(
+                '没有因子目录表：%s\n'
+                '先跑 python3 datalake/build/build_factor_catalog.py'
+                '（它随 sync_daily.sh 的 11/12 每天自动跑）' % f)
+        c = getattr(self, '_fcat', None)
+        if c is not None and c[0] == mt:
+            return c[1]
+        df = self.con.execute(
+            'SELECT * FROM %s' % _paths.factor_catalog_sql(self.root)).df()
+        self._fcat = (mt, df)
+        return df
+
+    def factor_meta(self, ids=None):
+        """因子目录 -> DataFrame。不给 `ids` 就是全部 162 个。
+
+        列：`factor_id` / `name_cn` / `group_cn` / `formula` / `desc` /
+        `unit` / **`xs_comparable`**（横截面可不可比）/ `warm`（预热多少根）…
+
+        ★ 策略拿它干两件事：① 把"这个因子是什么"写进日志，事后复盘看得懂；
+          ② 自己决定要不要横截面排序（见上面那条 ⚠）。
+        """
+        df = self._factor_catalog()
+        if ids is not None:
+            df = df[df['factor_id'].isin(list(ids))]
+        return df.reset_index(drop=True)
+
+    def factor_ids(self):
+        """全部因子 id（list，按目录表顺序）。"""
+        return self._factor_catalog()['factor_id'].tolist()
+
+    def factors(self, date, ids, codes=None, carry_days=0):
+        """某一天的因子值 -> DataFrame(`jq_code`, `fdate`, <ids...>)。
+
+        ⚠ **值是 float32**（因子面板存的就是 FLOAT）—— 与主面板现场算出来的
+          float64 有 ~6e-08 的相对差（实测 5199 只，最大 5.9e-08）。
+          做阈值比较没问题，**别拿它做等值判断**，也别把它与面板的
+          `close_hfq` 之类直接 `==`。
+
+        ids         因子 id 列表（`feed.factor_ids()` / 因子广场 `/factors.html`）
+        codes       只要这几只（None = 当日全市场）
+        carry_days  停牌股当日**没有行**（因子面板与主面板一样是 K 线驱动的）。
+                    > 0 时对缺的那些做 ASOF 结转，回看窗口 carry_days 天。
+
+        🔴 **`fdate` 永远返回**，哪怕没开结转 —— 它是"这一行到底是哪天的"。
+          不给的话结转出来的值与当日值在屏幕上、在 DataFrame 里**长得一模一样**，
+          而那是两件事（同「实时价与昨收混在一起是两个数量级的误解」那条）。
+          开了结转就自己 `df['fdate'] < date` 看哪些是旧的。
+
+        ⚠ **结转的是整行**，价格派生量与财务派生量一起往回退。
+          它**不是未来函数**（退回去的那天更早），只是更陈旧 ——
+          与 `snapshot(carry_days=)` 那条「基本面不许结转」的理由不同：
+          那边结转会拿到**该股最后交易日那天的报告**并当成今天的，
+          而这边财务那半本来就已经 as-of 过了，退一天只是少知道一天的公告。
+          所以这里允许结转，但用 `fdate` 把陈旧**标出来**。
+        """
+        ids = list(ids)
+        if not ids:
+            raise ValueError('factors() 至少要给一个因子 id')
+        self._check_factor_ids(ids)
+        F = _paths.factor_sql(self.root)
+        cl = ', '.join(ids)
+        cur = ("SELECT jq_code, date AS fdate, %s FROM %s WHERE date = DATE '%s'"
+               % (cl, F, date))
+        if not carry_days or codes is None:
+            df = self.con.execute(cur).df()
+            if codes is not None:
+                df = df[df['jq_code'].isin(set(codes))].reset_index(drop=True)
+            return df
+        self.con.register('_fac_codes', _pd.DataFrame({'code': list(codes)}))
+        try:
+            return self.con.execute("""
+                WITH today AS (%s),
+                miss AS (
+                  SELECT u.code AS jq_code, p.date AS fdate, %s
+                  FROM (SELECT code, DATE '%s' AS d FROM _fac_codes
+                        WHERE code NOT IN (SELECT jq_code FROM today)) u
+                  ASOF LEFT JOIN (
+                      SELECT jq_code, date, %s FROM %s
+                      WHERE date > DATE '%s' - INTERVAL %d DAY
+                        AND date <= DATE '%s'
+                  ) p ON p.jq_code = u.code AND p.date <= u.d
+                )
+                SELECT * FROM today WHERE jq_code IN (SELECT code FROM _fac_codes)
+                UNION ALL SELECT * FROM miss
+            """ % (cur, ', '.join('p.%s' % c for c in ids), date,
+                   cl, F, date, int(carry_days), date)).df()
+        finally:
+            self.con.unregister('_fac_codes')
+
+    def _check_factor_ids(self, ids):
+        """不认识的因子 id **响亮失败**，并指出最像的那几个。
+
+        🔴 不查的话 duckdb 会抛 `Referenced column "xxx" not found`
+          外加一串 `Candidate bindings` —— 那个报错**指不到真正的原因**
+          （人会以为是自己 SQL 写错了，而实际是这个因子没实现 / 打错字 /
+          在"算不出来"的那 117 个里）。同「报错必须指向真正的原因」那条。
+        """
+        known = set(self._factor_catalog()['factor_id'])
+        bad = [i for i in ids if i not in known]
+        if not bad:
+            return
+        import difflib
+        tips = []
+        for b in bad:
+            near = difflib.get_close_matches(b, known, n=3, cutoff=0.5)
+            tips.append('%s%s' % (b, ('（是不是 %s？）' % ' / '.join(near))
+                                  if near else ''))
+        raise ValueError(
+            '没有这几个因子：%s\n'
+            '本地实现了 %d 个，清单见 feed.factor_ids() 或看板「🧪 因子广场」'
+            '（/factors.html）；那一页还列着【算不出来】的那些与原因。'
+            % ('、'.join(tips), len(known)))
 
     def nth_prev_day(self, d, n):
         """往前数 n 个交易日（不足则返回最早一天）。

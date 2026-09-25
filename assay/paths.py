@@ -59,6 +59,30 @@ def panel_sql(root=None):
     return "read_parquet('%s/%s')" % (datalake(root), PANEL_GLOB)
 
 
+# 因子值面板（`datalake/build/build_factor_daily.py` 的产物，按年分片的宽表：
+# `jq_code` / `date` + 162 个因子列）与它的目录表（`build_factor_catalog.py`）。
+#
+# 🔴 **与 `PANEL_GLOB` 同一条纪律**：`feed.FINGERPRINT_PARTS` 盯的必须与实际
+#   读的是**同一批**文件 —— 少盯一个就会出现「数据变了而指纹没变」，于是
+#   tick 判「不用重算」、模拟盘判「不用推进」、归档去重把两次不同数据的回测
+#   当成重复删掉一个，**三个都不报错**。所以两边取同一个常量。
+# ★ 立这个常量的直接理由：`assay/factor_eval.py` 已经内联拼了一份
+#   （连 `panel_daily/panel_*.parquet` 也自己拼了一遍，而它的注释写着
+#   「路径只在这一处拼」）—— 那正是"两处实现必然分叉"的现场。
+FACTOR_GLOB = 'mart/factor_daily/factor_*.parquet'
+FACTOR_CATALOG = 'mart/factor_catalog.parquet'
+
+
+def factor_sql(root=None):
+    """因子面板宽表的 duckdb 读法 —— **唯一**一处（同 `panel_sql`）。"""
+    return "read_parquet('%s/%s')" % (datalake(root), FACTOR_GLOB)
+
+
+def factor_catalog_sql(root=None):
+    """因子目录表的 duckdb 读法（一个因子一行：单位 / 横截面可不可比 / 预热）。"""
+    return "read_parquet('%s/%s')" % (datalake(root), FACTOR_CATALOG)
+
+
 # tdx 原始日线按类别分文件。🔴 这是**路径表**，不是"要兜哪几类"的策略 ——
 #   两者此前混在一起：`lv/perf._KIND_FILE`（4 类）与 `symbols.KIND_FILE`
 #   （2 类）各写一份，而后者被 `stock.alt_kind` 当策略用

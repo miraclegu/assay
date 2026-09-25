@@ -175,6 +175,29 @@ class GuardedFeed:
         self._check_date(date, 'fundamentals(%s)' % date)
         return self._f.fundamentals(date, fields, **kw)
 
+    def factors(self, date, ids, **kw):
+        """因子值（见 `feed.factors`）。
+
+        🔴 这道 PIT 检查是**因子这条路上唯一的防火墙**：面板自己保证了
+          「(code, date) 那一行只用 <= date 的信息」，而"别问到今天"只有
+          这里知道。少了它，策略在 T 日读 T 日的因子 —— 那一行含**当日收盘**
+          派生量（ma / rsi / 换手），于是回测拿今天的收盘去决定今天的买卖，
+          **不报错，只是结果好得可疑**（同 lookahead 那条用例记的教训）。
+        """
+        self._check_date(date, 'factors(%s)' % date)
+        return self._f.factors(date, ids, **kw)
+
+    def factor_meta(self, ids=None):
+        """因子目录（单位 / 横截面可不可比 / 预热多少根）。
+
+        ★ **不做 PIT 检查** —— 它没有日期维度，是"这个因子是什么"的静态
+          描述。给它加一道日期参数反而是在暗示它随时间变（而它不）。
+        """
+        return self._f.factor_meta(ids)
+
+    def factor_ids(self):
+        return self._f.factor_ids()
+
     def bars(self, date, codes):
         """历史 bar。今天的 bar 走 context.current()，不从这里拿。"""
         self._check_date(date, 'bars(%s)' % date)

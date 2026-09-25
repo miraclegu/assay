@@ -1914,6 +1914,171 @@ def t_data_api():
             % (len(cur), len(carry), same, tie))
 
 
+@case('因子 API：策略直接用量化因子（路径正本 / 指纹 / PIT / 可比性）')
+def t_factor_api():
+    """`feed.factors / factor_meta / factor_ids` —— 让策略直接用那 162 个因子。
+
+    与 `universe/snapshot/fundamentals` 同一条边界：feed 管「从哪取、as-of
+    怎么算」，阈值 / 分位 / 排序 / 截断仍归策略。用法样板见
+    `strategies/_demo/factor_api.py`（一行 SQL 都没有）。
+
+    这条用例钉六件事，每件对应一种**不报错**的坏法：
+
+      A 路径正本只有一处   —— 第二份 glob 迟早与指纹那份分叉
+      B 指纹盯的 == 实际读的 —— 少盯一个：tick 判「不用重算」、模拟盘判
+                              「不用推进」、归档去重把两次不同数据的回测
+                              当成重复删掉一个，**三个都不报错**
+      C PIT 防火墙          —— 少了它就是拿今天的收盘决定今天的买卖，
+                              而回测只会**好得可疑**
+      D 未知 id 响亮失败    —— 否则 duckdb 抛一句 Candidate bindings，
+                              报错指不到"这个因子没实现/打错字"
+      E 值与主面板独立算一致 —— 两条完全独立的路（因子面板 vs 现场开窗）
+      F 可比性由目录表给    —— 横截面排一个 `ma20` 排的是"股价×拆股史"
+    """
+    import datetime
+    import numpy as _np
+    from assay import paths as _P
+    from assay.feed import PanelFeed as _PF
+    from assay.guard import GuardedFeed, LookAheadError
+
+    # 🔴 **日期从数据里现取，不写死** —— 写死的第一版取到了 2026-09-19，
+    #   而那是个**周六**，因子面板里一行都没有，于是"反向自证"当场报空转。
+    #   同「判据不许依赖真实数据碰巧如此 / 构造依赖今天星期几」那两条。
+    _f0 = _PF('2026-01-01', '2100-01-01')
+    _days = _f0.con.execute(
+        'SELECT DISTINCT date FROM %s ORDER BY date DESC LIMIT 2'
+        % _P.factor_sql(_f0.root)).df()['date'].tolist()
+    assert len(_days) == 2, '因子面板里连两个交易日都没有 —— 先跑 ' \
+        'datalake/build/build_factor_daily.py'
+    D1, D0 = (str(_days[0])[:10], str(_days[1])[:10])   # D1 当"今天"，D0 严格更早
+
+    # ---- A 路径正本只有一处 ----
+    lit = 'mart/factor_daily/factor_*.parquet'
+    hits = []
+    for rel in ('assay/feed.py', 'assay/guard.py', 'assay/factor_eval.py',
+                'assay/srv/factors.py'):
+        fp = os.path.join(REPO, rel)
+        if os.path.exists(fp) and lit in io_open_text(fp):
+            hits.append(rel)
+    assert not hits, (
+        '这几个文件自己又拼了一遍因子 glob：%s —— 正本在 assay/paths.py 的 '
+        'FACTOR_GLOB，第二份迟早与 FINGERPRINT_PARTS 那份分叉，而那不报错'
+        % '、'.join(hits))
+    assert _P.FACTOR_GLOB in _P.factor_sql(), 'factor_sql 没用那个常量'
+
+    # ---- B 指纹盯的必须与实际读的是同一批 ----
+    fsrc = io_open_text(os.path.join(REPO, 'assay/feed.py'))
+    assert "('factor', _paths.FACTOR_GLOB)" in fsrc, (
+        'FINGERPRINT_PARTS 里没有因子面板（或没走 paths 的常量）—— '
+        '因子重算过而指纹没变，tick/模拟盘/归档去重三处都会静默做错事')
+    f = _f0
+    fp = f.fingerprint()
+    assert 'factor' in fp['parts'] and fp['parts']['factor']['n_files'] > 0, \
+        '指纹里没有 factor 部件，或它一个文件都没扫到'
+    #   ★ 行为判据：指纹扫到的那批 == `factor_sql` 真正读的那批。
+    #     只查源码里有那一行的话，glob 被改成另一个（比如带 `**`）照样绿。
+    a = set(glob.glob(os.path.join(f.root, _P.FACTOR_GLOB)))
+    b = set(glob.glob(os.path.join(
+        f.root, _P.factor_sql(f.root).split("'")[1].split(f.root + '/')[-1])))
+    assert a and a == b, '指纹扫的 %d 个文件与 factor_sql 读的 %d 个不是同一批' \
+        % (len(a), len(b))
+
+    # ---- C PIT 防火墙（两向：拦今天 / 放行昨天）----
+    gf = GuardedFeed(f)
+    gf.set_clock(datetime.date.fromisoformat(D1), 'pre_open')
+    for arg in (D1, datetime.date.fromisoformat(D1)):
+        try:
+            gf.factors(arg, ['mv'])
+            raise AssertionError('guard.factors(%r) 没被 PIT 拦住 —— '
+                                 '那一行含【当日收盘】派生量' % (arg,))
+        except LookAheadError:
+            pass
+    past = gf.factors(D0, ['mv'])
+    assert len(past) > 1000, (
+        '构造不对：%s 只取到 %d 行 —— 反向自证不成立，上面那条分不出'
+        '"拦住了"与"永远给不出数据"' % (D0, len(past)))
+
+    # ---- D 未知 id 要点名 ----
+    try:
+        gf.factors(D0, ['mv', 'rsi14'])
+        raise AssertionError('未知因子 id 被静默放行了')
+    except ValueError as e:
+        assert 'rsi14' in str(e) and '因子广场' in str(e), \
+            '报错没点名那个 id、也没说去哪看清单：%s' % e
+
+    # ---- E 值 == 从主面板独立算一遍（+ 反向自证）----
+    got = f.factors(D0, ['ma20', 'mv']).set_index('jq_code')
+    assert 'fdate' in got.columns, \
+        'factors() 没返回 fdate —— 结转出来的旧值与当日值就分不出来了'
+    ind = f.con.execute("""
+      SELECT jq_code, ma20_x, totalmv FROM (
+        SELECT jq_code, date, totalmv,
+               avg(close_hfq) OVER (PARTITION BY jq_code ORDER BY date
+                                    ROWS 19 PRECEDING) AS ma20_x,
+               count(*)       OVER (PARTITION BY jq_code ORDER BY date
+                                    ROWS 19 PRECEDING) AS n
+        FROM %s WHERE date BETWEEN DATE '2026-01-01' AND DATE '%s')
+      WHERE date = DATE '%s' AND n = 20
+    """ % (_P.panel_sql(f.root), D0, D0)).df().set_index('jq_code')
+    j = got.join(ind, how='inner')
+    assert len(j) > 3000, '构造不对：只对上 %d 只，这条自证是空转的' % len(j)
+    eps = float(_np.finfo(_np.float32).eps)
+
+    def _bad(c1, c2, frame=j):
+        x = frame[c1].astype('float64'); y = frame[c2].astype('float64')
+        m = x.notna() & y.notna()
+        rel = (x[m] - y[m]).abs() / y[m].abs().clip(lower=1e-12)
+        return int((rel > 8 * eps).sum()), int(m.sum())
+    for c1, c2 in (('ma20', 'ma20_x'), ('mv', 'totalmv')):
+        nb, nn = _bad(c1, c2)
+        assert nb == 0, '%s 与面板独立算出来的差了 %d/%d 行' % (c1, nb, nn)
+    #   反向自证：拿 MA10 去比必须**绝大多数不等**，否则上面那条分不出真假
+    w = f.con.execute("""
+      SELECT jq_code, ma10_x FROM (
+        SELECT jq_code, date,
+               avg(close_hfq) OVER (PARTITION BY jq_code ORDER BY date
+                                    ROWS 9 PRECEDING) AS ma10_x
+        FROM %s WHERE date BETWEEN DATE '2026-01-01' AND DATE '%s')
+      WHERE date = DATE '%s'
+    """ % (_P.panel_sql(f.root), D0, D0)).df().set_index('jq_code')
+    nb10, nn10 = _bad('ma20', 'ma10_x', got.join(w, how='inner'))
+    assert nn10 > 3000 and nb10 > 0.9 * nn10, \
+        '反向自证不成立（MA10 与 MA20 居然对上了 %d/%d）—— 上面那条判不出真假' \
+        % (nn10 - nb10, nn10)
+
+    # ---- F 可比性由目录表给；demo 的 _xs_guard 两向 ----
+    meta = gf.factor_meta(['mv_float', 'ep', 'ma20']).set_index('factor_id')
+    assert bool(meta.loc['mv_float', 'xs_comparable']) and \
+        bool(meta.loc['ep', 'xs_comparable']) and \
+        not bool(meta.loc['ma20', 'xs_comparable']), \
+        '目录表的 xs_comparable 不对 —— demo 那道护栏就没有判据可依'
+    import importlib.util as _iu2
+    _sp = _iu2.spec_from_file_location(
+        '_fac_demo', os.path.join(REPO, 'strategies/_demo/factor_api.py'))
+    dm = _iu2.module_from_spec(_sp); _sp.loader.exec_module(dm)
+
+    class _Ctx(object):
+        data = gf
+    dm._xs_guard(_Ctx(), ['mv_float', 'ep'])          # 可比 -> 必须放行
+    try:
+        dm._xs_guard(_Ctx(), ['ma20'])
+        raise AssertionError('横截面不可比的 ma20 被放行了 —— '
+                             '拿它跨票排序排的是"股价 × 上市以来分红拆细"')
+    except ValueError as e:
+        assert 'ma20' in str(e), '拒了但没点名是哪个因子：%s' % e
+    #   demo 必须真的不写 SQL（同 froec_api 那条）
+    dsrc = io_open_text(os.path.join(REPO, 'strategies/_demo/factor_api.py'))
+    assert 'data.query(' not in dsrc and 'SELECT ' not in dsrc.upper(), \
+        'factor_api.py 里还有 SQL —— 它存在的意义就是"不写 SQL"'
+
+    return ('%d 个因子；路径正本只有 paths.py 一处；指纹含 factor（%d 文件，'
+            '与 factor_sql 读的是同一批）；PIT 两向都钉（拦 %s / 放行 %s 的 '
+            '%d 行）；未知 id 点名报错；ma20+mv 与面板独立算的 %d 只**逐位一致**'
+            '（反向自证 MA10 有 %d/%d 行不等）；xs_comparable 两向'
+            % (len(gf.factor_ids()), fp['parts']['factor']['n_files'],
+               D1, D0, len(past), len(j), nb10, nn10))
+
+
 @case('serve.py 的 stop/restart：判据是端口而不是 PID 文件', tag='fast')
 def t_serve_ctl():
     """`serve.py --status/--stop/--restart`。
