@@ -447,6 +447,42 @@ def api_factor_charts(q):
             'top_bottom': tb, 'caveats': cav}
 
 
+def api_factor_industry(q):
+    """点开某个行业之后的下钻：逐日 IC 时序 + 逐年 IC / IR / 年收益。
+
+    ★ 与 `/api/factor/charts` 分开：它是**点了才要**的，一次只看一个行业。
+    """
+    fe = _eval()
+    fid = q.get('id') or ''
+    ind = q.get('ind') or ''
+    pool = q.get('pool') or 'all'
+    h = int(q.get('h') or 20)
+    win = q.get('win') or 'all'
+    if pool not in fe.POOL_KEYS:
+        return {'error': '不认识的池子：%s' % pool}
+    if h not in fe.HORIZONS:
+        return {'error': '不认识的前瞻：%s' % h}
+    if win not in [k for k, _, _ in fe.WINDOWS]:
+        return {'error': '不认识的区间：%s' % win}
+    if fid not in set(_cat(fe)['factor_id']):
+        return {'error': '没有这个因子：%s' % fid}
+    if not ind:
+        return {'error': '没说是哪个行业'}
+    d = _charts_cached(fe, ('ind1', fid, pool, h, win, ind),
+                       lambda: fe.industry_detail(fid, ind, pool, h, win))
+    d = dict(d)
+    d['caveats'] = {
+        'ic': ('这个行业【内部】每个交易日算一个 IC（因子值秩 vs 未来 %d 日'
+               '收益秩），条形图上那一个数就是这条序列的算术平均。'
+               '当日行业内不足 10 只的那天不计入。' % h),
+        'ret': ('三列都是【等权、不扣费、后复权、每 %d 个交易日调一次仓】。'
+                '低/高半区是行业内按因子值切两半 —— 不切 10 组是因为行业内'
+                '常常只有十几只，每组 1~2 只的收益是噪声。'
+                '哪一边好由你自己看，这里不替你定多空方向。' % h),
+    }
+    return d
+
+
 def api_factors_missing(_q):
     """算不出来的那些：按原因分组，每组带「为什么」，每条带细节。
 

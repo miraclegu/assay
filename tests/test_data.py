@@ -2768,8 +2768,8 @@ def t_factor_charts():
 
     # ---- ③ 行业 IC 是申万一级，没有被归成 11 个大类 ----
     n1y = len(sf.api_factor_charts({'id': 'mv', 'h': '5', 'win': '1y'})['ind'])
-    nall = len(o if False else sf.api_factor_charts(
-        {'id': 'mv', 'h': '5', 'win': 'all'})['ind'])
+    o2 = sf.api_factor_charts({'id': 'mv', 'h': '5', 'win': 'all'})
+    nall = len(o2['ind'])
     assert n1y >= 28, '近 1 年只有 %d 个行业 —— 申万一级该是 31 个左右' % n1y
     assert nall > n1y, (
         '全程 %d 个、近 1 年 %d 个 —— 行业名是 PIT 的（申万 2014/2021 改过版），'
@@ -2825,6 +2825,54 @@ def t_factor_charts():
                 '详情页那一发没带 pool（%s）—— 在沪深300 上点进因子会看到'
                 '【全市场】的数，而选择器还写着沪深300' % (hit[:1] or '一发都没有'))
             notes.append('池子带过去了')
+
+            # ---- ⑥ 行业下钻：点进去的均值必须与柱子【逐位】相同 ----
+            # 🔴 判据要落在一个**换过行业**的行业上。行业名是 PIT 的，
+            #   而先按行业过滤再算 `lead` 会在换过行业的票的日期序列里挖出
+            #   断档 -> "未来 h 日收益"跨了几年。实测美容护理I −0.0836 vs
+            #   −0.0834 对不上，而**银行I 恰好一致**（银行几乎不换行业）——
+            #   只拿它自证会漏过（这一轮就是这么漏的）。
+            # ★ 构造：拿"全程天数最少"的那个当迁入样本（新设行业的票都是
+            #   迁进来的），再拿"天数最多"的当稳定对照；两个都必须逐位相同。
+            pg.goto('http://127.0.0.1:%d/factors.html?id=mv&h=5&win=all' % port,
+                    wait_until='networkidle')
+            pg.wait_for_selector('#ch_ind svg rect.hbr', timeout=90000)
+            nb = n('#ch_ind .hbr')
+            assert nb == len(o2['ind']), (
+                '条形图 %d 行、服务端给了 %d 个行业' % (nb, len(o2['ind'])))
+            cur = pg.eval_on_selector('#ch_ind .hbr', 'e=>getComputedStyle(e).cursor')
+            assert cur == 'pointer', (
+                '行业那几行看不出能点（cursor=%s）—— 看不出能点的入口 = 没有入口' % cur)
+            byday = sorted(o2['ind'], key=lambda x: x['nday'])
+            probe = [byday[0]['ind'], byday[-1]['ind']]
+            assert byday[0]['nday'] * 2 < byday[-1]['nday'], (
+                '天数最少 %d / 最多 %d —— 差得不够开，挑不出"迁入"那种行业，'
+                '这条判据会退化成只验稳定行业（而那正是漏过的原因）'
+                % (byday[0]['nday'], byday[-1]['nday']))
+            for ind in probe:
+                one = sf.api_factor_industry(
+                    {'id': 'mv', 'h': '5', 'win': 'all', 'ind': ind})
+                assert not one.get('error'), one.get('error')
+                bar = [x for x in o2['ind'] if x['ind'] == ind][0]
+                assert abs(one['ic_mean'] - bar['ic']) < 1e-12, (
+                    '「%s」柱子 %.6f vs 点进去 %.6f —— 两处不同源。'
+                    '多半是先按行业过滤再算 lead：行业是 PIT 的，'
+                    '换过行业的票会被挖出断档，lead 就跨过去了'
+                    % (ind, bar['ic'], one['ic_mean']))
+                assert one['nday'] == bar['nday'], (
+                    '「%s」天数 %d vs %d' % (ind, bar['nday'], one['nday']))
+                assert one['years'], '「%s」没有逐年' % ind
+                y0 = one['years'][-1]
+                for k in ('ic', 'ir', 'ret_lo', 'ret_hi', 'ret_eq'):
+                    assert k in y0, '逐年缺 %s' % k
+            notes.append('行业下钻与柱子逐位同源（%s）' % '/'.join(probe))
+
+            # 点开真的出得来（只验接口的话，"点了没反应"照样绿）
+            pg.click('#ch_ind .hbr')
+            pg.wait_for_selector('#ch_ind1 table', timeout=60000)
+            assert n('#ind1ic svg path') == 2, '下钻的 IC 图没画出 IC + 均线两条'
+            assert n('#ch_ind1 table tbody tr') > 0, '下钻的逐年表一行都没有'
+            assert not errs, '控制台有异常：%s' % errs[:2]
             br.close()
     finally:
         httpd.shutdown()

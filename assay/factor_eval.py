@@ -944,6 +944,103 @@ def industry_ic(fid, pool='all', h=20, win='all', min_n=10):
             for _, r in d.iterrows() if r['ic'] == r['ic']]
 
 
+def industry_detail(fid, ind, pool='all', h=20, win='all', min_n=10):
+    """点开某个行业之后看的：**逐日 IC 时序** + 逐年 IC / IR / 年收益。
+
+    ★ 条形图上那一个数是这里逐日序列的**算术平均** —— 两处必须同源，
+      否则"点进去的均值与外面那根柱子对不上"，而它不报错。
+
+    🔴🔴 **不能先按行业过滤再算 `lead`。** 行业是 **PIT** 的（面板里
+      `sw_l1_name` 逐日给），一只票换过行业的话，先过滤会在它的日期序列里
+      **挖出断档**，于是 `lead(close_hfq, h)` 跨了过去 —— 算出来的"未来 h 日
+      收益"其实是几个月甚至几年的。表现就是**点进去的均值与柱子对不上**：
+      实测美容护理I（2021 新设、大量迁入）−0.0836 vs −0.0834，
+      而**银行I 恰好一致**（银行几乎不换行业）—— 只拿它自证会漏过。
+      所以 `lead` 在**全样本**上算，行业过滤放进 WHERE。
+    ★ 而收益那三列**就该按行业过滤**：票离开这个行业之后自然掉出来，
+      那是对的 PIT 语义（与上面那条不矛盾 —— 一个问"未来收益是多少"、
+      一个问"那天它算不算这个行业的"）。
+
+    🔴 **年收益给三列，不替人挑一个**：
+      · `ret_lo` / `ret_hi` —— 行业内按因子值切**高低两半**（不切 10 组：
+        行业内常常只有十几只，每组 1~2 只的收益是噪声），各自等权、
+        每 h 个交易日调一次仓、逐日链乘。
+      · `ret_eq` —— 这个行业**全样本等权**，当参照。
+      两种读法（"这个行业今年涨了多少" / "这个因子在这个行业里赚不赚"）
+      都答得了，而**哪一边好由读的人自己看**，不由我定一个多空方向
+      （同页面上「最小分位超额 / 最大分位超额」分两列那条）。
+    ⚠ 三列都是**等权、不扣费、后复权**，与净值曲线同一套口径。
+    """
+    import pandas as pd
+    pm = pool_meta(pool)
+    con = _con()
+    _chart_base(con, fid, pm, ('close_hfq', 'ret_1d', 'sw_l1_name'))
+    if con.execute('SELECT count(*) FROM cb WHERE sw_l1_name = ?',
+                   [ind]).fetchone()[0] == 0:
+        con.close()
+        return {'ind': ind, 'series': {'dates': [], 'ic': [], 'ma': []},
+                'years': [], 'nday': 0, 'ic_mean': None,
+                'why': '这个池子里没有「%s」这个行业（行业名是 PIT 的，'
+                       '申万 2014/2021 改过版）' % ind}
+    # ---- 逐日 IC：lead 在【全样本】上算，行业过滤放 WHERE ----
+    con.execute("""CREATE OR REPLACE TABLE iw AS
+        SELECT jq_code, date, val, sw_l1_name,
+               lead(close_hfq, %d) OVER (PARTITION BY jq_code ORDER BY date)
+                 / close_hfq - 1 AS f1 FROM cb""" % h)
+    d0 = _win_start(con.execute('SELECT date FROM cb').df()['date'],
+                    dict((k, n) for k, _, n in WINDOWS).get(win))
+    w = '' if d0 is None else " AND date >= DATE '%s'" % str(d0)[:10]
+    ic = con.execute("""SELECT date, corr(rv, rf) ic, count(*) n FROM (
+          SELECT date, rank() OVER (PARTITION BY date ORDER BY val, jq_code) rv,
+                 rank() OVER (PARTITION BY date ORDER BY f1, jq_code) rf
+          FROM iw WHERE val IS NOT NULL AND f1 IS NOT NULL
+                    AND sw_l1_name = ?%s)
+        GROUP BY 1 HAVING count(*) >= %d ORDER BY 1""" % (w, min_n), [ind]).df()
+    # ---- 高低两半 + 全样本等权的逐日收益 ----
+    # ★ 调仓日历取**全局**交易日（同 `_rbd`）：按"这个行业有行情的日子"算的话，
+    #   两个行业的第 k 次调仓落在不同的日子上，横向比就没有意义了。
+    con.execute("""CREATE OR REPLACE TABLE rb AS
+        SELECT date FROM (SELECT date, row_number() OVER (ORDER BY date) - 1 i
+                          FROM (SELECT DISTINCT date FROM cb)) WHERE i %% %d = 0""" % h)
+    con.execute("""CREATE OR REPLACE TABLE qa AS
+        SELECT jq_code, date AS reb,
+               ntile(2) OVER (PARTITION BY date ORDER BY val, jq_code) AS q
+        FROM cb WHERE val IS NOT NULL AND sw_l1_name = ?
+          AND date IN (SELECT date FROM rb)""", [ind])
+    dr = con.execute("""SELECT b.date, qa.q, avg(b.ret_1d) r
+        FROM cb b ASOF JOIN qa ON b.jq_code = qa.jq_code AND b.date >= qa.reb
+        WHERE b.ret_1d IS NOT NULL AND b.sw_l1_name = ?
+        GROUP BY 1, 2""", [ind]).df()
+    eq = con.execute('SELECT date, avg(ret_1d) r FROM cb WHERE ret_1d IS NOT NULL'
+                     ' AND sw_l1_name = ? GROUP BY 1', [ind]).df()
+    con.close()
+
+    def _yr(df):
+        if df.empty:
+            return {}
+        g = df.assign(y=pd.to_datetime(df['date']).dt.year).groupby('y')['r']
+        return {int(y): float((1 + v.fillna(0)).prod() - 1) for y, v in g}
+    lo, hi, ez = _yr(dr[dr['q'] == 1]), _yr(dr[dr['q'] == 2]), _yr(eq)
+    years = []
+    if not ic.empty:
+        for y, sub in ic.assign(y=pd.to_datetime(ic['date']).dt.year).groupby('y'):
+            sd = float(sub['ic'].std())
+            years.append({'year': int(y), 'nday': int(len(sub)),
+                          'ic': float(sub['ic'].mean()),
+                          'ir': (None if not sd else float(sub['ic'].mean() / sd)),
+                          'n_med': float(sub['n'].median()),
+                          'ret_lo': lo.get(int(y)), 'ret_hi': hi.get(int(y)),
+                          'ret_eq': ez.get(int(y))})
+    ser = {'dates': [str(x)[:10] for x in ic['date']],
+           'ic': [None if v != v else float(v) for v in ic['ic']]}
+    ser['ma'] = ([None if v != v else float(v)
+                  for v in pd.Series(ser['ic']).rolling(22, min_periods=1).mean()]
+                 if ser['ic'] else [])
+    return {'ind': ind, 'h': h, 'win': win, 'series': ser, 'years': years,
+            'ic_mean': (float(ic['ic'].mean()) if not ic.empty else None),
+            'nday': int(len(ic))}
+
+
 def decay(fid, pool='all', h=20, win='all', k=10):
     """**分位收益衰减**：t 期形成分位，持有第 1..k 个 **h 日窗口**的超额。
 

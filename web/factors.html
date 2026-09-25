@@ -628,7 +628,8 @@ async function facCharts(id) {
     '<div class="lvsec"><h3>IC 时序图' + helpIcon('ic', o.caveats.ic) +
       '</h3><div id="ch_ic"></div></div>' +
     '<div class="lvsec"><h3>行业 IC' + helpIcon('ind', o.caveats.ind) +
-      '</h3><div id="ch_ind"></div></div>' +
+      '</h3><div class="note">点某一行看这个行业的 IC 时序与逐年表现</div>' +
+      '<div id="ch_ind"></div><div id="ch_ind1"></div></div>' +
     '<div class="lvsec"><h3>换手率' + helpIcon('turn', o.caveats.turn) +
       '</h3><div id="ch_turn"></div></div>' +
     '<div class="lvsec"><h3>买入信号衰减分析' + helpIcon('dec', o.caveats.decay) +
@@ -677,6 +678,63 @@ function facChNav() {
     : '普通轴：纵轴是累计收益（起点 0%）。' + o.caveats.nav;
 }
 
+/* 点开某个行业：逐日 IC 时序 + 逐年 IC / IR / 年收益。
+   ★ 条形图上那一个数就是这条逐日序列的算术平均 —— 两处同源，
+     不然"点进去的均值与外面那根柱子对不上"，而它不报错。 */
+let FACIND = null;
+async function facInd1(ind) {
+  const el = $('#ch_ind1');
+  if (!el || !FACCH) return;
+  if (FACIND === ind) { FACIND = null; el.innerHTML = ''; return; }  /* 再点一次收起 */
+  FACIND = ind;
+  el.innerHTML = '<div class="note">读取「' + esc(ind) + '」…</div>';
+  let d;
+  try {
+    d = await j('/api/factor/industry?id=' + encodeURIComponent(FACCH.id) +
+                '&ind=' + encodeURIComponent(ind) + facCtx());
+  } catch (err) {
+    el.innerHTML = '<div class="warn">取不到：' + esc(String(err)) + '</div>';
+    return;
+  }
+  if (FACIND !== ind) return;            /* 人已经点了别的行业，作废这一发 */
+  if (!d || d.error) {
+    el.innerHTML = '<div class="warn">' + esc((d && (d.error || d.why)) || '没有返回') + '</div>';
+    return;
+  }
+  const f = v => v == null ? '—' :
+    '<span style="color:' + upc(v) + '">' + pct(v, 2) + '</span>';
+  el.innerHTML =
+    '<h4 style="margin:14px 0 2px">' + esc(ind) + '　' +
+      '<span class="dim" style="font-size:13px">IC 均值 ' +
+      fmtN(d.ic_mean, 4) + '　计入 ' + d.nday + ' 天</span>' +
+      '<a href="#" class="lvtag" id="ind1x" style="margin-left:10px">收起</a></h4>' +
+    '<div class="note">' + esc(d.caveats.ic) + '</div>' +
+    '<div id="ind1ic"></div>' +
+    (d.years.length ?
+      '<div class="pw"><table class="lvt"><thead><tr><th class="tx">年</th>' +
+      '<th class="rt">天数</th><th class="rt">行业内只数（中位）</th>' +
+      '<th class="rt">IC 均值</th><th class="rt">IR</th>' +
+      '<th class="rt">低半区年收益</th><th class="rt">高半区年收益</th>' +
+      '<th class="rt">行业等权年收益</th></tr></thead><tbody>' +
+      d.years.map(y => '<tr><td class="tx">' + y.year + '</td>' +
+        '<td class="rt">' + y.nday + '</td>' +
+        '<td class="rt">' + fmtN(y.n_med, 0) + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ic) + '">' + fmtN(y.ic, 4) + '</td>' +
+        '<td class="rt" style="color:' + upc(y.ir) + '">' + fmtN(y.ir, 2) + '</td>' +
+        '<td class="rt">' + f(y.ret_lo) + '</td>' +
+        '<td class="rt">' + f(y.ret_hi) + '</td>' +
+        '<td class="rt">' + f(y.ret_eq) + '</td></tr>').join('') +
+      '</tbody></table></div><div class="note">' + esc(d.caveats.ret) + '</div>'
+      : '<div class="note">这个区间里算不出逐年</div>');
+  $('#ind1x').onclick = ev => { ev.preventDefault(); FACIND = null; el.innerHTML = ''; };
+  if (d.series.dates.length) {
+    lineChart($('#ind1ic'), [
+      { n: ind + ' 行业内 IC', c: '#6aa9e0', v: d.series.ic },
+      { n: '22 日移动平均', c: '#e08a3c', v: d.series.ma }
+    ], { dates: d.series.dates, h: 260, zero: 0 });
+  } else { $('#ind1ic').innerHTML = '<div class="note">这个区间里没有 IC</div>'; }
+}
+
 function facChRender() {
   const o = FACCH;
   facChNav();
@@ -692,8 +750,8 @@ function facChRender() {
   if (o.ind.length) {
     hbarChart($('#ch_ind'), o.ind.map(x => ({
       n: x.ind, v: x.ic,
-      t: x.ind + '　IC ' + x.ic.toFixed(4) + '　计入 ' + x.nday + ' 天'
-    })), { fmt: v => (v == null ? '—' : v.toFixed(3)) });
+      t: x.ind + '　IC ' + x.ic.toFixed(4) + '　计入 ' + x.nday + ' 天（点开看时序）'
+    })), { fmt: v => (v == null ? '—' : v.toFixed(3)), onPick: facInd1 });
   } else { $('#ch_ind').innerHTML = '<div class="note">这个区间里算不出行业 IC</div>'; }
 
   const tn = o.turn;

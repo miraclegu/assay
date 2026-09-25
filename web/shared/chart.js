@@ -416,13 +416,28 @@ function hbarChart(el, rows, opt){
         const y = T + RH * i, x0 = X(0), x1 = X(r.v == null ? 0 : r.v);
         return `<text class="ax" x="${L - 8}" y="${(y + RH * 0.72).toFixed(1)}"
             text-anchor="end">${esc(r.n)}</text>
+          <rect class="hbr" data-n="${esc(r.n)}" x="${(L - 4).toFixed(1)}"
+            y="${(y + 1).toFixed(1)}" width="${(W - L - R + 8).toFixed(1)}"
+            height="${(RH - 2).toFixed(1)}" fill="transparent"
+            style="${opt.onPick ? 'cursor:pointer' : ''}">
+            <title>${esc(r.t || (r.n + '  ' + fmt(r.v)))}</title></rect>
           <rect x="${Math.min(x0, x1).toFixed(1)}" y="${(y + 3).toFixed(1)}"
             width="${Math.max(1, Math.abs(x1 - x0)).toFixed(1)}"
-            height="${(RH - 7).toFixed(1)}" fill="${col(r.v)}" opacity="0.85">
-            <title>${esc(r.t || (r.n + '  ' + fmt(r.v)))}</title></rect>
+            height="${(RH - 7).toFixed(1)}" fill="${col(r.v)}" opacity="0.85"
+            style="pointer-events:none"/>
           <text class="ax" x="${(x1 + (r.v < 0 ? -6 : 6)).toFixed(1)}"
             y="${(y + RH * 0.72).toFixed(1)}"
             text-anchor="${r.v < 0 ? 'end' : 'start'}">${fmt(r.v)}</text>`;
       }).join('')}
    </svg>`;
+  /* 🔴 整行都可点（不只是那根柱子）—— 值接近 0 的行柱子只有 1px 宽，
+     只在柱子上绑的话那几行【点不中】，而它不报错。
+     ★ 事件委托绑在 svg 上：内容是 innerHTML 整块换掉的。 */
+  if(opt.onPick){
+    const sv = el.querySelector('svg');
+    sv.onclick = e => {
+      const t = e.target.closest('.hbr');
+      if(t) opt.onPick(t.dataset.n);
+    };
+  }
 }
