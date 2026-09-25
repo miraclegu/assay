@@ -171,7 +171,11 @@ def positions_valued(aid, datalake=None):
     rtp = {}
     try:
         from assay import realtime as _rt
-        rtp = _rt.latest(list(book), root=datalake)
+        # 🔴 **不传 root**：快照库只有一个，而 `datalake` 这个参数指的是
+        #   **面板**那个 lake。今天两个调用方都传 None 所以没发作 ——
+        #   但 `openbar` 那处同样的混用**实测已经坏了**（补抓写进
+        #   `etf_lake/rt/`、读的是主库），所以这里一并拆开。
+        rtp = _rt.latest(list(book))
     except Exception:                                       # noqa: BLE001
         rtp = {}
     # ★ 账户级的"今天"只算一次 —— 逐只循环里那个 `today` 是按每只的
@@ -510,7 +514,7 @@ def equity_curve(aid, datalake=None):
     intraday = None
     try:
         from assay import realtime as _rt
-        rtp = _rt.latest(codes, root=datalake) if codes else {}
+        rtp = _rt.latest(codes) if codes else {}   # 同上：快照库只有一个
         rtp = {c: v for c, v in rtp.items() if (v or {}).get('price')}
         at = max([v.get('at') for v in rtp.values() if v.get('at')] or [None])
         d_now = (datetime.date.fromisoformat(at[:10]) if at else None)

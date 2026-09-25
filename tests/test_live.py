@@ -7902,11 +7902,87 @@ def t_paper_intraday():
         lv.LIVE = prev_live
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- 补抓与读取必须是【同一个快照库】----
+    # 🔴🔴 实测 2026-09-24 的 a4/a5（etf_p1_mask / maskpos）：8 个目标只买进
+    #   3 只，另外 5 只每 5 分钟推一次、**推了一整天都买不进**，
+    #   而它**不报错**（拒单只写"停牌/无行情"，看着像那几只真停牌了）。
+    #   根因是 `IntradayFeed.bars` 的补抓传了 `self._root`（策略声明的
+    #   `etf_lake`），而 `today_bars` 读的是主 `datalake/rt/` —— **两个库**：
+    #   补抓"成功"了、写进了一个没人读的地方（实测 `etf_lake/rt/snap_1m/`
+    #   里躺着 09:31 那一瞬的 9 行，而主库里只有 3 只）。
+    #   更糟的是 `missing()` 的收敛设计（抓到了就不再 missing）让它
+    #   **只错一次就再也不重试** —— 于是那 5 只永久买不进。
+    # ★ `today_bars` 的注释早就写出了这条（「快照库只有一个，root 只用于
+    #   面板」），但修的只有**读**那一侧 —— 这是同一件事的另一半。
+    # ★ 判据是**三个调用看到的快照库路径必须相同**，不是"源码里有没有
+    #   `root=`" —— 后者改个参数名就绕过去了。
+    _seen = []
+    import assay.realtime as _rtm
+    _sav = (_rtm.missing, _rtm.ensure_codes, _rtm.latest)
+    _alt = os.path.join(_P.datalake(), 'etf_lake')
+    assert _P.datalake(_alt) != _P.datalake(), \
+        '构造不对：备用 lake 与主 lake 解到同一个路径，这条判据是空转的'
+
+    class _Inner(object):
+        trading_days = [datetime.date.fromisoformat(PREV)]
+    try:
+        _rtm.missing = lambda codes, root=None, day=None: (
+            _seen.append(('missing', root)) or list(codes))
+        _rtm.ensure_codes = lambda codes, root=None, max_bars=3, day=None: (
+            _seen.append(('ensure_codes', root)) or {})
+        _rtm.latest = lambda codes=None, day=None, root=None: (
+            _seen.append(('latest', root)) or {})
+        ob.IntradayFeed(_Inner(), DAY0, PREV, root=_alt).bars(
+            DAY0, ['513310.XSHG'])
+    finally:
+        _rtm.missing, _rtm.ensure_codes, _rtm.latest = _sav
+    #   反向自证：三个都真的被调到了，否则下面那条"路径相同"是空转的
+    assert {k for k, _ in _seen} == {'missing', 'ensure_codes', 'latest'}, \
+        '构造不对：只调到 %s —— 这条判据没测到' % sorted({k for k, _ in _seen})
+    # ★ 第二道，**分工与上面那条不同，别记反**：
+    #     上面那条抓的是「**谁**写错了」（精确指到 IntradayFeed 的三个调用），
+    #     这一条抓的是「**结果**不对」—— 策略 lake 底下根本不该有 rt 目录，
+    #     不管是哪个新调用点写出来的。前者改个参数名就绕过去、后者绕不过去；
+    #     而后者报错只说"出现了"、指不到是谁写的，所以两条都要。
+    # ★ 策略 lake 的清单**照声明取**（模块级 `DATALAKE`，与 `run.resolve_lake`
+    #   同源），不写死 'etf_lake' —— 将来多一个 lake 它自动跟着管。
+    import ast as _ast
+    _lakes = set()
+    for _dp, _dn, _fn in os.walk(os.path.join(REPO, 'strategies')):
+        for _f in _fn:
+            if not _f.endswith('.py'):
+                continue
+            try:
+                _t = _ast.parse(io_open_text(os.path.join(_dp, _f)))
+            except SyntaxError:
+                continue
+            for _n in _t.body:
+                if isinstance(_n, _ast.Assign) and any(
+                        getattr(x, 'id', '') == 'DATALAKE' for x in _n.targets) \
+                        and isinstance(_n.value, _ast.Constant):
+                    _lakes.add(_n.value.value)
+    assert _lakes, '构造不对：一个声明了 DATALAKE 的策略都没扫到 —— 这条判据空转'
+    for _lk in sorted(_lakes):
+        _d = os.path.join(_P.datalake(_lk if os.path.isabs(_lk)
+                                      else os.path.join(_P.datalake(), _lk)),
+                          'rt')
+        assert not os.path.isdir(_d), (
+            '策略 lake 底下出现了快照库：%s —— 快照库只有一个'
+            '（datalake/rt/）。写进这里的东西【没人读】，而那几只票会'
+            '永久买不进，且只写"停牌/无行情"不报错。' % _d)
+
+    _stores = {_P.datalake(r) for _, r in _seen}
+    assert len(_stores) == 1, (
+        '补抓与读取指向了【不同的快照库】：%s —— 补抓会写进一个没人读的地方，'
+        '而 missing() 的收敛让它只错一次就再也不重试，那几只票永久买不进'
+        % sorted(_stores))
+
     return ('盘中 bar 与日终权威 %d 只逐位相同（open/因子/open_hfq/涨跌停判定）；'
             '%d 个收盘派生量是哨兵；除权守卫 3/3 跳过；'
             'ETF lake %d 只（量纲/舍入逐只自证）；'
-            '只跑 OPEN、幂等、日终未到不冲正、篡改后冲正重录并收敛'
-            % (len(rows), len(ob.CLOSE_DERIVED), _n_etf))
+            '只跑 OPEN、幂等、日终未到不冲正、篡改后冲正重录并收敛；'
+            '补抓与读取同一个快照库（3 个调用）+ %d 个策略 lake 底下没有 rt/'
+            % (len(rows), len(ob.CLOSE_DERIVED), _n_etf, len(_lakes)))
 
 
 @case('记一笔：买是搜索下拉 / 卖只能从【那天的】持仓选且不超量（playwright）',

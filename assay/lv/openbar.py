@@ -293,10 +293,21 @@ class IntradayFeed(object):
             if self._fetch:
                 try:
                     from assay import realtime as _rt
-                    miss = _rt.missing(want, root=self._root, day=self._day)
+                    # 🔴🔴 **不传 root** —— 快照库只有一个（`datalake/rt/`），
+                    #   与下面 `today_bars` 的 `latest(codes, day=day)` **必须
+                    #   是同一个库**。传 `self._root` 的话 ETF 策略会去
+                    #   `etf_lake/rt/` 查与写，而读的是主库 -> **两个库**：
+                    #   补抓"成功"了、写进了一个没人读的地方，于是那几只
+                    #   永远没有 bar。更糟的是 `missing()` 的收敛设计
+                    #   （抓到了就不再 missing）让它**只错一次就再也不重试** ——
+                    #   实测 2026-09-24 的 a4/a5：8 个目标只买进 3 只，
+                    #   另外 5 只每 5 分钟推一次、推了一整天都买不进，
+                    #   **而它不报错**（拒单只写"停牌/无行情"）。
+                    #   ★ `today_bars` 那边的注释早就把这条写出来了，
+                    #     修的却只有"读"那一侧 —— 这是同一件事的另一半。
+                    miss = _rt.missing(want, day=self._day)
                     if miss:
-                        _rt.ensure_codes(miss, root=self._root, max_bars=0,
-                                         day=self._day)
+                        _rt.ensure_codes(miss, max_bars=0, day=self._day)
                 except Exception as e:                      # noqa: BLE001
                     self.skipped.append({'code': '(补抓)', 'why': str(e)[:120]})
             got, sk = today_bars(self._day, self._prev, want, self._root)
