@@ -30,16 +30,25 @@ if not defined PY (
   rem    durable record -- `pause` only helps while the window is open.
   rem    A parenthesised redirect writes the whole block in one go; batch
   rem    has no tee, and echoing everything twice would drift.
-  > "%~dp0install.log" (
-    echo   [X] No Python 3.10+ found.
-    echo.
-    echo       Download: https://www.python.org/downloads/windows/
-    echo       While installing, TICK "Add python.exe to PATH".
-    echo.
-    echo       Already installed?  Open a NEW terminal and run:  py -3 -V
-    echo.
-    echo   [FAIL] exit code 2 -- no interpreter, nothing was installed.
-  )
+  rem -- Say WHAT this machine actually has.  "not found" alone cannot
+  rem    tell apart: not installed / too old / Microsoft Store stub /
+  rem    installed but not on PATH.  Those need different fixes.
+  > "%~dp0install.log" echo   [X] No Python 3.10+ found.
+  >>"%~dp0install.log" echo.
+  >>"%~dp0install.log" echo   ---- what this machine has ----
+  >>"%~dp0install.log" echo   $ py -0p
+  py -0p        >>"%~dp0install.log" 2>&1
+  >>"%~dp0install.log" echo   $ python -V
+  python -V     >>"%~dp0install.log" 2>&1
+  >>"%~dp0install.log" echo   $ where python
+  where python  >>"%~dp0install.log" 2>&1
+  >>"%~dp0install.log" echo   -------------------------------
+  >>"%~dp0install.log" echo.
+  >>"%~dp0install.log" echo       Download: https://www.python.org/downloads/windows/
+  >>"%~dp0install.log" echo       While installing, TICK "Add python.exe to PATH".
+  >>"%~dp0install.log" echo       Then close this window, open a NEW one, and run install.bat again.
+  >>"%~dp0install.log" echo.
+  >>"%~dp0install.log" echo   [FAIL] exit code 2 -- no interpreter, nothing was installed.
   echo.
   type "%~dp0install.log"
   echo   Log:  %~dp0install.log
