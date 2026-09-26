@@ -2832,12 +2832,66 @@ def t_windows_boot_path():
         'INSTALL.md 里没有一行 `pip install -r …requirements.txt` —— '
         '人照着它装会漏掉新依赖')
 
+    # ---- H) Windows 装机脚本 install.bat --------------------------------
+    #   用户 2026-09-26：「装机脚本可以先制作一个 windows 版本」
+    #
+    # 🔴🔴 **它必须是纯 ASCII。** `chcp 65001` 之后 cmd.exe 仍按**字节偏移**
+    #   续读批处理文件，中间换代码页而文件里又有多字节字符，解析位置会错位
+    #   —— 而那**不报错**，表现是后半截命令变成乱码或整段被跳过。
+    #   所以中文一律由 `install.py` 打（它那侧的 UTF-8 是验过的）。
+    #   ⚠ 这条在 macOS 上**测不到行为**，只能钉住"不许出现非 ASCII"。
+    _bat = os.path.join(REPO, 'install.bat')
+    assert os.path.isfile(_bat), '缺 install.bat（Windows 装机脚本）'
+    _bb = io.open(_bat, 'rb').read()
+    _bad = [i for i, b in enumerate(_bb) if b > 127]
+    assert not _bad, (
+        'install.bat 里有 %d 个非 ASCII 字节（首个在偏移 %d）—— '
+        'chcp 之后 cmd 按字节偏移续读，多字节字符会让解析错位，'
+        '而它不报错。中文交给 install.py 打' % (len(_bad), (_bad or [-1])[0]))
+    assert not _bb.startswith(b'\xef\xbb\xbf'), (
+        'install.bat 带了 UTF-8 BOM —— cmd 会把它当成命令的一部分，'
+        '第一行直接报「不是内部或外部命令」')
+    # 🔴 CRLF：LF-only 的 .bat 在 label / goto 上有已知的解析问题
+    assert _bb.count(b'\n') == _bb.count(b'\r\n'), (
+        'install.bat 有 LF-only 的行 —— .bat 要 CRLF')
+
+    _bt = _bb.decode('ascii')
+    # 判据不是"提到过 install.py"（注释里也提），是**真的转发**
+    assert re.search(r'^\s*%PY%\s+"[^"]*install\.py"\s+%\*', _bt, re.M), (
+        'install.bat 没有把参数转发给 install.py —— '
+        '`install.bat --check` 会静默变成"不带参数跑"')
+    # 🔴 `py -3` 必须排在裸 `python` **前面**：新装的 Windows 上 `python`
+    #   常常是 Microsoft Store 的存根，跑起来是打开商店而不是执行脚本
+    #   （而那不报错，只是装机卡在那儿）
+    # 🔴 找位置要用正则：文件是 CRLF、而 `python -c` 那行在块里带缩进
+    #   —— 第一版写死 `'\npython -c'` 找不到，判据报 -1 当场自伤
+    _mpy = re.search(r'^\s*py -3 -c', _bt, re.M)
+    _mpn = re.search(r'^\s*python -c', _bt, re.M)
+    assert _mpy and _mpn, 'install.bat 里没有两条解释器探测'
+    _ipy, _ipn = _mpy.start(), _mpn.start()
+    assert 0 < _ipy < _ipn, (
+        'install.bat 要先试 `py -3` 再试 `python` —— 顺序反了会撞上 '
+        'Microsoft Store 的 python 存根（py=%d python=%d）' % (_ipy, _ipn))
+    # 找不到解释器时要**说下一步**，不是静默退出
+    assert 'python.org/downloads/windows' in _bt, (
+        'install.bat 在找不到 Python 时没给下载地址 —— '
+        '那正是新机器上唯一走得到的分支')
+    # 双击打开时窗口不许一闪而过（否则结果一个字都看不到）
+    # 🔴 判据要认准**转发之后**那一处 —— 文件里还有一处 pause 在
+    #   「找不到 Python」那支里，裸 `^\s*pause$` 两处都命中，
+    #   删掉末尾那个照样绿（变异 M6 实测漏过）
+    assert re.search(r'install\.py"[^\n]*\n(?:.|\n)*^\s*pause\s*$',
+                     _bt, re.M), (
+        'install.bat 在转发给 install.py 之后没有 pause —— '
+        '双击跑完窗口当场关掉，结果一个字都看不见')
+
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
             '不许直接引用 SIGKILL / 不许 shell=True；'
             '目录挂载三条路（symlink -> junction -> 响亮失败，'
             '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
-            'requirements.txt 盖住运行时真的 import 的 %d 个第三方包'
+            'requirements.txt 盖住运行时真的 import 的 %d 个第三方包；'
+            'install.bat 纯 ASCII + CRLF、py -3 优先、转发参数'
             % (len(files), len(got - TRANSITIVE)))
 
 
