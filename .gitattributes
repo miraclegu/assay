@@ -1,0 +1,6 @@
+# Windows 批处理必须以 CRLF 签出 —— LF-only 的 .bat 在 label / goto 上有已知
+# 的解析问题。而本机 core.autocrlf=input 会把 CR 剥掉存进 blob，于是
+# 【工作区是 CRLF、仓库里是 LF】：守卫查工作区照样绿，而新 clone 拿到的那份
+# 是坏的 —— 同 datalake/requirements.txt 被 .gitignore 挡住那条（本机看着好、
+# 新 clone 上不成立）。`eol=crlf` 让它不管在哪台机器上签出都是 CRLF。
+*.bat text eol=crlf
