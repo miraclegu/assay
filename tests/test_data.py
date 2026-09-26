@@ -11,7 +11,7 @@ from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noq
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
 
 
-def _chain_dry():
+def _chain_dry(with_cwd=False):
     """同步链**真正会跑的那串命令**（`sync_daily.py --dry` 的输出）。
 
     🔴 正本 2026-09-26 从 `.sh` 搬进了 `.py`（Windows 上没有 bash），`.sh`
@@ -24,10 +24,16 @@ def _chain_dry():
     r = subprocess.run([sys.executable, os.path.join(dl, 'sync_daily.py'),
                         '--dry'], capture_output=True, text=True, cwd=dl)
     assert r.returncode == 0, r.stderr[-400:]
-    cmds = [m.group(2) for m in
-            re.finditer(r'\$ \(cd ([^ ]+) && (.+)\)', r.stdout)]
-    assert len(cmds) >= 8, '只解析出 %d 条命令 —— 判据在空转' % len(cmds)
-    return '\n'.join(cmds)
+    pairs = [(m.group(1), m.group(2)) for m in
+             re.finditer(r'\$ \(cd ([^ ]+) && (.+)\)', r.stdout)]
+    assert len(pairs) >= 8, '只解析出 %d 条命令 —— 判据在空转' % len(pairs)
+    # 🔴 `with_cwd` 不是可有可无：链里有几步是**相对 cwd** 的
+    #   （`daily_snapshot.py`、`scripts/check_data_anomaly.py`），
+    #   丢掉 cwd 就解析不到那几个文件 —— 而它们恰恰是要守的那几个，
+    #   **判据会静默缩小**（同「照清单拼会漏掉新文件」那条）。
+    if with_cwd:
+        return pairs
+    return '\n'.join(c for _, c in pairs)
 
 
 @case('数据版本指纹可用且稳定')
@@ -313,7 +319,7 @@ def t_sync():
 
     root = REPO
     dl = os.path.join(os.path.dirname(root), 'datalake')
-    tdx = os.path.join(os.path.dirname(root), 'tdx2db', 'tdx.db')
+    tdx = os.path.join(root, 'raw', 'tdx', '_ingest', 'tdx.db')
     if not os.path.exists(tdx):
         return '跳过（没有 tdx.db）'
 
@@ -723,13 +729,43 @@ def t_sync_ui():
                 assert au.get('on') in (True, False),                     'on 必须是明确的真假，不能是 None：%s' % au
                 btn = pg.locator('#syauto').inner_text()
                 assert btn == ('关闭自动同步' if au['on'] else '开启自动同步'),                     '按钮文字与实际状态不符：状态 on=%s，按钮「%s」' % (au['on'], btn)
-                assert pg.locator('#syauto').is_disabled(),                     '只读模式下开关也要置灰 —— 它会改 launchd'
+                # 🔴 **不再 disabled** —— 项目纪律是「按钮一律不设 disabled」：
+                #   disabled 的元素**连 title 提示都不触发**，点了没反应
+                #   又无从自查（`--allow-backtest` 那次实测踩过）。
+                #   **失败的是断言不是产品**，但它要保的东西一个不能丢 ——
+                #   只读模式不许真去改 launchd。所以判据换成两条：
+                #     ① 按钮点得动（可见 + 手型）
+                #     ② **服务端拒**，且把原因说出来（那才是真正的防线；
+                #        前端置灰挡不住任何人直接打这个接口）
+                assert not pg.locator('#syauto').is_disabled(), \
+                    '按钮一律不设 disabled —— 它连 title 都不触发'
+                assert pg.evaluate(
+                    "()=>getComputedStyle(document.querySelector('#syauto'))"
+                    ".cursor") != 'not-allowed', '看着像点不动'
+                _ro = _json.loads(_post('/api/sync/auto', {'on': True}))
+                assert _ro.get('error') and '只读' in _ro['error'], \
+                    ('🔴 只读模式下开关必须被【服务端】拒掉并说明原因，'
+                     '实得：%s' % _ro)
                 tag = pg.locator('.lvhead .lvtag').all_inner_texts()
                 tz = ' '.join(tag)
                 assert '自动同步' in tz, '顶栏要显示自动同步状态：%s' % tag
                 assert ('开' in tz) == au['on'], '标签与状态不符：%s' % tz
                 if au['on']:
-                    assert au.get('schedule') and au['schedule'] in tz,                         '开着的时候要显示计划时间：%s / %s' % (au.get('schedule'), tz)
+                    # 🔴 标签上现在写的是**下一次什么时候**（用户问的正是这个），
+                    #   完整口径进 title —— 原来那句「每日 16:00」是从**第一个**
+                    #   点位抠出来的，25 个点位只报一个，**那是在说谎**。
+                    #   所以判据分两头：标签说"下次"，title 说全窗口与间隔。
+                    assert '下次' in tz, \
+                        '开着的时候要说下一次什么时候扫：%s' % tz
+                    _ti = pg.locator('.lvhead .lvtag').filter(
+                        has_text='自动同步').first.get_attribute('title') or ''
+                    assert au.get('schedule') and au['schedule'] in _ti, \
+                        ('完整口径要进 title：%s / %s'
+                         % (au.get('schedule'), _ti[:160]))
+                    # 两条任务都要在 title 里（只报 sync 的话，tick 掉了没人发现）
+                    for _t in (au.get('tasks') or []):
+                        assert _t['name'] in _ti, \
+                            'title 里少了「%s」：%s' % (_t['name'], _ti[:160])
                     # 开着就不该弹"自动同步是关的"那条告警 —— 假告警看多了就不看了
                     assert '自动同步是关的' not in pg.locator('#main').inner_text(),                         '开着却提示"关的"'
                 else:
@@ -1395,6 +1431,79 @@ def t_setup_tdx():
     finally:
         m.subprocess.run, m.platform.system = _real_run, _real_sys
 
+    # ---- 「下一次什么时候跑」：跨午夜那档【必须先排序】----------------
+    # 🔴 `_range_times('16:00','09:20',60)` 生成的顺序是
+    #   16:00…23:00, 00:00…09:00, 09:20 —— **不是时钟升序**。
+    #   直接取"第一个 >= now"的话，凌晨 02:05 会答 16:00，
+    #   而真正的下一次是 03:00。**它不报错**，只是页面上那个
+    #   "下次扫描"一直在说谎（同「判据永远是现在的状态」那条）。
+    import datetime as _dt
+    _wrap = m._range_times('16:00', '09:20', 60)
+    assert _wrap[0] == (16, 0) and _wrap.index((0, 0)) > _wrap.index((23, 0)), \
+        '构造不成立：这一档本来就该是乱序的，%s' % _wrap[:3]
+    _cases = [('02:05', (3, 0)), ('15:00', (16, 0)), ('23:59', (0, 0))]
+    for _now, _want in _cases:
+        _h, _mi = (int(x) for x in _now.split(':'))
+        _at, _left = m.next_slot(
+            _wrap, _dt.datetime(2026, 9, 26, _h, _mi))
+        assert (_at.hour, _at.minute) == _want, \
+            '跨午夜下一次算错：now=%s -> %s，应是 %s' % (_now, _at, _want)
+        assert _left > 0, '下一次不许落在过去：%s' % _left
+    # 空点位不许猜一个出来
+    assert m.next_slot([]) == (None, None), '没有点位时该给 None，不是猜一个'
+
+    # ---- show_schedule 要答得出「下次」与「开着没有」--------------------
+    _sh = m.show_schedule()
+    assert set(_sh['installed']) == {'sync', 'tick'}, \
+        '两条定时都要报状态 —— 只管 sync 的话，tick 掉了没人发现'
+    for _k, _v in _sh['installed'].items():
+        for _f in ('next_at', 'next_in', 'next_from', 'on'):
+            assert _f in _v, '%s 缺字段 %s' % (_k, _f)
+        if _v.get('got_slots'):
+            assert _v['next_from'] == 'installed', \
+                '🔴 下次时间要按【实际装上的】点位算，不是按配置 —— ' \
+                '配置改了没重装时，照配置报的那个时刻根本不会发生'
+
+    # 🔴 上面那条在"装的与配置一致"时是**空转**的（本机正是如此，
+    #   两种实现给出同样的 next_at，变异测试当场漏过）。
+    #   所以**构造**出「配置改了但没重装」：把 load_schedule 换成一个
+    #   窗口完全不同的，此时按配置算与按已装点位算必然不同。
+    #   ★ 只在进程内换，不碰 schedule.json（selftest 不许写生产数据）。
+    _real_load = m.load_schedule
+    try:
+        _sc0, _w0 = _real_load()
+        _drift = {k: dict(v) for k, v in _sc0.items()}
+        _drift['sync'] = {'from': '03:00', 'to': '04:00', 'every': 30}
+        m.load_schedule = lambda: (_drift, _w0)
+        _d2 = m.show_schedule()['installed']['sync']
+        if _d2.get('got_slots'):
+            assert _d2['next_from'] == 'installed', \
+                '🔴 配置改了没重装时，"下次"照的还是配置 —— 那个时刻不会发生'
+            assert _d2['match'] is False, \
+                '构造不成立：改了配置之后 match 该是 False'
+            _h = int(_d2['next_at'][11:13])
+            assert _h not in (3, 4), \
+                '🔴 "下次 %s" 是照【配置】算的（03:00~04:00），' \
+                '而实际装的点位根本不在那个窗口' % _d2['next_at']
+    finally:
+        m.load_schedule = _real_load
+
+    # ---- 自动同步：**两条都要管**（srv 层那个开关的唯一判据）----------
+    # 🔴 原来 `srv/sync.py` 自己查 launchd、只管 sync 一条 ——
+    #   关掉"自动同步"之后 tick 每小时照跑（日志里一串"A 腿落后"），
+    #   **而页面上写着"已关闭"**。判据落在 tasks 的集合上。
+    import importlib as _il
+    _sv = _il.import_module('assay.srv.sync')
+    _au = _sv.autosync_status()
+    if not _au.get('error'):
+        assert {t['key'] for t in _au.get('tasks') or []} == {'sync', 'tick'}, \
+            '🔴 自动同步只报了 %s —— 另一条掉了没人会发现' \
+            % [t.get('key') for t in _au.get('tasks') or []]
+        # 那个 schedule 字符串不许退回"只抠第一个点位"的写法
+        _txt = _au.get('schedule') or ''
+        assert '每' in _txt and '~' in _txt, \
+            '🔴 schedule 只报了 %r —— 25 个点位只说一个是在说谎' % _txt
+
     # 本地这个库的 schema 版本读得出来（顺带证明 _meta 判据有效）
     v = m._db_schema_version()
     if v:
@@ -1408,6 +1517,9 @@ def t_setup_tdx():
             '定时 PATH 首段是当前解释器%s；plist 带 EnvironmentVariables 且 '
             'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在；'
             '两条定时都走 sys.executable + .py 正本（不是 /bin/bash）；'
+            '跨午夜的"下次"先排序（02:05 -> 03:00 不是 16:00）；'
+            'show_schedule 两条都给 next_at/on，且【构造】配置漂移后'
+            '仍按已装点位算；自动同步两条都管、窗口口径说全；'
             'Windows 任务名装/查往返 %d 个'
             '%s' % (mine, len(_tasks), ('；本地库 schema %s' % v) if v else ''))
 
@@ -1872,15 +1984,27 @@ def t_signal_revision():
     # ---- ⑧ 两个 timer 必须一起装 ----
     st = open(os.path.join(os.path.dirname(here), 'datalake', 'setup_tdx.py'),
               encoding='utf-8').read()
+    _stx = os.path.join(os.path.dirname(REPO), 'datalake', 'setup_tdx.py')
     assert 'TICK_LABEL' in st and 'tick_daily.py' in st, \
         ('setup_tdx.py 没装「信号重算」的 timer —— 漏装的表现是'
          '**信号永远是昨晚 18:10 那份**，不报错')
     assert 'def _times(' in st, '多时间点要能解析（07:00,08:00,09:00）'
-    jobs = st[st.index('JOBS = ['):st.index('if osname ==', st.index('JOBS = ['))]
-    assert 'LABEL' in jobs and 'TICK_LABEL' in jobs, \
-        'JOBS 里要同时有 sync 与 tick —— 清单只写一处，分开写会漏'
-    for tag in ('sync', 'tick'):
-        assert "'%s'" % tag in jobs, 'JOBS 少了 %s' % tag
+    # 🔴 这条原来是**扫源码**里 `JOBS = [` 那一段 —— 把它抽成
+    #   `build_jobs()` 之后当场 `ValueError: substring not found`。
+    #   **失败的是断言不是产品**；而这是「改一处之前先扫同类」漏掉的
+    #   **第二处**（当场撞到的那条在 t_setup_tdx 里，已改；这条只在
+    #   跑到本用例时才现形）。改成问**运行时到底装哪两个**。
+    import importlib.util as _ilu
+    _sp = _ilu.spec_from_file_location('_tdx_jobs_probe', _stx)
+    _m = _ilu.module_from_spec(_sp)
+    _sp.loader.exec_module(_m)
+    _tags = {j[3] for j in _m.build_jobs(_m.load_schedule()[0])}
+    assert _tags == {'sync', 'tick'}, \
+        ('定时任务要同时有 sync 与 tick，实得 %s —— 清单只写一处，'
+         '分开写会漏，而漏装的表现是**信号永远停在昨晚那份**' % sorted(_tags))
+    _labels = {j[0] for j in _m.build_jobs(_m.load_schedule()[0])}
+    assert _labels == {_m.LABEL, _m.TICK_LABEL}, \
+        '两条任务的 label 对不上：%s' % sorted(_labels)
     #   ★ 判据是 launchctl 里到底有没有，不是命令返回码
     assert "launchctl', 'list'" in st, \
         '装完要用 launchctl list 复查（launchctl 对"已是这个状态"会报错退出）'
@@ -2030,7 +2154,8 @@ def t_etf_price_precision():
 
     # ③ 探测器自证：直接喂构造数据，不靠真实数据碰巧覆盖
     #    （真实数据修好之后，上面两条在"塌陷探测器坏了"时照样绿）
-    sys.path.insert(0, os.path.join(os.path.dirname(REPO), 'tdx2db', 'scripts'))
+    sys.path.insert(0, os.path.join(os.path.dirname(REPO), 'datalake',
+                                    'raw', 'tdx', '_ingest', 'scripts'))
     import importlib
     fx = importlib.import_module('fix_etf_price_from_dayfile')
     m = duckdb.connect(':memory:')
@@ -2125,7 +2250,8 @@ def t_etf_price_precision():
 
     # ⑤ 退役守卫要真的拒，不是只在文档里写一句
     rc = subprocess.run([sys.executable,
-                         os.path.join(os.path.dirname(REPO), 'tdx2db', 'scripts',
+                         os.path.join(os.path.dirname(REPO), 'datalake', 'raw',
+                                      'tdx', '_ingest', 'scripts',
                                       'fix_etf_price_scale.py'),
                          '--db', '/nonexistent/x.db', '--dry-run'],
                         capture_output=True, text=True)
@@ -2135,6 +2261,584 @@ def t_etf_price_precision():
     return ('最近20日 %.1f%% 带第3位(基线 %.1f%%) · 持平 %.2f%%(基线 %.2f%%) · '
             '滚动窗口 %d 日覆盖÷10那种坏法 + 塌陷往回扩 + 链条 + 退役守卫'
             % (p_new, p_base, f_new, f_base, fx.WINDOW_DAYS))
+
+
+@case('跨平台：tdx.db 只有一份解析，链上脚本不许写死本机路径', tag='fast')
+def t_tdx_path_single_source():
+    """2026-09-26 用户："这一轮修复完，是否可以直接在 window 上下载和自动
+    补全数据？"
+
+    查下来 **12 处各自解析 tdx.db**，其中 6 处换台机器必崩，而两种坏法
+    **都不报错**（本机上照跑）：
+
+        ① 绝对路径    `/Users/guhao/finacial/tdx2db/tdx.db`       3 处
+        ② 走符号链接  `join(dirname(ROOT), 'tdx2db', 'tdx.db')`  3 处
+
+    🔴🔴 `finacial/tdx2db` 是一个**符号链接**（-> `datalake/raw/tdx/_ingest`，
+      实测同一个 inode），而它**不在任何仓库里**（同 `finacial/CLAUDE.md`
+      那条）。新机器 clone 出来根本没有它 —— 而那 6 处里有 4 处是 13 步链的
+      **2/13、5/13、6/13、10/13**。
+    ★ 本机上两条路 `realpath` 相同，**所以一直看不出来**。
+
+    判据四段，分工别记反：
+        A 正本存在，且它自己不经过那个符号链接
+        B 全仓不许再有 `os.path.join(..., 'tdx2db', ...)`（★ 扫目录，
+          不照清单拼 —— 照清单的话新文件自动不在保护里）
+        C **链上**脚本的字符串字面量里不许有本机绝对路径（清单从
+          `--dry` + `setup_stages` 派生，加一步自动进保护范围）
+        D 运行时：**最深**那个脚本上 bootstrap 与 cwd 无关
+    """
+    import ast as _ast
+    import importlib.util
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+
+    # ---- A 正本 ----
+    pp = os.path.join(dl, 'paths.py')
+    assert os.path.isfile(pp), '缺 datalake/paths.py —— tdx.db 的解析没有正本'
+    _sp = importlib.util.spec_from_file_location('_dl_paths_probe', pp)
+    _m = importlib.util.module_from_spec(_sp)
+    _sp.loader.exec_module(_m)
+    real = os.path.join(dl, 'raw', 'tdx', '_ingest', 'tdx.db')
+    assert _m.TDX_DB == real, 'paths.TDX_DB 不是真实路径：%s' % _m.TDX_DB
+    assert 'tdx2db' + os.sep + 'tdx.db' not in _m.TDX_DB, \
+        '正本自己还在走 finacial/tdx2db 那个符号链接'
+    assert _m.tdx2db_bin().endswith(('tdx2db', 'tdx2db.exe')), \
+        'paths.tdx2db_bin() 给的不是可执行文件名'
+
+    SKIP = ('archive', '__pycache__', '_recovery', 'venv', 'site-packages')
+
+    def _pys():
+        for r, ds, fs in os.walk(dl):
+            ds[:] = [d for d in ds if d not in SKIP]
+            for f in fs:
+                if f.endswith('.py'):
+                    yield os.path.join(r, f)
+
+    # ---- B 不许再走符号链接（扫目录，不照清单拼）----
+    bad, n_scan = [], 0
+    for f in _pys():
+        # ★ 跳过正本自己 —— 它的 docstring 里正在讲这个坏法
+        #   （同「扫描要跳过守卫用例自己」那条）
+        if os.path.basename(f) == 'paths.py':
+            continue
+        try:
+            t = _ast.parse(io.open(f, encoding='utf-8').read())
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        n_scan += 1
+        for n in _ast.walk(t):
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute) \
+                    and n.func.attr == 'join' and any(
+                        isinstance(a, _ast.Constant) and a.value == 'tdx2db'
+                        for a in n.args):
+                bad.append('%s:%d' % (os.path.relpath(f, dl), n.lineno))
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str) \
+                    and 'tdx2db/tdx.db' in n.value:
+                bad.append('%s:%d(字面量)' % (os.path.relpath(f, dl), n.lineno))
+    assert n_scan >= 40, '只扫到 %d 个 .py —— 判据在空转' % n_scan
+    assert not bad, (
+        '这些地方还在走 `finacial/tdx2db` 那个符号链接（它不在任何仓库里，'
+        '新机器上根本没有）：%s。一律改成 `from paths import TDX_DB`' % bad[:6])
+
+    # ---- C 链上脚本不许写死本机绝对路径 ----
+    #   ★ 清单**派生**：`--dry` 那 13 步 + setup_stages 的七个阶段 ——
+    #     加一步自动进保护范围（同「断言直接扫目录而不是照清单拼」）
+    chain = set()
+    for _cwd, _cmd in _chain_dry(with_cwd=True):
+        for _a in re.findall(r'\S+\.py', _cmd):
+            chain.add(os.path.normpath(os.path.join(_cwd, _a)))
+    _ss = importlib.util.spec_from_file_location(
+        '_ss_probe', os.path.join(dl, 'setup_stages.py'))
+    _sm = importlib.util.module_from_spec(_ss)
+    _ss.loader.exec_module(_sm)
+    for st in _sm.stages():
+        for a in (st.get('cmd') or []):
+            if str(a).endswith('.py'):
+                chain.add(str(a))
+    files = sorted({os.path.abspath(c) for c in chain if os.path.isfile(c)})
+    # 反向自证：链上那几步**逐个**都解析得到（少一个就是判据悄悄缩小）
+    _miss = sorted(os.path.relpath(c, dl) for c in chain if not os.path.isfile(c))
+    assert not _miss, '这几步的脚本解析不到，判据没覆盖它们：%s' % _miss
+    assert len(files) >= 12, '只解析出 %d 个链上脚本 —— 判据在空转' % len(files)
+    # ★ 原始那三处里最深的一个必须在保护范围内（它是 2/13 步）
+    assert any(f.endswith('daily_snapshot.py') for f in files), \
+        'daily_snapshot.py 不在扫描范围里 —— 而它正是当初写死路径的那三处之一'
+    hard = []
+    for f in files:
+        try:
+            t = _ast.parse(io.open(f, encoding='utf-8').read())
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for n in _ast.walk(t):
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str) \
+                    and re.search(r'/(Users|home)/[a-z]', n.value) \
+                    and not n.value.lstrip().startswith(('python3 ', 'tar ')):
+                hard.append('%s:%d' % (os.path.basename(f), n.lineno))
+    assert not hard, (
+        '链上脚本里写死了本机绝对路径：%s —— 换台机器（尤其 Windows）'
+        '那一步必崩，而本机上一直看不出来' % hard[:6])
+
+    # ---- D 运行时：最深那个脚本上，bootstrap 与 cwd 无关 ----
+    deep = os.path.join(dl, 'raw', 'jq', '_ingest', 'probes', 'probe_baostock.py')
+    assert os.path.isfile(deep), '缺最深那个样本'
+    src = io.open(deep, encoding='utf-8').read().splitlines()
+    end = next(i for i, l in enumerate(src) if l.startswith('from paths import'))
+    tmp = os.path.join(os.path.dirname(deep), '_probe_paths_tmp.py')
+    io.open(tmp, 'w', encoding='utf-8').write(
+        '\n'.join(src[:end + 1]) + '\nprint(TDX_DB)\n')
+    try:
+        r = subprocess.run([sys.executable, tmp], capture_output=True,
+                           text=True, timeout=60, cwd=os.sep)   # cwd 故意无关
+    finally:
+        os.remove(tmp)
+    assert r.returncode == 0 and r.stdout.strip() == real, (
+        '最深那层（%s）的 bootstrap 没找到正本 —— cwd 无关这条不成立：%s'
+        % (os.path.relpath(deep, dl), (r.stdout + r.stderr).strip()[-200:]))
+
+    n_imp = sum(1 for f in _pys() if os.path.basename(f) != 'paths.py'
+                and re.search(r'^(from paths import|import paths as)',
+                              io.open(f, encoding='utf-8', errors='ignore').read(),
+                              re.M))
+    # ★ 反向自证：真的有一批文件在用正本，否则 B 那段是"全 0 == 全 0"
+    assert n_imp >= 10, '只有 %d 个文件 import 正本 —— B 段在空转' % n_imp
+    return ('正本 paths.py（%s）；扫 %d 个 .py 无人再走 tdx2db 符号链接；'
+            '链上 %d 个脚本无本机绝对路径；最深那层 bootstrap 与 cwd 无关；'
+            '%d 个文件用上正本'
+            % (os.path.relpath(real, dl), n_scan, len(files), n_imp))
+
+
+@case('日志按天保留：两条链各裁自己的 launchd 日志（原地截断，不改名）', tag='fast')
+def t_log_retention():
+    """2026-09-26 用户："现在我们的系统每天运行是不是会产生很多日志？
+    有没有自动清理的机制，比如只保留 7 天、30 天之类，防止日志膨胀"
+
+    量了一遍，真正**无界**的只有 launchd 那四个文件：
+
+        _manifest/sync_logs/*.log    520 KB / 60 份   ✅ 有轮转（本轮改成按天）
+        _manifest/launchd-sync.out   1.6 MB / 19 天   🔴 永不轮转 ~84 KB/天
+        _manifest/launchd-tick.out   190 KB /  8 天   🔴 永不轮转
+
+    🔴🔴 **只能原地截断，不能改名/删除** —— launchd 以 `O_APPEND` 持有 fd，
+      rename/unlink 之后它继续往那个 inode 写：磁盘不释放、新文件永远是空的，
+      **而日志看着"清干净了"**。`O_APPEND` 这条是**真跑一次验的**：把
+      1.65 MB 截到 21 KB，等下一个 launchd 点位，文件从新 EOF 续写、
+      NUL 字节 **0 个**（不是 O_APPEND 的话中间会留一大段空洞）。
+    🔴 **按 `\n` 切，且读要 `newline=''`** —— 日志里有 `\r`（进度行原地刷新）：
+      `splitlines()` 把它当换行（同一文件 `wc -l` 7860 vs splitlines 19560），
+      而**文本模式读本身就会把 `\r` 翻译成 `\n`**，只改 split 是不够的。
+    """
+    import ast as _ast
+    import importlib.util
+    import datetime as _dt
+    import tempfile
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+
+    # ---- A 正本只有一处 ----
+    lp = os.path.join(dl, 'logs.py')
+    assert os.path.isfile(lp), '缺 datalake/logs.py —— 日志保留策略没有正本'
+    _sp = importlib.util.spec_from_file_location('_dl_logs_probe', lp)
+    L = importlib.util.module_from_spec(_sp)
+    _sp.loader.exec_module(L)
+
+    # ---- B 🔴 sync 链：裁必须排在 `--if-stale` 提前返回【之前】----
+    #   轮询每 10 分钟一个点位，绝大多数时候走的就是那条提前返回，
+    #   而它也往 launchd 的 .out 里写一行 —— 排在后面的话**最常走的那条路
+    #   永远裁不到**，日志照旧涨，而它不报错。
+    sd = io.open(os.path.join(dl, 'sync_daily.py'), encoding='utf-8').read()
+    t = _ast.parse(sd)
+    main = [n for n in t.body
+            if isinstance(n, _ast.FunctionDef) and n.name == 'main'][0]
+    trim_ln = [n.lineno for n in _ast.walk(main)
+               if isinstance(n, _ast.Call)
+               and getattr(n.func, 'attr', '') == 'trim_by_days']
+    stale_ln = [n.lineno for n in _ast.walk(main)
+                if isinstance(n, _ast.Call)
+                and getattr(n.func, 'id', '') == '_if_stale']
+    assert trim_ln, 'sync 链没有裁 launchd 日志'
+    assert stale_ln, '找不到 _if_stale —— 判据在空转'
+    assert min(trim_ln) < min(stale_ln), (
+        '裁日志（第 %d 行）排在 `--if-stale`（第 %d 行）之后 —— '
+        '而轮询绝大多数时候就从那里返回，最常走的路永远裁不到'
+        % (min(trim_ln), min(stale_ln)))
+
+    # ---- C 两条链都真的调了（漏一条就是那条链的日志无限涨）----
+    td = io.open(os.path.join(REPO, 'tick_daily.py'), encoding='utf-8').read()
+    assert 'trim_by_days' in td, 'tick 链没有裁自己的 launchd 日志'
+    #   ★ 而且不许静默吞 —— "没裁"与"没跑到"要分得开
+    assert not re.search(r'except Exception:\s*\n\s*pass\s*\n\s*today',
+                         td), (
+        'tick 链把日志清理的异常静默吞了（`except: pass`）—— '
+        '"没裁"与"没跑到这里"就分不开了（我为此真查了一轮）')
+
+    # ---- D 🔴 原地截断：`trim_by_days` 里不许出现 rename/replace/unlink ----
+    lt = _ast.parse(io.open(lp, encoding='utf-8').read())
+    fn = [n for n in lt.body
+          if isinstance(n, _ast.FunctionDef) and n.name == 'trim_by_days'][0]
+    for n in _ast.walk(fn):
+        if isinstance(n, _ast.Call):
+            a = getattr(n.func, 'attr', '')
+            assert a not in ('rename', 'replace', 'unlink', 'remove'), (
+                'trim_by_days 用了 os.%s —— launchd 持有 fd，改名/删除之后'
+                '它继续往旧 inode 写：磁盘不释放、新文件永远是空的，'
+                '而日志看着"清干净了"' % a)
+    #   ★ 反向自证：它确实在**写回**（否则上面那圈是"全 0 == 全 0"）
+    assert any(isinstance(n, _ast.Call) and getattr(n.func, 'attr', '') == 'open'
+               and any(isinstance(a, _ast.Constant) and a.value == 'w'
+                       for a in n.args)
+               for n in _ast.walk(fn)), 'trim_by_days 根本没写回'
+
+    # ---- E 行为：按天裁 / \r 不切断 / 认不出时间戳退回行数 / 幂等 ----
+    NOW = _dt.datetime(2026, 9, 26, 18, 0)
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, 'a.out')
+    #   ★ 构造要**行多字少**（真日志就是这个形状），而且窗口内那段要
+    #     **超过 `keep_min_lines`** —— 否则下限会把这一段也挡住，于是下面
+    #     "行少字多也要裁得动"那句永远轮不到，**两句分不开**
+    #     （同「别把功劳记在错的那句上」）。窗口外 140 行、窗口内 280 行。
+    io.open(p, 'w', encoding='utf-8', newline='').write('\n'.join(
+        ['[07-%02d 10:%02d] 窗口外 %d' % (i, j, i) for i in range(1, 29)
+         for j in range(5)] +
+        ['[09-%02d 10:%02d] 进度 a\r进度 b 近期 %d' % (i, j, i)
+         for i in range(20, 27) for j in range(40)]) + '\n')
+    n1, why1 = L.trim_by_days(p, days=30, min_bytes=0, now=NOW)
+    got = io.open(p, encoding='utf-8', newline='').read()
+    #   ★ 判据用 `[07-` 这个**不会被别的行前缀命中**的标记 ——
+    #     写成 `'旧 1'` 的话 `旧 19` 也算命中，断言会为了错的理由红
+    assert '[07-' not in got, '窗口外那 140 行没裁掉（%s）' % why1
+    assert '近期 26' in got, '把窗口内的也裁了（%s）' % why1
+    #   🔴 带 \r 的行必须**完整**（split('\n') + newline='' 两条缺一不可）
+    assert '进度 a\r进度 b' in got, (
+        '带 \\r 的行被切成两段了 —— `splitlines()` 把 \\r 当换行，'
+        '而文本模式读本身也会把 \\r 翻成 \\n（要 newline=""）')
+    #   幂等：全在窗口内时一个字节都不动
+    n2, _ = L.trim_by_days(p, days=30, min_bytes=0, now=NOW)
+    assert n2 == 0, '再裁一次又动了 %d 字节 —— 不幂等' % n2
+    #   🔴 行数下限只在"认不出时间戳"那条兜底路上生效 ——
+    #     按天那条路上也套的话，"行少字多"的日志永远裁不动（实测踩过）
+    p2 = os.path.join(d, 'fat.out')
+    io.open(p2, 'w', encoding='utf-8', newline='').write('\n'.join(
+        '[%s] %s' % ((NOW - _dt.timedelta(days=k)).strftime('%m-%d %H:%M'),
+                     'x' * 2000) for k in range(60, -1, -1)) + '\n')
+    L.trim_by_days(p2, days=30, min_bytes=0, now=NOW)
+    left = [x for x in io.open(p2, encoding='utf-8', newline='').read().split('\n') if x]
+    assert 29 <= len(left) <= 32, (
+        '"行少字多"的日志没裁动（剩 %d 行）—— 行数下限不该管按天那条路' % len(left))
+    p3 = os.path.join(d, 'c.err')
+    io.open(p3, 'w', encoding='utf-8', newline='').write(
+        '\n'.join('Traceback 行 %d' % i for i in range(500)))
+    L.trim_by_days(p3, days=30, keep_min_lines=50, min_bytes=0, now=NOW)
+    assert len(io.open(p3, encoding='utf-8', newline='').read().split('\n')) == 50, \
+        '认不出时间戳时没退回"保留最后 N 行"'
+
+    # ---- F sync_logs 目录按【天】清，且有 keep_min 下限 ----
+    assert re.search(r'^KEEP_DAYS\s*=\s*(\d+)', sd, re.M), (
+        'sync_daily 还在按【份数】留日志 —— 轮询"齐了就秒退不建文件"，'
+        '份数在忙的日子只盖住两三天、闲的日子盖住半年，说不清"留多久"')
+    dd = os.path.join(d, 'sync_logs')
+    os.makedirs(dd)
+    for i in range(10):
+        f = os.path.join(dd, '%02d.log' % i)
+        io.open(f, 'w', encoding='utf-8').write('x')
+        os.utime(f, (time.time() - i * 864000, time.time() - i * 864000))
+    L.prune_dir_by_days(dd, '*.log', days=30, keep_min=5)
+    assert len(os.listdir(dd)) == 5, (
+        'keep_min 下限没护住 —— 系统时间跳变时整个目录会被清空')
+
+    keep = int(re.search(r'^KEEP_DAYS\s*=\s*(\d+)', sd, re.M).group(1))
+    return ('保留 %d 天；裁排在 --if-stale 之前（%d 行 < %d 行）；'
+            '两条链都裁且不静默吞；原地截断不 rename（launchd 持 O_APPEND，'
+            '实测截断后续写 NUL=0）；\\r 行不切断、幂等、'
+            '"行少字多"也裁得动、认不出时间戳退回行数下限；'
+            'sync_logs 按天清 + keep_min 护底'
+            % (keep, min(trim_ln), min(stale_ln)))
+
+
+@case('跨平台：首次启动那条路上不许有 POSIX-only 的东西', tag='fast')
+def t_windows_boot_path():
+    """2026-09-26 用户："现在的代码能在 windows 上下载后，直接启动，
+    开始下载数据吗？"
+
+    判据**扫的是那条路上真正会跑到的文件**（启动 -> 建库六个阶段 ->
+    每日链 13 步），而不是全仓 —— 全仓扫会把 `rebuild_lake_db.py`
+    那种一次性迁移工具也算进来，天天误报（同「假告警看多了就不看告警」）。
+
+    🔴 抓到过的真问题：
+        · `build_etf_lake.py` 的 `os.symlink` —— **Windows 上要管理员或
+          开发者模式**（WinError 1314），而它是每日链的 **9/13**
+        · `signal.SIGKILL` —— Windows 上**没有这个常量**
+        · `os.kill(pid, 0)` —— Windows 上**会把进程真的杀掉**
+      三条**都不报错**（在 macOS 上），全是换台机器才崩。
+    """
+    import ast as _ast
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+
+    # 路径**派生**：建库阶段照 setup_stages 的 cmd、每日链照 --dry
+    import importlib.util
+    _sp = importlib.util.spec_from_file_location(
+        '_ss_win', os.path.join(dl, 'setup_stages.py'))
+    _sm = importlib.util.module_from_spec(_sp)
+    _sp.loader.exec_module(_sm)
+    files = {os.path.join(REPO, 'serve.py')}
+    for st in _sm.stages():
+        for a in (st.get('cmd') or []):
+            if str(a).endswith('.py') and os.path.isfile(str(a)):
+                files.add(os.path.abspath(str(a)))
+    for _cwd, _cmd in _chain_dry(with_cwd=True):
+        for _a in re.findall(r'\S+\.py', _cmd):
+            c = os.path.normpath(os.path.join(_cwd, _a))
+            if os.path.isfile(c):
+                files.add(c)
+    # 🔴 **两个定时脚本自己也要扫。** `sync_daily.py` 是【跑链的那个】——
+    #   它不会出现在自己 `--dry` 的输出里，于是第一版**整个漏掉了它**
+    #   （W7「某处用 shell=True」变异因此没抓到）。清单从
+    #   `setup_tdx.build_jobs()` 派生 —— 那是定时器真正会执行的命令。
+    _sp2 = importlib.util.spec_from_file_location(
+        '_st_win', os.path.join(dl, 'setup_tdx.py'))
+    _stm = importlib.util.module_from_spec(_sp2)
+    _sp2.loader.exec_module(_stm)
+    for _j in _stm.build_jobs(_stm.load_schedule()[0]):
+        for _a in _j[1]:
+            if str(_a).endswith('.py') and os.path.isfile(str(_a)):
+                files.add(os.path.abspath(str(_a)))
+    # ★ 再带上这些入口**直接 import 的、住在 datalake 下的**模块
+    #   （`logs` / `paths` / `progress` / `build.is_stale`）—— 它们也在
+    #   那条路上跑，而照清单拼会漏掉将来新加的（同「扫目录不照清单拼」）。
+    for f in list(files):
+        try:
+            _t = _ast.parse(io.open(f, encoding='utf-8').read())
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for n in _ast.walk(_t):
+            mods = []
+            if isinstance(n, _ast.Import):
+                mods = [a.name for a in n.names]
+            elif isinstance(n, _ast.ImportFrom) and n.level == 0:
+                mods = [n.module or '']
+                mods += ['%s.%s' % (n.module or '', a.name) for a in n.names]
+            for m in mods:
+                cand = os.path.join(dl, *m.split('.')) + '.py'
+                if os.path.isfile(cand):
+                    files.add(os.path.abspath(cand))
+            # ★ 还有**起子进程**跑的（`is_stale.py` 就是这么被调的：
+            #   `os.path.join(DL, 'build', 'is_stale.py')` —— import 走不到，
+            #   而字面量也只是 `'is_stale.py'`，单独解不出来）。
+            #   所以按 `os.path.join` 的**常量参数**拼起来解。
+            if isinstance(n, _ast.Call) \
+                    and getattr(n.func, 'attr', '') == 'join':
+                segs = [a.value for a in n.args
+                        if isinstance(a, _ast.Constant)
+                        and isinstance(a.value, str)]
+                if segs and segs[-1].endswith('.py'):
+                    for base in (dl, os.path.dirname(f),
+                                 os.path.dirname(REPO), REPO):
+                        cand = os.path.normpath(os.path.join(base, *segs))
+                        if os.path.isfile(cand):
+                            files.add(os.path.abspath(cand))
+                            break
+    files = sorted(files)
+    assert len(files) >= 19, '只解析出 %d 个文件 —— 判据在空转' % len(files)
+    #   ★ 反向自证：跑链的那个与它的正本模块都在里面
+    for _must in ('sync_daily.py', 'logs.py', 'paths.py', 'is_stale.py'):
+        assert any(f.endswith(_must) for f in files), \
+            '%s 不在扫描范围里 —— 而它就在那条路上跑' % _must
+
+    POSIX_MOD = {'fcntl', 'pwd', 'grp', 'termios', 'tty', 'resource', 'syslog'}
+    POSIX_BIN = {'lsof', 'ps', 'launchctl', 'chmod', 'ln', 'uname', 'which',
+                 'bash', 'sh', 'osascript', 'plutil', 'kill', 'sed', 'awk'}
+    bad = []
+    for f in files:
+        src = io.open(f, encoding='utf-8').read()
+        t = _ast.parse(src)
+        for n in _ast.walk(t):
+            for c in _ast.iter_child_nodes(n):
+                c.parent = n
+        rel = os.path.relpath(f, os.path.dirname(REPO))
+
+        def _guarded(node):
+            """往上找最近的 `if`，条件里提到平台就算守住了。"""
+            q = node
+            while getattr(q, 'parent', None) is not None:
+                q = q.parent
+                if isinstance(q, _ast.If):
+                    c = _ast.unparse(q.test)
+                    if ('platform' in c or 'osname' in c or 'os.name' in c):
+                        return True
+            return False
+
+        for n in _ast.walk(t):
+            if isinstance(n, (_ast.Import, _ast.ImportFrom)):
+                mods = [(a.name or '').split('.')[0]
+                        for a in getattr(n, 'names', [])]
+                if isinstance(n, _ast.ImportFrom):
+                    mods.append((n.module or '').split('.')[0])
+                for m in mods:
+                    if m in POSIX_MOD:
+                        bad.append('%s:%d 只有 POSIX 才有的模块 %s'
+                                   % (rel, n.lineno, m))
+            if isinstance(n, _ast.Attribute) and n.attr == 'SIGKILL':
+                # ★ `getattr(signal, 'SIGKILL', …)` 是**字符串**不是属性，
+                #   所以这里命中的一定是直接引用
+                bad.append('%s:%d 直接引用 signal.SIGKILL（Windows 上没有'
+                           '这个常量，会 AttributeError）' % (rel, n.lineno))
+            if isinstance(n, _ast.Call):
+                fn = getattr(n.func, 'attr', '') or getattr(n.func, 'id', '')
+                if fn == 'symlink':
+                    # 🔴 `os.symlink` **只许出现在 `_link_tree` 里面** ——
+                    #   第一版查的是"这个文件里有没有 `_link_tree`"，而变异
+                    #   只改调用点、helper 还在 -> **照样全绿**
+                    #   （判据比要证的事宽，W1 变异实测漏过）。
+                    q, inside = n, False
+                    while getattr(q, 'parent', None) is not None:
+                        q = q.parent
+                        if isinstance(q, _ast.FunctionDef) \
+                                and q.name == '_link_tree':
+                            inside = True
+                            break
+                    if not inside:
+                        bad.append('%s:%d 裸 os.symlink（不在 _link_tree 里）'
+                                   ' —— Windows 上要管理员或开发者模式'
+                                   '（WinError 1314）' % (rel, n.lineno))
+                if fn in ('run', 'Popen', 'call', 'check_output', 'check_call'):
+                    a0 = n.args[0] if n.args else None
+                    nm = ''
+                    if isinstance(a0, _ast.List) and a0.elts \
+                            and isinstance(a0.elts[0], _ast.Constant):
+                        nm = os.path.basename(str(a0.elts[0].value))
+                    if nm in POSIX_BIN and not _guarded(n):
+                        bad.append('%s:%d 外部命令 %s 没有平台分支'
+                                   % (rel, n.lineno, nm))
+                if any(k.arg == 'shell' and getattr(k.value, 'value', None)
+                       is True for k in n.keywords):
+                    bad.append('%s:%d shell=True（Windows 上 shell 语法不同）'
+                               % (rel, n.lineno))
+    assert not bad, ('首次启动那条路上还有 POSIX-only 的东西（新机器上崩、'
+                     '本机上一直看不出来）：\n    ' + '\n    '.join(bad[:8]))
+
+    # ---- 目录挂载三条路：符号链接 / junction / 响亮失败（不许退回复制）----
+    bl = os.path.join(dl, 'build', 'build_etf_lake.py')
+    bsrc = io.open(bl, encoding='utf-8').read()
+    bt = _ast.parse(bsrc)
+    fn = [n for n in bt.body if isinstance(n, _ast.FunctionDef)
+          and n.name == '_link_tree'][0]
+    # 🔴 判据要看**真实调用的参数**，不是 `unparse` 出来的文本 ——
+    #   `mklink` 就写在 `_link_tree` 自己的 docstring 里，查文本必然命中，
+    #   把那条 subprocess 换成别的命令照样全绿（W2 变异实测漏过）。
+    #   **这是第六次踩「查字符串命中自己写的注释」。**
+    _mk = [n for n in _ast.walk(fn)
+           if isinstance(n, _ast.Call)
+           and any(isinstance(a, _ast.List)
+                   and any(isinstance(e, _ast.Constant) and e.value == 'mklink'
+                           for e in a.elts)
+                   for a in n.args)]
+    assert _mk, (
+        '_link_tree 没有 Windows 退路 —— 目录联接（mklink /J）对本地目录'
+        '不需要任何权限，是这里唯一能用的替代')
+    #   🔴 不许退回"复制"：492 MB 而且**不会跟着主 lake 更新**，
+    #     ETF 回测会拿着旧指数点位跑而不报错
+    for n in _ast.walk(fn):
+        if isinstance(n, _ast.Call):
+            a = getattr(n.func, 'attr', '')
+            assert a not in ('copytree', 'copy2', 'copyfile'), (
+                '_link_tree 退回了复制 —— 那是 492 MB 的副本，主 lake 每天'
+                '更新而它不会跟着变，回测拿旧数据跑**且不报错**')
+    #   ★ 真跑一遍符号链接那条（POSIX 上走得到）+ 幂等
+    import tempfile
+    d = tempfile.mkdtemp()
+    tgt = os.path.join(d, 'tgt')
+    os.makedirs(tgt)
+    io.open(os.path.join(tgt, 'x.txt'), 'w').write('hi')
+    _spec = importlib.util.spec_from_file_location('_bel_probe', bl)
+    _bel = importlib.util.module_from_spec(_spec)
+    try:
+        _spec.loader.exec_module(_bel)
+    except SystemExit:
+        pass
+    lk = os.path.join(d, 'lk')
+    how = _bel._link_tree(tgt, lk)
+    assert os.path.isdir(lk) and os.path.isfile(os.path.join(lk, 'x.txt')), \
+        '_link_tree 挂完读不到里面的文件（%s）' % how
+    #   报错要说清下一步（不是一句裸 OSError）
+    try:
+        _bel._link_tree(tgt, lk)          # 已经在了 -> 必然失败
+        raise AssertionError('重复挂载居然成功了 —— 判据在空转')
+    except (OSError, RuntimeError) as e:
+        assert os.name != 'nt' or '开发人员模式' in str(e), \
+            '挂不上时没说下一步：%s' % e
+
+    # ---- 依赖清单必须盖住【真正会被 import 的】第三方包 ----
+    #   🔴 缺 duckdb 连 `serve.py` 都起不来（实测屏蔽掉它 ->
+    #     `import assay.server` 直接 ModuleNotFoundError）。而报错只是
+    #     一句裸 ModuleNotFoundError，**指不到"该装什么"** ——
+    #     新机器上"下载完直接启动"那一步就卡死在这里。
+    req = os.path.join(dl, 'requirements.txt')
+    assert os.path.isfile(req), (
+        '没有依赖清单 —— 新机器上不知道该 pip install 什么')
+    want = {ln.split('>')[0].split('=')[0].split('[')[0].strip().lower()
+            for ln in io.open(req, encoding='utf-8').read().splitlines()
+            if ln.strip() and not ln.strip().startswith('#')}
+    assert want, 'requirements.txt 里一个包都没有'
+    #   ★ 判据取**运行时真的 import 了什么**，不是照源码猜：
+    #     起一个子进程 import `assay.server`，拿 sys.modules 减标准库
+    code = (
+        'import sys;sys.path.insert(0,%r);b=set(sys.modules);'
+        'import assay.server;'
+        'print(" ".join(sorted({m.split(".")[0] for m in set(sys.modules)-b}'
+        '-set(sys.stdlib_module_names))))' % REPO)
+    r = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                       text=True, cwd=REPO, timeout=180)
+    assert r.returncode == 0, 'import assay.server 失败：%s' % r.stderr[-200:]
+    got = {t for t in r.stdout.split()
+           if t and not t.startswith('_') and t not in (
+               'assay', 'tests', 'build', 'factors', 'paths', 'logs',
+               'progress', 'strategies')}
+    #   ⚠ 传递依赖（cloudpickle / dateutil / six / cython_runtime 是
+    #     pandas / pyarrow 自己带的）不要求列 —— 只要求**直接**那几个在
+    TRANSITIVE = {'cloudpickle', 'dateutil', 'six', 'cython_runtime',
+                  'pytz', 'tzdata'}
+    miss = sorted((got - TRANSITIVE) - want)
+    assert not miss, (
+        '这些包启动时真的会 import，却不在 requirements.txt 里：%s —— '
+        '新机器上就是一句裸 ModuleNotFoundError，指不到该装什么' % miss)
+    #   ★ 反向自证：真的量到了东西（否则上面那句是"空 - 空"）
+    assert len(got) >= 4, '只量到 %d 个第三方包 —— 判据在空转' % len(got)
+    #   🔴 清单要**真的能提交**：`datalake/.gitignore` 是**白名单**
+    #     （`*` 先忽略一切再逐条放行）—— 不放行的话这份清单进不了版本库，
+    #     新 clone 上既没有它、上面那几句断言也会直接红（本轮实测踩到）。
+    _ci = subprocess.run(['git', 'check-ignore', '-q', 'requirements.txt'],
+                         cwd=dl, capture_output=True)
+    assert _ci.returncode != 0, (
+        'datalake/requirements.txt 被 .gitignore 忽略了 —— 它提交不进去，'
+        '新 clone 上没有这份清单')
+    #   🔴 **包名只许列一处**：`INSTALL.md` 里原来也硬编码了一份
+    #     `pip install duckdb pandas numpy pyarrow` —— 两份清单迟早分叉，
+    #     而"改漏一处"的表现是新机器上一句裸 ModuleNotFoundError。
+    _ins = os.path.join(REPO, 'INSTALL.md')
+    assert os.path.isfile(_ins), '缺 INSTALL.md（从零装起的指南）'
+    _itxt = io.open(_ins, encoding='utf-8').read()
+    for _m in re.finditer(r'^\s*pip install\s+(.+)$', _itxt, re.M):
+        _args = _m.group(1)
+        if _args.lstrip().startswith('-r'):
+            continue
+        _hit = sorted(w for w in want if re.search(r'\b%s\b' % w, _args))
+        assert len(_hit) < 2, (
+            'INSTALL.md 里又硬编码了一份包名清单（%s）—— 包名只许在 '
+            'requirements.txt 一处列，两份迟早分叉' % ', '.join(_hit))
+    #   ★ 判据要钉**真正会被照着敲的那一行**，不是"文里提到过"——
+    #     第一版写的是 `'requirements.txt' in _itxt`，而上面那句说明文字
+    #     里就有这个词，**把 pip 那行换掉照样全绿**（G3 变异实测漏过）。
+    #     这是第七次踩「查字符串命中自己写的文案」。
+    assert re.search(r'^\s*pip install\s+-r\s+\S*requirements\.txt',
+                     _itxt, re.M), (
+        'INSTALL.md 里没有一行 `pip install -r …requirements.txt` —— '
+        '人照着它装会漏掉新依赖')
+
+    return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
+            '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
+            '不许直接引用 SIGKILL / 不许 shell=True；'
+            '目录挂载三条路（symlink -> junction -> 响亮失败，'
+            '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
+            'requirements.txt 盖住运行时真的 import 的 %d 个第三方包'
+            % (len(files), len(got - TRANSITIVE)))
 
 
 # ====================== 因子层（datalake/build/factors） ======================
@@ -3684,6 +4388,22 @@ def t_load_progress():
     importlib.reload(P)
     src = io.open(os.path.join(dl, 'sync_daily.py'), encoding='utf-8').read()
 
+    # ── A0 🔴🔴 活性探测不许用 `os.kill(pid, 0)`（跨平台，2026-09-26）──
+    #   POSIX 上那是"只探测不发信号"的惯用法；而 **Windows 上 `os.kill`
+    #   对任何非 CTRL_* 的 sig 都走 `TerminateProcess`** —— 于是
+    #   **每打开一次页面、横条读一次进度，就把正在跑的同步进程杀掉**，
+    #   而它不报错（同 serve.py `_alive` 那条，两处要一起改）。
+    _psrc = io.open(os.path.join(dl, 'progress.py'), encoding='utf-8').read()
+    _av = _psrc[_psrc.index('def _alive'):_psrc.index('class Progress')]
+    assert 'os.name' in _av, (
+        'progress._alive 没有分平台 —— Windows 上 os.kill(pid,0) 会把'
+        '正在跑的同步进程真的杀掉，而那不报错')
+    assert 'GetExitCodeProcess' in _av, \
+        'progress._alive 的 Windows 分支不是"只查不杀"'
+    assert P._alive(os.getpid()) and not P._alive(999999) \
+        and not P._alive(None) and not P._alive('x'), \
+        'progress._alive 判错：自己/不存在的 pid/None/垃圾 四种都要对'
+
     # ── A 「一共多少步」只有一处真值 ────────────────────────
     # 🔴 搬运前 `.sh` 里前九步写 `x/12`、后四步写 `x/13` —— 链长了只改新加
     #   那几行，屏幕上的分母自相矛盾**而它不报错**。所以步号必须生成。
@@ -3782,7 +4502,7 @@ def t_load_progress():
         P.DIR, P.TIMES = old_dir, old_times
         shutil.rmtree(td, ignore_errors=True)
 
-    return ('链 %d 步（分母只有一处、步号生成）｜ 进度走文件所以 launchd 也可见'
+    return ('活性探测分平台（Windows 上 os.kill 会杀进程）｜ 链 %d 步（分母只有一处、步号生成）｜ 进度走文件所以 launchd 也可见'
             ' ｜ 第一次不猜 ETA、跑完有基准且两条链不串 ｜ 死进程报中断、'
             '隔夜与完成都自己退场' % n_decl)
 
@@ -3871,6 +4591,69 @@ def t_load_progress_bar():
                 ' —— 没有历史却插值 = 编一个假进度' % (6 / 13, frac))
             out.append('%.0f%%' % (frac * 100))
 
+            # ②b 「明细」展开：这条链**每一步**跑得怎么样
+            # 用户："点开可以看到其更新到第几步，已使用多长时间，
+            #        大约还要多长时间"。
+            more = pg.locator('#prgbar .pgmore')
+            assert more.count() == 1 and more.is_visible(), \
+                '横条上没有「明细」入口 —— 那些数据接口里全都有，' \
+                '只是没人看得到'
+            assert pg.evaluate(
+                "()=>getComputedStyle(document.querySelector"
+                "('#prgbar .pgmore')).cursor") == 'pointer', \
+                '「明细」看不出能点 —— 看不出能点的入口 = 没有入口'
+            _h0 = pg.evaluate(
+                "()=>[document.querySelector('#prgbar').getBoundingClientRect()"
+                ".height, parseFloat(getComputedStyle(document.body).paddingTop),"
+                " document.querySelector('#top')?"
+                "document.querySelector('#top').getBoundingClientRect().top:null]")
+            more.click()
+            try:
+                pg.wait_for_selector('#prgbar .pgd', timeout=5000)
+            except Exception:
+                raise AssertionError('点了「明细」没展开')
+            # 🔴🔴 **浮层不许被任何祖先剪掉。** 我把 `overflow:hidden`
+            #   从 `#prgbar` 搬到 `.pgrow` 上，而浮层正是 `.pgrow` 的子元素
+            #   —— 几何量出来 433×328「可见」，**截图上什么都没有**。
+            #   所以判据要问"谁在剪"，不是问"尺寸够不够大"。
+            clip = pg.evaluate(
+                "()=>{let e=document.querySelector('#prgbar .pgd')"
+                ".parentElement,o=[];while(e&&e!==document.documentElement){"
+                "if(getComputedStyle(e).overflow!=='visible')"
+                "o.push(e.id||e.className||e.tagName);e=e.parentElement;}"
+                "return o;}")
+            assert not clip, \
+                '🔴 明细浮层被祖先剪掉了：%s —— 几何量着"可见"，' \
+                '屏幕上一个字都没有' % clip
+            # 🔴 展开**不许撑高横条自己**：`body.hasprog` 的 padding-top 是
+            #   固定值，横条一变高就盖住顶栏、导航点不到（实测撑到 337px）。
+            _h1 = pg.evaluate(
+                "()=>[document.querySelector('#prgbar').getBoundingClientRect()"
+                ".height, parseFloat(getComputedStyle(document.body).paddingTop),"
+                " document.querySelector('#top')?"
+                "document.querySelector('#top').getBoundingClientRect().top:null]")
+            assert abs(_h1[0] - _h0[0]) < 2, \
+                '🔴 展开把横条撑高了 %s -> %s，而 body 留白还是 %s —— ' \
+                '它会盖住顶栏' % (_h0[0], _h1[0], _h1[1])
+            if _h0[2] is not None:
+                assert abs(_h1[2] - _h0[2]) < 2, \
+                    '🔴 展开把页面顶栏顶动了：%s -> %s' % (_h0[2], _h1[2])
+            rows = pg.eval_on_selector_all(
+                '#prgbar .pgdr',
+                "es=>es.map(e=>[e.className, e.innerText.replace(/\\n/g,' ')])")
+            assert len(rows) == 13, \
+                '明细该逐步列出 13 步，实得 %d 行' % len(rows)
+            assert 'pgdcur' in rows[6][0], \
+                '第 7 步是正在跑的那一步，应高亮：%s' % (rows[6],)
+            assert '已用' in rows[6][1], '当前那步没说已用多久：%s' % (rows[6],)
+            # 第一次跑没有剖面 -> 未跑那几步**明说不知道**，不编名字
+            assert 'pgdq' in rows[12][0] and '还不知道' in rows[12][1], \
+                '没有上次剖面时，未跑的步骤该明说不知道：%s' % (rows[12],)
+            more.click()
+            pg.wait_for_timeout(300)
+            assert pg.locator('#prgbar .pgd').count() == 0, '再点一次没收起'
+            out.append('明细 13 行')
+
             # ③ 跑完 -> 不再是"进行中"，但那 90 秒仍然说得出结果
             p.finish_step('ok')
             p.finish(0)
@@ -3878,6 +4661,97 @@ def t_load_progress_bar():
                 "()=>{const e=document.querySelector('#prgbar');"
                 "return e && e.innerText.indexOf('完成') >= 0;}", timeout=20000)
             assert '⟳' not in pg.inner_text('#prgbar'), '跑完了还在转圈'
+
+            # ── ③b 数据齐了、但定时任务没装 ──────────────────────
+            # 用户问「新下载的项目会在什么时候启用定时任务」—— 查下来
+            # 装定时的三个入口（--install-timer / 数据页开关 / 改窗口重装）
+            # **全要人主动做**，而一键建库跑完不装。于是新机器上七个阶段
+            # 全绿、横条自己消失、首页一切正常，**而明天起数据不再更新**。
+            # 🔴 判据三条都要，缺一条它就往另一边飘：
+            #   ① 没装时要出现  ② 装上了必须消失  ③ 数据没齐时不许出现
+            #     （那时该说的是"先把数据建起来"，两条一起出就是自相矛盾）
+            _real_auto = sy.autosync_status
+            _AU = {'on': False, 'supported': True, 'partial': False,
+                   'schedule': '16:00 ~ 20:00 每 10 分钟',
+                   'tasks': [{'key': 'sync', 'name': '数据同步', 'on': False,
+                              'window_text': '16:00 ~ 20:00 每 10 分钟'},
+                             {'key': 'tick', 'name': '信号重算', 'on': False,
+                              'window_text': '16:00 ~ 次日 09:20 每 60 分钟'}]}
+
+            class _Ready(object):
+                def stages(self, **kw):
+                    return [{'id': 'x', 'name': '装第一步', 'why': '',
+                             'state': 'ok', 'detail': '', 'eta': '2 分钟',
+                             'cmd': [sys.executable, '-c', 'pass']}]
+
+                def summary(self, *a, **k):
+                    return {'stages': self.stages(), 'n_todo': 0,
+                            'ready': True, 'next_name': None,
+                            'n_auto_todo': 0, 'eta_text': None, 'os': 'T'}
+
+            _o_mod, _o_live = sy._stages_mod, sv.ALLOW_LIVE
+            try:
+                sy._stages_mod = lambda: (_Ready(), None)
+                sv.ALLOW_LIVE = True
+                sy.autosync_status = lambda: dict(_AU)
+                sy._SETUP_SUM['at'] = 0; sy._SETUP_SUM['d'] = None
+                sy._AUTO_SUM['at'] = 0; sy._AUTO_SUM['d'] = None
+                # ① 没装 -> 横条上要有那个入口
+                pg.reload()
+                try:
+                    pg.wait_for_selector('#prgauto', timeout=20000)
+                except Exception:
+                    raise AssertionError(
+                        '数据齐了而定时没装，横条上却没有「开启自动同步」的'
+                        '入口 —— 而那不报错，只是从明天起数据再也不更新')
+                _t = ' '.join(pg.inner_text('#prgbar').split())
+                # 窗口口径必须来自服务端（前端写死的话改了窗口它不跟着变）
+                assert '16:00' in _t and '每 10 分钟' in _t, \
+                    '没把定时窗口说出来：%s' % _t[:160]
+                assert 'PIT' in _t or '补不回来' in _t, \
+                    '没说代价 —— 「漏一天永久丢失」才是该立刻点它的理由：%s' % _t[:160]
+                assert pg.evaluate(
+                    "()=>getComputedStyle(document.querySelector('#prgauto'))"
+                    ".cursor") == 'pointer', '入口看不出能点'
+                # ② 装上之后这一行【自己消失】——不常驻
+                _AU['on'] = True
+                for t in _AU['tasks']:
+                    t['on'] = True
+                sy._AUTO_SUM['at'] = 0; sy._AUTO_SUM['d'] = None
+                pg.reload()
+                pg.wait_for_timeout(1200)
+                assert pg.locator('#prgauto').count() == 0, \
+                    '🔴 已经开着自动同步，横条还挂着「还没开」—— ' \
+                    '常驻一条要人做事的横幅等于教人忽略这个位置'
+                # ③ 数据没齐时不许出现（那时该说的是"先把数据建起来"）
+                _AU['on'] = False
+                for t in _AU['tasks']:
+                    t['on'] = False
+                class _NotReady(object):
+                    def stages(self, **kw):
+                        return [{'id': 'x', 'name': '装第一步', 'why': '',
+                                 'state': 'todo', 'detail': '', 'eta': '2 分钟',
+                                 'cmd': [sys.executable, '-c', 'pass']}]
+
+                    def summary(self, *a, **k):
+                        return {'stages': self.stages(), 'n_todo': 1,
+                                'ready': False, 'next_name': '装第一步',
+                                'n_auto_todo': 1, 'eta_text': '2 分钟',
+                                'os': 'T'}
+
+                sy._stages_mod = lambda: (_NotReady(), None)
+                sy._SETUP_SUM['at'] = 0; sy._SETUP_SUM['d'] = None
+                sy._AUTO_SUM['at'] = 0; sy._AUTO_SUM['d'] = None
+                pg.reload()
+                pg.wait_for_selector('#prgsetup', timeout=20000)
+                assert pg.locator('#prgauto').count() == 0, \
+                    '🔴 数据都还没有就催人开自动同步 —— 同屏两条自相矛盾'
+                out.append('定时入口')
+            finally:
+                sy.autosync_status = _real_auto
+                sy._stages_mod, sv.ALLOW_LIVE = _o_mod, _o_live
+                sy._SETUP_SUM['at'] = 0; sy._SETUP_SUM['d'] = None
+                sy._AUTO_SUM['at'] = 0; sy._AUTO_SUM['d'] = None
 
             # ── ④ 本地还没有数据时，横条【就是那个入口】────────────
             # 用户："系统启动后展示一个数据初始化的按钮，点击按钮开始加载。"
@@ -3961,5 +4835,8 @@ def t_load_progress_bar():
         shutil.rmtree(td, ignore_errors=True)
     return ('独立页面上有横条、贴在最上侧且不盖内容（填充 %s）｜ 空闲时整条不渲染'
             ' ｜ 步数/当前步/已用都写出来了、没有基准时明说未知 ｜ 跑完说完成'
+            ' ｜ %s：不被祖先剪、不撑高横条、当前步高亮、未跑的明说不知道'
+            ' ｜ %s：数据齐了但定时没装才出现，装上就消失，数据没齐时不出'
             ' ｜ 空 lake 时横条上那个入口点得动且发的是一键建库'
-            % out[0])
+            % (out[0], out[1] if len(out) > 1 else '明细',
+               out[2] if len(out) > 2 else '定时入口'))

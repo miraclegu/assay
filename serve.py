@@ -154,6 +154,38 @@ def do_status(host, port):
     return 0
 
 
+def _alive(pid):
+    """那个进程还在吗 —— **跨平台**。
+
+    🔴 **不能直接用 `os.kill(pid, 0)`。** POSIX 上那是"只探测不发信号"的
+      惯用法；而 **Windows 上 `os.kill` 对任何非 `CTRL_*` 的 sig 都走
+      `TerminateProcess`** —— 于是这句"探测"会把进程**真的杀掉**，
+      而它不报错（`--status` 看一眼就把服务停了）。
+    ★ 同一份实现在 `datalake/progress.py` 也有一份（横条读进度要判
+      "跑的那个进程还在吗"）—— 两个仓库，跨仓共享要引依赖，
+      这是明知的取舍。改一处要**两处一起改**。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.name == 'nt':
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259   # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def do_stop(port, wait=10.0):
     """停掉并**确认真的停了**。"""
     hit = _who(port)
@@ -172,31 +204,30 @@ def do_stop(port, wait=10.0):
         print('停 PID %s …' % pid, end=' ', flush=True)
         try:
             os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except OSError:          # Windows 上进程没了不是 ProcessLookupError
             print('（已经没了）')
             continue
         # ★ 轮询确认 —— "发了 SIGTERM"不等于"停了"
         t0 = time.time()
         while time.time() - t0 < wait:
             time.sleep(0.2)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _alive(pid):
                 print('已停（%.1fs）' % (time.time() - t0))
                 break
         else:
-            print('%.0fs 还没退，升级 SIGKILL …' % wait, end=' ', flush=True)
+            print('%.0fs 还没退，升级强杀 …' % wait, end=' ', flush=True)
+            # 🔴 **Windows 上没有 `signal.SIGKILL`** —— 直接引用是
+            #   AttributeError。而那边 `os.kill` 对任何非 CTRL_* 的 sig
+            #   本来就是 TerminateProcess，所以退回 SIGTERM 就是强杀。
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, getattr(signal, 'SIGKILL', signal.SIGTERM))
                 time.sleep(0.5)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError, OSError):
                 pass
-            try:
-                os.kill(pid, 0)
+            if _alive(pid):
                 print('🔴 还在（PID %s）—— 手工处理' % pid)
                 return 1
-            except ProcessLookupError:
-                print('已强杀')
+            print('已强杀')
     # 🔴 最后再确认端口真的空了：进程没了但端口处于 TIME_WAIT 也会让
     #   新进程 bind 失败，而那时的报错是 "Address already in use"，
     #   指不到"上一个还没退干净"这个原因。

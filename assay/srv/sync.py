@@ -80,43 +80,62 @@ def _sync_plist_paths():
 
 
 def autosync_status():
-    """自动同步开着还是关着 —— 按钮要照这个显示文字，不能瞎猜。"""
-    import subprocess
-    src, dst = _sync_plist_paths()
-    out = {'label': SYNC_LABEL, 'plist': dst, 'src': src,
-           'installed': os.path.isfile(dst), 'src_exists': os.path.isfile(src),
-           'supported': sys.platform == 'darwin'}
-    if not out['supported']:
-        out['on'] = None
-        out['note'] = 'launchd 只有 macOS 有；其它平台请自行接 cron'
-        return out
+    """自动同步开着还是关着 —— 按钮要照这个显示文字，不能瞎猜。
+
+    🔴🔴 **判据整个转发给 `setup_tdx.show_schedule()`，这里不再自己查。**
+      原来这儿是**第二份实现**，有三处各自出错而都不报错：
+
+        ① 只认 launchd（`supported = sys.platform == 'darwin'`）——
+           而定时器 2026-09-26 已经跨平台了（Windows 走 schtasks）。
+           于是 Windows 上这个开关**永远显示"不支持"**。
+        ② 只管 sync 一条，**tick 那条不管** —— 关掉"自动同步"之后
+           信号重算每小时照跑（判据 ② 拒绝、日志里一串"A 腿落后"）。
+        ③ `schedule` 用正则抠**第一个** Hour/Minute —— 25 个点位只报
+           一个，页面上写着「每日 16:00」，而实际是 16:00~20:00 每 10 分。
+           **那是在说谎**，不是少说。
+
+    ★ 旧字段名（on / supported / label / plist / schedule / drift）保留 ——
+      前端与既有用例都在读它们（同「命令行是产品契约」那条）。
+    """
     try:
-        r = subprocess.run(['launchctl', 'list', SYNC_LABEL],
-                           capture_output=True, text=True, timeout=15)
-        out['loaded'] = (r.returncode == 0)
+        m = _setup_tdx()
+        d = m.show_schedule()
     except Exception as e:                                  # noqa: BLE001
-        out['loaded'] = None
-        out['note'] = '%s: %s' % (type(e).__name__, e)
-    out['on'] = bool(out['installed'] and out['loaded'])
-    # ★ 已安装那份与仓库正本不一致时要说出来：改了 plist 但没重新安装，
-    #   跑的还是旧的（比如时间还停在旧的 18:10），而这**不会报错**。
-    if out['installed'] and out['src_exists']:
-        try:
-            out['drift'] = (open(src, 'rb').read() != open(dst, 'rb').read())
-        except Exception:                                   # noqa: BLE001
-            out['drift'] = None
-    # 计划时间从【已安装那份】里读 —— 显示正在生效的，不是仓库里的
-    out['schedule'] = None
-    try:
-        txt = open(dst if out['installed'] else src, encoding='utf-8').read()
-        h = re.search(r'<key>Hour</key>\s*<integer>(\d+)</integer>', txt)
-        mi = re.search(r'<key>Minute</key>\s*<integer>(\d+)</integer>', txt)
-        if h and mi:
-            out['schedule'] = '%02d:%02d' % (int(h.group(1)), int(mi.group(1)))
-    except Exception:                                       # noqa: BLE001
-        pass
+        return {'supported': None, 'on': None,
+                'error': '%s: %s' % (type(e).__name__, e)}
+
+    ins, sc = d.get('installed') or {}, d.get('schedule') or {}
+    tasks = []
+    for k, name in (('sync', '数据同步'), ('tick', '信号重算')):
+        v, w = dict(ins.get(k) or {}), sc.get(k) or {}
+        v.update({'key': k, 'name': name, 'window': w,
+                  'window_text': _window_text(w, v.get('wrap'))})
+        tasks.append(v)
+    # 🔴 **两条都开着才算"开"** —— 只看 sync 的话，tick 掉了之后页面写着
+    #   "开"，而早上的信号重算其实已经没了（同「漏装了的表现是信号永远
+    #   停在昨晚那份，不报错」）。部分开着要单独说，不能假装正常。
+    on_n = sum(1 for t in tasks if t.get('on'))
+    out = {'label': SYNC_LABEL, 'tasks': tasks,
+           'supported': bool(tasks) and tasks[0].get('on') is not None
+                        or sys.platform in ('darwin', 'win32', 'linux'),
+           'on': on_n == len(tasks) and on_n > 0,
+           'partial': 0 < on_n < len(tasks),
+           'plist': (ins.get('sync') or {}).get('label') or SYNC_LABEL,
+           'schedule': _window_text((sc.get('sync') or {}),
+                                    (ins.get('sync') or {}).get('wrap')),
+           # 配置与实际装上的不一致 —— 旧字段名叫 drift，含义没变
+           'drift': any(t.get('match') is False for t in tasks)}
+    if d.get('warn'):
+        out['note'] = d['warn']
     return out
 
+
+def _window_text(w, wrap=False):
+    """'16:00 ~ 20:00 每 10 分钟'。跨午夜要把「次日」说出来。"""
+    if not w:
+        return None
+    return '%s ~ %s%s 每 %s 分钟' % (w.get('from'), '次日 ' if wrap else '',
+                                     w.get('to'), w.get('every'))
 
 
 def _setup_tdx():
@@ -176,6 +195,29 @@ def api_sync_schedule_set(_q, body):
     return out
 
 
+_AUTO_SUM = {'at': 0.0, 'd': None}
+
+
+def _autosync_cached(force=False):
+    """横条那条轮询用的自动同步状态 —— **缓存 20 秒**。
+
+    🔴 `autosync_status()` 要起 `launchctl list` / `schtasks /query` 子进程，
+      而横条在**每个页面**上每 2~10 秒轮一次 —— 不缓存就是每台标签页每几秒
+      一个子进程（同 `_setup_summary` 那条 20 秒缓存的理由）。
+    ★ 开关点完之后 `force=True` 主动失效：否则刚装上还有 20 秒写着
+      「还没开自动同步」，**那看着像没生效**。
+    """
+    import time as _t
+    if not force and _AUTO_SUM['d'] is not None and _t.time() - _AUTO_SUM['at'] < 20:
+        return _AUTO_SUM['d']
+    try:
+        d = autosync_status()
+    except Exception as e:                                  # noqa: BLE001
+        d = {'error': '%s: %s' % (type(e).__name__, e), 'on': None}
+    _AUTO_SUM['at'], _AUTO_SUM['d'] = _t.time(), d
+    return d
+
+
 def api_sync_auto(_q):
     """GET /api/sync/auto —— 自动同步的当前状态。"""
     return autosync_status()
@@ -183,42 +225,50 @@ def api_sync_auto(_q):
 
 
 def api_sync_auto_set(_q, body):
-    """POST /api/sync/auto —— 开/关自动同步（load / unload 那个 launchd agent）。
+    """POST /api/sync/auto —— 开/关自动同步（两条定时一起）。
 
-    ★ 用 `-w`：它同时写 Disabled 标记，重启后仍然生效。不带 -w 的话
-      "关掉"只活到下次登录 —— 而那种"以为关了其实又开了"比开着更糟。
-    ★ 开启时若 LaunchAgents 下没有或与仓库正本不一致，先复制过去 ——
-      否则会 load 到一份旧的 plist，而这不会报错。
+    🔴 **走子进程跑 `setup_tdx.py --install-timer / --uninstall-timer`**，
+      不在这儿自己拼 launchctl：
+        · 那是**跨平台**的正本（launchd / systemd+cron / schtasks 三套），
+          自己拼一份的话 Windows 上这个按钮就是死的；
+        · `install_timer` 里 `raise SystemExit`（BaseException）——
+          在请求线程里直接把线程打死、页面只看到一个没有原因的 500
+          （同 `resolve_lake` 那条）。子进程把它变成返回码 + 日志。
+    🔴 **两条一起开关**：tick 是 sync 的下半截（数据到了要重算信号），
+      只关一条的表现是"日志里每小时一条『A 腿落后，拒绝重算』"——
+      那是噪声不是工作（同「一起装是因为它们配套」）。
+
+    ★ 判据仍然是**复查到的状态**，不是命令返回码 ——
+      `launchctl` 对"已经是这个状态"会报错退出，而那不是失败。
     """
     if not base.ALLOW_LIVE:
-        return {'error': '服务以只读模式启动 —— 用 python3 serve.py --live 开启'}
-    import shutil
+        return {'error': '服务以只读模式启动 —— 用 python3 serve.py 开启'}
     import subprocess
     on = bool((body or {}).get('on'))
-    st = autosync_status()
-    if not st.get('supported'):
-        return {'error': st.get('note') or '当前平台不支持 launchd'}
-    src, dst = _sync_plist_paths()
-    if on:
-        if not os.path.isfile(src):
-            return {'error': '找不到 plist 正本：%s' % src}
-        if not st['installed'] or st.get('drift'):
-            os.makedirs(_launch_agents_dir(), exist_ok=True)
-            shutil.copyfile(src, dst)
-    elif not st['installed']:
-        return dict(autosync_status(), changed=False,
-                    note='本来就没安装，无需关闭')
-    cmd = ['launchctl', 'load' if on else 'unload', '-w', dst]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    st2 = autosync_status()
-    # ★ 以【复查到的状态】为准，不以命令返回码为准：launchctl 对"已经是这个
-    #   状态"会报错退出，而那不是失败。判据永远是"现在到底开着没"。
-    if st2.get('on') != on:
-        return dict(st2, changed=False,
-                    error='%s 失败：%s' % ('开启' if on else '关闭',
-                                          (r.stderr or r.stdout or
-                                           '返回码 %d' % r.returncode).strip()[-300:]))
-    return dict(st2, changed=True, cmd=' '.join(cmd))
+    before = autosync_status()
+    if before.get('error'):
+        return dict(before, changed=False)
+    if not on and not (before.get('on') or before.get('partial')):
+        return dict(autosync_status(), changed=False, note='本来就没装，无需关闭')
+
+    flag = '--install-timer' if on else '--uninstall-timer'
+    r = subprocess.run(
+        [sys.executable, os.path.join(base._datalake_dir(), 'setup_tdx.py'),
+         flag], capture_output=True, text=True, timeout=180)
+    st = _autosync_cached(force=True)
+    st = dict(st)
+    st['log'] = ((r.stdout or '') + (r.stderr or ''))[-1500:]
+    st['rc'] = r.returncode
+    # ★ 复查：说"开了"就得真的两条都在，说"关了"就得一条都不剩。
+    if st.get('on') != on:
+        st['changed'] = False
+        st['error'] = '%s 失败%s —— 看 log' % (
+            '开启' if on else '关闭',
+            '（只成功了一半）' if st.get('partial') else '')
+        return st
+    st['changed'] = True
+    st['cmd'] = 'setup_tdx.py %s' % flag
+    return st
 
 
 # ==================== 个股（搜索 / 面板 / K 线 / 财务） ====================
@@ -694,6 +744,34 @@ def api_progress(_q):
                          # ⚠ 阶段自己声明的估计，**不是实测** —— 页面上写「估」
                          'eta_text': su.get('eta_text'),
                          **_setup_flags()})
+        elif su and su.get('ready'):
+            # 🔴🔴 **数据建好了 != 它会自己更新。** 装定时任务的入口有三个
+            #   （命令行 --install-timer / 数据页那个开关 / 改窗口后重装），
+            #   **三个都要人主动做**，而一键建库跑完不装。于是新机器上
+            #   「七个阶段全绿、横条自己消失、首页一切正常」，
+            #   **而明天起数据再也不更新** —— 同「靠人记得跑的步骤 =
+            #   迟早不跑」，且它**不报错**。
+            # 🔴 代价还不对称：`daily_snapshot` 是 type-1 覆盖写、
+            #   **漏一天永久丢失**（关自动同步那句 confirm 写的就是这条）
+            #   —— 没装等于每天都在丢，而且补不回来。
+            # ★ **不替人装**：往 ~/Library/LaunchAgents 或 schtasks 里写
+            #   条目是系统级副作用，该由人点一下。但「必须说出来」——
+            #   而装上之后这一行自己消失（不常驻，同上面那条纪律）。
+            au = _autosync_cached()
+            if au and not au.get('error') and au.get('supported') \
+                    and not au.get('on'):
+                live.append({
+                    'job': 'autosync', 'kind': 'autosync_needed',
+                    'title': '数据已就绪 · 还没开自动同步',
+                    'state': 'idle', 'i': 0, 'total': 0,
+                    # 窗口口径由服务端给（前端写死的话，改了窗口它不会跟着变）
+                    'window': au.get('schedule'),
+                    'partial': bool(au.get('partial')),
+                    'tasks': [{'name': t.get('name'),
+                               'on': t.get('on'),
+                               'window_text': t.get('window_text')}
+                              for t in (au.get('tasks') or [])],
+                    **_setup_flags()})
 
     # 页面点出来的那些能链到日志；launchd 那条只有日志文件路径。
     for r in live:

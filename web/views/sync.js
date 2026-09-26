@@ -6,15 +6,37 @@
      launchctl 对"已经是这个状态"会报错退出，所以判据是"现在到底开着没"。 */
 function autoTag(au){
   if(!au) return '<span class="lvtag">自动同步 —</span>';
+  if(au.error) return `<span class="lvtag warn" title="${esc(au.error)}">自动同步 查不了</span>`;
   if(au.supported===false) return `<span class="lvtag" title="${esc(au.note||'')}">自动同步 不支持</span>`;
-  return `<span class="lvtag ${au.on?'on':'warn'}"
-    title="${esc(au.label)}\n${esc(au.plist)}"
-    >自动同步 ${au.on?'开 · 每日 '+esc(au.schedule||'?'):'关'}</span>`;
+  /* 🔴 **只说"开"是不够的，要说"下一次什么时候"** —— 用户问的正是
+     「下一次准备扫描的时间」。而口径写全（窗口 + 间隔），不是原来那个
+     只抠第一个点位的「每日 16:00」——25 个点位只报一个是在说谎。 */
+  const nx = autoNext(au);
+  return `<span class="lvtag ${au.on?'on':(au.partial?'warn':'warn')}"
+    title="${esc(autoTitle(au))}"
+    >自动同步 ${au.on?'开':(au.partial?'半开':'关')}${nx?' · 下次 '+esc(nx):''}</span>`;
+}
+/* 两条任务里**最近**的那一次 —— 页面上问的是"下一次什么时候动"，
+   而不是"sync 那条什么时候动"。都没开就不给（给了是在骗人）。 */
+function autoNext(au){
+  const ts=(au.tasks||[]).filter(t=>t.on&&t.next_at);
+  if(!ts.length) return '';
+  ts.sort((a,b)=>(a.next_in||0)-(b.next_in||0));
+  const t=ts[0], hm=String(t.next_at).slice(11);
+  const mins=Math.round((t.next_in||0)/60);
+  return hm+(mins>=0?'（'+(mins<60?mins+' 分钟后':Math.round(mins/60)+' 小时后')+'）':'');
+}
+function autoTitle(au){
+  return (au.tasks||[]).map(t=>`${t.name}：${t.on?'开':'关'} · ${t.window_text||'?'}`
+    +(t.next_at?` · 下次 ${t.next_at}`:'')
+    +(t.match===false?'　⚠️ 装上的点位与配置不一致':'')).join('\n')
+    ||esc(au.label||'');
 }
 function autoBtn(au, ro){
-  if(!au||au.supported===false) return '';
-  return `<button class="btn" id="syauto" ${ro?'disabled':''}
-    >${au.on?'关闭自动同步':'开启自动同步'}</button>`;
+  if(!au||au.supported===false||au.error) return '';
+  /* 按钮**一律不设 disabled**（项目纪律：disabled 的元素连 title 都不触发）
+     —— 只读模式下点了会把原因说清楚。 */
+  return `<button class="btn" id="syauto">${au.on?'关闭自动同步':'开启自动同步'}</button>`;
 }
 /* 定时窗口。🔴 **必须显示"实际装上的点位"**，不能只回显配置 ——
    配置改了而 timer 没重装时，"页面写着每小时一次、实际还是旧的"不报错。
@@ -350,8 +372,13 @@ async function showSync(){
     try{
       const r=await post('/api/sync/auto',{on:on});
       m.className='lvmsg ok';
-      m.textContent=(r.on?'自动同步已开启 —— 每日 '+(r.schedule||'?')+' 跑 sync_daily.sh'
-                         :'自动同步已关闭 —— 记得每天手动点「立即同步」');
+      /* 🔴 照**复查到的**状态说，而且把两条任务与下次时间都说出来 ——
+         原来那句「每日 16:00」是从第一个点位抠的，25 个点位只报一个。 */
+      m.className='lvmsg '+(r.error?'bad':'ok');
+      m.textContent=r.error?String(r.error)
+        :(r.on?'自动同步已开启 —— '+(r.tasks||[]).map(t=>t.name+' '+(t.window_text||'')).join('；')
+               +(autoNext(r)?'，下次 '+autoNext(r):'')
+             :'自动同步已关闭 —— 记得每天手动点「立即同步」');
       showSync();
     }catch(e){ m.className='lvmsg bad'; m.textContent=String(e); }
   };

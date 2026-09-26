@@ -1025,21 +1025,63 @@ tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
      （同 `.pw` 的 overflow-x 当初只定义在 `#pk` 下面那条）。
    ★ `.hasprog` 由 JS 在挂上横条时加，没挂上就不留白（同 `.hasidx`）。 */
 #prgbar{position:fixed;left:0;right:0;top:0;z-index:60;
-  display:flex;align-items:center;gap:8px;overflow:hidden;
-  padding:4px 10px;font-size:12px;line-height:18px;
+  font-size:12px;line-height:18px;
   background:var(--bg2,#12161c);border-bottom:1px solid var(--line);
-  color:var(--dim);white-space:nowrap}
+  color:var(--dim)}
+/* 🔴🔴 **这一层一个 `overflow:hidden` 都不能有。** 明细是贴在行下方的
+   `position:absolute` 浮层，而它是 `.pgrow` 的子元素 —— 剪在 `#prgbar`
+   上固然看不见，剪在 `.pgrow` 上**一样看不见**（实测：`clippedBy:[pgrow]`，
+   几何量出来 433×328「可见」，截图上却什么都没有）。
+   原来那个 `overflow:hidden` 是防窄屏横滚的，改由会溢出的那一项
+   （`.pgs`，它本来就有 ellipsis）自己收缩 —— flex 子项默认
+   `min-width:auto` 不收缩，所以必须显式给 `min-width:0`
+   （同 `.pgrid>*,.lvgrid>*{min-width:0}` 那条）。 */
+#prgbar .pgrow{position:relative;display:flex;align-items:center;gap:8px;
+  padding:4px 10px;white-space:nowrap}
 #prgbar b{font-weight:600;color:var(--fg)}
 #prgbar .pgi{font-size:13px}
-#prgbar .pgs{overflow:hidden;text-overflow:ellipsis;
+#prgbar .pgs{overflow:hidden;text-overflow:ellipsis;min-width:0;
   font-variant-numeric:tabular-nums}
 #prgbar a{margin-left:auto;padding-left:10px;color:var(--accent);
   text-decoration:none;flex:none}
+/* 「明细」与「看日志」并排：只有第一个吃 margin-left:auto，
+   否则两个各推一次、中间裂一道大缝 */
+#prgbar a ~ a{margin-left:0}
+#prgbar .pgmore{cursor:pointer}
 /* 进度条本身是铺在横条底下的一层，不占布局高度 —— 文字不会被它挤动 */
-#prgbar .pgfill{position:absolute;left:0;top:0;bottom:0;z-index:-1;
+#prgbar .pgfill{position:absolute;left:0;top:0;bottom:0;z-index:0;
   background:color-mix(in srgb,var(--accent) 22%,transparent);
   transition:width .4s linear}
 #prgbar .pgfill.bad{background:color-mix(in srgb,var(--down) 22%,transparent)}
+/* 🔴 抬升的元素要**逐个列出**，不能写 `>:not(.pgfill)` —— 那条的特异度
+   是 (1,2,0)，比 `#prgbar .pgd` 的 (1,1,0) **高**，会把明细浮层的
+   `position:absolute` 覆盖成 relative：浮层当场变成一个 flex item，
+   把整条横条撑到 337px 高 —— 而 `body.hasprog` 的 padding-top 还是 28px，
+   于是它**盖住顶栏、导航点不到**。实测踩到（同 `.lvtag.on` 压 `.rg.on` 那条：
+   靠特异度决胜负的规则，要把作用对象写准，不要用通配去"排除"）。 */
+#prgbar .pgi,#prgbar .pgrow>b,#prgbar .pgs,#prgbar .pgrow>a,
+#prgbar .pgrow>.btn{position:relative;z-index:1}
+/* 明细浮层：**绝对定位**贴在这一行下方，不撑高横条自己 ——
+   `body.hasprog` 的 padding-top 是个固定值，横条一变高就盖住顶栏、
+   导航点不到（同「position:fixed 会盖住页面最下面那行」那条）。 */
+#prgbar .pgd{position:absolute;left:0;top:100%;z-index:2;
+  min-width:420px;max-width:min(760px,96vw);max-height:60vh;overflow:auto;
+  padding:6px 0;background:var(--bg2,#12161c);
+  border:1px solid var(--line);border-top:none;border-radius:0 0 8px 0;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);white-space:normal;cursor:default}
+#prgbar .pgdr{display:flex;align-items:baseline;gap:8px;padding:2px 12px}
+#prgbar .pgdi{flex:none;width:14px;text-align:center}
+#prgbar .pgdn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+#prgbar .pgdt{flex:none;font-variant-numeric:tabular-nums;color:var(--dim)}
+#prgbar .pgdok .pgdn{color:var(--fg)}
+#prgbar .pgdcur{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#prgbar .pgdcur .pgdn,#prgbar .pgdcur .pgdt{color:var(--accent)}
+#prgbar .pgdbad .pgdn,#prgbar .pgdbad .pgdt{color:var(--down)}
+/* 还没跑到的那几步压暗 —— 它们是【上次】的名字，不是这次的事实 */
+#prgbar .pgdq{opacity:.55}
+#prgbar .pgdf{padding:4px 12px 2px;margin-top:4px;
+  border-top:1px solid var(--line);color:var(--dim);font-size:11px}
 body.hasprog{padding-top:28px}
 /* 横条上那个入口按钮：12px 的带子里不能用默认 .btn 的高度，否则把
    横条撑高一截、body 的 padding-top 就对不上了（表现是它盖住顶栏）。 */

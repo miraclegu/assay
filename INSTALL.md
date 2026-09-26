@@ -52,10 +52,12 @@ cd 随便一个目录            # 就是上面那个放着 assay/ 和 datalake/
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install duckdb pandas numpy pyarrow
+pip install -r datalake/requirements.txt
 ```
 
-**只要这 4 个**。这个清单是扫两个仓库的全部 `import` 得出的（不是照某个
+**只要这 4 个**（duckdb / pandas / numpy / pyarrow）。
+🔴 **包名只在 `datalake/requirements.txt` 一处列** —— 这里再抄一遍的话，加一个依赖时改漏一处，新机器上就是一句裸 `ModuleNotFoundError`。
+这个清单是扫两个仓库的全部 `import` 得出的（不是照某个
 现成的 venv 抄——那里面还有一堆别的项目留下的包），并且**实测过**：
 拿一个只装了这 4 个包的干净 venv 起了一次看板，首页与
 `/api/setup`、`/api/progress`、`/api/sync` 都正常。
@@ -141,7 +143,7 @@ cd 随便一个目录
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-pip install duckdb pandas numpy pyarrow
+pip install -r datalake/requirements.txt
 ```
 
 > `Activate.ps1` 被拦下来（提示"禁止运行脚本"）的话，先执行一次：

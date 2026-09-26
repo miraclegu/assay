@@ -782,6 +782,11 @@ function _tipAt(tip, cx, cy){
      （同顶部横条那条纪律）。刚跑完的 90 秒仍然显示结果，然后自己退场。 */
 let PRG = null, PRGT = null;
 const PRG_RUN = 2000, PRG_IDLE = 10000;
+/* 🔴 展开态**必须是模块级** —— 横条每 2 秒被 innerHTML 整块换掉，
+   存在局部里的话刚点开就被下一轮冲掉（同 LVSORT / KPOPEN 那条）。
+   ★ 不进 localStorage：它是"我现在想看"，下次打开该回到收起
+     （同「待办折叠状态不持久化」）。 */
+let PRGOPEN = {};
 
 function fmtDur(s){
   if(s == null || !isFinite(s)) return null;
@@ -789,6 +794,47 @@ function fmtDur(s){
   const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), q = s % 60;
   return h ? (h + ':' + String(m).padStart(2,'0') + ':' + String(q).padStart(2,'0'))
            : (m + ':' + String(q).padStart(2,'0'));
+}
+
+/* 展开面板：这条链**每一步**跑得怎么样。
+   用户："点开可以看到其更新到第几步，已使用多长时间，大约还要多长时间"。
+   🔴 数据全部来自 `/api/progress`（`done` 是这次真跑出来的，`plan` 是
+     **上一次**完整跑的剖面）—— 所以未跑那几步要标【上次】：
+     链加过步骤的话那份名字就是过期的，而它不报错（同「不猜一个数」）。 */
+function prgSteps(j){
+  const done = j.done || [], plan = j.plan || [], total = j.total || 0;
+  const rows = [];
+  for(let k = 0; k < total; k++){
+    const d = done[k], cur = (j.state === 'running' && j.i === k + 1 && !d);
+    const nm = (d && d.name) || (plan[k] && plan[k].name) || null;
+    let ico = '·', cls = 'pgdq', right = '';
+    if(d){
+      ico = d.state === 'ok' ? '✅' : '🔴';
+      cls = d.state === 'ok' ? 'pgdok' : 'pgdbad';
+      right = fmtDur(d.sec) || '';
+    }else if(cur){
+      ico = '⟳'; cls = 'pgdcur';
+      right = '已用 ' + (fmtDur(j.step_elapsed) || '0:00');
+      if(j.step_eta > 0) right += ' · 上次 ' + fmtDur(j.step_eta);
+    }else if(plan[k]){
+      right = '上次 ' + (fmtDur(plan[k].sec) || '—');
+    }
+    /* 没跑到、也没有上次剖面 -> 名字是【未知】，照实说，不编一个。 */
+    const label = cur ? (j.step || nm || '（这一步）')
+                      : (nm || (d ? '（未记名）' : '（还不知道是哪一步）'));
+    rows.push('<div class="pgdr ' + cls + '">' +
+      '<span class="pgdi">' + ico + '</span>' +
+      '<span class="pgdn">' + (k + 1) + '. ' + esc(label) + '</span>' +
+      '<span class="pgdt">' + esc(right) + '</span></div>');
+  }
+  const foot = [];
+  if(!plan.length && j.state === 'running')
+    foot.push('还没有耗时基准（第一次跑完就有了），所以没写"还要多久"');
+  else if(plan.length) foot.push('灰的那几步是【上次】跑的名字与耗时');
+  if(j.log) foot.push('日志 ' + esc(j.log));
+  return '<div class="pgd">' + rows.join('') +
+    (foot.length ? '<div class="pgdf">' + foot.join(' · ') + '</div>' : '') +
+    '</div>';
 }
 
 function prgHtml(j){
@@ -810,6 +856,32 @@ function prgHtml(j){
       '<span class="pgs">' + bits.join(' · ') + '</span>' +
       '<a href="#" class="btn" id="prgsetup">▷ 开始建本地数据</a>' +
       '<a href="/#/sync">看清单 ›</a>';
+  }
+  /* 数据齐了，但定时任务没装 —— 新机器上最容易漏掉的一步。
+     用户问「新下载的项目会在什么时候启用定时任务」，查下来是
+     【三个入口全要人主动做】，而一键建库跑完不装：于是七个阶段全绿、
+     横条自己消失、首页一切正常，而明天起数据再也不更新。
+     不替人装（往 launchd / schtasks 里写条目是系统级副作用），
+     但必须说出来；装上之后这一行自己消失。 */
+  if(j.kind === 'autosync_needed'){
+    const bits = [];
+    /* 窗口口径由服务端给 —— 前端写死的话，改了窗口它不会跟着变
+       （同「清单在服务端」）。 */
+    (j.tasks || []).forEach(t => {
+      if(t.window_text) bits.push(esc(t.name || '') + ' ' + esc(t.window_text));
+    });
+    if(!bits.length && j.window) bits.push(esc(j.window));
+    /* 🔴 代价要说出来，而且说的是【可证的事实】：PIT 快照是覆盖写，
+       漏一天补不回来（同「关自动同步」那句 confirm）。 */
+    bits.push(j.partial ? '现在只开了一半' : '现在没开 —— 数据不会自己更新');
+    bits.push('PIT 快照漏一天补不回来');
+    if(!j.can_run && j.why) bits.push(esc(j.why));
+    return '<div class="pgrow" data-job="' + esc(j.job) + '">' +
+      '<span class="pgi">⟳</span>' +
+      '<b>' + esc(j.title) + '</b>' +
+      '<span class="pgs">' + bits.join(' · ') + '</span>' +
+      '<a href="#" class="btn" id="prgauto">▷ 开启自动同步</a>' +
+      '<a href="/#/sync">看定时窗口 ›</a></div>';
   }
   const run = j.state === 'running', bad = j.state === 'stale' || j.rc;
   const ico = run ? '⟳' : (bad ? '🔴' : '✅');
@@ -844,12 +916,20 @@ function prgHtml(j){
   }
   if(!run && !bad) bits.push('完成');
 
-  return '<i class="pgfill' + (bad ? ' bad' : '') + '" style="width:' +
+  /* 🔴 展开区是**浮层**（绝对定位贴在横条下方），不撑高横条自己 ——
+     `body.hasprog{padding-top}` 是个固定值，横条一变高就会盖住顶栏、
+     把导航**点不到**（同「position:fixed 会盖住页面最下面那行」）。 */
+  const open = !!PRGOPEN[j.job];
+  return '<div class="pgrow" data-job="' + esc(j.job) + '">' +
+         '<i class="pgfill' + (bad ? ' bad' : '') + '" style="width:' +
          (pct * 100).toFixed(1) + '%"></i>' +
          '<span class="pgi">' + ico + '</span>' +
          '<b>' + esc(j.title || j.job) + '</b>' +
          '<span class="pgs">' + bits.join(' · ') + '</span>' +
-         '<a href="/#/sync">看日志 ›</a>';
+         '<a href="#" class="pgmore" data-job="' + esc(j.job) + '">' +
+         (open ? '收起 ▴' : '明细 ▾') + '</a>' +
+         '<a href="/#/sync">看日志 ›</a>' +
+         (open ? prgSteps(j) : '') + '</div>';
 }
 
 async function prgScan(){
@@ -870,6 +950,31 @@ async function prgScan(){
        整块换掉，逐个绑的话换完就没有 handler 了（同「innerHTML 填充之后
        才存在的元素要重新绑事件」）。 */
     bar.onclick = async (ev) => {
+      /* 明细开关：同样**委托**在这个稳定容器上（内容每轮重建）。 */
+      const more = ev.target.closest('.pgmore');
+      if(more){
+        ev.preventDefault();
+        const k = more.dataset.job;
+        PRGOPEN[k] = !PRGOPEN[k];
+        prgScan();                 // 立刻重渲染，别等下一轮
+        return;
+      }
+      /* 开启自动同步：与「开始建本地数据」同一条委托链。 */
+      const a = ev.target.closest('#prgauto');
+      if(a){
+        ev.preventDefault();
+        a.textContent = '正在开启…';
+        let r;
+        try{ r = await post('/api/sync/auto', {on: true}); }
+        catch(e){ r = {error: String(e)}; }
+        if(r && r.error){
+          a.textContent = '▷ 开启自动同步';
+          alert('开不了：' + r.error);
+          return;
+        }
+        prgScan();     // 装上了这一行就该自己消失，别等下一轮
+        return;
+      }
       const b = ev.target.closest('#prgsetup');
       if(!b) return;
       ev.preventDefault();

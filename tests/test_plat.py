@@ -2127,15 +2127,37 @@ def t_serve_ctl():
     assert 'SIGTERM' in body and 'SIGKILL' in body, \
         'do_stop 应当先 SIGTERM、超时才升级 SIGKILL'
     #   🔴 要检查**轮询循环体内**有确认，不能只查"文件里出现过" ——
-    #     `os.kill(pid, 0)` 在 do_stop 里有两处（轮询 + 强杀后再确认），
+    #     活性探测在 do_stop 里有两处（轮询 + 强杀后再确认），
     #     只查存在性时把轮询那处删掉照样全绿。
     #     （同 pruned 那条用例踩过的坑：字符串存在性检查抓不到"逻辑被绕过"。）
     poll = body[body.index('while time.time()'):body.index('else:')]
-    assert 'os.kill(pid, 0)' in poll, \
+    assert '_alive(pid)' in poll, \
         'do_stop 的轮询里没有确认进程退出 —— 「发了信号」不等于「停了」'
     kill9 = body.split('SIGKILL')[-1]
-    assert 'os.kill(pid, 0)' in kill9, \
+    assert '_alive(pid)' in kill9, \
         'SIGKILL 之后没再确认 —— 强杀也可能失败（僵尸、权限）'
+
+    # ---- ④b 🔴🔴 活性探测**不许**退回 `os.kill(pid, 0)`（2026-09-26）----
+    #   POSIX 上那是"只探测不发信号"的惯用法；而 **Windows 上 `os.kill`
+    #   对任何非 CTRL_* 的 sig 都走 `TerminateProcess`** —— 那句"探测"
+    #   会把进程**真的杀掉**，而它不报错（`--status` 看一眼就把服务停了）。
+    #   ★ 判据落在**探测点**上：`_alive` 自己的实现里那句是对的（POSIX 分支），
+    #     所以只扫 `do_stop` / `do_status` 这两段。
+    for _nm, _seg in (('do_stop', body),
+                      ('do_status', src[src.index('def do_status'):
+                                         src.index('def _alive')])):
+        assert 'os.kill(pid, 0)' not in _seg, (
+            '%s 里又出现 `os.kill(pid, 0)` —— Windows 上它会把进程杀掉，'
+            '而那不报错。活性探测一律走 `_alive()`' % _nm)
+    #   ★ 而且 SIGKILL 不许**直接引用**（Windows 上没有这个常量，
+    #     直接写就是 AttributeError）
+    assert "getattr(signal, 'SIGKILL'" in body, \
+        ('do_stop 直接引用了 signal.SIGKILL —— Windows 上没有这个常量，'
+         '会 AttributeError。要 getattr 兜一个 SIGTERM')
+    #   ★ 反向自证：`_alive` 真的存在且 POSIX 分支仍用 os.kill(pid, 0)
+    alv = src[src.index('def _alive'):src.index('def do_stop')]
+    assert 'os.name' in alv and 'os.kill(pid, 0)' in alv, \
+        '_alive 里没有分平台 —— 它才是唯一该出现 os.kill(pid, 0) 的地方'
     assert '_who(port)' in body.split('SIGKILL')[-1], \
         ('stop 结束前要再确认端口真的空了 —— 进程没了但端口还在 TIME_WAIT 时，'
          '新进程 bind 会报 "Address already in use"，那个报错指不到真原因')
@@ -2167,6 +2189,8 @@ def t_serve_ctl():
             '_ours 认自己不认 nginx/node/http.server；'
             'stop 先 TERM 后 KILL 且轮询确认 + 收尾查端口；'
             'restart 没停干净不启动；--status 从 code 子对象取；'
+            '跨平台：活性探测不许退回 os.kill(pid,0)（Windows 上那会杀掉进程）、'
+            'SIGKILL 要 getattr 兜底；'
             '空端口上 --status=1 / --stop=0')
 
 
