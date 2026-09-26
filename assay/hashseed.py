@@ -34,6 +34,42 @@
 import os
 import sys
 
+
+def ensure_utf8_console():
+    """把输出编码钉成 UTF-8 —— **Windows 上不做这件事整条链会崩**。
+
+    本项目的脚本满屏 `✓ ✗ ⚠ ★ 🔴`，而中文 Windows 的默认编码是 cp936，
+    **编不出这些字符**。交互控制台没事（PEP 528 起用 UTF-8），坑在
+    **输出被重定向**的时候（schtasks 写日志、subprocess 抓输出）——
+    那时 Python 退回 locale 编码，第一个 `✓` 就 `UnicodeEncodeError`、
+    **退出码 1**，而报出来指不到"是编码不是逻辑"。实测验过。
+
+    做两件事，缺一件都不够：自己的 stdout 重配（env 对已建好的流无效）、
+    给子进程设 `PYTHONUTF8=1`（PEP 540；这条链上几乎每步都是子进程）。
+    ★ `errors='replace'` 兜底 —— 宁可显示成 `?` 也不许整个进程崩掉。
+    ★ 同一份实现在 `datalake/console.py` 也有一份（那边是 datalake 各入口
+      的家）。两个仓库，跨仓共享要引依赖，这是明知的取舍；改一处要
+      **两处一起改**。
+    """
+    if os.environ.get('PYTHONUTF8') != '1':
+        os.environ['PYTHONUTF8'] = '1'
+    for _n in ('stdout', 'stderr'):
+        _f = getattr(sys, _n, None)
+        _e = (getattr(_f, 'encoding', '') or '').lower().replace('-', '')
+        if _f is None or _e.startswith('utf8'):
+            continue
+        try:
+            _f.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, OSError, ValueError):
+            pass
+    if os.name == 'nt':
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:                                   # noqa: BLE001
+            pass
+
 SEED = '0'
 _ENV = 'PYTHONHASHSEED'
 

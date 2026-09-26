@@ -28,7 +28,17 @@ import os as _os
 import sys as _sys
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from assay.hashseed import ensure_fixed_hash_seed as _ehs   # noqa: E402
+from assay.hashseed import ensure_utf8_console as _euc      # noqa: E402
+# 🔴 UTF-8 要在【任何打印与任何子进程】之前 —— 中文 Windows 默认 cp936，
+#   编不出满屏的 ✓✗⚠，输出一被重定向（schtasks 写日志 / subprocess 抓
+#   输出）就 UnicodeEncodeError、退出码 1。见 hashseed.ensure_utf8_console
+# 🔴 **顺序不能反**：`_ehs()` 要固定 hash 种子，没固定就 `os.execve` 把自己
+#   重启一次 —— 在它之前做的事白做、有副作用的会重来一遍，所以它必须是
+#   第一条可执行语句（守卫用 ast 钉着）。而 `_euc()` 放在后面不影响 UTF-8：
+#   `_ehs` 在 exec 之前一个字都不打印，当前进程靠 `reconfigure()`、
+#   子进程靠 `PYTHONUTF8=1`，两条路都不要求"在 exec 之前设"。
 _ehs()
+_euc()
 import os
 import sys
 
