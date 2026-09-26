@@ -1,0 +1,255 @@
+{
+ "account": "a3",
+ "built_at": "2026-09-24T16:15:47",
+ "buy": [],
+ "calendar_source": "tdx.raw_holidays",
+ "cash": 6513.88,
+ "code_sha": "457e0dca",
+ "code_sha256": "457e0dca5f8fee17012c18a97986d21d95f1f881239c215d7a12dfd2d1913a94",
+ "data_asof": "2026-09-23",
+ "data_fingerprint": {
+  "overall": "b468da889c23",
+  "parts": {
+   "factor": {
+    "hash": "e3b0c44298fc",
+    "n_files": 0,
+    "newest_mtime": null,
+    "total_bytes": 0
+   },
+   "index": {
+    "hash": "d18302e3084f",
+    "n_files": 24,
+    "newest_mtime": "2026-09-24T16:07:04",
+    "total_bytes": 64780327
+   },
+   "panel": {
+    "hash": "eb80951c5f90",
+    "n_files": 1,
+    "newest_mtime": "2026-09-24T16:07:37",
+    "total_bytes": 122109624
+   },
+   "std": {
+    "hash": "0d7961afe2a8",
+    "n_files": 4,
+    "newest_mtime": "2026-09-24T16:07:37",
+    "total_bytes": 158400
+   }
+  }
+ },
+ "days_until_rebalance": null,
+ "explain": {
+  "captured": false,
+  "codes_total": 0,
+  "g_sets": {
+   "target": [
+    "513120.XSHG",
+    "515050.XSHG",
+    "515880.XSHG"
+   ]
+  },
+  "groups": [],
+  "n_groups": 0,
+  "notes": [
+   "这一轮策略没有查数据 —— 多半不是调仓日，所以没有候选池。"
+  ],
+  "params": {
+   "n_breadth": 7
+  },
+  "pool_shown": 0,
+  "pool_total": 0,
+  "set_labels": {
+   "target": "target"
+  },
+  "steps": []
+ },
+ "for_date": "2026-09-24",
+ "freed_est": 65144.8,
+ "held_codes": [
+  "515050.XSHG",
+  "515880.XSHG"
+ ],
+ "hold": [
+  {
+   "code": "515050.XSHG",
+   "name": "5GETF",
+   "shares": 13000,
+   "why": ""
+  },
+  {
+   "code": "515880.XSHG",
+   "name": "通信ETF",
+   "shares": 19400,
+   "why": ""
+  }
+ ],
+ "is_rebalance_day": false,
+ "left_est": 71658.68,
+ "next_rebalance": null,
+ "no_price": [],
+ "params": {},
+ "recomputed": false,
+ "revisions": [
+  {
+   "archived": "signals/_rev/2026-09-24.rev1.json",
+   "built_at": "2026-09-24T09:20:09",
+   "data_asof": "2026-09-23",
+   "diff": {
+    "buy_added": [],
+    "buy_removed": [],
+    "changed": true,
+    "data_fp_changed": true,
+    "data_fp_new": "b468da889c23",
+    "data_fp_old": "2b7d7d4e5eb7",
+    "hold_added": [
+     "515050.XSHG",
+     "515880.XSHG"
+    ],
+    "hold_removed": [
+     "513120.XSHG",
+     "515050.XSHG",
+     "515880.XSHG"
+    ],
+    "sell_added": [
+     "159363.XSHE",
+     "512480.XSHG",
+     "513310.XSHG",
+     "588000.XSHG",
+     "588080.XSHG",
+     "588200.XSHG"
+    ],
+    "sell_removed": []
+   },
+   "new_data_asof": "2026-09-23",
+   "replaced_at": "2026-09-24T16:15:47",
+   "rev": 1
+  }
+ ],
+ "sell": [
+  {
+   "code": "159363.XSHE",
+   "name": "创业板人工智能ETF华宝",
+   "reason": "limit_up_exit",
+   "ref_price": 1.28,
+   "shares": 12100,
+   "why": ""
+  },
+  {
+   "code": "512480.XSHG",
+   "name": "半导体",
+   "reason": "limit_up_exit",
+   "ref_price": 1.05,
+   "shares": 4100,
+   "why": ""
+  },
+  {
+   "code": "513310.XSHG",
+   "name": "中韩芯片",
+   "reason": "limit_up_exit",
+   "ref_price": 4.97,
+   "shares": 6200,
+   "why": ""
+  },
+  {
+   "code": "588000.XSHG",
+   "name": "科创50",
+   "reason": "limit_up_exit",
+   "ref_price": 1.75,
+   "shares": 2900,
+   "why": ""
+  },
+  {
+   "code": "588080.XSHG",
+   "name": "科创板50",
+   "reason": "limit_up_exit",
+   "ref_price": 1.7,
+   "shares": 3100,
+   "why": ""
+  },
+  {
+   "code": "588200.XSHG",
+   "name": "科创芯片",
+   "reason": "limit_up_exit",
+   "ref_price": 1.19,
+   "shares": 3500,
+   "why": ""
+  }
+ ],
+ "upcoming": [
+  {
+   "date": "2026-09-28",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-09-29",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-09-30",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-08",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-09",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-12",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-13",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-14",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-15",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-16",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-19",
+   "is_rebal": false,
+   "wday": 1
+  },
+  {
+   "date": "2026-10-20",
+   "is_rebal": false,
+   "wday": 2
+  },
+  {
+   "date": "2026-10-21",
+   "is_rebal": false,
+   "wday": 3
+  },
+  {
+   "date": "2026-10-22",
+   "is_rebal": false,
+   "wday": 4
+  },
+  {
+   "date": "2026-10-23",
+   "is_rebal": false,
+   "wday": 5
+  }
+ ],
+ "warnings": []
+}

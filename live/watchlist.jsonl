@@ -42,3 +42,9 @@
 {"uid": "3a7c3d732328", "ts": "2026-09-22T10:12:33", "act": "group", "code": "300980.XSHE", "group": "实盘·FROEA-TRADE模拟账户"}
 {"uid": "b27a1d7ba6ff", "ts": "2026-09-22T10:12:33", "act": "add", "code": "301062.XSHE", "group": "实盘·FROEC-TRADE账户", "note": "持仓自动加入"}
 {"uid": "ec2bf068d8a5", "ts": "2026-09-22T11:12:34", "act": "note", "code": "300980.XSHE", "note": "已清仓（曾在实盘·FROEA-TRADE模拟账户）"}
+{"uid": "2e7ae9f4124a", "ts": "2026-09-24T09:32:08", "act": "note", "code": "513120.XSHG", "note": "已清仓（曾在实盘·ETF轮动模拟）"}
+{"uid": "09d27be08e25", "ts": "2026-09-24T14:59:48", "act": "add", "code": "512480.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入，另在 ETF 轮动mask、ETF轮动maskpos"}
+{"uid": "b05d24058979", "ts": "2026-09-24T14:59:48", "act": "add", "code": "513310.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入，另在 ETF 轮动mask、ETF轮动maskpos"}
+{"uid": "18ef40eec107", "ts": "2026-09-24T14:59:48", "act": "add", "code": "588000.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入，另在 ETF 轮动mask、ETF轮动maskpos"}
+{"uid": "74be9e073d9f", "ts": "2026-09-24T14:59:48", "act": "add", "code": "588080.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入，另在 ETF 轮动mask、ETF轮动maskpos"}
+{"uid": "cc2ad65e2570", "ts": "2026-09-24T14:59:48", "act": "add", "code": "588200.XSHG", "group": "实盘·ETF轮动模拟", "note": "持仓自动加入，另在 ETF 轮动mask、ETF轮动maskpos"}

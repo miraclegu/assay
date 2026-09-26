@@ -1,40 +1,59 @@
 {
- "account": "a2",
- "built_at": "2026-09-23T16:17:37",
+ "account": "froec",
+ "built_at": "2026-09-24T23:00:11",
  "buy": [],
  "calendar_source": "tdx.raw_holidays",
- "cash": 1917.35,
+ "cash": 212.53,
  "code_sha": "c3118f7d",
  "code_sha256": "c3118f7d57a41ef3ae6a9de2715481e1d4d11029bf9c51f04e4a7382f867ee36",
- "data_asof": "2026-09-22",
+ "data_asof": "2026-09-24",
  "data_fingerprint": {
-  "overall": "9c1374444a9f",
+  "overall": "036d7865819f",
   "parts": {
-   "index": {
-    "hash": "97772dfde652",
+   "factor": {
+    "hash": "70c93fea3f0b",
     "n_files": 24,
-    "newest_mtime": "2026-09-23T16:16:57",
-    "total_bytes": 64767910
+    "newest_mtime": "2026-09-24T18:11:08",
+    "total_bytes": 9769936413
+   },
+   "index": {
+    "hash": "7e5e1e63d056",
+    "n_files": 24,
+    "newest_mtime": "2026-09-24T18:06:16",
+    "total_bytes": 64792245
    },
    "panel": {
-    "hash": "b726d99e9f35",
+    "hash": "ba0d117cfd9c",
     "n_files": 24,
-    "newest_mtime": "2026-09-23T16:17:20",
-    "total_bytes": 1342006456
+    "newest_mtime": "2026-09-24T18:07:20",
+    "total_bytes": 1343052319
    },
    "std": {
-    "hash": "0f6f2714e0d8",
+    "hash": "ecea64e67ee7",
     "n_files": 18,
-    "newest_mtime": "2026-09-23T16:17:27",
-    "total_bytes": 376370239
+    "newest_mtime": "2026-09-24T18:07:39",
+    "total_bytes": 376436683
    }
   }
  },
- "days_until_rebalance": 3,
+ "days_until_rebalance": 1,
  "explain": {
   "captured": false,
   "codes_total": 0,
-  "g_sets": {},
+  "g_sets": {
+   "pos_state": [
+    "002910.XSHE",
+    "300375.XSHE",
+    "300500.XSHE",
+    "300575.XSHE",
+    "301062.XSHE",
+    "301126.XSHE",
+    "301152.XSHE",
+    "603168.XSHG",
+    "603506.XSHG",
+    "605122.XSHG"
+   ]
+  },
   "groups": [],
   "n_groups": 0,
   "notes": [
@@ -56,10 +75,10 @@
    "limit_days": 20,
    "limit_up_exit": 1,
    "listed_days": 250,
-   "lu_buy_only": 0,
+   "lu_buy_only": 1,
    "lu_hold_only": 0,
    "lu_need_held": 1,
-   "lu_since_start": 0,
+   "lu_since_start": 1,
    "n_pf_stop": 0,
    "n_stop": 0,
    "paused_in_pool": 0,
@@ -81,18 +100,20 @@
    "skip_n": 0,
    "stock_num": 10,
    "stop_ban": 0,
-   "stop_intraday": 0,
-   "stop_loss": 0.0,
+   "stop_intraday": 1,
+   "stop_loss": 0.35,
    "stop_time": "14:00",
    "trail_stop": 0.0,
    "weekday": 2
   },
   "pool_shown": 0,
   "pool_total": 0,
-  "set_labels": {},
+  "set_labels": {
+   "pos_state": "持仓状态"
+  },
   "steps": []
  },
- "for_date": "2026-09-23",
+ "for_date": "2026-09-28",
  "freed_est": 0,
  "held_codes": [
   "002910.XSHE",
@@ -110,92 +131,86 @@
   {
    "code": "002910.XSHE",
    "name": "庄园牧场",
-   "shares": 3800,
+   "shares": 3700,
    "why": ""
   },
   {
    "code": "300375.XSHE",
    "name": "鹏翎股份",
-   "shares": 28900,
+   "shares": 9100,
    "why": ""
   },
   {
    "code": "300500.XSHE",
    "name": "启迪设计",
-   "shares": 4000,
+   "shares": 3800,
    "why": ""
   },
   {
    "code": "300575.XSHE",
    "name": "中旗股份",
-   "shares": 6300,
+   "shares": 6000,
    "why": ""
   },
   {
    "code": "301062.XSHE",
    "name": "上海艾录",
-   "shares": 2000,
+   "shares": 9200,
    "why": ""
   },
   {
    "code": "301126.XSHE",
    "name": "达嘉维康",
-   "shares": 3800,
+   "shares": 3600,
    "why": ""
   },
   {
    "code": "301152.XSHE",
    "name": "天力锂能",
-   "shares": 600,
+   "shares": 1600,
    "why": ""
   },
   {
    "code": "603168.XSHG",
    "name": "莎普爱思",
-   "shares": 6700,
+   "shares": 6400,
    "why": ""
   },
   {
    "code": "603506.XSHG",
    "name": "南都物业",
-   "shares": 1200,
+   "shares": 3300,
    "why": ""
   },
   {
    "code": "605122.XSHG",
    "name": "四方新材",
-   "shares": 3300,
+   "shares": 3200,
    "why": ""
   }
  ],
  "is_rebalance_day": false,
- "left_est": 1917.35,
+ "left_est": 212.53,
  "next_rebalance": "2026-09-29",
  "no_price": [],
- "params": {},
+ "params": {
+  "lu_buy_only": 1,
+  "lu_since_start": 1,
+  "stop_intraday": 1,
+  "stop_loss": 0.35,
+  "weekday": 2
+ },
  "recomputed": false,
  "recomputed_at": [
-  "2026-09-22T19:00:14",
-  "2026-09-22T20:00:30",
-  "2026-09-22T21:22:41",
-  "2026-09-22T22:00:11",
-  "2026-09-22T23:00:11",
-  "2026-09-23T16:08:04",
-  "2026-09-23T16:17:37"
+  "2026-09-24T19:17:29",
+  "2026-09-24T20:00:45",
+  "2026-09-24T21:12:44",
+  "2026-09-24T22:00:10",
+  "2026-09-24T23:00:11"
  ],
  "revisions": [],
  "sell": [],
  "upcoming": [
-  {
-   "date": "2026-09-24",
-   "is_rebal": false,
-   "wday": 4
-  },
-  {
-   "date": "2026-09-28",
-   "is_rebal": false,
-   "wday": 1
-  },
   {
    "date": "2026-09-29",
    "is_rebal": true,
@@ -260,6 +275,16 @@
    "date": "2026-10-22",
    "is_rebal": false,
    "wday": 4
+  },
+  {
+   "date": "2026-10-23",
+   "is_rebal": false,
+   "wday": 5
+  },
+  {
+   "date": "2026-10-26",
+   "is_rebal": false,
+   "wday": 1
   }
  ],
  "warnings": []
