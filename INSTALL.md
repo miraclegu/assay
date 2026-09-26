@@ -170,37 +170,28 @@ python serve.py
 > 同目录下那个 `sync_daily.sh` 只是一行转发，给老的 launchd 配置用的——
 > **Windows 上不需要它，也不需要 Git Bash 或 WSL**。
 
-### 2.5 每天自动更新 —— ⚠ 这一步 Windows 上要手动
+### 2.5 每天自动更新
 
 ```powershell
 python setup_tdx.py --install-timer
 ```
 
-🔴 **这条命令在 Windows 上现在装出来的任务跑不了**：它建的计划任务里
-写死了 `/bin/bash sync_daily.sh`，而 Windows 没有 `/bin/bash`。
-任务会建成功、到点执行失败，**而失败只写在计划任务的历史里，你不会注意到**。
-
-在修好之前，**自己建两个计划任务**指向 Python 正本（把 `C:\路径\` 换成你的）：
+装两个 **Windows 计划任务**（schtasks）：**数据同步**（16:00~20:00 每 10 分钟
+问一次"今天的数据齐了没"，齐了秒退）和**信号重算**（16:00~次日 09:20 每小时）。
 
 ```powershell
-# 数据同步：16:00 起，每 10 分钟问一次（齐了就秒退，所以很便宜）
-schtasks /create /tn "finacial-sync" /f /sc minute /mo 10 /st 16:00 /du 04:00 `
-  /tr "C:\路径\.venv\Scripts\python.exe C:\路径\datalake\sync_daily.py --if-stale"
-
-# 信号重算：每小时一次
-schtasks /create /tn "finacial-tick" /f /sc hourly `
-  /tr "C:\路径\.venv\Scripts\python.exe C:\路径\assay\tick_daily.py"
+python setup_tdx.py --schedule          # 看配置与【实际装上】的点位
+schtasks /query /tn finacial-sync-1600 /v /fo list    # 看某个任务上次跑得怎么样
 ```
 
-★ 路径要用**虚拟环境里的** `python.exe` —— 用系统的那个会
-`ModuleNotFoundError: No module named 'duckdb'`，而**那条错只出现在任务日志里**。
+★ 任务里写的是**你这个虚拟环境的 `python.exe` 绝对路径** + `sync_daily.py`
+（纯 Python 正本）—— 所以 Windows 上**不需要 Git Bash 或 WSL**，也不会
+踩到"系统 python 没装 duckdb"那个坑。
 
-⚠ **本文档的 macOS 部分是在 macOS 上逐条跑过的；Windows 部分没有 Windows
-机器可验** —— 上面这两条 `schtasks` 是照官方语法写的，**没有实测**。
-建完用 `schtasks /query /tn finacial-sync /v /fo list` 看一眼「上次运行结果」
-是不是 `0`，别默认它成了。
-
----
+> ⚠ **这一段没有 Windows 机器可实测**：代码路径是跨平台的（装/查/删三处
+> 任务名走同一处定义，并有守卫构造了一次"装 44 个 -> 查出 44 个"的往返），
+> 但真实的 `schtasks` 行为我没跑过。装完**回头看一眼上次运行结果是不是 0**，
+> 别默认它成了。
 
 ## 3. 装完了怎么确认它是好的
 

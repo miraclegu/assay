@@ -1193,18 +1193,22 @@ def t_setup_tdx():
     assert (18, 10) in rt, \
         ('轮询序列要覆盖原来那个 18:10 —— 覆盖了才能删掉独立的 sync timer，'
          '少一处要对齐的时间常量')
-    jobs = m_st = open(os.path.join(os.path.dirname(here), 'datalake',
-                                    'setup_tdx.py'), encoding='utf-8').read()
-    assert "'--if-stale'" in jobs.split('JOBS = [')[1][:600], \
+    # 🔴 这条原来是**扫源码**里 `JOBS = [` 那一段查字符串 —— 把 JOBS
+    #   抽成 `build_jobs()` 之后它当场 IndexError。失败的是断言不是产品，
+    #   而它本来就该问**运行时到底传了什么**（查字符串还会命中注释）。
+    _sync_job = [j for j in m.build_jobs(m.load_schedule()[0]) if j[3] == 'sync']
+    assert len(_sync_job) == 1, 'build_jobs 里没有 sync 那条'
+    assert '--if-stale' in _sync_job[0][1], \
         ('轮询必须带 --if-stale —— 不带的话每 10 分钟跑一次完整链，'
-         '而且数据齐了还在跑')
+         '而且数据齐了还在跑：%r' % (_sync_job[0][1],))
     # 🔴 plist 必须能被【严格】解析：plutil -lint 会放过非法 XML
     #   （XML 注释里不能有两个连字符，而 Apple 的解析器宽容、launchd 照跑，
     #     Python 的 expat 直接拒绝 —— 严格的那个才是真判据）
     import plistlib as _pl
-    for label, args, times, tag in (
-            (m.LABEL, ['/bin/bash', m.SH, '--if-stale'], rt, 'sync'),
-            (m.TICK_LABEL, ['python3', m.TICK_PY], _tk_t, 'tick')):
+    # ★ 用**真实的** build_jobs 结果去生成 plist，不再手写一份参数 ——
+    #   手写的那份与真实装的分叉时，这条断言照样绿（它就这么绿过：
+    #   写着 `/bin/bash` 而 Windows 上根本跑不了）。
+    for label, args, times, tag, _what in m.build_jobs(m.load_schedule()[0]):
         xml = m._plist(label, args, times, tag)
         try:
             d = _pl.loads(xml.encode())
@@ -1329,6 +1333,68 @@ def t_setup_tdx():
     #  init 必须先落到别的文件，确认后才替换（不许直接覆盖 tdx.db）
     assert "DB + '.new'" in src, \
         'init 直接覆盖 tdx.db 了 —— 全量包不含退市股时历史会静默缩水'
+    # ── 定时器【真正跑的命令】必须跨平台 ──────────────────────
+    # 🔴 这条此前**完全没有判据**：两条相关守卫都是用例自己构造一份
+    #   参数去调 `_plist`，而那证明不了真实装的是什么。于是 sync 那条
+    #   写着 `/bin/bash …sync_daily.sh` 一直没人发现 ——
+    #   **Windows 上没有 `/bin/bash`**，计划任务建得成功、到点执行失败，
+    #   而失败只写在任务历史里（同「静默失效比报错贵」那条）。
+    jobs = m.build_jobs(m.load_schedule()[0])
+    assert len(jobs) == 2, '定时任务不是两条（sync + tick）：%d' % len(jobs)
+    for label, args, times, tag, what in jobs:
+        assert args and args[0] == sys.executable, (
+            '%s 的命令没走 sys.executable：%r —— 写 `/bin/bash x.sh` 在 '
+            'Windows 上根本跑不起来，写字面量 `python3` 则会在 launchd '
+            '那种窄环境里解析到系统那个（没装 duckdb）' % (tag, args[0]))
+        assert os.path.isfile(args[0]), '%s 的解释器不存在：%s' % (tag, args[0])
+        # 脚本参数必须是真实存在的 .py（正本），不是 .sh 转发
+        py = [a for a in args[1:] if a.endswith(('.py', '.sh'))]
+        assert len(py) == 1, '%s 的命令里不是恰好一个脚本：%r' % (tag, args)
+        assert py[0].endswith('.py'), (
+            '%s 还指着 shell 脚本 %s —— 正本已经是 .py 了' % (tag, py[0]))
+        assert os.path.isfile(py[0]), '%s 指向不存在的脚本：%s' % (tag, py[0])
+        assert times, '%s 一个时间点都没有 —— 空的调度不报错，只是永不触发' % tag
+    # 反向自证：两条确实是不同的脚本（否则上面那圈可能在同一条上空转）
+    _scripts = {j[3]: [a for a in j[1] if a.endswith('.py')][0] for j in jobs}
+    assert len(set(_scripts.values())) == 2, '两条定时指向同一个脚本：%r' % _scripts
+
+    # ── Windows：装用的名字与查/删用的必须是同一套 ──────────────
+    # 🔴 装的是 `finacial-sync-1600`（每点位一个），而查与删原来写的是
+    #   不带后缀的 `finacial-sync` —— 那个名字**根本不存在**，于是
+    #   「装完状态永远显示未安装」「卸载一个都删不掉却说已卸载」。
+    #   判据**构造**一次往返：把 schtasks 换成桩，装一遍、再查一遍。
+    _tasks = []
+
+    def _fake_run(argv, *a, **k):
+        class R:
+            returncode = 0
+            stdout = ''
+            stderr = ''
+        r = R()
+        if argv[:2] == ['schtasks', '/create']:
+            _tasks.append(argv[argv.index('/tn') + 1])
+        elif argv[:2] == ['schtasks', '/query'] and '/fo' in argv:
+            r.stdout = '\n'.join('"\\%s","N/A","Ready"' % t for t in _tasks)
+        return r
+
+    _real_run, _real_sys = m.subprocess.run, m.platform.system
+    try:
+        m.subprocess.run = _fake_run
+        m.platform.system = lambda: 'Windows'
+        for label, args, times, tag, what in jobs:
+            for hh, mm in times:
+                _fake_run(['schtasks', '/create', '/tn',
+                           'finacial-%s-%02d%02d' % (tag, hh, mm)])
+        assert _tasks, '构造不对：一个任务都没"装"上'
+        got = m._win_tasks()
+        assert sorted(got) == sorted(_tasks), (
+            '装了 %d 个任务，查出来 %d 个 —— 装用的名字与查用的对不上，'
+            '而那不报错：状态永远显示"未安装"' % (len(_tasks), len(got)))
+        assert len(m._win_tasks('sync')) == len(jobs[0][2]), \
+            '按 tag 筛不出 sync 的那批'
+    finally:
+        m.subprocess.run, m.platform.system = _real_run, _real_sys
+
     # 本地这个库的 schema 版本读得出来（顺带证明 _meta 判据有效）
     v = m._db_schema_version()
     if v:
@@ -1340,8 +1406,10 @@ def t_setup_tdx():
             '缩表护栏拦不住"值变了"）；'
             '不用 pip 装（PyPI 同名项目无 DuckDB）；'
             '定时 PATH 首段是当前解释器%s；plist 带 EnvironmentVariables 且 '
-            'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在'
-            '%s' % (mine, ('；本地库 schema %s' % v) if v else ''))
+            'plutil 合法；无硬编码 /Users/guhao；缩表护栏 + schema 探针在；'
+            '两条定时都走 sys.executable + .py 正本（不是 /bin/bash）；'
+            'Windows 任务名装/查往返 %d 个'
+            '%s' % (mine, len(_tasks), ('；本地库 schema %s' % v) if v else ''))
 
 
 @case('外部行情接口文档：结构完整 / 示例代码能跑（离线）', tag='fast')
