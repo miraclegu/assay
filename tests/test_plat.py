@@ -3701,7 +3701,13 @@ def t_no_markdown_stars():
     #   实测 **0 误报**（未加规则时 11 条里 3 条是误报）。
     import ast as _ast
     pybad = []
-    for f in sorted(_g.glob(os.path.join(REPO, 'assay/**/*.py'), recursive=True)):
+    # 🔴 **仓库根那几个可执行入口也要扫**（2026-09-27）：它们打到终端上
+    #   的文案同样渲染不了 markdown —— 星号原样显示。扩之前先量过：
+    #   命中 5 处、**0 个误报**（install.py 1 / serve.py 1 /
+    #   tick_daily.py 3），全是真的用户可见文案，已改成【】。
+    for f in (sorted(_g.glob(os.path.join(REPO, 'assay/**/*.py'),
+                             recursive=True))
+              + sorted(_g.glob(os.path.join(REPO, '*.py')))):
         src = open(f, encoding='utf-8').read()
         try:
             tree = _ast.parse(src)
@@ -3737,7 +3743,7 @@ def t_no_markdown_stars():
               if isinstance(c, _ast.Constant) and isinstance(c.value, str)
               and '**' in c.value and len(c.value) > 3]
     assert _found, '服务端那半个扫描器自己坏了'
-    return '扫了 web 下全部 .js 与 assay 下全部 .py，0 处；两半扫描器都自证可用'
+    return '扫了 web 下全部 .js 与 assay 包 + 仓库根的 .py，0 处；两半扫描器都自证可用'
 
 
 @case('万/亿折算与盈亏符号各只有一份（yiv / pnlv）', tag='web')

@@ -38,6 +38,7 @@
   不该在人没表态时替他做 —— 横条上有入口（同「配股不自动执行」那条）。
 """
 import argparse
+import datetime
 import io
 import os
 import subprocess
@@ -61,8 +62,43 @@ MIN_PY = (3, 10)          # assay/hashseed.py 用了 sys.orig_argv（3.10+）
 OK, BAD, WARN = '  ✓ ', '  ✗ ', '  ⚠ '
 
 
+# 窗口关掉之后还看得到。🔴 环境变量可覆盖 —— 守卫要验「结论落盘了没有」
+#   而又不许写生产目录（同 `lv.LIVE` / `progress.DIR` 那套重定向）
+LOG = os.environ.get('ASSAY_INSTALL_LOG') or os.path.join(HERE, 'install.log')
+_LOGF = None
+
+
+def _logopen():
+    """🔴 **结果必须落盘。**
+
+    用户 2026-09-27：「点击 install.bat 后出来命令行框，确认后直接消失了，
+    这样我不知道是安装完成了还是没安装完成」——`pause` 只在窗口还开着时
+    有用，**人一按键那次的输出就永远没了**（同「刚跑完的 90 秒仍显示：
+    任务一结束横条当场消失的话，人走开一分钟就完全不知道到底成没成」）。
+
+    ★ **逐行 flush**：崩在半路时那半截也要留下来，否则最需要日志的那次
+      恰恰是空的。
+    ★ 写不出来（只读目录 / 没权限）**不许把装机搞挂** —— 静默退回只打屏幕。
+    """
+    global _LOGF
+    try:
+        _LOGF = io.open(LOG, 'w', encoding='utf-8', errors='replace')
+        _LOGF.write('# %s  %s\n' % (
+            datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            ' '.join(sys.argv)))
+        _LOGF.flush()
+    except Exception:                                    # noqa: BLE001
+        _LOGF = None
+
+
 def say(s=''):
     print(s, flush=True)
+    if _LOGF is not None:
+        try:
+            _LOGF.write(s + '\n')
+            _LOGF.flush()
+        except Exception:                                # noqa: BLE001
+            pass
 
 
 def venv_python(venv):
@@ -104,7 +140,7 @@ def importable(py, pkgs):
     return (not miss), miss
 
 
-def main():
+def _run():
     ap = argparse.ArgumentParser(description='装好运行环境（不碰数据）')
     ap.add_argument('--check', action='store_true', help='只报不动手')
     ap.add_argument('--venv', default=None,
@@ -125,7 +161,7 @@ def main():
             '而那是固定 hash 种子、保证回测跨进程可复现的入口。')
         if os.name == 'nt':
             say('     去 https://www.python.org/downloads/windows/ 下 3.10+，'
-                '安装时**务必勾上 Add python.exe to PATH**')
+                '安装时【务必勾上 Add python.exe to PATH】')
         else:
             say('     brew install python@3.13   或去 python.org 下安装包')
         say('\n🔴 Python 本身这个脚本装不了（那是系统级的）—— 装好再跑一次。')
@@ -135,7 +171,7 @@ def main():
     # ---- ② 两个仓库并排吗 ----
     if not os.path.isdir(DL):
         say(BAD + '找不到 %s' % DL)
-        say('     两个仓库要**并排**放：<父目录>/assay 与 <父目录>/datalake')
+        say('     两个仓库要【并排】放：<父目录>/assay 与 <父目录>/datalake')
         say('     现在 assay 在 %s' % HERE)
         return 2
     say(OK + '两个仓库并排（%s）' % ROOT)
@@ -224,10 +260,48 @@ def main():
     say('')
     say('    然后打开 http://127.0.0.1:8770')
     say('')
-    say('★ 上面那个是**虚拟环境里**的 python 绝对路径 —— 直接敲 `python`'
+    say('★ 上面那个是【虚拟环境里】的 python 绝对路径 —— 直接敲 `python`'
         ' 的话可能是系统那个（没装 duckdb，serve.py 起不来）。')
     return 0
 
+
+# ---- 收尾：一句明确的结论 + 落盘 ------------------------------------
+#  🔴 **结论必须是最后一行。** 上面那几十行里有 ✓ 也有 ⚠，人扫一眼是看不出
+#    "到底成没成"的；而窗口关掉之后连那几十行都没了。所以：
+#      ① 一句话结论，排在最末（不是夹在中间）
+#      ② 同时写进 install.log —— 窗口关了还查得到（同「任务一结束横条当场
+#         消失的话，人走开一分钟就完全不知道到底成没成」）
+_VERDICT = {
+    0: '✅ 装好了 —— 照上面那行命令起看板',
+    1: '⚠  只检查没动手（--check）—— 去掉 --check 再跑一次就会补上',
+    2: '🔴 没装成 —— 原因见上面那条 ✗，修好再跑一次',
+}
+
+
+def main():
+    _logopen()
+    try:
+        rc = _run()
+    except BaseException as e:                           # noqa: BLE001
+        # 🔴 连异常也要落盘：最需要日志的那一次恰恰是崩掉的那一次
+        import traceback
+        say('')
+        say(BAD + '装机脚本自己崩了：%s: %s' % (type(e).__name__, e))
+        say(traceback.format_exc())
+        rc = 3
+        _VERDICT[3] = '🔴 装机脚本自己崩了 —— 把 install.log 贴出来'
+    say('')
+    say('-' * 62)
+    say(' %s' % _VERDICT.get(rc, '退出码 %s' % rc))
+    if _LOGF is not None:
+        say(' 这次的完整输出已写进：%s' % LOG)
+    say('-' * 62)
+    if _LOGF is not None:
+        try:
+            _LOGF.close()
+        except Exception:                                # noqa: BLE001
+            pass
+    return rc
 
 if __name__ == '__main__':
     sys.exit(main())

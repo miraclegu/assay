@@ -40,6 +40,14 @@ if not defined PY (
 %PY% "%~dp0install.py" %*
 set "RC=%ERRORLEVEL%"
 
+rem -- Restate the verdict in ASCII as the VERY LAST thing on screen.
+rem    install.py already prints a verdict, but if it could not start
+rem    at all (wrong interpreter, missing file) nothing would say so.
+rem    The log file is what survives the window closing.
+echo.
+if "%RC%"=="0" (echo   [OK]   finished, exit code 0) else (echo   [FAIL] exit code %RC%)
+echo   Log:  %~dp0install.log
+
 rem -- Keep the window open when double-clicked, so the result is readable.
 rem    (When run from a terminal there is already a prompt to come back to,
 rem     but pausing there is harmless and costs one keypress.)

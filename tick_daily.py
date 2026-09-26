@@ -163,11 +163,11 @@ def main():
     ok, why, last_day = _leg_a_ok()
     _say('② %s' % why)
     if ok is None:
-        _say('   ⚠️ 判断不了新鲜度 —— **不重算**（宁可用昨晚那份，'
+        _say('   ⚠️ 判断不了新鲜度 —— 【不重算】（宁可用昨晚那份，'
              '也不要拿不确定的数据覆盖它）')
         return 2
     if not ok:
-        _say('   🔴 行情数据没到最新交易日 —— **拒绝重算**。')
+        _say('   🔴 行情数据没到最新交易日 —— 【拒绝重算】。')
         _say('      昨晚 18:10 的同步可能失败了。先看：')
         _say('        bash datalake/sync_daily.sh --no-live')
         _say('      （宁可没有新信号，也不要用半截数据算出来的覆盖旧的）')
@@ -247,7 +247,7 @@ def main():
         if new:
             changed += 1
             d = new[-1]['diff']
-            _say('   [%s] %s  🔴 **与之前那份不一致**（第 %d 版）'
+            _say('   [%s] %s  🔴 【与之前那份不一致】（第 %d 版）'
                  % (aid, r['for_date'], new[-1]['rev']))
             for k in ('buy', 'sell', 'hold'):
                 for tag, key in (('新增', k + '_added'), ('移除', k + '_removed')):

@@ -8,7 +8,7 @@
 from tests._base import *          # noqa: F401,F403  框架 + 共用辅助
 from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noqa: F401
                          _kset, _kmain, _kfq, _klog, _lp_tab, _via_pop)
-import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
+import os, re, sys, io, json, glob, time, shutil, subprocess, datetime, tempfile  # noqa: E401,F401
 
 
 def _chain_dry(with_cwd=False):
@@ -2903,13 +2903,57 @@ def t_windows_boot_path():
         'install.bat 在转发给 install.py 之后没有 pause —— '
         '双击跑完窗口当场关掉，结果一个字都看不见')
 
+    # ---- I) 跑完必须留下【结论】，而且窗口关了还查得到 ----------------
+    #   用户 2026-09-27：「点击 install.bat 后出来命令行框，确认后直接消失了，
+    #   这样我不知道是安装完成了还是没安装完成」——`pause` 只在窗口还开着时
+    #   有用，人一按键那次的输出就永远没了（同「刚跑完的 90 秒仍显示」）。
+    #
+    # 🔴 判据是**真跑一次**看最后几行与日志，不是"源码里有没有 LOG 这个名字"
+    #   —— 后者在 say() 忘了写盘时照样命中。
+    # ★ 日志重定向到临时文件：守卫不许写生产目录（同 lv.LIVE / progress.DIR）。
+    _tmpd = tempfile.mkdtemp(prefix='inst_')
+    try:
+        _lg = os.path.join(_tmpd, 'x.log')
+        _env = dict(os.environ, ASSAY_INSTALL_LOG=_lg)
+        _r = subprocess.run([sys.executable, os.path.join(REPO, 'install.py'),
+                             '--check'], capture_output=True, text=True,
+                            env=_env, cwd=REPO)
+        _tailn = [x for x in _r.stdout.strip().splitlines() if x.strip()][-4:]
+        _tail = '\n'.join(_tailn)
+        # ① 结论要在**最后几行**（夹在中间等于没有——上面几十行里 ✓ ⚠ 都有）
+        assert re.search(r'(装好了|只检查没动手|没装成|崩了)', _tail), (
+            'install.py 跑完没有在最后给一句明确的结论 —— '
+            '人只会看最后那一眼，夹在中间的 ✓/⚠ 说不出"到底成没成"。'
+            '实际最后 4 行：\n%s' % _tail)
+        # ② 结论必须落盘：窗口一关，屏幕上那些就永远没了
+        assert os.path.isfile(_lg), (
+            'install.py 没有把这次的输出写进日志（%s）—— '
+            '双击跑的话窗口一关就什么都查不到了' % _lg)
+        _lt = io.open(_lg, encoding='utf-8').read()
+        assert re.search(r'(装好了|只检查没动手|没装成|崩了)', _lt), (
+            '日志里没有那句结论 —— 只留过程不留结论等于没留')
+        # ③ 反向自证：日志不是空壳，过程也在里面
+        assert 'Python' in _lt and len(_lt.splitlines()) >= 5, (
+            '日志只有结论没有过程，出问题时查不到是哪一步：\n%s' % _lt[:300])
+    finally:
+        shutil.rmtree(_tmpd, ignore_errors=True)
+
+    # 🔴 .bat 也要在【转发之后】把结论再说一遍：install.py 要是压根没起来
+    #   （解释器不对 / 文件缺失），它那句结论根本不会打出来
+    assert re.search(r'^\s*if "%RC%"=="0"', _bt, re.M), (
+        'install.bat 没有在转发之后按退出码给结论 —— '
+        'install.py 起不来时屏幕上一句话都没有')
+    assert 'install.log' in _bt, (
+        'install.bat 没有告诉人日志在哪 —— 窗口关了就无从查起')
+
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
             '不许直接引用 SIGKILL / 不许 shell=True；'
             '目录挂载三条路（symlink -> junction -> 响亮失败，'
             '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
             'requirements.txt 盖住运行时真的 import 的 %d 个第三方包；'
-            'install.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数'
+            'install.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数；'
+            '跑完有结论且落盘（窗口关了还查得到）'
             % (len(files), len(got - TRANSITIVE)))
 
 

@@ -205,7 +205,7 @@ def do_stop(port, wait=10.0):
     mine = [(p, c) for p, c in hit if _ours(c)]
     other = [(p, c) for p, c in hit if not _ours(c)]
     for pid, cmd in other:
-        print('🔴 端口 %d 被别的进程占着，**不动它**：' % port)
+        print('🔴 端口 %d 被别的进程占着，【不动它】：' % port)
         print('   PID %-7s %s'
               % (pid, cmd if len(cmd) <= 88 else '…' + cmd[-87:]))
     if not mine:
