@@ -25,13 +25,24 @@ if not defined PY (
 )
 
 if not defined PY (
+  rem -- write the log FIRST, then show it.  This branch is the one a
+  rem    fresh machine actually hits, so it is the one that most needs a
+  rem    durable record -- `pause` only helps while the window is open.
+  rem    A parenthesised redirect writes the whole block in one go; batch
+  rem    has no tee, and echoing everything twice would drift.
+  > "%~dp0install.log" (
+    echo   [X] No Python 3.10+ found.
+    echo.
+    echo       Download: https://www.python.org/downloads/windows/
+    echo       While installing, TICK "Add python.exe to PATH".
+    echo.
+    echo       Already installed?  Open a NEW terminal and run:  py -3 -V
+    echo.
+    echo   [FAIL] exit code 2 -- no interpreter, nothing was installed.
+  )
   echo.
-  echo   [X] No Python 3.10+ found.
-  echo.
-  echo       Download: https://www.python.org/downloads/windows/
-  echo       While installing, TICK "Add python.exe to PATH".
-  echo.
-  echo       Already installed?  Open a NEW terminal and run:  py -3 -V
+  type "%~dp0install.log"
+  echo   Log:  %~dp0install.log
   echo.
   pause
   exit /b 2

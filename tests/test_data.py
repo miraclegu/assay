@@ -2946,6 +2946,27 @@ def t_windows_boot_path():
     assert 'install.log' in _bt, (
         'install.bat 没有告诉人日志在哪 —— 窗口关了就无从查起')
 
+    # 🔴🔴 「找不到 Python」那一支**也要写日志** —— 而那恰恰是新机器上最可能
+    #   走到的分支：install.py 压根没起来，它那套 LOG 一个字都写不出来。
+    #   只有 `pause` 的话，人一回车窗口就没了，事后查无对证（同「刚跑完的
+    #   90 秒仍显示」那条：任务结束就消失 = 完全不知道到底成没成）。
+    # ★ 判据要**切到那一支里面**去查：全文查 `install.log` 会被转发之后
+    #   那句 `echo Log:` 满足（判据比要证的事宽）。
+    _i_np = _bt.find('No Python 3.10+')
+    assert _i_np > 0, 'install.bat 里没有「找不到 Python」那一支了？'
+    _i_hd = _bt.rfind('if not defined PY (', 0, _i_np)
+    assert _i_hd > 0, 'install.bat：「找不到 Python」那段不在 if 块里'
+    _m_end = re.compile(r'^\)\s*$', re.M).search(_bt, _i_np)
+    assert _m_end, 'install.bat：「找不到 Python」那个 if 块没有闭合'
+    _blk = _bt[_i_hd:_m_end.end()]
+    assert re.search(r'>\s*"%~dp0install\.log"', _blk), (
+        'install.bat 的「找不到 Python」那一支没有把结论写进 install.log —— '
+        '而 install.py 起不来时它是【唯一】留得下记录的地方，'
+        '窗口一关就查无对证')
+    assert 'type "%~dp0install.log"' in _blk, (
+        'install.bat 的「找不到 Python」那一支只写了日志没显示出来 —— '
+        '屏幕上一片空白比不写更糟')
+
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
             '不许直接引用 SIGKILL / 不许 shell=True；'
