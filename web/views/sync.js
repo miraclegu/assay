@@ -95,12 +95,120 @@ function autoNote(au){
    服务端调它。写两遍必然漂移（脚本说没问题、页面说落后 3 天）。 */
 let SY=null, SYJOB=null;
 
+let SU=null;
+
+/* ============ 数据装配：从零把本地数据建起来 ============ */
+/* 用户："没有数据也要能启动 server，然后点击数据加载开始同步数据，
+   需要兼容 Windows 和 Mac。"
+
+   🔴 **阶段清单、当前状态、要跑什么命令，全由服务端给**（/api/setup ->
+     datalake/setup_stages.py）。这一段里不许出现任何一个阶段名或命令 ——
+     写死的话加一个阶段页面上不会出现，**而那不报错**
+     （同「加一个指标，广场上自动就有」）。
+   🔴 **判据是"现在磁盘上是什么"，不是"跑过没有"** —— 记一个 done 标记
+     会在「文件被删了 / 手工跑过 / 换了台机器」时说谎（同 launchd 那条）。 */
+function setupBlock(su){
+  if(!su || su.error) return su&&su.error
+    ? '<div class="lvwarn"><b>装配状态读不出来</b><br>'+esc(su.error)+'</div>' : '';
+  const ico={ok:'\u2705', todo:'\u2b1c', manual:'\u270b'};
+  const rows=(su.stages||[]).map(s=>{
+    const can = s.state==='todo' && s.cmd && su.can_run;
+    return '<tr><td class="tx">'+ico[s.state]+' '+esc(s.name)+
+      '<div class="cd">'+esc(s.why||'')+'</div></td>'+
+      '<td class="tx">'+esc(s.detail||'')+'</td>'+
+      '<td class="tx">'+esc(s.eta||'')+'</td>'+
+      '<td class="tx">'+(can
+        ? '<button class="btn susbtn" data-sid="'+esc(s.id)+'">\u25b7 开始</button>'
+        : (s.state==='ok'?'<span class="cd">已完成</span>'
+          :(s.state==='manual'?'<span class="cd">人工</span>'
+            :'<span class="cd">'+(su.can_run?'等上一步':esc(su.why||'只读'))+'</span>')))+
+      '</td></tr>';
+  }).join('');
+  const tbl='<div class="pw"><table class="lvt">'+
+    '<tr><th class="tx">阶段</th><th class="tx">现在的状态</th>'+
+    '<th class="tx">大概多久</th><th class="tx"></th></tr>'+rows+'</table></div>';
+  /* 全齐时【不占半屏】，但也不许藏没了 —— 一行摘要 + 可展开
+     （同「常驻一条『一切正常』的横幅等于教人忽略这个位置」）。 */
+  /* 🔴 收起态**不标 `.lvsec`** —— 它是"一行摘要"不是一个分区，而分区
+     在这一页里是「有 h3 的那种」。标成 lvsec 会让遍历 `.lvsec` 找 h3 的
+     代码在它身上空等（实测：既有那条页面用例裸超时 30 秒）。 */
+  if(su.ready) return '<details style="margin:0 0 10px">'+
+    '<summary class="lvwhy" style="cursor:pointer">\u2705 数据装配 '+
+    su.stages.length+' 个阶段都齐了（本机 '+esc(su.os||'')+'）—— 展开看每一项</summary>'+
+    tbl+'</details>';
+  /* 🔴 **首次加载给一个按钮，一次跑到底** —— 用户：「首次加载，应该是
+     系统启动后展示一个数据初始化的按钮，然后点击按钮开始加载数据」。
+     改之前是七个按钮、要人自己点六次、还得自己判断上一步跑完没有
+     （同「靠人记得跑的步骤 = 迟早不跑」）。逐阶段那几个按钮**留着**：
+     某一步失败时要能单独重来（同「硬拒必须配一个逃生口」）。 */
+  const one = su.running
+    ? '<span class="cd">正在跑：'+esc(su.running.stage||'')+'　'+
+      '（跑完会自动接着下一步）</span>'
+    : (su.can_run
+       ? '<button class="btn" id="suall">\u25b7 开始建本地数据</button>'+
+         '<span class="cd" style="margin-left:8px">一次跑完剩下的 '+
+         su.n_auto_todo+' 步'+(su.eta_text?'，约需 '+esc(su.eta_text)+'（估）':'')+
+         '；中途失败会停下并说清是哪一步</span>'
+       : '<span class="cd">'+esc(su.why||'只读模式，不能跑')+'</span>');
+  return '<div class="lvwarn"><b>\u8fd8\u5dee '+su.n_todo+' \u6b65\u624d\u80fd\u7528</b><br>'+
+    '本机 '+esc(su.os||'')+'。<b>首次</b>点下面那个按钮一次建完；'+
+    '之后每天的增量由「自动同步」跑，不用再点。'+
+    '每一步都可以中断，再点一次从没完成的地方接着跑（都是幂等的）。'+
+    '<div style="margin-top:8px">'+one+'</div>'+
+    '</div><div class="lvsec" style="margin-bottom:10px">'+
+    '<h3>\u6570\u636e\u88c5\u914d</h3>'+tbl+'</div>';
+}
+
+function setupWire(){
+  const all=$('#suall');
+  if(all) all.onclick=async()=>{
+    all.textContent='\u542f\u52a8\u4e2d\u2026';
+    const m=$('#symsg');
+    try{
+      const o=await post('/api/setup/run',{stage:'__all__'});
+      if(o.error){ m.className='lvmsg bad'; m.textContent=o.error;
+                   all.textContent='\u25b7 \u5f00\u59cb\u5efa\u672c\u5730\u6570\u636e'; return; }
+      m.className='lvmsg';
+      m.textContent='已开始，还要跑 '+(o.todo||[]).length+' 步 —— '+
+        '可以关掉这一页，顶上那条横条在【任何页面】都看得到进度。';
+      SYJOB=o.job_id; pollSync();
+    }catch(e){ m.className='lvmsg bad'; m.textContent='启动失败：'+esc(e);
+               all.textContent='\u25b7 \u5f00\u59cb\u5efa\u672c\u5730\u6570\u636e'; }
+  };
+  document.querySelectorAll('.susbtn').forEach(b=>{
+    b.onclick=async()=>{
+      const sid=b.dataset.sid;
+      b.disabled=true; b.textContent='\u542f\u52a8\u4e2d\u2026';
+      const m=$('#symsg');
+      try{
+        const o=await post('/api/setup/run',{stage:sid});
+        if(o.error){ m.className='lvmsg bad'; m.textContent=o.error;
+                     b.disabled=false; b.textContent='\u25b7 \u5f00\u59cb'; return; }
+        m.className='lvmsg'; m.textContent='已开始：'+o.stage+'　'+o.cmd;
+        SYJOB=o.job_id; pollSync();
+      }catch(e){ m.className='lvmsg bad'; m.textContent='启动失败：'+esc(e);
+                 b.disabled=false; b.textContent='\u25b7 \u5f00\u59cb'; }
+    };
+  });
+}
+
+
 async function showSync(){
   stopPoll();
   enterView();
-  let o; try{ o=await j('/api/sync'); }
-  catch(e){ $('#main').innerHTML='<div class="none">读取失败：'+esc(e)+'</div>'; return; }
-  SY=o;
+  let o, su=null;
+  /* 🔴 两发**并发**，而且装配那发【失败也不许挡住整页】—— 空 lake 上
+     `/api/sync` 很可能是它自己先报错，那时更需要看得到装配清单。 */
+  try{
+    const r = await Promise.all([j('/api/sync'), j('/api/setup').catch(e=>({error:String(e)}))]);
+    o = r[0]; su = r[1];
+  }catch(e){
+    try{ su = await j('/api/setup'); }catch(_){}
+    $('#main').innerHTML = (su?setupBlock(su):'') +
+      '<div class="none">数据同步状态读取失败：'+esc(e)+'</div>';
+    setupWire(); return;
+  }
+  SY=o; SU=su;
   const st=o.status||{}, it=st.items||[], cal=st.calendar||{};
   const A=it.filter(x=>x.leg==='A'), B=it.filter(x=>x.leg==='B');
   let warn='';
@@ -149,6 +257,7 @@ async function showSync(){
   };
   $('#main').innerHTML=warn+`
   ${dataTabs('sync')}
+  ${setupBlock(SU)}
   <div class="lvhead">
     <h2>数据同步</h2>
     <span class="lvtag">应到交易日 ${esc(st.expect_trade_day||'?')}</span>
@@ -168,9 +277,11 @@ async function showSync(){
       <table class="lvt"><tr><th>项</th><th>最新</th><th>状态</th></tr>
       ${A.map(row).join('')}</table>
       <div class="lvwhy" style="margin-top:6px">
-        由 <code>datalake/sync_daily.sh</code> 六步串起：tdx2db cron →
-        <b>PIT 快照（漏一天永久丢失）</b> → load_tdx_kline → 交易日历 → 面板 → beta。
+        由 <code>datalake/sync_daily.py</code> 一条链串起：抓日线 →
+        <b>PIT 快照（漏一天永久丢失）</b> → 规范层 → 面板 → 因子。
         跑完直接触发实盘出信号 —— 依赖写进调用顺序，不靠两个时间常量隔开。
+        <b>步数不写在这里</b>：链条长度只在那个文件里定义一处，
+        抄一份到页面上迟早对不上，而那不报错。
       </div>
     </div>
     <div class="lvsec"><h3>财务数据 · 需手动导出</h3>
@@ -228,6 +339,7 @@ async function showSync(){
     border-radius:6px;padding:12px;overflow:auto;max-height:60vh;font:11px/1.6 'SF Mono',Menlo,monospace"></pre>`;
 
   $('#syref').onclick=()=>showSync();
+  setupWire();   /* 装配那几个按钮与主渲染同一条路 */
   if($('#syauto')) $('#syauto').onclick=async()=>{
     const on=!o.auto.on, m=$('#symsg');
     /* 关闭要确认：它的代价是"几个月后发现历史有缺口"，而不是立刻报错。 */

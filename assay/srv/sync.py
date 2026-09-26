@@ -408,10 +408,14 @@ def api_sync_run(_q, body):
         return {'error': '服务以只读模式启动，手动同步已关闭。'
                          '用 python3 serve.py --live 开启。'}
     dl = _datalake_dir()
-    sh = os.path.join(dl, 'sync_daily.sh')
-    if not os.path.isfile(sh):
-        return {'error': '找不到 %s' % sh}
-    cmd = ['bash', sh]
+    # 🔴 **调 .py 不调 .sh** —— Windows 上没有 bash。正本本来就在
+    #   `sync_daily.py`（`.sh` 只是一行转发，留着是因为命令行是产品契约）。
+    #   走 `sys.executable` 而不是字面量 'python3'：venv 里那个才是对的，
+    #   而 Windows 上根本没有 `python3` 这个名字。
+    py = os.path.join(dl, 'sync_daily.py')
+    if not os.path.isfile(py):
+        return {'error': '找不到 %s' % py}
+    cmd = [sys.executable, py]
     if (body or {}).get('no_live'):
         cmd.append('--no-live')
     job_id = 'sync-%s' % datetime.now().strftime('%H%M%S')
@@ -420,3 +424,292 @@ def api_sync_run(_q, body):
     threading.Thread(target=_runs._run_job, args=(job_id, cmd, dl),
                      daemon=True).start()
     return {'job_id': job_id, 'cmd': ' '.join(cmd)}
+
+
+# ==== 数据装配：从零把本地数据建起来（Windows / Mac 通用） ====
+#
+# 用户："没有数据也要能启动 server，然后点击数据加载开始同步数据。"
+#
+# 🔴 阶段清单与**当前状态**都由 `datalake/setup_stages.py` 给 —— 页面里
+#   不许出现任何一个阶段名或命令（同「可选清单由服务端给」「加一个指标，
+#   广场上自动就有」）。加一个阶段页面上自动就有，**而写死的话不报错**。
+
+def _stages_mod():
+    """晚绑定地 import `setup_stages` —— datalake 的路径是运行时才知道的。"""
+    dl = _datalake_dir()
+    p = os.path.join(dl, 'setup_stages.py')
+    if not os.path.isfile(p):
+        return None, '找不到 %s' % p
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    import importlib
+    import setup_stages as m
+    importlib.reload(m)       # 🔴 每次重读：进程可能比那个文件老
+    return m, None
+
+
+def api_setup(_q):
+    """GET /api/setup —— 现在有什么数据、还差哪几步。
+
+    ★ 这一发**任何模式都给**（含 `--readonly`）：它只读磁盘状态，
+      而「我这台机器有什么数据」正是空 lake 上最需要回答的问题。
+    """
+    m, err = _stages_mod()
+    if err:
+        return {'error': err}
+    d = m.summary()
+    d.update(_setup_flags())
+    # 已经在跑的那个（页面刷新之后要接得回去 —— 否则看着像"点了没反应"）
+    for jid, j in _runs._JOBS.items():
+        if jid.startswith('setup-') and j.get('state') == 'running':
+            d['running'] = {'job_id': jid, 'stage': j.get('stage')}
+            break
+    return d
+
+
+def api_setup_run(_q, body):
+    """POST /api/setup/run {stage} —— 跑某一个阶段（后台子进程，复用 _JOBS）。
+
+    🔴 **只认清单里的 id，不接受任意命令**：命令由服务端按 id 查出来。
+      让页面传命令行的话，这个接口就成了远程执行入口。
+    🔴 **一次只许跑一个**：这些步骤重（面板 6 分钟、因子面板 30 分钟），
+      而且**互相有依赖**（因子面板吃面板的产物）。并发跑最好的情况是白烧
+      一遍 CPU，最坏是下游读到只建了一半的上游 —— **而那不报错**
+      （同「先把面板改对再建因子分片，反过来那 45 分钟白付两遍」）。
+    """
+    if not base.ALLOW_LIVE:
+        return {'error': '服务以只读模式启动，装配已关闭。'
+                         '用 python3 serve.py 开启（默认就是全功能）。'}
+    m, err = _stages_mod()
+    if err:
+        return {'error': err}
+    for jid, j in _runs._JOBS.items():
+        if jid.startswith('setup-') and j.get('state') == 'running':
+            return {'error': '已经有一个装配任务在跑（%s）——'
+                             '它们有先后依赖，等它跑完再点。' % j.get('stage')}
+    sid = (body or {}).get('stage')
+
+    # ---- 一键：从没完成的那一步接着跑到底 ----
+    # 用户："首次加载，应该是系统启动后展示一个数据初始化的按钮，
+    #        然后点击按钮开始加载数据。"
+    # 🔴 之前是**七个按钮**、要人自己点六次、还要自己判断上一个跑完没有
+    #   —— 同「靠人记得跑的步骤 = 迟早不跑」。首次建库是一条有先后依赖的
+    #   链，那就该像 `sync_daily` 那样**一次跑完**。
+    if sid == '__all__':
+        auto = [x for x in m.stages() if x.get('cmd')]
+        if not [x for x in auto if x['state'] == 'todo']:
+            return {'error': '本地数据已经齐了 —— 没有要建的步骤。'}
+        job_id = 'setup-all-%s' % datetime.now().strftime('%H%M%S')
+        _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': [],
+                               'sha': None, 'run_id': None, 'rc': None,
+                               'stage': '建本地数据'}
+        pg = None
+        try:
+            import progress as _P
+            pg = _P.Progress('setup', '建本地数据（首次批量加载）', len(auto))
+        except Exception:                                   # noqa: BLE001
+            pass
+
+        def _go_all():
+            j = _runs._JOBS[job_id]
+            ids = [x['id'] for x in auto]
+            rc = 0
+            while True:
+                # 🔴 **每跑完一个就重新查状态**，不照一开始那份清单硬跑到底
+                #   —— 判据永远是"现在磁盘上是什么"（同 launchd 那条）。
+                #   上一步跑完可能顺带满足了下一步，也可能人在别处补过。
+                try:
+                    cur = [x for x in m.stages() if x.get('cmd')]
+                except Exception as e:                      # noqa: BLE001
+                    j['lines'].append('读阶段状态失败: %s' % e)
+                    rc = 1
+                    break
+                nxt = next((x for x in cur if x['state'] == 'todo'), None)
+                if not nxt:
+                    break
+                if pg:
+                    pg.step(nxt['name'], at=ids.index(nxt['id']) + 1)
+                j['stage'] = nxt['name']
+                j['lines'].append('')
+                j['lines'].append('───── %s ─────' % nxt['name'])
+                sub = job_id + ':' + nxt['id']
+                _runs._JOBS[sub] = {'state': 'running', 'lines': j['lines'],
+                                    'cmd': list(nxt['cmd']), 'sha': None,
+                                    'run_id': None, 'rc': None}
+                _runs._run_job(sub, list(nxt['cmd']), _datalake_dir())
+                rc = _runs._JOBS[sub].get('rc') or 0
+                _runs._JOBS.pop(sub, None)
+                if pg:
+                    pg.finish_step('ok' if rc == 0 else 'bad')
+                if rc != 0:
+                    # 🔴 **失败就停**：后面每步都吃前一步的产物，带着坏数据
+                    #   往下跑会一路传播，**而下游不报错**（同 sync 链那条
+                    #   「前置失败就跳过 5~13，不在坏数据上继续加工」）。
+                    j['lines'].append(
+                        '❌ 「%s」失败（rc=%s）—— 后面几步吃它的产物，'
+                        '就停在这里了。修好再点一次，会从这一步接着跑。'
+                        % (nxt['name'], rc))
+                    break
+            j['rc'] = rc
+            j['state'] = 'done' if rc == 0 else 'failed'
+            if pg:
+                pg.finish(rc)
+            _setup_summary(force=True)      # 建完了，横条要立刻反映
+
+        threading.Thread(target=_go_all, daemon=True).start()
+        return {'job_id': job_id, 'stage': '建本地数据',
+                'total': len(auto),
+                'todo': [x['id'] for x in auto if x['state'] == 'todo']}
+
+    st = [s for s in m.stages() if s['id'] == sid]
+    if not st:
+        return {'error': '没有这个阶段：%r' % sid}
+    st = st[0]
+    if not st.get('cmd'):
+        return {'error': '「%s」要人工完成，没有可跑的命令。' % st['name']}
+    cmd = list(st['cmd'])
+    job_id = 'setup-%s-%s' % (sid, datetime.now().strftime('%H%M%S'))
+    _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
+                           'sha': None, 'run_id': None, 'rc': None,
+                           'stage': st['name']}
+
+    # 🔴 **进度按【整条装配链】报，不是"这次点了 1 步"** —— 人要看的是
+    #   「第 4 步 / 共 7 步」。能自动跑的阶段才算分母（⑦ 财务是人工的，
+    #   把它算进去会让分母永远差一步跑不满）。
+    auto = [x for x in m.stages() if x.get('cmd')]
+    pos = [x['id'] for x in auto].index(sid) + 1
+    pg = None
+    try:
+        import progress as _P
+        pg = _P.Progress('setup', '数据装配（历史批量加载）', len(auto),
+                         None)
+        pg.step(st['name'], at=pos)
+    except Exception:                                       # noqa: BLE001
+        pass                    # 进度坏了不许挡住装配本身
+
+    def _go():
+        _runs._run_job(job_id, cmd, _datalake_dir())
+        if pg:
+            rc = _runs._JOBS[job_id].get('rc')
+            pg.finish_step('ok' if rc == 0 else 'bad')
+            pg.finish(rc if rc is not None else 1)
+        _setup_summary(force=True)
+
+    threading.Thread(target=_go, daemon=True).start()
+    return {'job_id': job_id, 'stage': st['name'], 'cmd': ' '.join(cmd),
+            'step': pos, 'total': len(auto)}
+
+
+def _setup_flags():
+    """「能不能点」与「为什么不能」—— 两个入口（数据页、横条）共用一处。
+
+    各写一份的话，改了只读模式的措辞会有一处跟不上，**而那不报错**。
+    """
+    ok = bool(base.ALLOW_LIVE)
+    return {'can_run': ok,
+            'why': None if ok else '服务以只读模式启动，装配按钮已关闭。'}
+
+
+_SETUP_SUM = {'at': 0.0, 'd': None}
+
+
+def _setup_summary(force=False):
+    """装配状态，**缓存 20 秒** —— 横条在每个页面上都轮询它。
+
+    ★ 实测 `summary()` 冷 0.12 秒 / 热 0.033 秒（要 glob + 查几张 parquet
+      的 max(date)）。不缓存的话 N 个标签页就是 N 倍（同指数带子那条）。
+    🔴 缓存**只有一个键**，所以不会掉进「miss 就 clear() = 等于没有缓存」
+      那个坑（本项目已经犯过三次）。
+    ★ 装配跑完时 `force=True` 主动失效 —— 否则刚建完还会有 20 秒
+      显示"还差 1 步"，那看着像没生效。
+    """
+    import time as _t
+    if not force and _SETUP_SUM['d'] and _t.time() - _SETUP_SUM['at'] < 20:
+        return _SETUP_SUM['d']
+    try:
+        m, err = _stages_mod()
+        d = None if err else m.summary()
+    except Exception:                                       # noqa: BLE001
+        d = None
+    _SETUP_SUM['at'], _SETUP_SUM['d'] = _t.time(), d
+    return d
+
+
+def api_progress(_q):
+    """GET /api/progress —— 现在有没有数据加载在跑、跑到第几步、还要多久。
+
+    🔴 **读的是【进度文件】不是 `_JOBS`** —— 每天真正跑同步的是 launchd，
+      它不经过 serve.py。只看 `_JOBS` 的话「定时任务正在跑」在页面上
+      完全不可见，而那是最常见的情形。
+    ★ 这一发**任何模式都给**（含 `--readonly`）：它只读状态。
+    ★ 页面**每 2 秒轮一次**，所以这里不做任何重活：读两个小 json 而已。
+    """
+    try:
+        dl = _datalake_dir()
+        if dl not in sys.path:
+            sys.path.insert(0, dl)
+        import progress as _P
+        # 🔴 **这里不 reload** —— selftest 靠 `progress.DIR = 临时目录` 把
+        #   写操作重定向掉（同 `lv.LIVE` 那条纪律），reload 会把它冲回
+        #   生产的 `_manifest/progress/`，于是**用例写进真目录而不报错**。
+        rows = _P.read()
+    except Exception as e:                                  # noqa: BLE001
+        return {'error': '%s: %s' % (type(e).__name__, e), 'jobs': []}
+
+    # 没跑完但进程已经没了的，`read()` 标成 stale —— 页面要说"中断了"，
+    # 不许一直转圈（同「线程还活着不等于链条还在工作」）。
+    # ★ **刚跑完的那 90 秒也给** —— 否则任务一结束横条当场消失，
+    #   人正好走开一分钟就完全不知道"到底成没成"。90 秒之后它自己退场
+    #   （常驻一条"一切正常"等于教人忽略这个位置）。
+    import time as _t
+    def _show(r):
+        st, now = r.get('state'), _t.time()
+        if st == 'running':
+            return True
+        # 🔴 中断过（进程没了而文件还写着 running）要说，但**不能常驻** ——
+        #   隔了一天还挂在那儿就是噪声，而「数据新鲜度」那条横幅本来就会
+        #   接管"数据落后了"这件事（同「假告警看多了就不看告警」）。
+        #   下一次跑会覆盖同名文件，所以正常情况下它自己就消失了。
+        if st == 'stale':
+            return now - r.get('started', now) < 86400
+        return bool(r.get('ended')) and now - r['ended'] < 90
+    live = [r for r in rows if _show(r)]
+
+    # 🔴 **没有数据时，横条就是那个入口。**
+    #   用户："系统启动后展示一个数据初始化的按钮，然后点击按钮开始加载。"
+    #   原来这件事只有翻到「🔄 数据」页才看得见 —— 而新机器上第一眼打开的
+    #   是首页，那等于**没有入口**（同「只能从个股页工具条里摸到的入口，
+    #   等于没有入口」）。
+    # ★ 这不违反「顶部横条只在真的要做什么时出现」那条 —— 本地没有数据
+    #   **正是**真的要做什么；数据齐了它自己就消失，不是常驻横幅。
+    if not [r for r in live if r.get('state') == 'running']:
+        su = _setup_summary()
+        if su and not su.get('ready'):
+            live.append({'job': 'setup', 'kind': 'setup_needed',
+                         'title': '本地还没有数据',
+                         'state': 'idle', 'i': 0,
+                         'total': su.get('n_todo') or 0,
+                         'n_todo': su.get('n_todo'),
+                         'next_name': su.get('next_name'),
+                         # ⚠ 阶段自己声明的估计，**不是实测** —— 页面上写「估」
+                         'eta_text': su.get('eta_text'),
+                         **_setup_flags()})
+
+    # 页面点出来的那些能链到日志；launchd 那条只有日志文件路径。
+    for r in live:
+        for jid, j in _runs._JOBS.items():
+            if j.get('state') == 'running' and jid.split('-')[0] == r['job']:
+                r['job_id'] = jid
+                break
+    # ★ 没有实测 ETA 时，退回阶段自己声明的那个**文字**估计，并标明是估的
+    #   —— 「约 6 分钟」比一个空白有用，但不能让它看着像实测出来的。
+    try:
+        m, err = _stages_mod()
+        if m and not err:
+            by = {x['name']: x.get('eta') for x in m.stages()}
+            for r in live:
+                if r.get('eta') is None and r.get('step') in by:
+                    r['eta_text'] = by[r['step']]
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {'jobs': live, 'n': len(live)}

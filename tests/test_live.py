@@ -1258,6 +1258,21 @@ def t_live_ui():
             assert pg.locator('.ditem.on').count() == 1, '新账户没被选中'
 
             # ---- 策略是【唯一入口】：未绑定也要能打开浮层去绑 ----
+            # 🔴 **等条件，不等固定时间**：上面那个 700ms 在机器忙时会读到
+            #   **半截页面**（`#lvbody` 还停在「读取中…」）—— 实测同一条用例
+            #   单跑 67 秒通过、刚重建完因子分片之后 3.4 秒报"缺策略入口"，
+            #   而真实只差 **0.5 秒**。这是本项目记过的那一类（「数据字典页」
+            #   那次同款），**失败的是断言不是产品**。
+            # ★ 超时要**翻译成原因** —— 裸 `Timeout` 指不到是"没渲染出来"
+            #   还是"渲染了但没有这个入口"。
+            try:
+                pg.wait_for_selector('#lvstrat', timeout=25000)
+            except Exception:
+                raise AssertionError(
+                    '缺策略入口 ｜ hash=%r ｜ 侧栏 %d 个账户 ｜ #lvbody 开头 %r'
+                    % (pg.evaluate('location.hash'), pg.locator('.ditem').count(),
+                       pg.locator('#lvbody').inner_text()[:120]
+                       if pg.locator('#lvbody').count() else '(没有 #lvbody)'))
             assert pg.locator('#lvstrat').count() == 1, '缺策略入口'
             body = pg.locator('#lvbody').inner_text()
             assert '策略版本' not in body, \

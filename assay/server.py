@@ -29,6 +29,7 @@ serve() 改了值外部读到的还是旧的，**而这不报错**。转发保�
 import json
 import mimetypes
 import os
+import re
 import sys
 import threading
 import types
@@ -111,6 +112,8 @@ ROUTES = {
     '/api/watchlist': watch.api_watchlist,
     '/api/watchlist/log': watch.api_watchlist_log,
     '/api/sync/log': sync.api_sync_log,
+    '/api/setup': sync.api_setup,
+    '/api/progress': sync.api_progress,
 }
 
 
@@ -151,7 +154,8 @@ class Handler(BaseHTTPRequestHandler):
                  '/api/watchlist/order': watch.api_watchlist_order,
                  '/api/rt/poll': rt.api_rt_poll,
                  '/api/live/backtest': live.api_live_backtest,
-                 '/api/sync/run': sync.api_sync_run}
+                 '/api/sync/run': sync.api_sync_run,
+                 '/api/setup/run': sync.api_setup_run}
         # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再
         #   json.loads（多传 33% + 整包再复制一遍）。所以它不能和下面的
         #   JSON 解析共用一条路。
@@ -189,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                   # noqa: BLE001
             import traceback
             traceback.print_exc()
-            return self._send(500, json.dumps({'error': '%s: %s' % (type(e).__name__, e)},
+            return self._send(500, json.dumps(_explain_err(e),
                                               ensure_ascii=False))
         # ★ default=str 与 GET 分支保持一致 —— POST 的返回里也可能带
         #   date/Timestamp（实盘持仓的建仓日就是），少这一个参数就是 500。
@@ -206,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
                 import traceback
                 traceback.print_exc()
                 return self._send(500, json.dumps(
-                    {'error': '%s: %s' % (type(e).__name__, e)}, ensure_ascii=False))
+                    _explain_err(e), ensure_ascii=False))
             if r is None:
                 return self._send(404, json.dumps({'error': 'run_id 不存在或无效'},
                                                   ensure_ascii=False))
@@ -221,6 +225,38 @@ class Handler(BaseHTTPRequestHandler):
             ctype += '; charset=utf-8'
         self._send(200, open(p, 'rb').read(), ctype)
 
+
+
+def _explain_err(e):
+    """把「本地还没有这份数据」翻译成一句可执行的话。
+
+    空 lake 上有 9 个接口会抛 duckdb 的
+    `IOException: No files found that match the pattern ".../panel_*.parquet"`
+    或 `FileNotFoundError` —— 那串话**技术上指名了文件**，却答不了人真正
+    要做的事（"我该去哪把它建出来"）。同「报错必须指向真正的原因」。
+
+    🔴 **只翻译落在 datalake 根下面的缺文件**：别的异常原样透传 ——
+      把真 bug 一律说成"还没装数据"是更糟的静默（同「判据比要证的事宽」）。
+    ★ **不在这里维护一张 glob -> 阶段名 的表** —— 那就是第二份阶段清单，
+      加一个阶段它不会跟着变。路径本身已经够具体，下一步统一指向「🔄 数据」。
+    """
+    msg = '%s: %s' % (type(e).__name__, e)
+    low = str(e)
+    if ('No files found that match the pattern' not in low
+            and 'No such file or directory' not in low):
+        return {'error': msg}
+    try:
+        root = os.path.abspath(base._datalake_dir())
+    except Exception:                                   # noqa: BLE001
+        return {'error': msg}
+    m = re.search(r'["\']([^"\']*)["\']', low)
+    path = m.group(1) if m else ''
+    if not path or not os.path.abspath(path).startswith(root):
+        return {'error': msg}
+    return {'error': '本地还没有这份数据：%s —— '
+                     '去顶栏「🔄 数据」页开始装配（每一步都可中断、可续跑）。'
+                     % path,
+            'no_data': True, 'missing': path, 'next': '#/sync'}
 
 
 def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):

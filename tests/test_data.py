@@ -11,6 +11,25 @@ from tests._base import (CASES, JQ, REPO, case, _run, _pages, _web_files,  # noq
 import os, re, sys, io, json, glob, time, shutil, subprocess, datetime  # noqa: E401,F401
 
 
+def _chain_dry():
+    """同步链**真正会跑的那串命令**（`sync_daily.py --dry` 的输出）。
+
+    🔴 正本 2026-09-26 从 `.sh` 搬进了 `.py`（Windows 上没有 bash），`.sh`
+      只剩一行转发 —— 原来那几条扫 `.sh` 源码的判据当场全挂。
+      **失败的是断言不是产品**，但它们保的东西一条都不能丢。
+    ★ 所以改成钉 `--dry` 的输出：那是**会被执行的**东西，比查源码字符串
+      严一档，而且天然躲开「查字符串命中自己写的注释」（本项目踩过五次）。
+    """
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    r = subprocess.run([sys.executable, os.path.join(dl, 'sync_daily.py'),
+                        '--dry'], capture_output=True, text=True, cwd=dl)
+    assert r.returncode == 0, r.stderr[-400:]
+    cmds = [m.group(2) for m in
+            re.finditer(r'\$ \(cd ([^ ]+) && (.+)\)', r.stdout)]
+    assert len(cmds) >= 8, '只解析出 %d 条命令 —— 判据在空转' % len(cmds)
+    return '\n'.join(cmds)
+
+
 @case('数据版本指纹可用且稳定')
 def t_fingerprint():
     """归档只记 datalake 路径的话，panel 重建一次同一策略结果就会变而看不出来。
@@ -467,21 +486,21 @@ def t_sync():
     assert os.path.isfile(sh), '缺 sync_daily.sh'
     r = subprocess.run(['bash', '-n', sh], capture_output=True, text=True)
     assert r.returncode == 0, 'sync_daily.sh 语法错误：%s' % r.stderr[-300:]
-    src = open(sh, encoding='utf-8').read()
-    # ★ 只看【真命令行】，剥掉注释 —— 本会话已经三次栽在"断言匹配到自己写的
-    #   注释文本"上（sync_daily.sh 的文件头正解释了为什么不调那两个坏脚本，
-    #   于是 `'scripts/update.sh' not in src` 必然失败）。
-    #   注释是给人看的说明，断言必须针对会被执行的东西。
-    code = '\n'.join(ln.split('#', 1)[0] for ln in src.splitlines())
+    # ★ 判据钉**真正会被执行的那串命令**，不是源码文本 ——
+    #   注释是给人看的说明（`.sh`/`.py` 的文件头正解释了为什么不调那两个
+    #   坏脚本），查源码必然命中它自己。正本已搬进 `.py`，见 `_chain_dry`。
+    assert 'sync_daily.py' in open(sh, encoding='utf-8').read(), \
+        '.sh 该是一行转发到正本 .py（Windows 上没有 bash）'
+    code = _chain_dry()
     for bad in ('scripts/update.sh', 'scripts/full_update.sh'):
         assert bad not in code, \
-            'sync_daily.sh 不该调 %s —— 它引用的 fast_update_indicators.py 不存在' % bad
+            '同步链不该调 %s —— 它引用的 fast_update_indicators.py 不存在' % bad
     assert 'daily_snapshot.py' in code, 'PIT 快照那步不能少（漏一天永久丢失）'
     # 🔴 **ETF lake 也要每天建。** 2026-09-18 实测它停在 09-11 而主数据到
     #   09-17 —— 因为它一直是**手工**跑的（同「靠人记得跑的步骤 = 迟早不跑」）。
     #   后果是 ETF 模拟盘「推进到最新数据日」只能到 09-11，**而它不报错**。
     assert 'build_etf_lake.py' in code, \
-        ('sync_daily.sh 里没有 ETF lake 那步 —— 它只能靠人记得手工跑，'
+        ('同步链里没有 ETF lake 那步 —— 它只能靠人记得手工跑，'
          '而 ETF 策略/模拟盘全跑在它上面')
     # 判据落在**顺序**上：它吃的是 load_tdx_kline 的产物（raw/tdx/kline）。
     #   只查"提到过这个名字"的话，把它挪到最前面照样绿，而那时它读的是
@@ -609,8 +628,12 @@ def t_sync_ui():
             #   最新时间不会更新，显得我好像没有更新一下。」根因：页面只显示
             #   数据内容的 pub_date，而 B 腿事件驱动 —— 没公告就不前进。
             _ex = _json.loads(_get('/api/sync')).get('status', {}).get('extract')
+            # 🔴 先看有没有 h3 再取 —— 直接 `.first.inner_text()` 碰上一个
+            #   没有 h3 的 `.lvsec` 会**裸等 30 秒**，报出来只有一句
+            #   `Timeout 30000ms`，指不到"哪一块没有标题"（实测踩过）。
             _bsec = [s for s in pg.locator('.lvsec').all()
-                     if '财务' in (s.locator('h3').first.inner_text() or '')]
+                     if s.locator('h3').count()
+                     and '财务' in (s.locator('h3').first.inner_text() or '')]
             assert _bsec, '找不到「财务数据」那一块'
             _btxt = ' '.join(_bsec[0].inner_text().split())
             assert '上次抽取' in _btxt, \
@@ -2027,11 +2050,10 @@ def t_etf_price_precision():
 
     # ④ 链条：必须调正本修复，且不许再调退役的 ×10 补丁
     #    （退役那个会把【已经正确】的价格再放大一次，而下游一路静默）
-    sh = open(os.path.join(os.path.dirname(REPO), 'datalake', 'sync_daily.sh')).read()
-    body = '\n'.join(l for l in sh.split('\n') if not l.lstrip().startswith('#'))
-    assert 'fix_etf_price_from_dayfile.py' in body, 'sync_daily.sh 没接正本修复'
+    body = _chain_dry()
+    assert 'fix_etf_price_from_dayfile.py' in body, '同步链没接正本修复'
     assert 'fix_etf_price_scale.py' not in body, (
-        'sync_daily.sh 还在调退役的 ×10 补丁 —— 它会把正确价格再 ×10')
+        '同步链还在调退役的 ×10 补丁 —— 它会把正确价格再 ×10')
 
     # ⑤ 退役守卫要真的拒，不是只在文档里写一句
     rc = subprocess.run([sys.executable,
@@ -2323,7 +2345,14 @@ def t_factor_page():
         import pandas as _pd
         d = fsrv.api_factor({'id': fid, 'h': 20})
         assert d['years'] and all('ir' in y for y in d['years']), '逐年没给 IR'
-        _ic = _pd.read_parquet(os.path.join(fe.OUT, 'factor_ic.parquet'))
+        # 🔴 期望要从**接口读的那同一批数据**算，而不是那个扁平
+        #   `factor_ic.parquet` —— 分池改造（2026-09-24）之后正本是
+        #   `factors/ic/<池>/<年>.parquet` 分片，扁平那份**停在 09-23
+        #   再没人写过**，于是判据拿 3 天前的数去比今天的接口，
+        #   报出来像"IR 口径不一致"（实测踩过）。
+        #   ★ 仍然是**独立**的：这里自己按 pandas 算 mean/std，
+        #     不拿接口的输出当期望。
+        _ic = fe._load_shards('ic', 'all')
         _ic = _ic[(_ic['factor_id'] == fid) & (_ic['h'] == 20)]
         _ic = _ic.assign(y=_pd.to_datetime(_ic['date']).dt.year)
         for y in d['years']:
@@ -3201,3 +3230,668 @@ def t_factor_pools():
     return ('池子 %d 个 ｜ 判据分工 IC 盯 Y+1 / 换手不盯 ｜ tie-break 可复现'
             ' ｜ 分片 tmp 名带 pid+uuid（3 线程并发写，落地 %d 行是完整的一份）'
             % (len(fe.POOLS), _got))
+
+
+@case('数据装配：阶段清单是正本 / 空 lake 也能起服务 / 缺数据的报错要指得到下一步', tag='fast')
+def t_setup_stages():
+    """用户："没有数据也要能启动 server，然后点击数据加载开始同步数据，
+    需要兼容 Windows 和 Mac。"
+
+    🔴 本机数据是**齐的**，所以"还没装"那一半在真实数据上一步都走不到 ——
+      判据必须**构造**一个空 lake（同「真实数据触发不到的上限，判据必须
+      能构造出来」「断言要在能触发的构造上跑」）。
+    """
+    import importlib
+    import tempfile
+    from assay import server as sv
+    from assay.srv import sync as sysrv, base as sbase
+
+    dl = sbase._datalake_dir()
+    sys.path.insert(0, dl) if dl not in sys.path else None
+    ss = importlib.import_module('setup_stages')
+    importlib.reload(ss)
+
+    # ── A 阶段清单只有一份，页面里不许写死 ─────────────────────
+    _prev = sbase.ALLOW_LIVE
+    sbase.ALLOW_LIVE = True
+    try:
+        api = sv.ROUTES['/api/setup'](None)
+    finally:
+        sbase.ALLOW_LIVE = _prev
+    assert not api.get('error'), api
+    ids_api = [s['id'] for s in api['stages']]
+    ids_src = [s['id'] for s in ss.stages()]
+    assert ids_api == ids_src, (ids_api, ids_src)
+    assert len(ids_src) >= 5, ids_src
+    js = io.open(os.path.join(REPO, 'web', 'views', 'sync.js'),
+                 encoding='utf-8').read()
+    # 🔴 判据比"有没有提到"窄一档：阶段【名】与它的【命令】都不许出现在
+    #   页面里。写死的话加一个阶段页面上不会有它，**而那不报错**。
+    for s in ss.stages():
+        assert s['name'] not in js, '页面写死了阶段名：%s' % s['name']
+        for part in (s.get('cmd') or []):
+            b = os.path.basename(str(part))
+            if b.endswith('.py'):
+                assert b not in js, '页面写死了阶段命令：%s' % b
+
+    # ── B 构造一个**全空**的 lake：那才是 Windows 刚 clone 下来的样子 ──
+    td = tempfile.mkdtemp(prefix='_emptylake_')
+    try:
+        empty = os.path.join(td, 'datalake')
+        os.makedirs(empty)
+        d = ss.summary(empty, td)
+        assert d['ready'] is False and d['n_todo'] >= 4, d
+        # 🔴 逐个钉，不只钉总数：空目录上**凡是能自动跑的阶段一个都不许是 ok**
+        #   （只钉 n_todo >= 4 的话，某一个阶段判错照样绿 —— 变异实测漏过）
+        auto = [x for x in d['stages'] if x.get('cmd')]
+        assert auto and all(x['state'] == 'todo' for x in auto), \
+            [(x['id'], x['state']) for x in auto]
+        todo = [s for s in d['stages'] if s['state'] == 'todo']
+        assert d['next'] == todo[0]['id'], (d['next'], todo[0]['id'])
+        # 反向自证：本机这一份必须**不是**空的，否则上面那段在比两个空壳
+        assert ss.summary()['n_todo'] < d['n_todo'], '构造不对：本机也空？'
+        # 每条 todo 都要说清"还缺什么"与"大概多久" —— 只说"没有"等于没说
+        for s in d['stages']:
+            assert s.get('detail'), s
+            assert s.get('eta'), s
+            assert s.get('why'), s
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ── C 只认清单里的 id；人工那条不给跑；只读模式拒 ───────────
+    _prev = sbase.ALLOW_LIVE
+    try:
+        sbase.ALLOW_LIVE = True
+        r = sysrv.api_setup_run(None, {'stage': '../../etc/passwd'})
+        assert r.get('error') and '没有这个阶段' in r['error'], r
+        man = [s for s in ss.stages() if not s.get('cmd')]
+        assert man, '构造不对：没有"人工"那一档，下面这条判据空转'
+        r = sysrv.api_setup_run(None, {'stage': man[0]['id']})
+        assert r.get('error') and '人工' in r['error'], r
+        sbase.ALLOW_LIVE = False
+        r = sysrv.api_setup_run(None, {'stage': ids_src[0]})
+        assert r.get('error') and '只读' in r['error'], r
+        # ★ 状态那一发**只读模式也要给** —— 空 lake 上它正是唯一有内容的
+        assert not sv.ROUTES['/api/setup'](None).get('error')
+        assert sv.ROUTES['/api/setup'](None)['can_run'] is False
+    finally:
+        sbase.ALLOW_LIVE = _prev
+
+    # ── D 缺数据的报错要指得到下一步，而**真 bug 必须原样透传** ────
+    root = os.path.abspath(sbase._datalake_dir())
+    miss = sv._explain_err(Exception(
+        'IOException: IO Error: No files found that match the pattern '
+        '"%s/mart/panel_daily/panel_*.parquet"' % root))
+    assert miss.get('no_data') is True, miss
+    assert '数据' in miss['error'] and '#/sync' == miss['next'], miss
+    # 两头夹。🔴 **两道护栏（"是不是缺文件" / "在不在 lake 里"）会互相遮蔽**，
+    #   所以两条构造要各自只触发一道，否则变异测不出哪道在起作用
+    #   （同「段落往上找那两道边界」那条 —— 实测第一轮就这么漏了两条）。
+    real = sv._explain_err(KeyError('close_hfq'))
+    assert not real.get('no_data') and 'KeyError' in real['error'], real
+    # ① 只有【在不在 lake 里】那道能挡：是缺文件，但不在我们的 lake 下
+    out = sv._explain_err(Exception(
+        "FileNotFoundError: No such file or directory: '/etc/nope.parquet'"))
+    assert not out.get('no_data'), out
+    # ② 只有【是不是缺文件】那道能挡：路径就在 lake 里，但它是**坏文件**不是
+    #    "还没装" —— 翻译成"去装配"会把 2026-09-07 那种并发写坏 parquet 的
+    #    事故说成"你还没建数据"，而那是两件完全不同的事
+    #    ★ 路径要**带引号**：不带的话正则抠不出来，会被"抠不出路径就透传"
+    #      那道兜住 —— 又是一条只触发到别人的构造（变异实测漏过两轮）
+    corrupt = sv._explain_err(Exception(
+        'TProtocolException: Invalid data in file "%s/mart/panel_daily/'
+        'panel_2026.parquet"' % root))
+    assert not corrupt.get('no_data'), corrupt
+
+    # ── E 正本是 .py；`.sh` 只是一行转发（Windows 上没有 bash）────
+    dlp = sbase._datalake_dir()
+    sh = io.open(os.path.join(dlp, 'sync_daily.sh'), encoding='utf-8').read()
+    body = [x for x in sh.splitlines()
+            if x.strip() and not x.lstrip().startswith('#')]
+    assert any('sync_daily.py' in x for x in body), sh[:400]
+    assert len(body) <= 4, '.sh 不再是转发了，%d 行实代码' % len(body)
+    src = io.open(os.path.join(REPO, 'assay', 'srv', 'sync.py'),
+                  encoding='utf-8').read()
+    seg = src[src.index('def api_sync_run'):]
+    seg = seg[:seg.index('\ndef ') if '\ndef ' in seg[1:] else len(seg)]
+    # 🔴 **先剥注释**：那个函数的注释里就写着「正本本来就在 sync_daily.py」——
+    #   查字符串会命中自己写的注释（这是第五次踩，变异 M8 当场漏过）
+    code = '\n'.join(x.split('#')[0] for x in seg.splitlines())
+    assert 'sync_daily.py' in code and "'bash'" not in code, code[:600]
+    assert 'sys.executable' in seg, '走字面量 python3 的话 Windows 上没这个名字'
+
+    # ── F 链里每一步要跑的脚本【必须真的在】 ──────────────────
+    # 🔴🔴 这条是被一个**既有缺陷**逼出来的：13/13「因子评价」那一步写的是
+    #   `assay/factor_eval.py`，而文件在 `assay/assay/factor_eval.py` ——
+    #   **从它接进链那天起一次都没跑成功过**（真跑到那一步的两次全是 ⚠️）。
+    #   它是 soft step，所以只在末尾多一行告警，而那行告警天天都在
+    #   —— 「天天报的告警等于没有告警」。
+    # ★ 判据**不钉那一步**，钉「每一步的脚本参数都解析得到」——
+    #   钉具体那一处的话，下次换个步骤写错路径照样不报（同「守卫不要钉
+    #   坏成什么样，要钉和正本一不一样」）。
+    dry = subprocess.run([sys.executable, os.path.join(dlp, 'sync_daily.py'),
+                          '--dry'], capture_output=True, text=True, cwd=dlp)
+    assert dry.returncode == 0, dry.stderr[-400:]
+    n_script, missing = 0, []
+    for m in re.finditer(r'\$ \(cd ([^ ]+) && (.+)\)', dry.stdout):
+        cwd, cmd = m.group(1), m.group(2)
+        for tok in cmd.split():
+            if tok.endswith('.py') or tok.endswith('.sh'):
+                n_script += 1
+                if not os.path.isfile(os.path.join(cwd, tok)):
+                    missing.append(os.path.join(cwd, tok))
+    assert n_script >= 8, '只扫到 %d 个脚本参数 —— 这条判据在空转' % n_script
+    assert not missing, '链里这些脚本不存在（跑到就失败，而 soft 步只告警）：%s' % missing
+
+    return ('阶段 %d（%s）｜ 空 lake 构造出 %d 步待办 ｜ 缺数据的报错带 next ｜'
+            ' 正本 .py、.sh %d 行转发 ｜ 链里 %d 个脚本参数全都解析得到'
+            % (len(ids_src), '/'.join(ids_src), 6, len(body), n_script))
+
+
+@case('首次建库：一个按钮跑到底 / 失败就停 / 齐了入口自己退场', tag='fast')
+def t_setup_all():
+    """用户："每日同步是系统自动同步，但是首次加载，应该是系统启动后展示一个
+    数据初始化的按钮，然后点击按钮开始加载数据。"
+
+    改之前是**七个按钮**、要人自己点六次、还得自己判断上一步跑完没有 ——
+    同「靠人记得跑的步骤 = 迟早不跑」。
+
+    🔴 用例全程跑在**假的阶段模块 + 临时 `progress.DIR`** 上：真链要跑
+      45 分钟，而且它写的是 launchd 与页面共用的真目录（同 `lv.LIVE` 那条）。
+    """
+    import importlib
+    import tempfile
+    import time as _t
+    from assay import server as sv
+    from assay.srv import base as sbase
+    from assay.srv import runs as _rn
+    from assay.srv import sync as sy
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    importlib.reload(P)
+
+    td = tempfile.mkdtemp(prefix='_setall_')
+    old_dir, old_times = P.DIR, P.TIMES
+    old_mod, old_live = sy._stages_mod, sv.ALLOW_LIVE
+    P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+    sv.ALLOW_LIVE = True
+    ran, done, fail = [], set(), ['']
+
+    class Fake(object):
+        """三步假链：cmd 只是 `python3 -c`，跑完把自己记进 done。"""
+        NAMES = ('a', 'b', 'c')
+
+        def stages(self, **kw):
+            out = []
+            for sid in self.NAMES:
+                bad = sid == fail[0]
+                out.append({
+                    'id': sid, 'name': '阶段' + sid.upper(), 'why': '',
+                    'state': 'ok' if sid in done else 'todo',
+                    'detail': '', 'eta': '1 秒',
+                    'cmd': [sys.executable, '-c',
+                            'import sys;sys.exit(%d)' % (1 if bad else 0)]})
+            return out
+
+        def summary(self, *a, **k):
+            st = self.stages()
+            todo = [x for x in st if x['state'] == 'todo']
+            return {'stages': st, 'n_todo': len(todo), 'ready': not todo,
+                    'next_name': todo[0]['name'] if todo else None,
+                    'n_auto_todo': len(todo),
+                    'eta_text': '1 秒' if todo else None, 'os': 'T'}
+
+    fake = Fake()
+    real_run = _rn._run_job
+
+    def run_job(job_id, cmd, cwd):
+        """记下"谁被跑了"，成功就让那一步在下次 stages() 里变 ok。"""
+        real_run(job_id, cmd, cwd)
+        sid = [x for x in fake.NAMES if x not in done and x != 'DONE']
+        ran.append(sid[0] if sid else '?')
+        if _rn._JOBS[job_id].get('rc') == 0 and sid:
+            done.add(sid[0])
+        return _rn._JOBS[job_id].get('rc')
+
+    def wait(jid, sec=30):
+        t0 = _t.time()
+        while _t.time() - t0 < sec:
+            if _rn._JOBS[jid]['state'] != 'running':
+                return _rn._JOBS[jid]
+            _t.sleep(0.05)
+        raise AssertionError('装配任务 %s 跑了 %d 秒还没结束' % (jid, sec))
+
+    def fresh():
+        sy._SETUP_SUM['at'] = 0
+        sy._SETUP_SUM['d'] = None
+
+    try:
+        sy._stages_mod = lambda: (fake, None)
+        _rn._run_job = run_job
+
+        # ── A 一个按钮【跑到底】，不是只跑第一步 ──────────────
+        r = sy.api_setup_run(None, {'stage': '__all__'})
+        assert not r.get('error'), r
+        j = wait(r['job_id'])
+        assert j['rc'] == 0 and j['state'] == 'done', j
+        assert ran == ['a', 'b', 'c'], (
+            '点一次只跑了 %s —— 而首次建库是一条有先后依赖的链，'
+            '停在第一步等于又把"记得点六次"推回给人' % ran)
+        pr = [x for x in P.read() if x['job'] == 'setup'][0]
+        assert pr['total'] == 3 and len(pr['done']) == 3, pr
+        # 幂等：都齐了再点一次，不该又跑一遍
+        fresh()
+        r2 = sy.api_setup_run(None, {'stage': '__all__'})
+        assert r2.get('error') and '齐' in r2['error'], r2
+
+        # ── B 失败就【停】—— 后面几步吃它的产物 ────────────────
+        ran[:] = []
+        done.clear()
+        fail[0] = 'b'
+        fresh()
+        r = sy.api_setup_run(None, {'stage': '__all__'})
+        j = wait(r['job_id'])
+        assert j['rc'] != 0 and j['state'] == 'failed', j
+        assert ran == ['a', 'b'], (
+            '第二步失败了却还往下跑：%s —— 下游读到只建了一半的上游，'
+            '**而那不报错**' % ran)
+        assert any('阶段B' in x and '失败' in x for x in j['lines']), \
+            '停下来了却没说是哪一步失败的：%s' % j['lines'][-3:]
+        pr = [x for x in P.read() if x['job'] == 'setup'][0]
+        assert pr['state'] == 'failed' and pr['i'] == 2, pr
+
+        # ── C 每跑完一步【重新查状态】，不照初始清单硬跑 ──────────
+        # 构造：跑 a 的时候别人（手工 / 另一台机器）顺带把 c 也建好了。
+        ran[:] = []
+        done.clear()
+        fail[0] = ''
+
+        def run_job2(job_id, cmd, cwd):
+            rc = run_job(job_id, cmd, cwd)
+            if ran == ['a']:
+                done.add('c')       # ← 外部让 c 变成 ok
+            return rc
+
+        _rn._run_job = run_job2
+        fresh()
+        r = sy.api_setup_run(None, {'stage': '__all__'})
+        j = wait(r['job_id'])
+        _rn._run_job = run_job
+        assert j['rc'] == 0, j
+        assert 'c' not in ran, (
+            '照一开始那份清单硬跑到底了（跑了 %s）—— 判据永远是'
+            '"现在磁盘上是什么"，不是进函数那一刻的快照' % ran)
+
+        # ── D 空 lake 时横条【就是那个入口】；齐了自己退场 ────────
+        done.clear()
+        fresh()
+        rows = sy.api_progress(None)['jobs']
+        ent = [x for x in rows if x.get('kind') == 'setup_needed']
+        assert ent, ('本地没有数据时 /api/progress 不给入口 —— 而新机器上'
+                     '第一眼打开的是首页，那等于没有入口')
+        assert ent[0]['n_todo'] == 3 and ent[0]['eta_text'], ent[0]
+        # 🔴 反向自证：数据齐了就**不许**再给 —— 常驻一条"该装数据了"
+        #   等于教人忽略这个位置（同那条横幅纪律）。
+        done.update(Fake.NAMES)
+        fresh()
+        rows = sy.api_progress(None)['jobs']
+        assert not [x for x in rows if x.get('kind') == 'setup_needed'], \
+            '数据都齐了还挂着"本地还没有数据"'
+
+        # ── E 有任务在跑时不给入口（同屏两句话互相打架）──────────
+        done.clear()
+        fresh()
+        p = P.Progress('setup', '建本地数据（首次批量加载）', 3)
+        p.step('阶段A', at=1)
+        rows = sy.api_progress(None)['jobs']
+        assert not [x for x in rows if x.get('kind') == 'setup_needed'], \
+            '已经在跑了还并排挂一条"还没开始"'
+        p.finish_step('ok')
+        p.finish(0)
+    finally:
+        sy._stages_mod, sv.ALLOW_LIVE = old_mod, old_live
+        _rn._run_job = real_run
+        P.DIR, P.TIMES = old_dir, old_times
+        fresh()
+        for jid in [k for k in _rn._JOBS if k.startswith('setup-')]:
+            _rn._JOBS.pop(jid, None)
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ── F 装配那两段不许写死阶段名/命令（清单是服务端的） ────────
+    # 🔴 判据**只切装配那两段**，不扫整个文件 —— 同一份 sync.js 里
+    #   「立即同步」那个按钮的提示里就写着一句"tdx2db cron 要几分钟"，
+    #   那说的是**每日同步链**、与装配清单无关。扫全文件会误伤它
+    #   （同「判据比要证的事宽」；一个天天误报的检查等于没有检查）。
+    # 🔴 比对的清单取自**正本**（真 setup_stages），不在用例里拼一份 ——
+    #   拼一份的话加一个阶段它不会跟着变。
+    real = importlib.import_module('setup_stages')
+    importlib.reload(real)
+    words = set()
+    for st in real.stages():
+        words.add(st['name'])
+        for tok in (st.get('cmd') or []):
+            b = os.path.basename(str(tok))
+            if b.endswith(('.py', '.sh')):
+                words.add(b)
+    assert len(words) >= 8, '正本给不出阶段名，这条判据会空转'
+    segs = []
+    js = io.open(os.path.join(REPO, 'web/views/sync.js'), encoding='utf-8').read()
+    i, k = js.index('function setupBlock('), js.index('async function showSync(')
+    segs.append(('views/sync.js 装配那段', js[i:k]))
+    cj = io.open(os.path.join(REPO, 'web/shared/common.js'), encoding='utf-8').read()
+    i = cj.index('function prgHtml(')
+    segs.append(('common.js 横条', cj[i:cj.index('async function prgScan(')]))
+    for tag, seg in segs:
+        for w in words:
+            assert w not in seg, (
+                '%s 里写死了阶段「%s」—— 加一个阶段页面上不会出现，'
+                '而那不报错' % (tag, w))
+
+    return ('一键跑完 3/3 且幂等 ｜ 第二步失败就停在那里并点名 ｜ '
+            '每步重查状态（外部建好的自动跳过）｜ 空 lake 给入口、'
+            '齐了与在跑时都不给 ｜ 页面不写死任何阶段')
+
+
+@case('数据加载进度：步数只有一处 / 进度来自文件（launchd 也看得到）/ 不猜 ETA', tag='fast')
+def t_load_progress():
+    """用户："这些数据加载都应该在 web 端最上侧显示……一共多少步，当前多少步，
+    每一步的进度，已用多少时间，预计还要多少时间。"
+
+    🔴 用例全程跑在**临时 `progress.DIR`** 上（同 `lv.LIVE` 那条纪律）——
+      不重定向的话它会往 `datalake/_manifest/progress/` 里写，而那是
+      launchd 与页面共用的真目录。
+    """
+    import importlib
+    import tempfile
+    from assay import server as sv
+    from assay.srv import base as sbase
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    importlib.reload(P)
+    src = io.open(os.path.join(dl, 'sync_daily.py'), encoding='utf-8').read()
+
+    # ── A 「一共多少步」只有一处真值 ────────────────────────
+    # 🔴 搬运前 `.sh` 里前九步写 `x/12`、后四步写 `x/13` —— 链长了只改新加
+    #   那几行，屏幕上的分母自相矛盾**而它不报错**。所以步号必须生成。
+    assert re.search(r'^N_STEPS\s*=\s*(\d+)', src, re.M), 'sync_daily 没有 N_STEPS'
+    n_decl = int(re.search(r'^N_STEPS\s*=\s*(\d+)', src, re.M).group(1))
+    hard = re.findall(r"r\.run(?:_soft)?\(\s*'(\d+)\s*/\s*\d+", src)
+    assert not hard, '步号又写死进步名里了：%s' % hard
+    dry = subprocess.run([sys.executable, os.path.join(dl, 'sync_daily.py'),
+                          '--dry'], capture_output=True, text=True, cwd=dl)
+    assert dry.returncode == 0, dry.stderr[-300:]
+    num = re.findall(r'─────\s*(\d+)/(\d+)\s', dry.stdout)
+    assert num, '--dry 里没有「第几步/共几步」'
+    assert [int(a) for a, _ in num] == list(range(1, len(num) + 1)), num
+    assert {int(b) for _, b in num} == {n_decl}, '分母不止一个：%s' % num
+    assert len(num) == n_decl, '跑了 %d 步而 N_STEPS=%d' % (len(num), n_decl)
+    # 跑完必须自证步数（加一步忘改 N_STEPS 就要响亮失败，不是静默错分母）
+    assert 'r.n != N_STEPS' in src, 'sync_daily 少了步数自证'
+    # 🔴 `--dry` 不许写进度文件 —— 否则页面冒出一条"正在同步"而什么都没跑
+    assert 'if job and not dry' in src, '--dry 也会写进度文件'
+
+    td = tempfile.mkdtemp(prefix='_prg_')
+    old_dir, old_times = P.DIR, P.TIMES
+    P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+    try:
+        # ── B 进度来自【文件】，所以 launchd 跑的也看得见 ──────────
+        pg = P.Progress('sync', '每日数据同步', 13)
+        pg.step('第三步', at=3)
+        _prev = sbase.ALLOW_LIVE
+        try:
+            sbase.ALLOW_LIVE = False        # 只读模式也要能看进度
+            api = sv.ROUTES['/api/progress'](None)
+        finally:
+            sbase.ALLOW_LIVE = _prev
+        assert not api.get('error'), api
+        assert api['n'] == 1, api
+        r = api['jobs'][0]
+        # 反向自证：它**不在** _JOBS 里（正是 launchd 那条路的样子）
+        assert not r.get('job_id'), '这条进度不该有 job_id —— 构造没模拟到 launchd'
+        assert (r['i'], r['total'], r['state']) == (3, 13, 'running'), r
+        assert r['elapsed'] >= 0 and r['step'] == '第三步'
+
+        # ── C 第一次跑【不猜】ETA；跑完一次才有基准 ────────────────
+        assert r['eta'] is None, '没有历史却给了一个预计：%r' % r['eta']
+        # ★ 要**完整跑一次**才存剖面 —— 半截的剖面会让 ETA 系统性偏小，
+        #   而偏小的预计比没有预计更误导。所以这里从第 1 步重新跑满 13 步。
+        pgf = P.Progress('sync', '每日数据同步', 13)
+        for i in range(1, 14):
+            pgf.step('第%d步' % i, at=i)
+            pgf.finish_step('ok')
+        pgf.finish(0)
+        pg2 = P.Progress('sync', '每日数据同步', 13)
+        pg2.step('第一步', at=1)
+        r2 = [x for x in P.read('sync')][0]
+        assert r2['eta'] is not None, '跑完一次之后仍然给不出预计'
+        assert r2['eta_from'], '没说这个预计是哪次跑出来的'
+
+        # 🔴 两条链的耗时剖面**不许串** —— 串了那个"还要多久"没有意义。
+        #   ★ 构造里这条链的**步数要与 sync 相同**：`read` 另有一道
+        #     「剖面形状对不上就不用」的护栏（`len(secs)==total`），
+        #     步数不同的话是**那一道**替它挡住了，两道互相遮蔽、
+        #     测不出哪道在起作用（变异实测漏过一轮）。
+        #   两道的分工：一道管"取**自己这条链**的"，一道管"链加减过步数
+        #     之后旧剖面作废"。
+        po = P.Progress('setup', '装配', 13)
+        po.step('面板', at=4)
+        rs = [x for x in P.read('setup')][0]
+        assert rs['eta'] is None, 'setup 用了 sync 的耗时剖面：%r' % rs['eta']
+        po.finish(1)
+        os.remove(os.path.join(P.DIR, 'setup.json'))   # 免得它混进下面的计数
+
+        def _jobs():
+            # ★ 按 job 取，不按个数 —— 目录里多一条别的任务时，
+            #   "== 1" 会以另一条的名义通过/失败，报错指不到原因
+            return {x['job']: x for x in sv.ROUTES['/api/progress'](None)['jobs']}
+
+        # ── D 进程没了 -> stale（不是永远 running）；隔夜的不再常驻 ──
+        f = os.path.join(P.DIR, 'sync.json')
+        d = json.load(io.open(f, encoding='utf-8'))
+        d.update(state='running', pid=999999, step_started=time.time())
+        json.dump(d, io.open(f, 'w', encoding='utf-8'))
+        assert P.read('sync')[0]['state'] == 'stale', '死进程还报 running'
+        assert _jobs().get('sync', {}).get('state') == 'stale', '中断了却不说'
+        d['started'] = time.time() - 86400 * 2      # 两天前断的
+        json.dump(d, io.open(f, 'w', encoding='utf-8'))
+        assert 'sync' not in _jobs(), \
+            '隔了两天的中断还挂在最上面 —— 那就是常驻告警'
+
+        # ── E 刚跑完的 90 秒仍然显示（不然人一走开就不知道成没成）──
+        d.update(state='done', rc=0, ended=time.time(), started=time.time() - 9)
+        json.dump(d, io.open(f, 'w', encoding='utf-8'))
+        assert _jobs().get('sync', {}).get('state') == 'done', '跑完当场消失'
+        d['ended'] = time.time() - 600
+        json.dump(d, io.open(f, 'w', encoding='utf-8'))
+        assert 'sync' not in _jobs(), '完成的横条常驻了'
+    finally:
+        P.DIR, P.TIMES = old_dir, old_times
+        shutil.rmtree(td, ignore_errors=True)
+
+    return ('链 %d 步（分母只有一处、步号生成）｜ 进度走文件所以 launchd 也可见'
+            ' ｜ 第一次不猜 ETA、跑完有基准且两条链不串 ｜ 死进程报中断、'
+            '隔夜与完成都自己退场' % n_decl)
+
+
+@case('数据加载进度横条：在最上侧、每页都有、没任务时整条不渲染（playwright）', tag='web')
+def t_load_progress_bar():
+    """用户要的是"直接看到进度"，所以判据全是**可量的视觉事实**：
+    它在不在最上面、有没有把页面顶掉、步数与时间写没写出来。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import importlib
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    from assay.srv import base as sbase
+    from assay.srv import sync as sy
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    importlib.reload(P)
+
+    td = tempfile.mkdtemp(prefix='_prgbar_')
+    old_dir, old_times = P.DIR, P.TIMES
+    P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    errs, out = [], []
+    try:
+        with sync_playwright() as pw:
+            b = pw.chromium.launch()
+            pg = b.new_page(viewport={'width': 1280, 'height': 800})
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            # 🔴 **在【独立页面】上验** —— 横条挂在 common.js，而 6 个独立
+            #   .html 与 index.html 是两套骨架；只在首页验的话"独立页面上
+            #   没有横条"这种坏法抓不到（同炸板浮窗在个股页上验那条）。
+            pg.goto('http://127.0.0.1:%d/market.html' % port,
+                    wait_until='networkidle')
+
+            # ① 没有任务在跑 -> 整条不渲染，也不许留白
+            pg.wait_for_timeout(1500)
+            assert pg.locator('#prgbar').count() == 0, \
+                '没有任务在跑却挂着横条 —— 常驻一条"一切正常"等于教人忽略这个位置'
+            assert pg.evaluate("getComputedStyle(document.body).paddingTop") \
+                in ('0px', ''), '没挂横条却留了白'
+
+            # ② 造一个跑到一半的任务（pid 是本进程 -> 活的）
+            p = P.Progress('sync', '每日数据同步（增量补全到最新）', 13)
+            p.step('面板（本年增量）', at=7)
+            try:
+                pg.wait_for_selector('#prgbar', timeout=20000)
+            except Exception:
+                raise AssertionError(
+                    '任务在跑，独立页面上却没有进度横条 —— 而那不报错，'
+                    '只是从此没人知道数据在不在加载')
+            t = ' '.join(pg.inner_text('#prgbar').split())
+            geo = pg.evaluate(
+                "()=>{const e=document.querySelector('#prgbar'),"
+                "f=e.querySelector('.pgfill');"
+                "return {top:e.getBoundingClientRect().top,"
+                " pad:parseFloat(getComputedStyle(document.body).paddingTop),"
+                " h:e.getBoundingClientRect().height,"
+                " fw:f?f.getBoundingClientRect().width:0,"
+                " bw:e.getBoundingClientRect().width};}")
+            assert geo['top'] == 0, '横条不在最上侧：top=%s' % geo['top']
+            # 盖住页面第一行的话，顶栏就点不到了（同指数带子那条）
+            assert geo['pad'] >= geo['h'] - 1, \
+                '横条盖住了页面顶部：留白 %s < 横条高 %s' % (geo['pad'], geo['h'])
+            for want in ('第 7 / 13 步', '面板（本年增量）', '已用'):
+                assert want in t, '横条上缺「%s」：%s' % (want, t)
+            # 第一次跑没有基准 -> **明说未知**，不猜一个数
+            assert '剩余未知' in t, '没有历史却给了一个预计：%s' % t
+            frac = geo['fw'] / geo['bw']
+            # 🔴 钉**精确值**不是"一半左右"：没有历史耗时时条必须停在
+            #   **整步边界** (i-1)/total = 6/13。写成 0.4~0.6 的话
+            #   "按 i/total 硬算"（7/13 = 0.538）照样落在里面 ——
+            #   而那是在编一个看着在走的假进度（变异实测漏过）。
+            assert abs(frac - 6 / 13) < 0.012, (
+                '第一次跑没有基准，进度条应停在整步边界 %.3f，实际 %.3f'
+                ' —— 没有历史却插值 = 编一个假进度' % (6 / 13, frac))
+            out.append('%.0f%%' % (frac * 100))
+
+            # ③ 跑完 -> 不再是"进行中"，但那 90 秒仍然说得出结果
+            p.finish_step('ok')
+            p.finish(0)
+            pg.wait_for_function(
+                "()=>{const e=document.querySelector('#prgbar');"
+                "return e && e.innerText.indexOf('完成') >= 0;}", timeout=20000)
+            assert '⟳' not in pg.inner_text('#prgbar'), '跑完了还在转圈'
+
+            # ── ④ 本地还没有数据时，横条【就是那个入口】────────────
+            # 用户："系统启动后展示一个数据初始化的按钮，点击按钮开始加载。"
+            # 🔴 构造成"空 lake"，不能等真机器上恰好没数据
+            #   （同「判据不许依赖真实数据碰巧如此」）。
+            class _Fake(object):
+                def stages(self, **kw):
+                    return [{'id': 'x', 'name': '装第一步', 'why': '',
+                             'state': 'todo', 'detail': '', 'eta': '2 分钟',
+                             'cmd': [sys.executable, '-c', 'pass']}]
+
+                def summary(self, *a, **k):
+                    return {'stages': self.stages(), 'n_todo': 1,
+                            'ready': False, 'next_name': '装第一步',
+                            'n_auto_todo': 1, 'eta_text': '2 分钟', 'os': 'T'}
+
+            _old_mod, _old_live = sy._stages_mod, sv.ALLOW_LIVE
+            sy._stages_mod = lambda: (_Fake(), None)
+            sv.ALLOW_LIVE = True
+            sy._SETUP_SUM['at'] = 0
+            sy._SETUP_SUM['d'] = None
+            posted = []
+            pg.route('**/api/setup/run', lambda r: (
+                posted.append(r.request.post_data),
+                r.fulfill(status=200, content_type='application/json',
+                          body='{"error":"用例拦下了，没真跑"}')))
+            try:
+                # 换一页进来，确保读的是新的状态而不是内存里那份
+                pg.goto('http://127.0.0.1:%d/watchlist.html' % port,
+                        wait_until='networkidle')
+                try:
+                    pg.wait_for_selector('#prgsetup', timeout=20000)
+                except Exception:
+                    raise AssertionError(
+                        '本地还没有数据，横条上却没有"开始建"那个入口 —— '
+                        '而新机器上第一眼打开的是首页，那等于没有入口')
+                t2 = ' '.join(pg.inner_text('#prgbar').split())
+                assert '还差 1 步' in t2 and '2 分钟' in t2, \
+                    '入口没说还差几步、大概多久：%s' % t2
+                # 🔴 **看得出能点**才算入口（同「一个能点的东西被画成了标签」）
+                cur = pg.eval_on_selector('#prgsetup',
+                                          "e=>getComputedStyle(e).cursor")
+                assert cur == 'pointer', '那个入口的光标是 %s，看不出能点' % cur
+                assert pg.locator('#prgsetup').is_visible(), '入口不可见'
+                # 🔴 点了要**真的**发起一键建库 —— 只查"有这个按钮"的话，
+                #   handler 没绑（内容每轮被 innerHTML 整块换掉！）照样全绿
+                pg.click('#prgsetup')
+                pg.wait_for_timeout(800)
+                assert posted, '点了那个入口却什么请求都没发 —— 点了没反应'
+                assert '__all__' in (posted[0] or ''), (
+                    '点入口发的不是"一次跑完"：%s —— 只跑第一步等于又把'
+                    '"记得点六次"推回给人' % posted[0])
+
+                # 🔴 **第二个入口**：「🔄 数据」页上那个也得点得动。
+                #   两处各写一份 handler，漏一处的表现是"点了没反应"
+                #   而它不报错（同「两个『绑定策略』入口走同一条链」）。
+                posted[:] = []
+                pg.goto('http://127.0.0.1:%d/#/sync' % port,
+                        wait_until='networkidle')
+                try:
+                    pg.wait_for_selector('#suall', timeout=20000)
+                except Exception:
+                    raise AssertionError(
+                        '数据页上没有"一次建完"的入口 —— 只剩七个按钮'
+                        '要人自己点六次，那正是要改掉的东西')
+                pg.click('#suall')
+                pg.wait_for_timeout(800)
+                assert posted and '__all__' in (posted[0] or ''), \
+                    '数据页那个按钮点了没发一键建库：%s' % posted[:1]
+            finally:
+                pg.unroute('**/api/setup/run')
+                sy._stages_mod, sv.ALLOW_LIVE = _old_mod, _old_live
+                sy._SETUP_SUM['at'] = 0
+                sy._SETUP_SUM['d'] = None
+
+            assert not errs, errs[:3]
+            b.close()
+    finally:
+        httpd.shutdown()
+        P.DIR, P.TIMES = old_dir, old_times
+        shutil.rmtree(td, ignore_errors=True)
+    return ('独立页面上有横条、贴在最上侧且不盖内容（填充 %s）｜ 空闲时整条不渲染'
+            ' ｜ 步数/当前步/已用都写出来了、没有基准时明说未知 ｜ 跑完说完成'
+            ' ｜ 空 lake 时横条上那个入口点得动且发的是一键建库'
+            % out[0])

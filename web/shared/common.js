@@ -768,3 +768,135 @@ function _tipAt(tip, cx, cy){
   tip.style.left=Math.max(4, Math.min(x, W-w-4))+'px';
   tip.style.top=Math.max(4, Math.min(y, H-h-4))+'px';
 }
+
+/* ============ 数据加载进度：页面【最上侧】那条横条 ============ */
+/* 用户："这些数据加载都应该在 web 端最上侧显示，如果是分步加载的需要显示
+   一共多少步，当前多少步，每一步的进度，已用多少时间，预计还要多少时间。"
+
+   🔴 挂在 common.js —— 6 个独立 .html 与 index.html 都加载它，所以
+     **任何页面**都看得到（同炸板浮窗、同指数带子那条）。数据加载要几分钟
+     到几十分钟，人不会守在数据页上等。
+   🔴 数据来自 `/api/progress`，而那一发读的是**进度文件**不是 `_JOBS`
+     —— 每天真正跑同步的是 launchd，它不经过 serve.py。
+   ★ **没有任务在跑时整条不渲染**：常驻一条"一切正常"等于教人忽略这个位置
+     （同顶部横条那条纪律）。刚跑完的 90 秒仍然显示结果，然后自己退场。 */
+let PRG = null, PRGT = null;
+const PRG_RUN = 2000, PRG_IDLE = 10000;
+
+function fmtDur(s){
+  if(s == null || !isFinite(s)) return null;
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), q = s % 60;
+  return h ? (h + ':' + String(m).padStart(2,'0') + ':' + String(q).padStart(2,'0'))
+           : (m + ':' + String(q).padStart(2,'0'));
+}
+
+function prgHtml(j){
+  /* 🔴 本地还没有数据 —— 横条这时就是那个【入口】。
+     用户："首次加载，应该是系统启动后展示一个数据初始化的按钮，
+            然后点击按钮开始加载数据。"
+     ★ 按钮名写「开始建本地数据」而不是"数据初始化"：名字要说得出它做什么
+       （同「一个链接的名字必须说得出它去哪」）。 */
+  if(j.kind === 'setup_needed'){
+    const bits = ['还差 ' + j.n_todo + ' 步'];
+    if(j.eta_text) bits.push('约需 ' + esc(j.eta_text) + '（估）');
+    bits.push('之后每天自动增量同步，不用再点');
+    /* 只读模式下**按钮照样在**（项目纪律：一律不设 disabled，disabled 的
+       元素连 title 都不触发），但先把原因说在前面 —— 让人点一下才知道
+       "起不来"是把解释藏在了一次点击后面。 */
+    if(!j.can_run && j.why) bits.push(esc(j.why));
+    return '<span class="pgi">📦</span>' +
+      '<b>' + esc(j.title) + '</b>' +
+      '<span class="pgs">' + bits.join(' · ') + '</span>' +
+      '<a href="#" class="btn" id="prgsetup">▷ 开始建本地数据</a>' +
+      '<a href="/#/sync">看清单 ›</a>';
+  }
+  const run = j.state === 'running', bad = j.state === 'stale' || j.rc;
+  const ico = run ? '⟳' : (bad ? '🔴' : '✅');
+  /* 进度条的刻度是【已完成的步数】，当前这一步按它自己的实测时长插值。
+     🔴 没有历史耗时就**不插值**（条停在整步边界）—— 编一个看着在走的
+     假进度，比条不动更糟：人会拿它去估"还要多久"。 */
+  let pct = j.total ? (Math.max(0, j.i - 1) / j.total) : 0;
+  if(run && j.step_eta > 0 && j.step_elapsed != null)
+    pct += Math.min(j.step_elapsed / j.step_eta, 0.95) / j.total;
+  pct = Math.max(0, Math.min(1, pct));
+
+  const el = fmtDur(j.elapsed), eta = fmtDur(j.eta);
+  const bits = [];
+  if(run && j.total) bits.push('第 ' + j.i + ' / ' + j.total + ' 步');
+  if(j.step) bits.push(esc(j.step));
+  if(el) bits.push('已用 ' + el);
+  /* 预计剩余：**实测**的直接给；没实测过就退回阶段自己声明的文字估计
+     并标「估」；两样都没有就明说「未知」——【不猜一个数】。 */
+  if(run){
+    if(eta) bits.push('约剩 ' + eta);
+    else if(j.eta_text) bits.push('约需 ' + esc(j.eta_text) + '（估）');
+    else bits.push('剩余未知（第一次跑，跑完就有基准了）');
+  }
+  if(j.state === 'stale'){
+    /* 说清是**什么时候**断的 —— 只说"中断过"的话，人分不出是刚才还是
+       昨晚（而两者要做的事不一样）。 */
+    const t = j.broke_at ? new Date(j.broke_at * 1000) : null;
+    bits.push('中断了' + (t ? '（停在 ' + String(t.getMonth()+1).padStart(2,'0')
+      + '-' + String(t.getDate()).padStart(2,'0') + ' '
+      + String(t.getHours()).padStart(2,'0') + ':'
+      + String(t.getMinutes()).padStart(2,'0') + '）' : '') + ' —— 去数据页重跑');
+  }
+  if(!run && !bad) bits.push('完成');
+
+  return '<i class="pgfill' + (bad ? ' bad' : '') + '" style="width:' +
+         (pct * 100).toFixed(1) + '%"></i>' +
+         '<span class="pgi">' + ico + '</span>' +
+         '<b>' + esc(j.title || j.job) + '</b>' +
+         '<span class="pgs">' + bits.join(' · ') + '</span>' +
+         '<a href="/#/sync">看日志 ›</a>';
+}
+
+async function prgScan(){
+  let o;
+  try{ o = await j('/api/progress'); }catch(e){ return false; }
+  const js = (o && o.jobs) || [];
+  let bar = $('#prgbar');
+  if(!js.length){
+    if(bar){ bar.remove(); document.body.classList.remove('hasprog'); }
+    return false;
+  }
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'prgbar';
+    document.body.insertBefore(bar, document.body.firstChild);
+    document.body.classList.add('hasprog');
+    /* 🔴 事件**委托**在这个稳定容器上 —— 里面的内容每轮都被 innerHTML
+       整块换掉，逐个绑的话换完就没有 handler 了（同「innerHTML 填充之后
+       才存在的元素要重新绑事件」）。 */
+    bar.onclick = async (ev) => {
+      const b = ev.target.closest('#prgsetup');
+      if(!b) return;
+      ev.preventDefault();
+      b.textContent = '正在启动…';
+      let r;
+      try{ r = await post('/api/setup/run', {stage: '__all__'}); }
+      catch(e){ r = {error: String(e)}; }
+      if(r && r.error){
+        /* 按钮**一律不设 disabled**（项目纪律）：点得动，点了把原因说清楚。 */
+        b.textContent = '▷ 开始建本地数据';
+        alert('起不来：' + r.error);
+        return;
+      }
+      prgScan();      // 立刻换成"正在跑"那一行，别让人以为没反应
+    };
+  }
+  bar.innerHTML = js.map(prgHtml).join('');
+  return js.some(x => x.state === 'running');
+}
+
+if(typeof window !== 'undefined' && !window.__prgOn){
+  window.__prgOn = true;
+  const ptick = async () => {
+    const running = await prgScan();
+    /* 跑着的时候 2 秒一轮（进度要跟得上），闲着 10 秒一轮 ——
+       每个标签页都在轮，闲时也 2 秒的话纯属白打接口。 */
+    setTimeout(ptick, running ? PRG_RUN : PRG_IDLE);
+  };
+  setTimeout(ptick, 300);
+}

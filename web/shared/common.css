@@ -1017,3 +1017,30 @@ tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
 .mdel{color:var(--dim);cursor:pointer;text-decoration:none;padding:0 4px;
   font-size:13px;line-height:1}
 .mdel:hover{color:var(--up)}
+
+/* ---- 数据加载进度：页面最上侧那条横条（common.js 的 prgScan 挂上） ----
+   🔴 **不作用域化**（不写 `#main #prgbar`）—— 它挂在 6 个独立 .html 与
+     index.html 的 <body> 第一个子节点上，而 `#main` 只有 index.html 有。
+     作用域化的样式最容易这样漏，而 class 名看着"已经处理过了"
+     （同 `.pw` 的 overflow-x 当初只定义在 `#pk` 下面那条）。
+   ★ `.hasprog` 由 JS 在挂上横条时加，没挂上就不留白（同 `.hasidx`）。 */
+#prgbar{position:fixed;left:0;right:0;top:0;z-index:60;
+  display:flex;align-items:center;gap:8px;overflow:hidden;
+  padding:4px 10px;font-size:12px;line-height:18px;
+  background:var(--bg2,#12161c);border-bottom:1px solid var(--line);
+  color:var(--dim);white-space:nowrap}
+#prgbar b{font-weight:600;color:var(--fg)}
+#prgbar .pgi{font-size:13px}
+#prgbar .pgs{overflow:hidden;text-overflow:ellipsis;
+  font-variant-numeric:tabular-nums}
+#prgbar a{margin-left:auto;padding-left:10px;color:var(--accent);
+  text-decoration:none;flex:none}
+/* 进度条本身是铺在横条底下的一层，不占布局高度 —— 文字不会被它挤动 */
+#prgbar .pgfill{position:absolute;left:0;top:0;bottom:0;z-index:-1;
+  background:color-mix(in srgb,var(--accent) 22%,transparent);
+  transition:width .4s linear}
+#prgbar .pgfill.bad{background:color-mix(in srgb,var(--down) 22%,transparent)}
+body.hasprog{padding-top:28px}
+/* 横条上那个入口按钮：12px 的带子里不能用默认 .btn 的高度，否则把
+   横条撑高一截、body 的 padding-top 就对不上了（表现是它盖住顶栏）。 */
+#prgbar .btn{padding:1px 8px;font-size:12px;line-height:16px;margin-left:2px}
