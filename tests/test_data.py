@@ -2854,6 +2854,24 @@ def t_windows_boot_path():
     # 🔴 CRLF：LF-only 的 .bat 在 label / goto 上有已知的解析问题
     assert _bb.count(b'\n') == _bb.count(b'\r\n'), (
         'install.bat 有 LF-only 的行 —— .bat 要 CRLF')
+    # 🔴🔴 上面那条查的是【工作区】那份——而 `core.autocrlf=input` 会在 add
+    #   时把 CR 剥掉存进 blob，于是「工作区 CRLF / 仓库 LF」，守卫照样绿，
+    #   **而新 clone 拿到的是坏的**（同 requirements.txt 被 .gitignore 挡住
+    #   那条：本机看着好、新 clone 上不成立）。
+    # 🔴 判据要读【索引】那份 `.gitattributes`，不是工作区、也不是
+    #   `git check-attr`：后者在两处任一还在时都说 crlf（实测它在工作区那份
+    #   缺失时回落到 index），于是「rm 工作区那份」与「git rm --cached」
+    #   **两条变异都抓不到**。而"新 clone 会不会拿到 CRLF"只取决于
+    #   提交进去的那份——索引就是"下一次提交会是什么"。
+    _idx = subprocess.run(['git', 'show', ':.gitattributes'],
+                          cwd=REPO, capture_output=True, text=True)
+    assert _idx.returncode == 0, (
+        '.gitattributes 不在 git 索引里 —— 少了它，install.bat 会被存成 LF'
+        '（本机 core.autocrlf=input 剥掉 CR），新 clone 出来的 .bat 是坏的，'
+        '而本机工作区那份仍是 CRLF、上面那条守卫照样绿')
+    assert re.search(r'^\s*\*\.bat\b[^\n]*\beol=crlf\b', _idx.stdout, re.M), (
+        '索引里的 .gitattributes 没有为 *.bat 声明 eol=crlf：\n%s'
+        % _idx.stdout.strip()[:200])
 
     _bt = _bb.decode('ascii')
     # 判据不是"提到过 install.py"（注释里也提），是**真的转发**
@@ -2891,7 +2909,7 @@ def t_windows_boot_path():
             '目录挂载三条路（symlink -> junction -> 响亮失败，'
             '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
             'requirements.txt 盖住运行时真的 import 的 %d 个第三方包；'
-            'install.bat 纯 ASCII + CRLF、py -3 优先、转发参数'
+            'install.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数'
             % (len(files), len(got - TRANSITIVE)))
 
 

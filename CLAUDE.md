@@ -4907,6 +4907,40 @@ Python」那支里还有一处），裸 `^\s*pause$` 两处都命中，删掉末
 ★ 修法不是更小心地嵌套，是**把要插的代码写成单独一个文件**，
   补丁脚本只负责读它 + 定位锚点 —— 从结构上没有嵌套可踩。
 
+#### 🔴🔴 `.bat` 提交进去会被存成 LF —— 本机守卫绿、新 clone 拿到的是坏的
+
+`git add install.bat` 报了一句「下次 Git 接触时 CRLF 将被 LF 替换」。查下来
+blob 里确实是 **0 个 CRLF / 48 个 LF**（本机 `core.autocrlf=input` 剥掉了 CR）：
+
+    工作区   CRLF   <- 守卫查的是它，所以照样绿
+    仓库     LF     <- 新 clone 拿到的是它，而 LF-only 的 .bat 在 label/goto 上有坑
+
+**与上一轮 `requirements.txt` 被 `.gitignore` 挡住是同一类**：本机看着好、
+**新 clone 上不成立**。修法是 `.gitattributes` 的 `*.bat text eol=crlf`
+（不管哪台机器、什么 autocrlf 配置，签出都是 CRLF）。
+★ 自证：`git worktree add --detach` 干净签出一份 -> **48 CRLF / 0 裸 LF**。
+
+##### 🔴 判据选错了两次，两次都是【问错了对象】
+
+我先钉 `git check-attr eol -- install.bat`，两条变异**都没抓到**：
+
+    M8a  rm 工作区的 .gitattributes    -> check-attr **回落到 index**，仍说 crlf
+    M8b  git rm --cached              -> 工作区那份还在，仍说 crlf
+                                         （两处任一还在，它就说 crlf）
+
+而我真正要证的是「**新 clone 会不会拿到 CRLF**」—— 那只取决于**提交进去的
+那份**，与工作区无关。所以判据改成读**索引**（`git show :.gitattributes`，
+索引就是"下一次提交会是什么"）：
+
+    M8a  rm 工作区那份        -> **正确地不抓**（它不改变提交内容）
+    M8b  git rm --cached      -> 抓到：「.gitattributes 不在 git 索引里」
+    M8c  索引里改成 eol=lf     -> 抓到：「没有为 *.bat 声明 eol=crlf」
+
+★ 三条的分工这才对得上：**要证的事是"提交出去是什么"，判据就得问索引**。
+🔴 顺带踩了个还原的坑：M8c 之后 `git checkout .gitattributes` **是从索引恢复**，
+  而索引里正是变异那份 —— 报「更新了 0 个路径」，看着像还原了其实没有。
+  要写 `git checkout HEAD -- <file>`，并逐字节比 HEAD 自证。
+
 #### 🔴🔴 UTF-8 控制台接线时，我把它排在了固定 hash 种子【前面】
 
 全量 162/163，唯一那条是**我自己引入的**：
