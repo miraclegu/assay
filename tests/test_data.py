@@ -5562,6 +5562,11 @@ def t_setup_running_visible():
     old_dir, old_times = P.DIR, P.TIMES
     td = tempfile.mkdtemp(prefix='_gd_run_')
     P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+    # 🔴 这条用例**故意**让一个装配任务停在「正在跑」（①~⑧ 段要的就是它），
+    #   跑完 `_JOBS` 里就留下一个 state='running' 的僵尸 —— 而产品那道
+    #   「一次只许跑一个」的闸是对的，同进程里后面任何一条点装配的用例
+    #   都会被它拒掉。**单跑全绿、只有全量才红**（用例之间的干扰）。
+    _jobs0 = set(_rn._JOBS)
 
     done = set()
     NAMES = ('a', 'b', 'c')
@@ -5835,6 +5840,10 @@ def t_setup_running_visible():
         sy._SETUP_SUM['at'] = 0
         sy._SETUP_SUM['d'] = None
         P.DIR, P.TIMES = old_dir, old_times
+        # ★ 只删**自己新增**的，不无脑清空 —— 别的用例可能有自己的 job
+        for _k in [k for k in _rn._JOBS
+                   if k not in _jobs0 and k.startswith('setup-')]:
+            _rn._JOBS.pop(_k, None)
         shutil.rmtree(td, ignore_errors=True)
     # 🔴 守卫不许写生产数据 —— 日志落盘这件事最容易漏（同「selftest
     #   在往生产归档里写东西」那次）。逐个数一遍。
@@ -5866,6 +5875,17 @@ def t_setup_progress_failure_loud():
         sys.path.insert(0, dl)
     P = importlib.import_module('progress')
 
+    # 🔴 先确认没有**别的用例**留下的僵尸 job —— 有的话下面那一发会被
+    #   「一次只许跑一个」拒掉，而那句话看着像**产品**坏了
+    #   （实测：全量里被上一条 web 用例留的 G1 拒过，单跑却全绿）。
+    #   ★ 只报不清：清掉就把污染藏起来了，下次还会换个形式冒出来。
+    _zombie = [(k, j.get('stage')) for k, j in _rn._JOBS.items()
+               if k.startswith('setup-') and j.get('state') == 'running']
+    assert not _zombie, (
+        '🔴 构造不对：进来时就有 %d 个"正在跑"的装配任务 %r —— '
+        '是**别的用例**没清干净（产品那道「一次只许跑一个」是对的）。'
+        '单跑这条会全绿，只有全量才红' % (len(_zombie), _zombie[:2]))
+
     # 🔴 跑完必须真的变 ok —— `_go_all` 是 `while True` + 每轮重查状态，
     #   Fake 永远返回 todo 的话它**死循环**（第一版就是，用例挂在
     #   "已经有一个装配任务在跑"上，而报错指不到这里）。
@@ -5887,7 +5907,11 @@ def t_setup_progress_failure_loud():
     def boom(*a, **k):
         raise RuntimeError('写不了进度目录')
 
-    def fake_run(jid, cmd, cwd):
+    def fake_run(jid, cmd, cwd, **kw):
+        # 🔴 `**kw` 不能省：`_run_job` 后来加了 `log_path=`，而 stub 不接的话
+        #   `_go_all` 里那一发 TypeError -> job 崩在 running 状态 -> 同进程里
+        #   **下一条**点装配的用例被「一次只许跑一个」拒掉，报的是产品那句话
+        #   （实测全量里就是这么红的，而单跑全绿）。同「改一处之前先扫同类」。
         ran.append(jid)
         _rn._JOBS[jid].update({'rc': 0, 'state': 'done'})
 
@@ -5928,3 +5952,143 @@ def t_setup_progress_failure_loud():
         sy._SETUP_SUM['at'] = 0
         sy._SETUP_SUM['d'] = None
     return '进度条建不起来时：装配照跑 + 日志里说清楚 ｜ 正常时不报这句'
+
+
+@case('全量日线包：下坏了要【自己识别并重下】，不是永久卡在 BadZipFile',
+      tag='fast')
+def t_bootstrap_zip_guard():
+    """🔴 真机卡死在这里（2026-09-27）：日志里明明写着
+
+           已有 hsjday.zip（**0 MB**），跳过下载
+           校验 zip…
+           zipfile.BadZipFile: File is not a zip file
+
+       判据是 `os.path.isfile(zp)` —— **"文件在不在"，不是"文件对不对"**。
+       于是任何一次下载失败留下的残骸都让它**永远**跳过下载：重跑多少次
+       都报同一句，而那句话指不到真正的原因（"你那个文件是 0 字节的残骸"）。
+       ★ 最刺眼的是 `_download` 自己的 docstring 就写着「先写 .part 再
+         rename —— 中断的半个文件不许占正名」，而 isfile 那条判据恰好
+         把这条保护绕开了（**代码在和自己的注释打架**，第六次）。
+
+    两道闸，分工别记反：
+      `_zip_ready`   打得开吗（只读中央目录，快）-> 决定**要不要重下**
+      `testzip()`    逐条验 CRC（慢）          -> 决定**能不能解**
+    """
+    import importlib.util as _iu
+    import zipfile as _zf
+    import urllib.request as _ur
+
+    p = os.path.join(os.path.dirname(REPO), 'datalake', 'setup_tdx.py')
+    assert os.path.isfile(p), '找不到 setup_tdx.py'
+    spec = _iu.spec_from_file_location('setup_tdx_zipguard', p)
+    st = _iu.module_from_spec(spec)
+    spec.loader.exec_module(st)
+    out = []
+
+    td = tempfile.mkdtemp()
+    try:
+        def mk(name, data):
+            q = os.path.join(td, name)
+            io.open(q, 'wb').write(data)
+            return q
+
+        buf = io.BytesIO()
+        with _zf.ZipFile(buf, 'w') as z:
+            z.writestr('vipdoc/sh/lday/sh600000.day', b'x' * (2 << 20))
+        good = buf.getvalue()
+
+        # ---- ① 判据本身：三种坏法都要判成"不能用"
+        for label, q in [('不存在', os.path.join(td, 'nope.zip')),
+                         ('0 字节', mk('zero.zip', b'')),
+                         ('HTML 错误页', mk('h.zip', b'<html>404</html>' * 80))]:
+            ok, why = st._zip_ready(q)
+            assert not ok, (
+                '🔴 %s 被当成"已经下好了" —— 那正是真机永久卡死的那条路' % label)
+            assert why and '还没有' not in why or label == '不存在', why
+        # 🔴 反向自证：真 zip 必须判 ok，否则每次跑都白下 548 MB
+        #   （只测坏的那几种的话，"一律重下"也全绿）
+        ok, why = st._zip_ready(mk('good.zip', good))
+        assert ok, '🔴 好好的 zip 被判成残骸 -> 每次都重下 548 MB：%s' % why
+        out.append('判据四态：不存在/0字节/HTML 都判不可用，真 zip 判可用')
+
+        # ---- ② 端到端：残骸必须【删掉重下】，而不是抛 BadZipFile
+        old = (st.TDX, st.VIPDOC, st._download,
+               st._bin_version, st._extract_zip)
+        try:
+            st.TDX, st.VIPDOC = td, os.path.join(td, 'vipdoc')
+            zp = os.path.join(td, 'hsjday.zip')
+            io.open(zp, 'wb').write(b'')          # 真机上那个 0 MB 文件
+            calls = []
+
+            def _dl(url, dst, expect=None):
+                calls.append(dst)
+                io.open(dst, 'wb').write(good)
+                return dst
+            st._download = _dl
+            st._bin_version = lambda: '1.2.3'
+            st._extract_zip = lambda z, d: 0
+            try:
+                st.bootstrap()
+            except SystemExit:
+                pass                              # 后面几步本来就会拦下来
+            assert calls, (
+                '🔴 0 字节的残骸仍然被跳过下载 —— 每跑一次报一次 '
+                'BadZipFile，而人删不掉他不知道存在的那个文件')
+            assert not os.path.exists(zp + '.part'), '残留 .part'
+            out.append('0 字节残骸：识别 + 删掉 + 真的重下了')
+        finally:
+            (st.TDX, st.VIPDOC, st._download,
+             st._bin_version, st._extract_zip) = old
+
+        # ---- ③ 空响应 / 截断 一律不许落盘（同 realtime「空结果当失败」）
+        class _R(object):
+            def __init__(self, body, cl):
+                self.b, self.headers = body, {'Content-Length': cl}
+
+            def read(self, n):
+                d, self.b = self.b[:n], self.b[n:]
+                return d
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        _old_open = _ur.urlopen
+        try:
+            for label, body, cl, want in [
+                    ('空响应', b'', '0', '一个字节都没下到'),
+                    ('截断', b'x' * 10, '100', '连接中断')]:
+                _ur.urlopen = (lambda b, c: (
+                    lambda *a, **k: _R(b, c)))(body, cl)
+                dst = os.path.join(td, 'x.bin')
+                try:
+                    st._download('http://x', dst)
+                    raise AssertionError(
+                        '🔴 %s 被当成下载成功 —— 那个文件会占住正名，'
+                        '之后每次跑都从它身上报错' % label)
+                except SystemExit as e:
+                    assert want in str(e), \
+                        '🔴 %s 的报错指不到原因：%s' % (label, e)
+                    assert not os.path.exists(dst), \
+                        '🔴 %s 还是落盘了' % label
+            out.append('空响应 / 截断：都不落盘，且报错说得出是哪种')
+        finally:
+            _ur.urlopen = _old_open
+
+        # ---- ④ 日志每行带时间（用户：我都不知道是什么时候的报错日志）
+        _buf, _so = io.StringIO(), sys.stdout
+        try:
+            sys.stdout = _buf
+            st._say('校验 zip…')
+        finally:
+            sys.stdout = _so
+        ln = _buf.getvalue().strip()
+        assert re.match(r'^\[\d\d-\d\d \d\d:\d\d:\d\d\] ', ln), (
+            '🔴 装配日志没有时间戳：%r —— 这些行会进 sync_logs/*.log，'
+            '而"这是什么时候的报错"是翻日志时第一个要回答的问题' % ln[:60])
+        out.append('每行带时间戳（%s）' % ln[:19])
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    return ' ｜ '.join(out)
