@@ -32,7 +32,7 @@ def api_sync(_q):
     except Exception as e:                                  # noqa: BLE001
         out['error'] = '%s: %s' % (type(e).__name__, e)
     # 最近几次同步日志（只列文件名与大小，内容按需取）
-    ld = os.path.join(dl, '_manifest', 'sync_logs')
+    ld = _sync_log_dir()           # 写/列/读同一处（见 _sync_log_dir）
     logs = []
     if os.path.isdir(ld):
         for fn in sorted(os.listdir(ld), reverse=True)[:12]:
@@ -431,7 +431,16 @@ def api_sync_jq_upload(headers, raw):
 
 
 
-_LOG_RE = re.compile(r'^[0-9]{8}-[0-9]{6}\.log$')
+# 🔴 **白名单**，不是黑名单 —— 文件名是从 URL 回来的，直接 join 就是
+#   目录穿越。三种形状：
+#     20260927-161500.log                 每日同步链（sync_daily 自己写的）
+#     setup-20260927-161500.log           装配一键链
+#     setup-bootstrap-20260927-161500.log 单独重跑某一个阶段
+#   ★ 装配日志**带 `setup-` 前缀**而不是混用同一种名字：「最近同步日志」
+#     那张表会把两者列在一起，名字一样的话人看不出哪个是建库、哪个是每日
+#     增量（同「不拿 ETF 当指数用：近似物要叫自己的名字」）。
+_LOG_RE = re.compile(
+    r'^(?:setup-(?:[a-z0-9_]{1,20}-)?)?[0-9]{8}-[0-9]{6}\.log$')
 
 
 
@@ -441,7 +450,7 @@ def api_sync_log(q):
     name = (q.get('name') or '').strip()
     if not _LOG_RE.match(name):
         return {'error': '日志名格式不对：%r' % name}
-    p = os.path.join(_datalake_dir(), '_manifest', 'sync_logs', name)
+    p = _setup_log_path(name)      # 读与写同一处，不许各拼各的
     if not os.path.isfile(p):
         return {'error': '日志不存在：%s' % name}
     txt = open(p, encoding='utf-8', errors='replace').read()
@@ -510,9 +519,16 @@ def api_setup(_q):
     d = m.summary()
     d.update(_setup_flags())
     # 已经在跑的那个（页面刷新之后要接得回去 —— 否则看着像"点了没反应"）
-    for jid, j in _runs._JOBS.items():
-        if jid.startswith('setup-') and j.get('state') == 'running':
-            d['running'] = {'job_id': jid, 'stage': j.get('stage')}
+    for jid, j in list(_runs._JOBS.items()):
+        # ★ `':' not in jid` —— 一键链的子任务叫 `<父>:<阶段id>`，它的
+        #   state 也是 running。页面要的是那条链的身份（父任务），
+        #   而"多久没输出"由 job_live 往下找一层取（一份实现，两处共用）。
+        if (jid.startswith('setup-') and ':' not in jid
+                and j.get('state') == 'running'):
+            idle, nl, log = _runs.job_live(jid)
+            d['running'] = {'job_id': jid, 'stage': j.get('stage'),
+                            'stage_id': j.get('stage_id'),
+                            'log': log, 'n_lines': nl, 'idle': idle}
             break
     return d
 
@@ -550,15 +566,32 @@ def api_setup_run(_q, body):
         if not [x for x in auto if x['state'] == 'todo']:
             return {'error': '本地数据已经齐了 —— 没有要建的步骤。'}
         job_id = 'setup-all-%s' % datetime.now().strftime('%H%M%S')
+        # ★ 落盘复用 `_manifest/sync_logs/`：那一套已经有列表（api_sync 的
+        #   logs）、有防穿越的读取（api_synclog）、也已经被 logs.trim_by_days
+        #   按天清理。另造一个目录就是第二份实现（先查有没有，再决定写不写）。
+        log_path = _setup_log_path(
+            'setup-%s.log' % datetime.now().strftime('%Y%m%d-%H%M%S'))
+        # ★ 日志名**一开始就定下来**（不等第一个子任务跑起来才有）——
+        #   否则页面第一次渲染时「看完整日志」那个入口还不存在，
+        #   要等下一次重渲染才冒出来（实测：入口迟到了整整一步）。
         _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': [],
                                'sha': None, 'run_id': None, 'rc': None,
-                               'stage': '建本地数据'}
+                               'stage': '建本地数据',
+                               'log': os.path.basename(log_path)}
         pg = None
         try:
             import progress as _P
             pg = _P.Progress('setup', '建本地数据（首次批量加载）', len(auto))
-        except Exception:                                   # noqa: BLE001
-            pass
+        except Exception as e:                              # noqa: BLE001
+            # 🔴 **不许静默 pass**：进度文件是顶上那条横条的唯一数据源，
+            #   它建不起来的话"到底在不在跑"就再也没地方看得到，
+            #   而装配本身照跑 —— 屏幕上就是"点了没反应"。
+            #   装配不该被进度拖垮，所以不抛；但必须说一句
+            #   （同「保护分支不该静默跳过」）。
+            _runs._JOBS[job_id]['lines'].append(
+                '⚠ 进度条建不起来（%s: %s）—— 装配照跑，'
+                '但顶上那条横条不会显示进度，只能看这里的日志。'
+                % (type(e).__name__, e))
 
         def _go_all():
             j = _runs._JOBS[job_id]
@@ -580,13 +613,15 @@ def api_setup_run(_q, body):
                 if pg:
                     pg.step(nxt['name'], at=ids.index(nxt['id']) + 1)
                 j['stage'] = nxt['name']
+                j['stage_id'] = nxt['id']
                 j['lines'].append('')
                 j['lines'].append('───── %s ─────' % nxt['name'])
                 sub = job_id + ':' + nxt['id']
                 _runs._JOBS[sub] = {'state': 'running', 'lines': j['lines'],
                                     'cmd': list(nxt['cmd']), 'sha': None,
                                     'run_id': None, 'rc': None}
-                _runs._run_job(sub, list(nxt['cmd']), _datalake_dir())
+                _runs._run_job(sub, list(nxt['cmd']), _datalake_dir(),
+                               log_path=log_path)
                 rc = _runs._JOBS[sub].get('rc') or 0
                 _runs._JOBS.pop(sub, None)
                 if pg:
@@ -621,7 +656,7 @@ def api_setup_run(_q, body):
     job_id = 'setup-%s-%s' % (sid, datetime.now().strftime('%H%M%S'))
     _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
                            'sha': None, 'run_id': None, 'rc': None,
-                           'stage': st['name']}
+                           'stage': st['name'], 'stage_id': sid}
 
     # 🔴 **进度按【整条装配链】报，不是"这次点了 1 步"** —— 人要看的是
     #   「第 4 步 / 共 7 步」。能自动跑的阶段才算分母（⑦ 财务是人工的，
@@ -638,7 +673,9 @@ def api_setup_run(_q, body):
         pass                    # 进度坏了不许挡住装配本身
 
     def _go():
-        _runs._run_job(job_id, cmd, _datalake_dir())
+        _runs._run_job(job_id, cmd, _datalake_dir(),
+                       log_path=_setup_log_path('setup-%s-%s.log' % (
+                           sid, datetime.now().strftime('%Y%m%d-%H%M%S'))))
         if pg:
             rc = _runs._JOBS[job_id].get('rc')
             pg.finish_step('ok' if rc == 0 else 'bad')
@@ -648,6 +685,26 @@ def api_setup_run(_q, body):
     threading.Thread(target=_go, daemon=True).start()
     return {'job_id': job_id, 'stage': st['name'], 'cmd': ' '.join(cmd),
             'step': pos, 'total': len(auto)}
+
+
+def _sync_log_dir():
+    """日志目录 —— **写（装配）、列（api_sync）、读（api_sync_log）共用一处**。
+
+    改之前写那侧我另拼了一份路径，而读那侧还用自己的 —— 于是守卫把写
+    重定向到临时目录之后，读那边照旧去生产目录找，报「日志不存在」。
+    **两处实现必然分叉**，这次分叉是当场造出来的。
+
+    复用 `_manifest/sync_logs/`：那一套已经有列表、有防穿越的读取、
+    也已经被 logs.trim_by_days 按天清理（先查有没有，再决定写不写）。
+    ★ 抽成函数还有一个用处：守卫要把它重定向到临时目录，而**打桩整个
+      datalake 根会误伤** —— `/api/sync` 也读那个根，一指到空目录它就报错，
+      页面于是走进"状态读取失败"那条分支（实测踩过，查了一轮）。
+    """
+    return os.path.join(_datalake_dir(), '_manifest', 'sync_logs')
+
+
+def _setup_log_path(name):
+    return os.path.join(_sync_log_dir(), name)
 
 
 def _setup_flags():

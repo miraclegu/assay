@@ -129,21 +129,64 @@ let SU=null;
      （同「加一个指标，广场上自动就有」）。
    🔴 **判据是"现在磁盘上是什么"，不是"跑过没有"** —— 记一个 done 标记
      会在「文件被删了 / 手工跑过 / 换了台机器」时说谎（同 launchd 那条）。 */
+/* 🔴🔴 「到底是卡住了还是在干活」的**唯一**可证判据是「最后一次有输出
+   是多久以前」—— 不是"进程在不在"（项目里早有这条：realtime 那次
+   「线程还活着不等于链条还在工作」）。第 ② 步要跑 30~60 分钟，
+   而改之前屏幕上它与"卡死了"长得一模一样。
+   ★ **只给事实，不下结论**：有些步骤（tdx2db init）中途本来就长时间
+     不吐东西，说死"卡住了"就是假告警；说死"在跑"又可能是在骗人。
+     所以摆出"多久没输出"这个数，并把两种可能都说出来。 */
+/* 🔴 `let` 不是 `const`：300 秒的警告态在用例里等不起，守卫要能把它
+   临时压到 1 秒再验（同 KMAIN_MAX 那条——真实数据触发不到的上限，
+   判据必须能构造出来）。测完在 finally 里复位。 */
+let SU_IDLE_WARN = 300;
+function idleText(sec){
+  if(sec==null) return '';
+  if(sec < 90) return '最后输出 '+Math.round(sec)+' 秒前';
+  return '最后输出 '+Math.floor(sec/60)+' 分钟前';
+}
+function idleHtml(su){
+  const r = su && su.running; if(!r) return '';
+  const t = idleText(r.idle);
+  if(!t) return '';
+  const n = r.n_lines!=null ? '　已出 '+r.n_lines+' 行' : '';
+  if(r.idle >= SU_IDLE_WARN)
+    return '<span id="suidle" class="lvtag warn" title="有些步骤（比如 '+
+      'tdx2db init）中途本来就长时间不吐东西；也可能是真卡住了。'+
+      '点「看完整日志」对一眼最后在干什么。">\u26a0 '+esc(t)+esc(n)+'</span>';
+  return '<span id="suidle" class="cd">'+esc(t)+esc(n)+'</span>';
+}
+
 function setupBlock(su){
   if(!su || su.error) return su&&su.error
     ? '<div class="lvwarn"><b>装配状态读不出来</b><br>'+esc(su.error)+'</div>' : '';
-  const ico={ok:'\u2705', todo:'\u2b1c', manual:'\u270b'};
+  /* 正在跑的那一步要看得出来。改之前它与「还没轮到」共用同一个图标 +
+     「等上一步」 —— 于是第二步（30~60 分钟）跑着的时候，屏幕上写的是
+     「还没开始 … 等上一步」，那是在说谎：人分不出「在跑」「卡住了」
+     「等人动手」三种（用户原话：我都不知道是卡住了还是等人手工操作）。
+     判据用服务端给的 running.stage_id —— 按 id 不按名字，名字改了
+     它还认得（同「按位置对齐，names 只给显示用」那条）。 */
+  const ico={ok:'\u2705', todo:'\u2b1c', manual:'\u270b', running:'\u27f3'};
+  const busy = !!su.running;
   const rows=(su.stages||[]).map(s=>{
-    const can = s.state==='todo' && s.cmd && su.can_run;
-    return '<tr><td class="tx">'+ico[s.state]+' '+esc(s.name)+
+    const run = busy && su.running.stage_id===s.id;
+    /* 有任务在跑时，其余「开始」不该还是可点的 —— 服务端本来就会拒
+       （一次只许跑一个，它们有先后依赖），而让人点一个必然报错的按钮
+       比不给更糟（同 backLink 那条）。 */
+    const can = s.state==='todo' && s.cmd && su.can_run && !busy;
+    return '<tr'+(run?' class="surun"':'')+'><td class="tx">'+
+      (run?ico.running:ico[s.state])+' '+esc(s.name)+
       '<div class="cd">'+esc(s.why||'')+'</div></td>'+
       '<td class="tx">'+esc(s.detail||'')+'</td>'+
       '<td class="tx">'+esc(s.eta||'')+'</td>'+
-      '<td class="tx">'+(can
+      '<td class="tx">'+(run
+        ? '<b>正在跑…</b>'
+        : (can
         ? '<button class="btn susbtn" data-sid="'+esc(s.id)+'">\u25b7 开始</button>'
         : (s.state==='ok'?'<span class="cd">已完成</span>'
           :(s.state==='manual'?'<span class="cd">人工</span>'
-            :'<span class="cd">'+(su.can_run?'等上一步':esc(su.why||'只读'))+'</span>')))+
+            :'<span class="cd">'+(su.can_run
+               ?(busy?'排队中':'等上一步'):esc(su.why||'只读'))+'</span>'))))+
       '</td></tr>';
   }).join('');
   const tbl='<div class="pw"><table class="lvt">'+
@@ -165,7 +208,11 @@ function setupBlock(su){
      某一步失败时要能单独重来（同「硬拒必须配一个逃生口」）。 */
   const one = su.running
     ? '<span class="cd">正在跑：'+esc(su.running.stage||'')+'　'+
-      '（跑完会自动接着下一步）</span>'
+      '（跑完会自动接着下一步）</span>　'+idleHtml(su)+
+      (su.running.log
+        ? '　<a href="#" class="sylog" data-n="'+esc(su.running.log)+
+          '">看完整日志 \u203a</a>'
+        : '')
     : (su.can_run
        ? '<button class="btn" id="suall">\u25b7 开始建本地数据</button>'+
          '<span class="cd" style="margin-left:8px">一次跑完剩下的 '+
@@ -182,6 +229,15 @@ function setupBlock(su){
 }
 
 function setupWire(){
+  /* 🔴 `#subox` 每次刷新都整块换 innerHTML，而 a.sylog 是**逐个绑**的
+     —— 不在这里补一次的话，「看完整日志」点了没反应，且不报错
+     （同「innerHTML 填充之后才存在的元素要重新绑事件」，本项目栽过几次）。*/
+  document.querySelectorAll('#subox a.sylog').forEach(e=>e.onclick=async ev=>{
+    ev.preventDefault();
+    const r=await j('/api/sync/log?name='+encodeURIComponent(e.dataset.n));
+    const el=$('#syout'); el.style.display=''; el.textContent=r.text||'';
+    el.scrollTop=el.scrollHeight;
+  });
   const all=$('#suall');
   if(all) all.onclick=async()=>{
     all.textContent='\u542f\u52a8\u4e2d\u2026';
@@ -226,11 +282,29 @@ async function showSync(){
     o = r[0]; su = r[1];
   }catch(e){
     try{ su = await j('/api/setup'); }catch(_){}
-    $('#main').innerHTML = (su?setupBlock(su):'') +
-      '<div class="none">数据同步状态读取失败：'+esc(e)+'</div>';
-    setupWire(); return;
+    /* 🔴 这条路上**也要**有 #subox：空 lake 上 `/api/sync` 很可能是它
+       自己先报错（那一页要读同步状态、日志目录…），而那正是最需要
+       装配块能跟着任务自动刷新的时候 —— 没有这个容器，refreshSetup
+       找不到落点，于是阶段表整场不动，**而它不报错**。 */
+    if(su && su.running && su.running.job_id && !SYJOB) SYJOB=su.running.job_id;
+    $('#main').innerHTML = '<div id="subox">'+(su?setupBlock(su):'')+'</div>' +
+      '<div class="none">数据同步状态读取失败：'+esc(e)+'</div>'+
+      '<pre id="syout" style="display:none;background:var(--panel2);'+
+      'border:1px solid var(--line);border-radius:6px;padding:12px;'+
+      "overflow:auto;max-height:60vh;font:11px/1.6 'SF Mono',Menlo,monospace\"></pre>";
+    setupWire(); if(SYJOB) pollSync(); return;
   }
   SY=o; SU=su;
+  /* 接回已经在跑的装配任务。服务端早就把 running.job_id 给出来了
+     （api_setup 那行注释写的就是「页面刷新之后要接得回去 —— 否则看着像
+     点了没反应」），而前端从来没用过它 —— 于是刷新一次 / 切走再回来，
+     SYJOB 就没了，pollSync 第一行 return，**日志框再也不出现**。
+     用户原话：「卡在第二步，但是什么报错信息都没有」—— 那一步要跑
+     30~60 分钟，中途看一眼页面是常态。
+     ★ !SYJOB 这个条件不能少：已经在轮询时再起一条就是两条并发 setTimeout 链。 */
+  if(su && su.running && su.running.job_id && !SYJOB){
+    SYJOB = su.running.job_id;
+  }
   const st=o.status||{}, it=st.items||[], cal=st.calendar||{};
   const A=it.filter(x=>x.leg==='A'), B=it.filter(x=>x.leg==='B');
   let warn='';
@@ -276,7 +350,7 @@ async function showSync(){
   };
   $('#main').innerHTML=warn+`
   ${dataTabs('sync')}
-  ${setupBlock(SU)}
+  <div id="subox">${setupBlock(SU)}</div>
   <div class="lvhead">
     <h2>数据同步</h2>
     <span class="lvtag">应到交易日 ${esc(st.expect_trade_day||'?')}</span>
@@ -359,6 +433,8 @@ async function showSync(){
 
   $('#syref').onclick=()=>showSync();
   setupWire();   /* 装配那几个按钮与主渲染同一条路 */
+  /* 接回正在跑的那个任务的日志。放在渲染之后 —— pollSync 要往 #syout 写。 */
+  if(SYJOB) pollSync();
   if($('#syauto')) $('#syauto').onclick=async()=>{
     const on=!o.auto.on, m=$('#symsg');
     /* 关闭要确认：它的代价是"几个月后发现历史有缺口"，而不是立刻报错。 */
@@ -466,14 +542,45 @@ async function showSync(){
   });
 }
 
-async function pollSync(){
+/* 🔴 **代际计数防两条链并发。** showSync 现在会接回正在跑的任务，
+   而"刚点完按钮"那条链可能已经在跑 —— 不防的话每刷一次页面就多一条
+   setTimeout 链，日志框被几条链轮流写（同 LVGEN 那条）。 */
+let SYPOLLTOK=0, SYPOLLN=0;
+async function pollSync(tok){
   if(!SYJOB) return;
-  const el=$('#syout'); el.style.display='';
+  if(tok===undefined){ tok=++SYPOLLTOK; SYPOLLN=0; }
+  else if(tok!==SYPOLLTOK) return;      /* 旧链，作废自己 */
+  const el=$('#syout'); if(!el) return; el.style.display='';
   try{
     const o=await j('/api/job?id='+SYJOB);
     el.textContent=(o.lines||[]).join('\n');
     el.scrollTop=el.scrollHeight;
-    if(o.state==='running'){ setTimeout(pollSync, 2000); return; }
+    if(o.state==='running'){
+      /* 🔴 阶段表也要跟着动 —— 改之前 pollSync 只写 #syout，于是那七行
+         与按钮**整场冻结在点击那一刻的快照上**（第 ② 步要跑 30~60 分钟）。
+         用户原话：「按钮仍处于可用状态……其他阶段都没有任何进度」。
+         ★ 每 5 轮（10 秒）才查一次：/api/setup 那侧有 20 秒缓存，
+           2 秒一发纯属白打。
+         ★ **签名变了才重渲染** —— 不比的话每 10 秒重建一次 DOM，
+           hover 与选中的文字会断（同「刷新只换数字，不许重建 DOM」）。 */
+      /* 步骤一换就【立刻】刷表，不等那 10 秒 —— 否则横条说「第 3 步」
+         而表格还停在第 2 步，同屏两处自相矛盾（探针实测）。
+         `/api/job` 这一发本来就在打，stage_id 是白捡的，零额外请求。 */
+      /* 「多久没输出」要**每轮**都更新 —— 它是人判断"卡没卡"的那个数，
+         每 10 秒才动一次的话，盯着看的人会以为页面自己也卡住了。
+         ★ 只换那一格的文字，不重建 DOM（同 livePatch 那条）。 */
+      const ie=$('#suidle');
+      if(ie && o.idle!=null){
+        const t=idleText(o.idle)+(o.n_lines!=null?'　已出 '+o.n_lines+' 行':'');
+        if(ie.textContent.replace(/^\u26a0\s*/,'')!==t){
+          ie.textContent=(o.idle>=SU_IDLE_WARN?'\u26a0 ':'')+t;
+          ie.className=o.idle>=SU_IDLE_WARN?'lvtag warn':'cd';
+        }
+      }
+      const cur = SU && SU.running && SU.running.stage_id;
+      if(o.stage_id && o.stage_id!==cur) refreshSetup();
+      else if(SYPOLLN++ % 5 === 0) refreshSetup();
+      setTimeout(()=>pollSync(tok), 2000); return; }
     const m=$('#symsg');
     m.className='lvmsg '+(o.rc===0?'ok':'bad');
     /* 同一个轮询同时服务"立即同步"和"上传财务数据" —— 文案要分开，
@@ -487,6 +594,26 @@ async function pollSync(){
     SYJOB=null;
     setTimeout(()=>showSync(), 1200);
   }catch(e){ SYJOB=null; }
+}
+
+/* 只换阶段块那一格，别动 #syout（它的滚动位置是人正在看的地方）。 */
+let SUSIG=null;
+async function refreshSetup(){
+  const box=$('#subox'); if(!box) return;
+  try{
+    const su=await j('/api/setup');
+    if(su && su.error) return;
+    /* ★ 签名要覆盖**所有会变的**东西：漏了 log 的话，日志名从 null 变成
+       有值时签名不变 -> 不重渲染 -> 「看完整日志」那个入口永远不出现
+       （实测踩过）。 */
+    const sig=JSON.stringify([(su.stages||[]).map(x=>[x.id,x.state,x.detail]),
+                              su.running&&su.running.stage_id,
+                              su.running&&su.running.log, su.n_todo]);
+    if(sig===SUSIG) return;
+    SUSIG=sig; SU=su;
+    box.innerHTML=setupBlock(su);
+    setupWire();          /* innerHTML 换过之后按钮要重新绑 */
+  }catch(e){}
 }
 
 /* ============ 数据字典 ============ */

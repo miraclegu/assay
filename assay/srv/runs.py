@@ -1,6 +1,7 @@
 """srv/runs.py —— 回测归档：目录 / 详情 / 权益 / 成交 / 版本 / 触发回测。"""
 import ast
 import hashlib
+import io
 import json
 import os
 import re
@@ -805,9 +806,40 @@ _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 
-def _run_job(job_id, cmd, cwd):
+def _run_job(job_id, cmd, cwd, log_path=None):
+    """跑一个子进程，把输出收进 `j['lines']`。
+
+    🔴🔴 **记下"最后一次有输出是什么时候"**（`last_at`）。这是"到底卡住了
+      还是在干活"的**唯一**可证判据 —— 项目里早有这条纪律（realtime 那条：
+      「线程还活着不等于链条还在工作，判据是 poll.last.at 距今多久，
+      不是进程在不在」），而装配这条链一直没套用：于是第 ② 步
+      （下 548MB 再 init，30~60 分钟）跑着的时候，屏幕上与"卡死了"
+      **长得一模一样**。
+
+    🔴 **`n_lines` 单独记**：`lines` 超过 4000 行会砍掉前一半，拿
+      `len(lines)` 当"出了多少行"会在砍过之后**变小**，看着像倒着走。
+
+    ★ `log_path` 给了就**边跑边落盘**（逐行 flush）——`lines` 只在内存里，
+      serve.py 一重启就全没了，而"完整日志"恰恰是事后才要查的。
+    """
     import subprocess
+    import time as _time
     j = _JOBS[job_id]
+    j['started_at'] = _time.time()
+    j['last_at'] = j['started_at']
+    j['n_lines'] = 0
+    lf = None
+    if log_path:
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            lf = io.open(log_path, 'a', encoding='utf-8', errors='replace')
+            j['log'] = os.path.basename(log_path)
+        except Exception as e:                              # noqa: BLE001
+            # 🔴 不许静默：日志写不出去时，人事后翻不到任何东西，
+            #   而屏幕上看着一切正常（同「保护分支不该静默跳过」）。
+            j['lines'].append('⚠ 日志落不了盘（%s: %s）—— 跑照跑，'
+                              '但这次的输出只在内存里，重启 serve.py 就没了。'
+                              % (type(e).__name__, e))
     try:
         pr = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, bufsize=1,
@@ -815,7 +847,13 @@ def _run_job(job_id, cmd, cwd):
                               errors='replace')
         j['pid'] = pr.pid
         for line in pr.stdout:
-            j['lines'].append(line.rstrip('\n'))
+            ln = line.rstrip('\n')
+            j['lines'].append(ln)
+            j['n_lines'] += 1
+            j['last_at'] = _time.time()
+            if lf is not None:
+                lf.write(ln + '\n')
+                lf.flush()      # 逐行 flush：崩在半路时那半截也要留下来
             if len(j['lines']) > 4000:
                 del j['lines'][:2000]
         rc = pr.wait()
@@ -831,6 +869,12 @@ def _run_job(job_id, cmd, cwd):
     except Exception as e:                                  # noqa: BLE001
         j['state'] = 'failed'
         j['lines'].append('启动失败: %s: %s' % (type(e).__name__, e))
+    finally:
+        if lf is not None:
+            try:
+                lf.close()
+            except Exception:                               # noqa: BLE001
+                pass
 
 
 
@@ -895,12 +939,52 @@ def api_backtest(q, body):
 
 
 
+def job_live(jid):
+    """这个任务"现在到底在不在动"：(多久没输出, 出了多少行, 日志文件名)。
+
+    🔴 **一键装配链的父任务自己不跑子进程** —— 它起的是一串子任务
+      （`<父>:<阶段id>`），于是 `last_at` / `n_lines` 全记在子任务上，
+      父任务那边**永远是 None**。页面问的是父任务（它才是那条链的身份），
+      所以这里要往下找一层。不找的话"多久没输出"恒为空，
+      而那正是分辨"在跑 / 卡住"的唯一判据 —— 实测第一版就是这么空的。
+
+    ★ 两个调用方（api_job / api_setup）走同一份实现 —— 各写一份的话，
+      页面上同一件事两处给出不同的答案（同「两处实现必然分叉」）。
+    """
+    import time as _time
+    j = _JOBS.get(jid)
+    if j is None:
+        return None, None, None
+    src = j
+    if j.get('last_at') is None:
+        for k, v in _JOBS.items():
+            if k.startswith(jid + ':') and v.get('last_at') is not None:
+                src = v
+                break
+    la = src.get('last_at')
+    return (None if la is None else round(_time.time() - la, 1),
+            src.get('n_lines'), j.get('log') or src.get('log'))
+
+
 def api_job(q):
     j = _JOBS.get(q.get('id') or '')
     if j is None:
         return None
+    # ★ stage / stage_id 只有装配任务有（回测的 job 没有）。带上它之后，
+    #   页面那条 2 秒一轮的日志轮询**顺带**就知道"现在跑到哪一步"了 ——
+    #   不带的话阶段表只能靠另一发 /api/setup 去问，而那一发是 10 秒一次，
+    #   于是横条说「第 3 步」、表格还说「第 2 步」，**同屏自相矛盾**
+    #   （实测：探针 T+12s 就是这么两边对不上的）。
+    import time as _time
+    # ★ 给"多少秒前"而不是时间戳 —— 浏览器与服务端的钟不一定一致，
+    #   让前端拿两个时钟相减是在制造一个不可复现的数（同 next_in 那条）。
+    idle, nl, log = job_live(q.get('id') or '')
+    sa = j.get('started_at')
     return {'state': j['state'], 'rc': j['rc'], 'run_id': j['run_id'],
-            'cmd': ' '.join(j['cmd']), 'lines': j['lines'][-200:]}
+            'cmd': ' '.join(j['cmd']), 'lines': j['lines'][-200:],
+            'stage': j.get('stage'), 'stage_id': j.get('stage_id'),
+            'log': log, 'n_lines': nl, 'idle': idle,
+            'elapsed': None if sa is None else round(_time.time() - sa, 1)}
 
 
 

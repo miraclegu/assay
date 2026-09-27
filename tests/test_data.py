@@ -4896,7 +4896,7 @@ def t_setup_all():
     fake = Fake()
     real_run = _rn._run_job
 
-    def run_job(job_id, cmd, cwd):
+    def run_job(job_id, cmd, cwd, **kw):
         """记下"谁被跑了"，成功就让那一步在下次 stages() 里变 ok。"""
         real_run(job_id, cmd, cwd)
         sid = [x for x in fake.NAMES if x not in done and x != 'DONE']
@@ -4958,7 +4958,7 @@ def t_setup_all():
         done.clear()
         fail[0] = ''
 
-        def run_job2(job_id, cmd, cwd):
+        def run_job2(job_id, cmd, cwd, **kw):
             rc = run_job(job_id, cmd, cwd)
             if ran == ['a']:
                 done.add('c')       # ← 外部让 c 变成 ok
@@ -5517,3 +5517,414 @@ def t_load_progress_bar():
             ' ｜ 空 lake 时横条上那个入口点得动且发的是一键建库'
             % (out[0], out[1] if len(out) > 1 else '明细',
                out[2] if len(out) > 2 else '定时入口'))
+
+
+@case('建库跑的过程中：页面要说得出停在哪一步，刷新之后也接得回去（playwright）',
+      tag='web')
+def t_setup_running_visible():
+    """用户：「卡在第二步"全量日线 tdx.db"了，但是什么报错信息都没有，
+    也没有进度条」「按钮仍处于可用状态……其他阶段都没有任何进度，
+    我都不知道是卡住了还是等人手工操作」。
+
+    那一步真实要跑 30~60 分钟（下 548MB 再 init），所以「中途看一眼页面」
+    是常态 —— 而改之前：
+
+      · SYJOB 是内存变量，**刷新一次就没了** -> pollSync 第一行 return
+        -> 日志框再也不出现（服务端早就给了 running.job_id，
+        api_setup 那行注释写的就是"页面刷新之后要接得回去"，
+        **而前端从来没用过它** —— 代码在和自己的注释打架）
+      · pollSync 只写 #syout，**从不重渲染阶段表** -> 七行与按钮整场
+        冻结在点击那一刻
+      · 正在跑的那一步与"还没轮到"共用 ⬜ + 「等上一步」—— **在说谎**
+
+    判据全是可量的事实，不是"有没有那个 class"。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import importlib
+    import shutil
+    import tempfile
+    import threading
+    import time as _t
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    from assay.srv import base as sbase
+    from assay.srv import runs as _rn
+    from assay.srv import sync as sy
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    old_dir, old_times = P.DIR, P.TIMES
+    td = tempfile.mkdtemp(prefix='_gd_run_')
+    P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+
+    done = set()
+    NAMES = ('a', 'b', 'c')
+    LBL = {'a': 'G1 抓数程序', 'b': 'G2 全量日线', 'c': 'G3 规范层'}
+    # 每步 5 秒：刷新页面 + 等它接回来要占掉几秒，太短的话链已经跑完，
+    # 后面那几条判据就没得验了（第一版 3 秒就是这么空转的）。
+    # ★ 先吐两行、后面**故意静默** —— 这样 idle 才涨得起来，
+    #   「多久没输出」那条判据否则是空转的（每秒都有输出时它恒为 0）。
+    # 形状：吐一行 -> **静默 3 秒** -> 再吐一行 -> 再等一下。
+    # 🔴 静默必须夹在**同一个阶段内部**：放在末尾的话，"idle 回落"会被
+    #   「换了下一个阶段（新子任务重置 started_at）」满足 ——
+    #   于是 last_at 压根不更新也照样通过（M6 变异实测漏过）。
+    CHILD = ('import time,sys\n'
+             'sys.stdout.write("  tick 0\\n"); sys.stdout.flush()\n'
+             'time.sleep(3)\n'
+             'sys.stdout.write("  tick 1\\n"); sys.stdout.flush()\n'
+             'time.sleep(1.5)\n')
+
+    class Fake(object):
+        def stages(self, **kw):
+            return [{'id': s, 'name': LBL[s], 'why': 'w',
+                     'state': 'ok' if s in done else 'todo',
+                     'detail': '-', 'eta': '5 秒', 'eta_min': (1, 1),
+                     'cmd': [sys.executable, '-c', CHILD]} for s in NAMES]
+
+        def summary(self, *a, **k):
+            st = self.stages()
+            todo = [x for x in st if x['state'] == 'todo']
+            return {'stages': st, 'n_todo': len(todo), 'ready': not todo,
+                    'next_name': todo[0]['name'] if todo else None,
+                    'n_auto_todo': len(todo),
+                    'eta_text': '9 秒' if todo else None, 'os': 'probe'}
+
+    fake = Fake()
+    real_run = _rn._run_job
+
+    def run_job(job_id, cmd, cwd, **kw):
+        real_run(job_id, cmd, cwd, **kw)   # 🔴 透传！吞掉 log_path 的话日志不落盘
+        left = [x for x in NAMES if x not in done]
+        if _rn._JOBS[job_id].get('rc') == 0 and left:
+            done.add(left[0])
+        return _rn._JOBS[job_id].get('rc')
+
+    # 🔴 日志现在会落到 `<datalake>/_manifest/sync_logs/` —— 那是**生产目录**
+    #   （真实的 sync_daily 日志就在那儿，而且 logs.trim_by_days 在管它）。
+    #   守卫不许写生产数据，所以把 datalake 根整个打桩到临时目录
+    #   （同 lv.LIVE / progress.DIR / ASSAY_RUNS 那套重定向）。
+    #   ★ `_datalake_dir` 是 sync.py 里的**模块级名字**（from .base import
+    #     进来的），函数体里查的是模块全局 —— 换得掉。
+    # ★ 只打桩「日志落哪」这一处，**不打桩整个 datalake 根** ——
+    #   `/api/sync` 也读那个根，一指到空目录它就报错，页面走进
+    #   「状态读取失败」那条分支，整张阶段表都没了（实测踩过，查了一轮）。
+    _logdir = os.path.join(td, '_manifest', 'sync_logs')
+    _old_dl = sy._sync_log_dir
+    sy._sync_log_dir = lambda: _logdir
+    _prod_logs = os.path.join(sbase._datalake_dir(), '_manifest', 'sync_logs')
+    _prod_n = len(os.listdir(_prod_logs)) if os.path.isdir(_prod_logs) else -1
+
+    _old_mod, _old_live, _old_rj = sy._stages_mod, sv.ALLOW_LIVE, _rn._run_job
+    sy._stages_mod = lambda: (fake, None)
+    _rn._run_job = run_job
+    sv.ALLOW_LIVE = True
+    sy._SETUP_SUM['at'] = 0
+    sy._SETUP_SUM['d'] = None
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base_url = 'http://127.0.0.1:%d' % httpd.server_address[1]
+
+    # 页面上那张表现在长什么样 —— 一次全取，逐条判
+    SNAP = """() => {
+      const bar = document.querySelector('#prgbar');
+      const rows = [...document.querySelectorAll('#subox .lvt tr')].slice(1)
+        .map(tr => [...tr.querySelectorAll('td')]
+                     .map(td => td.innerText.split('\\n')[0]));
+      const out = document.querySelector('#syout');
+      const nm = t => String(t).replace(/^[^\\w\\u4e00-\\u9fa5]+\\s*/, '').trim();
+      return {run: rows.filter(r => r.length >= 4 && /正在跑/.test(r[3]))
+                       .map(r => nm(r[0])),
+              wait: rows.filter(r => r.length >= 4 && /等上一步/.test(r[3]))
+                        .map(r => nm(r[0])),
+              hi: document.querySelectorAll('#subox tr.surun').length,
+              btn: document.querySelectorAll('#subox .susbtn').length,
+              bar: bar ? bar.innerText.replace(/\\n/g, ' ') : '',
+              idle: (document.querySelector('#suidle')||{}).innerText || '',
+              idlewarn: !!document.querySelector('#suidle.warn'),
+              loglink: document.querySelectorAll('#subox a.sylog').length,
+              logshown: !!(out && getComputedStyle(out).display !== 'none'),
+              loglines: out ? (out.innerText || '').trim().split('\\n')
+                              .filter(x => x).length : 0};
+    }"""
+    out = []
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            pg = b.new_page()
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto(base_url + '/#/sync')
+            pg.wait_for_selector('#suall', timeout=20000)
+            pg.click('#suall')
+
+            def wait_for(pred, why, limit=25):
+                t0 = _t.time()
+                last = None
+                while _t.time() - t0 < limit:
+                    last = pg.evaluate(SNAP)
+                    if pred(last):
+                        return last
+                    pg.wait_for_timeout(300)
+                raise AssertionError('%s ——现场 %r' % (why, last))
+
+            # ---- ① 正在跑的那一步必须看得出来，而且不许再说"等上一步"
+            d = wait_for(lambda x: x['run'],
+                         '🔴 跑起来了，而阶段表里没有任何一行说"正在跑" —— '
+                         '人分不出"在跑 / 卡住 / 等人动手"')
+            assert d['hi'] == 1, \
+                '正在跑的行必须恰好高亮 1 行，实得 %d' % d['hi']
+            assert not d['wait'], \
+                '🔴 有任务在跑时其余行还写着「等上一步」：%s —— ' \
+                '那是在说谎，它们是在排队' % d['wait']
+            # ---- ③ 有任务在跑时不许还摆着能点的「开始」（点了服务端必拒）
+            assert d['btn'] == 0, \
+                '🔴 已经有任务在跑，阶段表里还有 %d 个「开始」按钮 —— ' \
+                '点了必然报错，而给一个点了必然报错的按钮比不给更糟' % d['btn']
+            out.append('跑起来那一刻：%s 正在跑、高亮 1 行、0 个可点按钮'
+                       % d['run'][0])
+
+            # ---- ② 🔴 刷新页面之后，日志框必须【接得回去】（用户报的那条）
+            pg.reload()
+            pg.wait_for_selector('#subox', timeout=20000)
+            d = wait_for(lambda x: (x['logshown'] and x['loglines'] > 0
+                                    and x['run'] and x['bar']
+                                    and x['run'][0] in x['bar']),
+                         '🔴🔴 刷新页面之后日志框不出现了 —— '
+                         'SYJOB 是内存变量，刷新就没了，而服务端明明给了 '
+                         'running.job_id。那一步要跑 30~60 分钟，'
+                         '中途看一眼页面就再也看不到任何输出')
+            assert d['run'], '刷新之后阶段表不说正在跑哪一步：%r' % d
+            # ---- ④ 🔴 同一时刻横条与阶段表不许说两个不同的步骤。
+            #   实测踩过：阶段表 10 秒才刷一次，于是横条已经到第 3 步、
+            #   表格还停在第 2 步 —— 同屏自相矛盾，人不知道该信哪个。
+            #   （修法是让 /api/job 顺带带上 stage_id，步骤一换就立刻刷表，
+            #   零额外请求。）★ 判据放在**刷新之后**这一刻，因为那正是
+            #   两条路径最容易分家的时点；而且链还在跑，不会空转。
+            assert d['bar'] and d['run'][0] in d['bar'], (
+                '🔴 横条与阶段表同屏说的不是同一步：表格「%s」/ 横条「%s」'
+                % (d['run'][0], d['bar'][:80]))
+            out.append('刷新之后：日志框仍在（%d 行）、仍说得出正在跑 %s、'
+                       '且横条与表格说的是同一步'
+                       % (d['loglines'], d['run'][0]))
+
+            # ---- ⑤ 🔴 **页面不刷新**时，步骤一换表格也要跟上。
+            #   上面那条是"刚刷新完"判的，而那一刻 showSync 刚全量重渲染过，
+            #   两边必然一致 —— 它**落不到**这条路上（M4 变异实测漏过）。
+            #   真实场景是人开着页面盯着看：链自己往下走，横条（读进度文件，
+            #   无缓存）立刻到第 2 步，而阶段表如果只靠 10 秒一次的轮询，
+            #   中间那十秒就是"横条说第 2 步、表格说第 1 步"。
+            first = d['run'][0]
+            wait_for(lambda x: x['bar'] and first not in x['bar'],
+                     '横条一直没换到下一步 —— 这段构造没跑到，判据是空转的')
+            # 给表格 4 秒跟上：修好之后是"步骤一换就立刻刷"（下一轮 ≤2 秒），
+            # 而只靠 `% 5` 那条路要等满 10 秒 —— 4 秒这个窗口正好分得开。
+            d2 = wait_for(
+                lambda x: x['run'] and x['bar'] and x['run'][0] in x['bar'],
+                '🔴 横条已经换到下一步，而阶段表还停在上一步 —— '
+                '同屏自相矛盾，人不知道该信哪个', limit=4)
+            out.append('步骤切换时表格立刻跟上（%s -> %s，没刷新页面）'
+                       % (first, d2['run'][0]))
+
+            # ---- ⑥ 🔴 「到底卡住了还是在干活」要有【可证的判据】。
+            #   子进程故意静默 4 秒，页面上那个数必须跟着涨 —— 一直是
+            #   「最后输出 0 秒前」的话它就是个摆设。
+            d3 = wait_for(lambda x: '秒前' in x['idle'],
+                          '🔴 页面上不说"最后一次输出是多久以前" —— '
+                          '那是分辨"在跑 / 卡住"的唯一可证判据，'
+                          '没有它，跑 30~60 分钟的那一步与卡死长得一模一样')
+            out.append('说得出多久没输出了（%s）' % d3['idle'].strip())
+
+            # 🔴 光"显示了一个数"是不够的 —— `last_at` 初值是任务开始时刻，
+            #   所以就算**一次都不更新**，页面照样能显示「最后输出 N 秒前」
+            #   （M6 变异实测漏过：判据比要证的事宽）。真正要证的是
+            #   **它跟着输出走**：子进程静默时涨上去、下一步一出输出就回落。
+            def _sec(t):
+                m = re.search(r'(\d+)\s*秒前', t or '')
+                return int(m.group(1)) if m else (999 if '分钟前' in (t or '')
+                                                  else -1)
+            hi = wait_for(lambda x: _sec(x['idle']) >= 2 and x['run'],
+                          '🔴 子进程静默了几秒，而"多久没输出"没涨上去')
+            _st = hi['run'][0]
+            # 🔴 回落必须发生在**同一个阶段内**：跨阶段的话新子任务会重置
+            #   起始时刻，于是 last_at 一次都不更新也照样"回落"（M6 漏过）。
+            d3b = wait_for(
+                lambda x: (x['run'] and x['run'][0] == _st
+                           and 0 <= _sec(x['idle']) <= 1),
+                '🔴 同一步里子进程又吐了新的输出，而"多久没输出"没有回落'
+                ' —— 它没跟着真实输出走，只是从这一步开始一路往上数')
+            out.append('而且跟着真实输出走（涨上去又回落到 %s）'
+                       % d3b['idle'].strip()[:12])
+
+            # ---- ⑦ 完整日志必须**落盘**且点得开：`lines` 只在内存里，
+            #   serve.py 一重启就没了，而人恰恰是事后才想查它。
+            if d3['loglink'] < 1:
+                raise AssertionError(
+                    '🔴 没有「看完整日志」的入口 —— 接口只给最后 200 行，'
+                    '而内存里那份重启就没了。现场：running=%r ｜ subox 开头 %r'
+                    % (pg.evaluate("()=>SU&&SU.running"),
+                       pg.evaluate("()=>{const b=document."
+                                   "querySelector('#subox');"
+                                   "return b?b.innerHTML.slice(0,300):null;}")))
+            logs_dir = _logdir
+            got = sorted(os.listdir(logs_dir)) if os.path.isdir(logs_dir) else []
+            assert got, '🔴 装配的日志没有落盘（%s 是空的）' % logs_dir
+            body = io.open(os.path.join(logs_dir, got[0]),
+                           encoding='utf-8').read()
+            assert 'tick' in body, \
+                '🔴 日志文件落了盘却没有子进程的输出：%r' % body[:200]
+            pg.click('#subox a.sylog')
+            pg.wait_for_timeout(600)
+            shown = pg.evaluate(
+                "()=>(document.querySelector('#syout')||{}).innerText||''")
+            assert 'tick' in shown, \
+                '🔴 「看完整日志」点了没把日志显示出来 —— ' \
+                '点了没反应是最难查的那种坏'
+            out.append('日志落盘（%s，%d 字）且点得开' % (got[0], len(body)))
+
+            # ---- ⑧ 静默太久要**标出来**。300 秒等不起，把阈值压到 1 秒再验
+            #   （同 KMAIN_MAX 那条：真实触发不到的上限，判据要能构造）。
+            pg.evaluate('()=>{window.__ow=SU_IDLE_WARN; SU_IDLE_WARN=1;}')
+            try:
+                d4 = wait_for(lambda x: x['idlewarn'],
+                              '🔴 静默很久了页面也不标出来 —— '
+                              '人只能盯着一个不动的屏幕猜', limit=8)
+                out.append('静默超阈值会标警告（%s）' % d4['idle'].strip()[:24])
+            finally:
+                pg.evaluate('()=>{SU_IDLE_WARN=window.__ow;}')
+
+            # ---- ⑨ 🔴 `/api/sync` **自己**报错时，装配块仍要在、仍要能刷。
+            #   空 lake 上那一发很可能先挂（它要读同步状态、日志目录…），
+            #   而那正是最需要看装配进度的时候。这条**必须构造** ——
+            #   守卫里那一发是好的，不拦的话这段路一步都走不到
+            #   （M9 变异第一轮就是这么漏的）。
+            pg.route('**/api/sync?**', lambda r: r.fulfill(
+                status=500, content_type='application/json',
+                body='{"error":"构造：同步状态读不出来"}'))
+            pg.route('**/api/sync', lambda r: r.fulfill(
+                status=500, content_type='application/json',
+                body='{"error":"构造：同步状态读不出来"}'))
+            try:
+                pg.reload()
+                pg.wait_for_timeout(2500)
+                sb = pg.evaluate(
+                    "()=>{const b=document.querySelector('#subox');"
+                    "return b?{n:b.querySelectorAll('.lvt tr').length,"
+                    "t:b.innerText.slice(0,40)}:null;}")
+                assert sb and sb['n'] > 1, (
+                    '🔴 /api/sync 一报错，装配块就没了（#subox=%r）—— '
+                    '空 lake 上那一发本来就容易挂，而那时人最需要看装配到'
+                    '哪一步了' % sb)
+                out.append('同步状态读不出来时装配块仍在（%d 行）' % sb['n'])
+            finally:
+                pg.unroute('**/api/sync?**')
+                pg.unroute('**/api/sync')
+
+            assert not errs, errs[:3]
+            b.close()
+    finally:
+        httpd.shutdown()
+        sy._stages_mod, sv.ALLOW_LIVE, _rn._run_job = _old_mod, _old_live, _old_rj
+        sy._sync_log_dir = _old_dl
+        sy._SETUP_SUM['at'] = 0
+        sy._SETUP_SUM['d'] = None
+        P.DIR, P.TIMES = old_dir, old_times
+        shutil.rmtree(td, ignore_errors=True)
+    # 🔴 守卫不许写生产数据 —— 日志落盘这件事最容易漏（同「selftest
+    #   在往生产归档里写东西」那次）。逐个数一遍。
+    now_n = len(os.listdir(_prod_logs)) if os.path.isdir(_prod_logs) else -1
+    assert now_n == _prod_n, \
+        '🔴 守卫往生产的 sync_logs 里写了东西：%d -> %d' % (_prod_n, now_n)
+    return ' ｜ '.join(out)
+
+
+@case('建库：进度条建不起来【不许静默】—— 否则"在不在跑"就没地方看得到',
+      tag='fast')
+def t_setup_progress_failure_loud():
+    """`api_setup_run` 里那段 `import progress` 原来是 `except: pass`。
+
+    它一失败，顶上那条横条就永远不出现 —— 而横条正是人判断"到底在不在跑"
+    的唯一入口（装配要几十分钟，没有它屏幕上就是一片静默）。
+    装配本身不该被进度拖垮，所以**不抛**；但必须说一句
+    （同「保护分支不该静默跳过」）。
+    """
+    import importlib
+
+    from assay import server as sv
+    from assay.srv import base as sbase
+    from assay.srv import runs as _rn
+    from assay.srv import sync as sy
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+
+    # 🔴 跑完必须真的变 ok —— `_go_all` 是 `while True` + 每轮重查状态，
+    #   Fake 永远返回 todo 的话它**死循环**（第一版就是，用例挂在
+    #   "已经有一个装配任务在跑"上，而报错指不到这里）。
+    ran = []
+
+    class Fake(object):
+        def stages(self, **kw):
+            return [{'id': 'a', 'name': 'G1', 'why': 'w',
+                     'state': 'ok' if ran else 'todo',
+                     'detail': '-', 'eta': '1 秒', 'eta_min': (1, 1),
+                     'cmd': [sys.executable, '-c', 'pass']}]
+
+        def summary(self, *a, **k):
+            st = self.stages()
+            todo = [x for x in st if x['state'] == 'todo']
+            return {'stages': st, 'n_todo': len(todo), 'ready': not todo,
+                    'n_auto_todo': len(todo), 'os': 'probe'}
+
+    def boom(*a, **k):
+        raise RuntimeError('写不了进度目录')
+
+    def fake_run(jid, cmd, cwd):
+        ran.append(jid)
+        _rn._JOBS[jid].update({'rc': 0, 'state': 'done'})
+
+    _old = (sy._stages_mod, sv.ALLOW_LIVE, P.Progress, _rn._run_job)
+    sy._stages_mod = lambda: (Fake(), None)
+    sv.ALLOW_LIVE = True
+    P.Progress = boom
+    _rn._run_job = fake_run
+    try:
+        r = sy.api_setup_run(None, {'stage': '__all__'})
+        assert r.get('job_id'), \
+            '🔴 进度条建不起来就不给跑了？装配不该被进度拖垮：%r' % r
+        import time as _t
+        t0 = _t.time()
+        while _t.time() - t0 < 10:
+            if _rn._JOBS[r['job_id']].get('state') != 'running':
+                break
+            _t.sleep(0.1)
+        lines = '\n'.join(_rn._JOBS[r['job_id']]['lines'])
+        assert '进度条' in lines and '横条' in lines, (
+            '🔴 进度条建不起来，而日志里一个字都没说 —— 于是横条永远不出现、'
+            '装配照跑，屏幕上就是"点了没反应"。日志：%r' % lines[:300])
+        # 反向自证：正常情况下不许天天报这句（那就是假告警）
+        P.Progress = _old[2]
+        del ran[:]                      # 复位，否则它会说"已经齐了"
+        r2 = sy.api_setup_run(None, {'stage': '__all__'})
+        assert r2.get('job_id'), r2
+        t0 = _t.time()
+        while _t.time() - t0 < 10:
+            if _rn._JOBS[r2['job_id']].get('state') != 'running':
+                break
+            _t.sleep(0.1)
+        ok = '\n'.join(_rn._JOBS[r2['job_id']]['lines'])
+        assert '进度条' not in ok, \
+            '进度条好好的却还在报警 —— 天天报的告警等于没有告警：%r' % ok[:200]
+    finally:
+        sy._stages_mod, sv.ALLOW_LIVE, P.Progress, _rn._run_job = _old
+        sy._SETUP_SUM['at'] = 0
+        sy._SETUP_SUM['d'] = None
+    return '进度条建不起来时：装配照跑 + 日志里说清楚 ｜ 正常时不报这句'

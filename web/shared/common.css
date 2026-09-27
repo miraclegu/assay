@@ -1086,3 +1086,13 @@ body.hasprog{padding-top:28px}
 /* 横条上那个入口按钮：12px 的带子里不能用默认 .btn 的高度，否则把
    横条撑高一截、body 的 padding-top 就对不上了（表现是它盖住顶栏）。 */
 #prgbar .btn{padding:1px 8px;font-size:12px;line-height:16px;margin-left:2px}
+
+/* 数据装配 / 定时窗口的行高亮。
+   🔴 `.sybad` 在 views/sync.js 里用了很久，而这里【一直没有定义】——
+     于是「配置与实际装上的 timer 不一致」那一行根本没有任何视觉标记，
+     而它不报错（同「不存在的 class 静默不生效」那条）。
+   ★ `.surun` 是正在跑的那一步：左边一条竖杠 + 压一点底色，
+     让人一眼看得出"现在停在哪一步"，而不是在七行 ⬜ 里数。 */
+#main tr.surun>td{background:rgba(91,156,240,.10)}
+#main tr.surun>td:first-child{box-shadow:inset 2px 0 var(--accent)}
+#main tr.sybad>td{background:rgba(224,163,60,.10)}
