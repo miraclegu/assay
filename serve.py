@@ -100,6 +100,43 @@ from assay import registry           # noqa: E402
 
 
 
+def _cmdline(pid):
+    """这个 PID 的命令行 —— 取不到返回 `''`（**不是 `'?'`**，见 do_stop）。
+
+    🔴🔴 **Windows 上不能只靠 `wmic`：它在 Win11 24H2 / Server 2025 上
+      默认已经【移除】了。** 取不到命令行时 `_ours()` 判 False，于是
+      `--stop` 会说「端口被别的进程占着，不动它」并拒绝重启 ——
+      **而那个"别的进程"其实就是它自己**，报错指到了错的原因
+      （同「报错必须指向真正的原因」那条）。
+    ★ 退路取 PowerShell 的 CIM：`Get-CimInstance Win32_Process` 与 wmic
+      问的是同一个 WMI 提供程序，而 PowerShell 不会被移除。
+    ⚠ 这两条分支**都没在真机上跑过** —— 逻辑与命令核对过，如实记
+      （同 junction / OpenProcess / schtasks 那几条）。
+    """
+    if platform.system() != 'Windows':
+        try:
+            return ' '.join(subprocess.run(
+                ['ps', '-o', 'command=', '-p', str(pid)],
+                capture_output=True, text=True).stdout.split())
+        except Exception:                                       # noqa: BLE001
+            return ''
+    for cmd in (['wmic', 'process', 'where', 'ProcessId=%s' % pid,
+                 'get', 'CommandLine'],
+                ['powershell', '-NoProfile', '-Command',
+                 '(Get-CimInstance Win32_Process -Filter '
+                 '"ProcessId=%s").CommandLine' % pid]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=20).stdout or ''
+        except Exception:                                       # noqa: BLE001
+            continue        # 这条路没有（wmic 被移除）—— 试下一条
+        # wmic 会把表头 `CommandLine` 也打出来，去掉它再判空
+        out = ' '.join(x for x in out.split() if x != 'CommandLine')
+        if out:
+            return out
+    return ''
+
+
 def _who(port):
     """谁占着这个端口 -> [(pid, 命令行)]。见模块头「为什么不用 PID 文件」。"""
     pids = []
@@ -112,21 +149,7 @@ def _who(port):
         r = subprocess.run(['lsof', '-ti', 'tcp:%d' % port, '-sTCP:LISTEN'],
                            capture_output=True, text=True)
         pids = (r.stdout or '').split()
-    out = []
-    for pid in dict.fromkeys(pids):          # 去重、保序
-        try:
-            if platform.system() == 'Windows':
-                c = subprocess.run(['wmic', 'process', 'where',
-                                    'ProcessId=%s' % pid, 'get',
-                                    'CommandLine'], capture_output=True,
-                                   text=True).stdout
-            else:
-                c = subprocess.run(['ps', '-o', 'command=', '-p', pid],
-                                   capture_output=True, text=True).stdout
-            out.append((int(pid), ' '.join(c.split())))
-        except Exception:                                       # noqa: BLE001
-            out.append((int(pid), '?'))
-    return out
+    return [(int(pid), _cmdline(pid)) for pid in dict.fromkeys(pids)]
 
 
 def _ours(cmd):
@@ -224,11 +247,27 @@ def do_stop(port, wait=10.0):
         print('本来就没在跑（端口 %d 没有 LISTEN）' % port)
         return 0
     mine = [(p, c) for p, c in hit if _ours(c)]
-    other = [(p, c) for p, c in hit if not _ours(c)]
+    # 🔴 **"取不到命令行"与"是别人的"是两件事，不许混成一句。**
+    #   wmic 在 Win11 24H2 起默认被移除，PowerShell 那条退路也可能被策略
+    #   挡掉 —— 那时说「被别的进程占着」是在**指错原因**：那个进程八成
+    #   就是它自己。照实说不知道，并给下一步（同「报错必须指向真正的原因」）。
+    unknown = [(p, c) for p, c in hit if not c]
+    other = [(p, c) for p, c in hit if c and not _ours(c)]
     for pid, cmd in other:
         print('🔴 端口 %d 被别的进程占着，【不动它】：' % port)
         print('   PID %-7s %s'
               % (pid, cmd if len(cmd) <= 88 else '…' + cmd[-87:]))
+    for pid, _ in unknown:
+        print('🔴 端口 %d 上有 PID %s，但**取不到它的命令行**，'
+              '无法确认是不是我们的看板 —— 不动它。' % (port, pid))
+        if platform.system() == 'Windows':
+            print('   多半是 wmic 被移除了（Win11 24H2 起）而 PowerShell '
+                  '也没跑成。手工确认一下再停：')
+            print('   powershell "Get-CimInstance Win32_Process -Filter '
+                  '\'ProcessId=%s\' | fl ProcessId,CommandLine"' % pid)
+            print('   确认是看板就： taskkill /PID %s /F' % pid)
+        else:
+            print('   手工确认： ps -p %s -o command=' % pid)
     if not mine:
         return 1
     for pid, cmd in mine:

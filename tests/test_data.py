@@ -6033,7 +6033,12 @@ def t_bootstrap_zip_guard():
             io.open(zp, 'wb').write(b'')          # 真机上那个 0 MB 文件
             calls = []
 
-            def _dl(url, dst, expect=None):
+            # 🔴 `**kw` 不能省：`_download` 后来加了 `is_zip=`，桩不接的话
+            #   那一发 TypeError —— 而它报的是"桩的签名不对"，指不到产品。
+            #   （同本轮 `_run_job` 的 `log_path=` 那次，第三回了。）
+            _real_dl = st._download
+
+            def _dl(url, dst, expect=None, **kw):
                 calls.append(dst)
                 io.open(dst, 'wb').write(good)
                 return dst
@@ -6102,6 +6107,85 @@ def t_bootstrap_zip_guard():
             '🔴 装配日志没有时间戳：%r —— 这些行会进 sync_logs/*.log，'
             '而"这是什么时候的报错"是翻日志时第一个要回答的问题' % ln[:60])
         out.append('每行带时间戳（%s）' % ln[:19])
+
+        # ── ④ 【下回来的不是 zip】要当场拒绝，不许 rename 上去 ──────────
+        #   🔴🔴 2026-09-27 真机第二轮：上面那三条都生效了（认出残骸、删掉、
+        #     重下），而**重下回来的还是坏的** —— 服务端（多半是网关/代理的
+        #     拦截页）给了 **200 + Content-Length 对得上的几 KB 正文**，于是
+        #     「空响应」与「长度不符」两道**都放行**，rename 上去又是一个
+        #     BadZipFile，下一轮再判"残骸"再下同一个页面 —— **死循环**。
+        #   ★ 判据还是那一条，只是这次要用在【刚下回来的那份】上：
+        #     **问的是内容对不对，不是下了多少字节**。
+        import http.server as _hs
+        import threading as _th
+        import zipfile as _zf
+        st._download = _real_dl        # ★ 这一段要验的正是【真】的那个
+
+        BODY = ('<html><head><title>403</title></head><body>'
+                '<h1>访问被网关拦截</h1></body></html>').encode('utf-8')
+
+        def _serve_once(payload, ctype):
+            class H(_hs.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Type', ctype)
+                    self.send_header('Content-Length', str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, *a):
+                    pass
+            s = _hs.HTTPServer(('127.0.0.1', 0), H)
+            _th.Thread(target=s.serve_forever, daemon=True).start()
+            return s, 'http://127.0.0.1:%d/hsjday.zip' % s.server_address[1]
+
+        srv, url = _serve_once(BODY, 'text/html; charset=utf-8')
+        # ★ 换个名字：`hsjday.zip` 在 ① 段就被建出来了，拿它验
+        #   "不许占正名"会被上一段的残留满足（判据要在干净的构造上跑）。
+        dst = os.path.join(td, 'dl_probe.zip')
+        _so, _buf = sys.stdout, io.StringIO()
+        try:
+            sys.stdout = _buf
+            try:
+                st._download(url, dst, is_zip=True)
+                raised = ''
+            except SystemExit as e:
+                raised = str(e)
+        finally:
+            sys.stdout = _so
+            srv.shutdown()
+        assert raised, '🔴 200 + 长度对得上的拦截页被【放行】了 —— ' \
+                       'rename 上去就是下一轮的 BadZipFile，而且会死循环'
+        assert not os.path.isfile(dst), \
+            '🔴 不是 zip 却已经占了正名 %s —— 下一轮会把它当成"已经下好了"' % dst
+        assert os.path.isfile(dst + '.part'), \
+            '坏的那份要留成 .part 当证据（同 realtime「隔离不是删除」）'
+        # 报错必须说清【收到的是什么】—— 只说"不是 zip"指不到原因
+        for kw in ('Content-Type', 'text/html', '访问被网关拦截'):
+            assert kw in raised, '报错里没说收到了什么（缺 %r）：%s' % (kw, raised)
+        assert '**' not in raised, '终端文案里有 markdown 星号（渲染不了）'
+        os.remove(dst + '.part')
+
+        # ★ 反向自证：真 zip 必须照常落地，否则上面那条可能只是"永远拒绝"
+        z = os.path.join(td, 'real.zip')
+        with _zf.ZipFile(z, 'w') as f:
+            f.writestr('sh/lday/sh000001.day', b'x' * 64)
+        srv2, url2 = _serve_once(io.open(z, 'rb').read(), 'application/zip')
+        ok = os.path.join(td, 'ok.zip')
+        _so, _buf = sys.stdout, io.StringIO()
+        try:
+            sys.stdout = _buf
+            st._download(url2, ok, is_zip=True)
+        finally:
+            sys.stdout = _so
+            srv2.shutdown()
+        assert _zf.is_zipfile(ok), '真 zip 被拒了'
+        # 服务端到底说了什么要打出来 —— 那一行就能把"拦截页"与"网络慢"分开
+        assert 'application/zip' in _buf.getvalue(), \
+            '没把 HTTP 状态与 Content-Type 打出来（"充分日志"的第一行）'
+        out.append('拦截页（200+长度对得上）当场拒绝、不占正名、留证据、'
+                   '说清收到了什么；真 zip 照常落地')
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)
