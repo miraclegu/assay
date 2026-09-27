@@ -3148,6 +3148,162 @@ def t_windows_boot_path():
     finally:
         _im.webbrowser = _real_wb
 
+    # ---- K) 起看板那一步：子进程不许 re-exec，复查必须是真 import ---------
+    #   2026-09-27 真机报的那一次：窗口先打「[OK] finished, exit code 0」
+    #   和 `Press any key to continue`，**之后**才吐出 serve.py 的
+    #   `ModuleNotFoundError: No module named 'duckdb'`。两件事一起坏：
+    #     ① 结论在说谎（环境其实不行，却报 exit code 0）
+    #     ② serve.py 的第一件事 `ensure_fixed_hash_seed()` 会 exec 自己，
+    #        而 **Windows 上 `os.exec*` 是「新建进程 + 结束当前这个」**，
+    #        于是 `proc.wait()` 立刻拿到 0、浏览器也永远不开
+    import tempfile as _tf
+    import shutil as _sh
+
+    # K1 行为：起子进程时必须把 hash 种子钉在 env 里 -> 子进程【不 exec】
+    _tmpd = _tf.mkdtemp(prefix='_ins_serve_')
+    try:
+        os.makedirs(os.path.join(_tmpd, 'assay'))
+        _sh.copy(os.path.join(REPO, 'assay', 'hashseed.py'),
+                 os.path.join(_tmpd, 'assay', 'hashseed.py'))
+        _stamp = os.path.join(_tmpd, 'enter.txt')
+        _stub = (
+            'import os, sys\n'
+            'sys.path.insert(0, os.path.dirname(os.path.'
+            'abspath(__file__)))\n'
+            'open(%r, "a").write("%%d\\n" %% sys.flags.hash_randomization)\n'
+            'from assay.hashseed import ensure_fixed_hash_seed\n'
+            'ensure_fixed_hash_seed()\n'
+            'import argparse\n'
+            'argparse.ArgumentParser().add_argument("--port", default=9931)\n'
+            'sys.exit(7)\n' % _stamp)
+        io.open(os.path.join(_tmpd, 'serve.py'), 'w',
+                encoding='utf-8').write(_stub)
+
+        _oh, _osay = _im.HERE, _im.say
+        _im.HERE, _im.say = _tmpd, (lambda *a, **k: None)
+        # 🔴 **构造必须把 `PYTHONHASHSEED` 从环境里摘掉**：selftest 自己是
+        #   带着它跑的（`ensure_fixed_hash_seed` 把自检进程 exec 过一次），
+        #   子进程会**继承**它 —— 于是"_serve 钉没钉"这件事在这里根本分不
+        #   出来。第一轮 M1 就是这么漏的：把 env 整段删掉，用例照样绿。
+        #   真实现场是双击 start.bat -> `py -3 install.py`，那里没有这个变量。
+        _oseed = os.environ.pop('PYTHONHASHSEED', None)
+        try:
+            _rc = _im._serve(sys.executable)
+        finally:
+            _im.HERE, _im.say = _oh, _osay
+            if _oseed is not None:
+                os.environ['PYTHONHASHSEED'] = _oseed
+        _ent = io.open(_stamp, encoding='utf-8').read().split()
+        assert len(_ent) == 1, (
+            '子进程进了 %d 次 —— serve.py 自己 exec 了一遍。'
+            'POSIX 上那是原地替换（看不出来），而 **Windows 上是「新建一个'
+            '进程 + 把当前这个结束掉」**：于是 proc.wait() 立刻拿到 0、'
+            '浏览器永远不开、真正的 serve.py 成了没人管的孤儿。'
+            '修法是起它的时候就把 PYTHONHASHSEED 钉进 env' % len(_ent))
+        assert _ent[0] == '0', (
+            '子进程里 hash_randomization=%s —— 种子没钉上，'
+            '回测就不再跨进程可复现了' % _ent[0])
+        assert _rc == 7, (
+            '_serve 返回 %r，而子进程的真退出码是 7 —— '
+            '拿不到真退出码的话"看板起没起来"就永远报不出来' % _rc)
+
+        # 反向自证：**不钉**种子的话它确实会进两次（否则上面那条是空转）
+        io.open(_stamp, 'w').write('')
+        _env0 = dict(os.environ)
+        _env0.pop('PYTHONHASHSEED', None)
+        subprocess.run([sys.executable, os.path.join(_tmpd, 'serve.py')],
+                       env=_env0, capture_output=True)
+        _ent0 = io.open(_stamp, encoding='utf-8').read().split()
+        assert len(_ent0) == 2, (
+            '构造不对：不钉种子时子进程只进了 %d 次，'
+            '那上面那条"只许进一次"根本分不出两种实现' % len(_ent0))
+
+        # K2 行为：复查必须【真 import】，不许退回 find_spec --------------
+        #   find_spec 只回答"找不找得到"、**不执行那个包** —— 于是
+        #   「目录在而 __init__.py 半截」「扩展模块 DLL 加载不上」
+        #   「包里第一句 import 就炸」它一律报"在"，而真跑起来是一句
+        #   ModuleNotFoundError（正是用户看到的那一句）。
+        _pk = os.path.join(_tmpd, 'zz_probe')
+        os.makedirs(_pk)
+        io.open(os.path.join(_pk, '__init__.py'), 'w',
+                encoding='utf-8').write('from zz_probe._nope import x\n')
+        _im.HERE = _tmpd
+        try:
+            _ok2, _miss2 = _im.importable(sys.executable, ['zz_probe'])
+            _okA, _whyA = _im.app_imports(sys.executable)
+        finally:
+            _im.HERE = _oh
+        assert not _ok2 and _miss2, (
+            '复查说这个包没问题 —— 而它 import 就炸。'
+            '多半是退回了 find_spec（它不执行那个包）')
+        assert 'ModuleNotFoundError' in ' '.join(_miss2), (
+            '复查没把**为什么**说出来（%r）—— 只报一个包名的话，'
+            '"装到别的解释器上了"和"wheel 架构不符"分不出来' % (_miss2,))
+        # 反向自证：同一个构造下 find_spec 是【看不见】的
+        _fs = subprocess.run(
+            [sys.executable, '-c',
+             'import importlib.util as u;print(u.find_spec("zz_probe") '
+             'is not None)'], cwd=_tmpd, capture_output=True, text=True)
+        assert _fs.stdout.strip() == 'True', (
+            '构造不对：这个假包连 find_spec 都看不见（%r），'
+            '那"真 import 比 find_spec 严"这件事就没被证到' % _fs.stdout)
+
+        # K3 行为：还要有一层"**真正要跑的那件事**能不能 import"
+        assert not _okA and _whyA, (
+            'app_imports 在一个没有 assay 包的目录上也说成功了 —— '
+            '那它根本没真去 import')
+    finally:
+        _sh.rmtree(_tmpd, ignore_errors=True)
+
+    # 正向：本机这个解释器上它必须为真（否则上面那条可能"永远是假"）
+    assert _im.app_imports(sys.executable)[0], (
+        'app_imports 在本机也说 import 不起来 —— 那它是个永远为假的判据')
+
+    # K3' 结构：那一层必须真的排在「决定起看板」【之前】
+    _itree = _ast.parse(io.open(_ins, encoding='utf-8').read())
+    _rf = [n for n in _ast.walk(_itree)
+           if isinstance(n, _ast.FunctionDef) and n.name == '_run']
+    assert len(_rf) == 1
+    _ln_app = [n.lineno for n in _ast.walk(_rf[0])
+               if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+               and n.func.id == 'app_imports']
+    _ln_go = [n.lineno for n in _ast.walk(_rf[0])
+              if isinstance(n, _ast.Subscript)
+              and isinstance(n.ctx, _ast.Store)
+              and isinstance(n.value, _ast.Name) and n.value.id == '_LAUNCH']
+    assert _ln_app, '_run 里没调 app_imports —— 那一层等于没有'
+    assert _ln_go and min(_ln_app) < min(_ln_go), (
+        '「看板 import 得起来吗」排在了"决定起看板"之后（%r vs %r）—— '
+        '那就成了事后诸葛亮：该拦的那一次照样起，照样报 ✅'
+        % (_ln_app, _ln_go))
+
+    # K4 结构：日志**不许**在起看板之前关掉 —— 否则"看板起没起来、
+    #   为什么没起来"那一段一个字都进不了日志，而那恰恰是要查的东西
+    #   （`say()` 对写不进去是静默兜底的，所以它连个错都不报）。
+    _mf = [n for n in _ast.walk(_itree)
+           if isinstance(n, _ast.FunctionDef) and n.name == 'main']
+    assert len(_mf) == 1
+    _ln_srv = [n.lineno for n in _ast.walk(_mf[0])
+               if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+               and n.func.id == '_serve']
+    _ln_cls = [n.lineno for n in _ast.walk(_mf[0])
+               if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
+               and n.func.id == '_logclose']
+    assert _ln_srv and _ln_cls, 'main() 里找不到 _serve / _logclose 了'
+    assert min(_ln_cls) > min(_ln_srv), (
+        'main() 在起看板之前就把日志关了（close 在 %r、serve 在 %r）—— '
+        '于是最该留下的那一段（看板为什么没起来）一个字都查不到'
+        % (_ln_cls, _ln_srv))
+
+    # K5 .bat：三路结论要分得开 —— 「环境不行」与「环境好了但看板停了」
+    #   报成同一句 [FAIL] 的话，人会去重装环境，而那根本不是原因
+    assert re.search(r'^if "%RC%"=="4" goto ', _stt, re.M), (
+        'start.bat 没有单独处理 exit code 4（环境好了但看板停了）—— '
+        '报成 [FAIL] 会让人去重装一个本来就没问题的环境')
+    _v4 = _stt[_stt.index(':vsrv'):]
+    assert 'dashboard' in _v4.split(':vend')[0], (
+        'start.bat 的 RC==4 那一支没说清是【看板】停了')
+
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
             '不许直接引用 SIGKILL / 不许 shell=True；'
@@ -3155,7 +3311,8 @@ def t_windows_boot_path():
             '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
             'requirements.txt 盖住运行时真的 import 的 %d 个第三方包；'
             'start.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数；'
-            '跑完有结论且落盘（窗口关了还查得到）'
+            '跑完有结论且落盘（窗口关了还查得到）；'
+            '起看板的子进程不 re-exec、复查是真 import'
             % (len(files), len(got - TRANSITIVE)))
 
 

@@ -42,7 +42,17 @@ set "RC=%ERRORLEVEL%"
 
 rem -- Restate the verdict in ASCII as the VERY LAST thing on screen.
 echo.
-if "%RC%"=="0" (echo   [OK]   finished, exit code 0) else (echo   [FAIL] exit code %RC%)
+if "%RC%"=="0" goto vok
+if "%RC%"=="4" goto vsrv
+echo   [FAIL] exit code %RC% -- the environment is NOT ready
+goto vend
+:vok
+echo   [OK]   finished, exit code 0
+goto vend
+:vsrv
+echo   [!]    the environment is fine, but the dashboard stopped.
+echo          The reason is in the log (scroll up, or open it).
+:vend
 echo   Log:  %LOG%
 
 echo.

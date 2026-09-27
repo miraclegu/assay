@@ -155,12 +155,48 @@ def _open_when_up(port, proc):
         pass
 
 
+def _hash_seed():
+    """固定 hash 种子取的那个值 —— **从 `assay/hashseed.py` 读，不再写一遍**。
+
+    在这里写死一个 `'0'` 就是第二份口径：那边改了之后这边还按旧值起子进程，
+    于是子进程**照样会 re-exec**（见 `_serve`），而它不报错。
+    ★ 按文件路径单独加载，不走 `import assay.hashseed` —— 那会执行
+      `assay/__init__.py`，而**此刻依赖装没装好还不一定**（系统 python 跑的）。
+    """
+    import importlib.util as _u
+    p = os.path.join(HERE, 'assay', 'hashseed.py')
+    spec = _u.spec_from_file_location('_assay_hashseed', p)
+    mod = _u.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return str(mod.SEED)
+
+
 def _serve(py):
     """起看板并打开浏览器 —— `--serve` 那条路。
 
     ★ 用 Popen 起子进程而不是 `os.execv`：execv 会把进程映像整个换掉，
       "等端口起来再开浏览器"那个线程**当场就没了**（而它不报错，
       只是浏览器永远不弹）。父进程留着当个薄薄的看门人。
+
+    🔴🔴 **子进程的 env 里必须先把 `PYTHONHASHSEED` 钉上** —— 否则
+      `serve.py` 的第一件事 `ensure_fixed_hash_seed()` 会带着环境变量
+      **把自己 exec 一次**，而 **Windows 上 `os.exec*` 不是"原地替换"**：
+      MSVCRT 的 `_wexecve` 是「**新建一个进程 + 把当前这个结束掉**」，
+      于是站在这里看：
+
+          proc.wait()      立刻返回 **0**（结束掉的是 exec 之前那个壳）
+          _open_when_up    `proc.poll()` 当场非 None -> **浏览器永远不开**
+          真正的 serve.py  变成一个没人管的孤儿，崩了也没人知道
+
+      2026-09-27 真机实测就是这个现场：窗口先打「[OK] finished, exit code 0」
+      和 `Press any key to continue`，**之后**才吐出 serve.py 的
+      `ModuleNotFoundError` —— 顺序本身就是物证。
+      ★ POSIX 上 exec 是原地替换、PID 不变，所以 `wait()` 拿到的是真退出码
+        —— 本机怎么跑都对，**这条只在 Windows 上现形**
+        （同「`os.kill(pid, 0)` 在 Windows 上会杀进程」那条，同一族）。
+      ★ 钉上之后 `fixed()` 为真、`ensure_fixed_hash_seed()` 直接返回，
+        **一次 exec 都不发生**，而"回测跨进程可复现"那条纪律分毫未动
+        （种子就是它自己声明的那个）。
     """
     port = serve_port()
     srv = os.path.join(HERE, 'serve.py')
@@ -175,7 +211,10 @@ def _serve(py):
     say('★ 要停：在这个窗口按 Ctrl-C，或者直接关掉它。')
     say('★ 下次再用，还是双击 start.bat —— 环境已经好了，它会直接起看板。')
     say('')
-    proc = subprocess.Popen([py, srv])
+    env = dict(os.environ)
+    env['PYTHONHASHSEED'] = _hash_seed()
+    env.setdefault('PYTHONUTF8', '1')
+    proc = subprocess.Popen([py, srv], env=env, cwd=HERE)
     threading.Thread(target=_open_when_up, args=(port, proc),
                      daemon=True).start()
     try:
@@ -205,23 +244,70 @@ def wanted_packages():
 
 
 def importable(py, pkgs):
-    """用**那个解释器**真 import 一遍 -> (行不行, 缺了谁)。
+    """用**那个解释器**真 import 一遍 -> (行不行, 谁不行 + 为什么)。
 
     🔴 这才是判据。`pip install` 返回 0 只说明 pip 没报错 —— 它可能装到了
       另一个解释器上、或者装了个架构不符的 wheel，两种都返回 0，
       而"装好了没有"这件事要问**现在 import 得到吗**。
+
+    🔴🔴 **必须真 `import`，不能用 `find_spec`。** 2026-09-27 之前这里写的是
+      `importlib.util.find_spec(p) is None` —— 而 find_spec **只回答"找不找得
+      到"，不执行那个包**。于是「目录在而 `__init__.py` 半截」「扩展模块的
+      DLL 加载不上」「包里第一句 import 就炸」这几种坏法它一律报"在"，
+      而真跑起来是一句 ModuleNotFoundError。
+      ★ 这个函数**自己的 docstring 当时写的就是「真 import 一遍」** ——
+        代码在和自己的注释打架（同 `ddGap` / `lprSlice` / `_PQ` 那几次）。
+
+    ★ `cwd=HERE`：`-c` 的 `sys.path[0]` 是**当前目录**，而 `serve.py` 的是
+      **脚本所在目录**。不对齐的话复查与真跑看到的是两条 sys.path，
+      **而那不报错**（只是复查说"在"、真跑说"没有"）。
     """
-    code = ('import importlib.util as u,sys;'
-            'print(",".join(p for p in %r if u.find_spec(p) is None))' % pkgs)
+    code = ('import sys\n'
+            'bad = []\n'
+            'for p in ' + repr(list(pkgs)) + ':\n'
+            '    try:\n'
+            '        __import__(p)\n'
+            '    except BaseException as e:\n'
+            '        bad.append(p + " (" + type(e).__name__ + ": "\n'
+            '                   + str(e)[:120] + ")")\n'
+            'sys.stdout.write("\\u0001".join(bad))\n')
     try:
         r = subprocess.run([py, '-c', code], capture_output=True, text=True,
-                           timeout=180)
+                           timeout=300, cwd=HERE)
     except (OSError, subprocess.SubprocessError) as e:
         return False, ['(跑不起来: %s)' % e]
     if r.returncode != 0:
-        return False, ['(解释器报错: %s)' % (r.stderr or '').strip()[-120:]]
-    miss = [x for x in (r.stdout or '').strip().split(',') if x]
+        return False, ['(解释器报错: %s)' % (r.stderr or '').strip()[-160:]]
+    miss = [x for x in (r.stdout or '').split('\u0001') if x.strip()]
     return (not miss), miss
+
+
+def app_imports(py):
+    """**真正要跑的那件事**：`import assay.server` 在那个解释器上成不成。
+
+    🔴 四个包都 import 得到 **≠** 看板起得来。`requirements.txt` 自己的注释
+      就写着「缺了 duckdb 的 `serve.py` 起不来」—— 而"要哪几个包"那份清单是
+      人维护的，会过期（新加一个 import 忘了写进去就不报，同「照清单拼会漏
+      掉新文件的全部组合」）。直接 import 那个模块**不依赖任何清单**。
+
+    ★ 2026-09-27 真机踩到：Windows 上复查说 4 个包都在、装机报
+      「✅ 装好了 · exit code 0」，而 serve.py 第一句
+      `from assay.server import serve` 就 `ModuleNotFoundError: No module
+      named 'duckdb'` —— 两句话直接矛盾，而**没有任何地方报错**。
+      这一层就是不让那种矛盾再悄悄发生。
+    """
+    code = ('import sys\n'
+            'sys.path.insert(0, ' + repr(HERE) + ')\n'
+            'import assay.server\n')
+    try:
+        r = subprocess.run([py, '-c', code], capture_output=True, text=True,
+                           timeout=600, cwd=HERE)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, '跑不起来: %s' % e
+    if r.returncode == 0:
+        return True, ''
+    tail = [x for x in (r.stderr or '').strip().splitlines() if x.strip()]
+    return False, (tail[-1].strip() if tail else '退出码 %d' % r.returncode)
 
 
 def _run():
@@ -320,6 +406,24 @@ def _run():
             return 2
         say(OK + '%d 个包装好并复查通过' % len(pkgs))
 
+    # ---- ④b 真正要跑的那件事：看板 import 得起来吗 ----
+    # 🔴 上面那层问的是"清单里那 4 个在不在"，而清单是人维护的、会过期。
+    #   这一层直接 import 要跑的那个模块 —— 它不依赖清单，也不依赖我对
+    #   "缺了谁"的判断（同「判据永远是现在的状态，不是记录」）。
+    if os.path.isfile(py):
+        _ok, _why = app_imports(py)
+        if _ok:
+            say(OK + '看板 import 得起来（assay.server）')
+        elif a.check:
+            say(WARN + '看板 import 不起来：%s' % _why)
+            bad.append('看板起不来')
+        else:
+            say(BAD + '清单里那几个包都在，但【看板 import 不起来】：%s' % _why)
+            say('     判据是"拿那个解释器真 import 一遍"，所以这不是误报。')
+            say('     用的解释器：%s' % py)
+            say('     手工看一眼装到哪儿去了：%s -m pip list' % py)
+            return 2
+
     # ---- ⑤ tdx2db 只报不装（见文件头「不做的两件事」）----
     sys.path.insert(0, DL)
     try:
@@ -380,6 +484,16 @@ _VERDICT = {
 _LAUNCH = {}          # --serve 时装完要起看板，见 _run() 收尾
 
 
+def _logclose():
+    global _LOGF
+    if _LOGF is not None:
+        try:
+            _LOGF.close()
+        except Exception:                                # noqa: BLE001
+            pass
+        _LOGF = None
+
+
 def main():
     _logopen()
     try:
@@ -398,18 +512,27 @@ def main():
     if _LOGF is not None:
         say(' 这次的完整输出已写进：%s' % LOG)
     say('-' * 62)
-    if _LOGF is not None:
-        try:
-            _LOGF.close()
-        except Exception:                                # noqa: BLE001
-            pass
-    # 🔴 起看板排在**结论与日志之后**：serve.py 一起来就阻塞在这里，
-    #   夹在中间的话「装好了没有」要等服务停掉才打出来，而那正是
-    #   人这一刻最想知道的（同「结论必须是最后一行」那条的另一半 ——
-    #   结论仍然是最后一行，只是后面接着干活）。
+    # 🔴 起看板排在**结论之后**：serve.py 一起来就阻塞在这里，夹在中间的话
+    #   「装好了没有」要等服务停掉才打出来，而那正是人这一刻最想知道的。
+    # 🔴🔴 **但日志【不能】在这里关掉。** 2026-09-27 之前是先 close 再起看板，
+    #   于是「看板起没起来、为什么没起来」那一段**一个字都没进日志**
+    #   —— 而那恰恰是出问题时唯一要查的东西（`say()` 对写不进去是静默
+    #   兜底的，所以它连个错都不报）。现在留到真正跑完再关。
     if rc == 0 and _LAUNCH.get('py'):
-        return _serve(_LAUNCH['py'])
+        src = _serve(_LAUNCH['py'])
+        if src != 0:
+            say('')
+            say('-' * 62)
+            say(' 🔴 环境装好了，但【看板没起来】（退出码 %s）' % src)
+            say('    上面那段报错就是原因；完整输出在 %s' % LOG)
+            say('-' * 62)
+        _logclose()
+        # ★ 退出码分得开：装机本身成了（所以不是 2），但看板没起来
+        #   —— 报成 0 的话 start.bat 会写「[OK] finished」，那是在说谎。
+        return 0 if src == 0 else 4
+    _logclose()
     return rc
+
 
 if __name__ == '__main__':
     sys.exit(main())

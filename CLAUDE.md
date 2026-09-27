@@ -5007,6 +5007,123 @@ blob 里确实是 **0 个 CRLF / 48 个 LF**（本机 `core.autocrlf=input` 剥�
 ★ 验过：那条守卫绿、`PYTHONIOENCODING=gbk` 下四个入口 `--help` 退出码全 0、
   `hash_randomization = 0 | PYTHONUTF8 = 1 | stdout = utf-8 | ✓中文`。
 
+#### 🔴🔴 真机第二轮：报「✅ 装好了 · exit code 0」，而看板当场崩了（2026-09-27）
+
+用户贴回来的真机输出，**两件事一起坏，而且都不报错**：
+
+```
+ ▶ 起看板中 —— 起来之后浏览器会自己打开
+    E:\...\.venv\Scripts\python.exe  E:\...\assay\serve.py
+  [OK]   finished, exit code 0
+  Log:  E:\workspace\finical\assay\install.log
+Press any key to continue . . . Traceback (most recent call last):
+  ...  registry.py line 40, in <module>  import duckdb
+ModuleNotFoundError: No module named 'duckdb'
+```
+
+★ **那个顺序本身就是物证**：结论与 `Press any key` 先打、serve.py 的
+  traceback **后**打 —— 也就是说 `proc.wait()` **在子进程还活着的时候就返回了**，
+  而且返回的是 0。
+
+##### ① 🔴🔴 Windows 上 `os.exec*` 不是「原地替换」，是「新建一个 + 把自己结束掉」
+
+`serve.py` 的第一条可执行语句是 `ensure_fixed_hash_seed()`，它没固定种子时
+会带着环境变量 `os.execve` 重启自己。POSIX 上那是**原地替换、PID 不变**，
+所以父进程 `wait()` 拿到的是真退出码 —— **本机怎么跑都对**。
+而 Windows 的 `os.execve` 落到 MSVCRT 的 `_wexecve`：**另起一个进程，当前这个
+当场结束**。站在 `_serve` 这里看：
+
+| | 表现 |
+|---|---|
+| `proc.wait()` | **立刻返回 0**（结束掉的是 exec 之前那个壳）-> 结论在说谎 |
+| `_open_when_up` | `proc.poll()` 当场非 None -> **浏览器永远不开** |
+| 真正的 serve.py | 变成没人管的孤儿，崩了也没人知道（所以 traceback 排在 pause 后面）|
+
+★ 与「`os.kill(pid, 0)` 在 Windows 上会把进程真的杀掉」是**同一族**：
+  POSIX 惯用法在 Windows 上语义完全不同，而 macOS 上验不出来。
+
+**修法：起它的时候就把 `PYTHONHASHSEED` 钉进子进程的 env** —— 于是
+`fixed()` 一进门就为真、`ensure_fixed_hash_seed()` 直接返回，**一次 exec 都
+不发生**，`wait()` 拿到真退出码、浏览器也开得成。
+「回测跨进程可复现」那条纪律分毫未动（种子就是 `hashseed.SEED` 自己声明的那个，
+**从那边读、不在这里再写一遍**）。
+★ 本机可证的部分是「**没有 exec**」（跨平台的**因**），不是「wait 拿到真码」
+  （那在 POSIX 上恒成立的**果**）—— 所以判据钉的是前者
+  （同「守卫不要钉坏成什么样，要钉和正本一不一样」）。实测：
+  不钉种子时 stub 的入口打印**两次**，钉上之后**一次**。
+
+##### ② 🔴🔴 复查用的是 `find_spec`，而它**不执行那个包**
+
+```python
+# 函数 docstring：「用**那个解释器**真 import 一遍」
+u.find_spec(p) is None          # ← 代码干的却是"找不找得到"
+```
+
+**代码在和自己的注释打架**（第五次，前四次是 `ddGap` / `lprSlice` / `_PQ` /
+`today_bars`）。`find_spec` 报"在"而真 import 炸掉的坏法至少三种，全都常见：
+目录在而 `__init__.py` 半截（pip 中途被打断）、扩展模块的 DLL 加载不上、
+包里第一句 import 就炸。本机构造实测：
+
+    duckdb/__init__.py 里 import 一个不存在的东西
+      find_spec -> 在        真 import -> ModuleNotFoundError
+
+现在是**真 `__import__`**，而且把**为什么**一起带出来
+（只报一个包名的话，"装到别的解释器上了"和"wheel 架构不符"分不出来）。
+★ 顺带把 `cwd=HERE` 补上：`-c` 的 `sys.path[0]` 是**当前目录**、`serve.py` 的
+  是**脚本目录**，不对齐的话复查与真跑看的是两条 sys.path，**而那不报错**。
+
+##### ③ 新增一层：**真正要跑的那件事** import 得起来吗（`app_imports`）
+
+四个包都 import 得到 **≠** 看板起得来 —— 而 `requirements.txt` 那份"要哪几个包"
+的清单是**人维护的、会过期**（新加一个 import 忘了写进去就不报，
+同「照清单拼会漏掉新文件的全部组合」）。所以装完之后直接
+`import assay.server` 跑一遍：**不依赖任何清单**。
+实测它复现出用户看到的**同一句话**：`ModuleNotFoundError: No module named 'duckdb'`
+—— 只是现在这句话出现在装机阶段、带着解释器路径和下一步，
+而不是在 `Press any key` 之后一闪而过。
+★ 判据还钉住**它排在"决定起看板"之前**（AST 比行号）：排在后面就成了
+  事后诸葛亮，该拦的那一次照样起、照样报 ✅。
+
+##### ④ 日志在起看板【之前】就被关掉了 —— 最该留的那一段一个字都没进去
+
+`main()` 原来是「打结论 -> `_LOGF.close()` -> `_serve()`」。而 `say()` 对
+写不进去是**静默兜底**的，于是「看板起没起来、为什么没起来」全程只在屏幕上，
+**窗口一关就没了** —— 正是上一轮那条纪律要修的东西，只是漏了后半截。
+现在留到真跑完再关。
+★ 退出码也分得开：**4 = 环境装好了但看板停了**。报成 0 是在说谎，
+  报成 2 会让人去重装一个本来就没问题的环境。`start.bat` 跟着改成三路。
+
+##### ⚠ 如实记：`duckdb` 到底为什么没装上，**没有定案**
+
+上面修的是「**为什么没人告诉你**」，不是「为什么缺」。定案要 `install.log`
+（它记着复查那几行说了什么），而用户贴的是 pause 之后那段。
+★ 本机能证的只是 `find_spec` 与真 import **可以**不一致；我构造出的那条
+  报的是 `No module named 'duckdb._nope'`，**与用户看到的 `'duckdb'` 不是
+  同一个字符串** —— 所以只能说"这一类坏法 find_spec 看不见"，
+  不能说"他就是这么坏的"（同「没量过的数不许拿出来当对照」）。
+
+##### ★ 变异 7/7，而第一轮有两条是坏的 —— 两条的毛病都值得记
+
+| | |
+|---|---|
+| **M1 漏了 —— 构造被环境【继承】遮住** | selftest 自己是带着 `PYTHONHASHSEED=0` 跑的（它自己被 exec 过一次），子进程**继承**它 -> 把 `_serve` 里那段 env 整段删掉，stub 照样只进一次、用例照样绿。真实现场是双击 start.bat（那里没有这个变量）。构造里要**先把它从 `os.environ` 摘掉**再跑 |
+| **M5 被【错的那句】抓到** | 我的变异脚本用**文本模式**读 .bat 再写回去 —— 而文本模式读做 universal newlines，**把 CRLF 全毁了**，于是抓到它的是"start.bat 有 LF-only 的行"，而不是我要验的 RC==4 那条。改成二进制读写之后才落到该落的地方（同「别把功劳记在错的那句上」；也是「`\r` 咬两次」那条的第三次） |
+
+⚠ **M8 是无效变异，而且它把我自己挂住了**：想验「种子从 `hashseed.SEED` 读、
+不写死」，就得让那个常量变成别的值 —— 而 `PYTHONHASHSEED` **只有 `0` 会让
+`hash_randomization` 变 0**，改成 `1` 是"固定种子但随机化仍开着"，
+于是 `ensure_fixed_hash_seed` **无限 exec**，用例一直跑不完（我 pkill 掉的）。
+所以 `_hash_seed()` 今天**没有可观察的变异**：它是「一份真值」的结构性措施，
+不是被变异挣出来的判据。**别把它算进那 7 条里。**
+
+##### ★ 顺带两条，都是守卫抓的
+
+- **第八次**在用户可见文案里写 markdown 星号（`install.py` 的那句"但\*\*看板
+  import 不起来\*\*"）—— 上一轮刚把扫描范围扩到仓库根 `*.py`，这次就是它抓的。
+- 「自检拆分」那条守卫扫到我**生成 stub 用的字符串**头上
+  （里面有一个完整的 `dirname(abspath(__file__))` 字面量）——
+  拼出来即可（同「扫描要跳过守卫用例自己」那条）。
+
 ### 🔴 同步改成【轮询】而不是写死时间(2026-09-07)
 
 ```
