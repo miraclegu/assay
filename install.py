@@ -51,7 +51,7 @@ import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))        # …/assay
 # 🔴 UTF-8 要在【任何打印】之前 —— 这个脚本本身满屏 ✓✗⚠，而中文 Windows
-#   默认 cp936 编不出来；输出一被重定向（`install.bat > log.txt`）就
+#   默认 cp936 编不出来；输出一被重定向（`start.bat > log.txt`）就
 #   UnicodeEncodeError、退出码 1。见 assay/hashseed.ensure_utf8_console
 sys.path.insert(0, HERE)
 try:
@@ -76,7 +76,7 @@ _LOGF = None
 def _logopen():
     """🔴 **结果必须落盘。**
 
-    用户 2026-09-27：「点击 install.bat 后出来命令行框，确认后直接消失了，
+    用户 2026-09-27：「点击 start.bat 后出来命令行框，确认后直接消失了，
     这样我不知道是安装完成了还是没安装完成」——`pause` 只在窗口还开着时
     有用，**人一按键那次的输出就永远没了**（同「刚跑完的 90 秒仍显示：
     任务一结束横条当场消失的话，人走开一分钟就完全不知道到底成没成」）。
@@ -338,9 +338,12 @@ def _run():
     if bad:
         say('🔴 --check 只报不动手。去掉它再跑一次就会补上：%s' % ' / '.join(bad))
         return 1
-    if a.serve:
+    if a.serve and not a.check:
         # 🔴 起看板这件事**排在结论之后**（见 main()）—— serve.py 会一直
         #   阻塞着，夹在中间的话那句"装好了没有"要等到服务停掉才打出来。
+        # 🔴 `--check` 压过 `--serve`：说了"只报不动手"却起一个服务进程，
+        #   那是自相矛盾（而 start.bat 无条件带 --serve，所以
+        #   `start.bat --check` 必然走到这一支）。
         _LAUNCH['py'] = py
         say(OK + '环境好了 —— 接着起看板')
         return 0
@@ -356,6 +359,8 @@ def _run():
         ' 的话可能是系统那个（没装 duckdb，serve.py 起不来）。')
     say('★ 想一步到位：双击 start.bat（Windows）或 `python3 install.py'
         ' --serve` —— 装好之后直接起看板并打开浏览器。')
+    say('★ Windows 上【只有 start.bat 一个入口】：它自己会把环境备好再起'
+        '看板，不用先跑别的。')
     return 0
 
 

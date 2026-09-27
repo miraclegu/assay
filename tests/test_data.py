@@ -2832,7 +2832,7 @@ def t_windows_boot_path():
         'INSTALL.md 里没有一行 `pip install -r …requirements.txt` —— '
         '人照着它装会漏掉新依赖')
 
-    # ---- H) Windows 装机脚本 install.bat --------------------------------
+    # ---- H) Windows 那个唯一入口 start.bat --------------------------------
     #   用户 2026-09-26：「装机脚本可以先制作一个 windows 版本」
     #
     # 🔴🔴 **它必须是纯 ASCII。** `chcp 65001` 之后 cmd.exe 仍按**字节偏移**
@@ -2844,9 +2844,14 @@ def t_windows_boot_path():
     #   （同「断言直接扫目录而不是照清单拼」那条；`.gitattributes` 的
     #   `*.bat text eol=crlf` 同理，也是按模式而不是按文件名）。
     _bats = sorted(glob.glob(os.path.join(REPO, '*.bat')))
-    assert len(_bats) >= 2, (
-        '仓库根只有 %d 个 .bat —— install.bat（装环境）与 start.bat'
-        '（一个文件点到底）都该在' % len(_bats))
+    # 🔴🔴 **只许有一个**（用户 2026-09-27：「两个脚本反而混乱」）。
+    #   两个的具体危害不是"多一个文件"：装完 Python 之后脚本要说「关掉窗口、
+    #   重新跑一次」，而它只能写死另一个的名字 —— 于是**你双击的那个不是它
+    #   让你再跑的那个**。实测 start.bat 转发给 start.bat 时就是这样。
+    assert len(_bats) == 1 and os.path.basename(_bats[0]) == 'start.bat', (
+        '仓库根有 %d 个 .bat（%s）—— 只许一个 start.bat。两个的话'
+        '"再跑一次"那句话必然指向另一个文件，而你双击的不是它'
+        % (len(_bats), ', '.join(os.path.basename(x) for x in _bats)))
     for _p1 in _bats:
         _n1 = os.path.basename(_p1)
         _b1 = io.open(_p1, 'rb').read()
@@ -2862,8 +2867,7 @@ def t_windows_boot_path():
         # 🔴 CRLF：LF-only 的 .bat 在 label / goto 上有已知的解析问题
         assert _b1.count(b'\n') == _b1.count(b'\r\n'), (
             '%s 有 LF-only 的行 —— .bat 要 CRLF' % _n1)
-    _bat = os.path.join(REPO, 'install.bat')
-    assert os.path.isfile(_bat), '缺 install.bat（Windows 装机脚本）'
+    _bat = _bats[0]
     _bb = io.open(_bat, 'rb').read()
     # 🔴🔴 上面那条查的是【工作区】那份——而 `core.autocrlf=input` 会在 add
     #   时把 CR 剥掉存进 blob，于是「工作区 CRLF / 仓库 LF」，守卫照样绿，
@@ -2877,7 +2881,7 @@ def t_windows_boot_path():
     _idx = subprocess.run(['git', 'show', ':.gitattributes'],
                           cwd=REPO, capture_output=True, text=True)
     assert _idx.returncode == 0, (
-        '.gitattributes 不在 git 索引里 —— 少了它，install.bat 会被存成 LF'
+        '.gitattributes 不在 git 索引里 —— 少了它，start.bat 会被存成 LF'
         '（本机 core.autocrlf=input 剥掉 CR），新 clone 出来的 .bat 是坏的，'
         '而本机工作区那份仍是 CRLF、上面那条守卫照样绿')
     assert re.search(r'^\s*\*\.bat\b[^\n]*\beol=crlf\b', _idx.stdout, re.M), (
@@ -2886,9 +2890,9 @@ def t_windows_boot_path():
 
     _bt = _bb.decode('ascii')
     # 判据不是"提到过 install.py"（注释里也提），是**真的转发**
-    assert re.search(r'^\s*%PY%\s+"[^"]*install\.py"\s+%\*', _bt, re.M), (
-        'install.bat 没有把参数转发给 install.py —— '
-        '`install.bat --check` 会静默变成"不带参数跑"')
+    assert re.search(r'^\s*%PY%\s+"[^"]*install\.py"[^\r\n]*\s%\*', _bt, re.M), (
+        'start.bat 没有把参数转发给 install.py —— '
+        '`start.bat --check` 会静默变成"不带参数跑"')
     # 🔴 `py -3` 必须排在裸 `python` **前面**：新装的 Windows 上 `python`
     #   常常是 Microsoft Store 的存根，跑起来是打开商店而不是执行脚本
     #   （而那不报错，只是装机卡在那儿）
@@ -2896,14 +2900,14 @@ def t_windows_boot_path():
     #   —— 第一版写死 `'\npython -c'` 找不到，判据报 -1 当场自伤
     _mpy = re.search(r'^\s*py -3 -c', _bt, re.M)
     _mpn = re.search(r'^\s*python -c', _bt, re.M)
-    assert _mpy and _mpn, 'install.bat 里没有两条解释器探测'
+    assert _mpy and _mpn, 'start.bat 里没有两条解释器探测'
     _ipy, _ipn = _mpy.start(), _mpn.start()
     assert 0 < _ipy < _ipn, (
-        'install.bat 要先试 `py -3` 再试 `python` —— 顺序反了会撞上 '
+        'start.bat 要先试 `py -3` 再试 `python` —— 顺序反了会撞上 '
         'Microsoft Store 的 python 存根（py=%d python=%d）' % (_ipy, _ipn))
     # 找不到解释器时要**说下一步**，不是静默退出
     assert 'python.org/downloads/windows' in _bt, (
-        'install.bat 在找不到 Python 时没给下载地址 —— '
+        'start.bat 在找不到 Python 时没给下载地址 —— '
         '那正是新机器上唯一走得到的分支')
     # 双击打开时窗口不许一闪而过（否则结果一个字都看不到）
     # 🔴 判据要认准**转发之后**那一处 —— 文件里还有一处 pause 在
@@ -2911,11 +2915,11 @@ def t_windows_boot_path():
     #   删掉末尾那个照样绿（变异 M6 实测漏过）
     assert re.search(r'install\.py"[^\n]*\n(?:.|\n)*^\s*pause\s*$',
                      _bt, re.M), (
-        'install.bat 在转发给 install.py 之后没有 pause —— '
+        'start.bat 在转发给 install.py 之后没有 pause —— '
         '双击跑完窗口当场关掉，结果一个字都看不见')
 
     # ---- I) 跑完必须留下【结论】，而且窗口关了还查得到 ----------------
-    #   用户 2026-09-27：「点击 install.bat 后出来命令行框，确认后直接消失了，
+    #   用户 2026-09-27：「点击 start.bat 后出来命令行框，确认后直接消失了，
     #   这样我不知道是安装完成了还是没安装完成」——`pause` 只在窗口还开着时
     #   有用，人一按键那次的输出就永远没了（同「刚跑完的 90 秒仍显示」）。
     #
@@ -2952,10 +2956,10 @@ def t_windows_boot_path():
     # 🔴 .bat 也要在【转发之后】把结论再说一遍：install.py 要是压根没起来
     #   （解释器不对 / 文件缺失），它那句结论根本不会打出来
     assert re.search(r'^\s*if "%RC%"=="0"', _bt, re.M), (
-        'install.bat 没有在转发之后按退出码给结论 —— '
+        'start.bat 没有在转发之后按退出码给结论 —— '
         'install.py 起不来时屏幕上一句话都没有')
     assert 'install.log' in _bt, (
-        'install.bat 没有告诉人日志在哪 —— 窗口关了就无从查起')
+        'start.bat 没有告诉人日志在哪 —— 窗口关了就无从查起')
 
     # 🔴🔴 「找不到 Python」那一支**也要写日志** —— 而那恰恰是新机器上最可能
     #   走到的分支：install.py 压根没起来，它那套 LOG 一个字都写不出来。
@@ -2967,18 +2971,18 @@ def t_windows_boot_path():
     #   而在括号块里 `%ANS%` 是**解析时**展开的（读到的是进块之前的值），
     #   于是菜单永远走同一支，**且静默**。判据跟着切到 `:nopy` 段。
     _i_np = _bt.find(':nopy')
-    assert _i_np > 0, 'install.bat 里没有「找不到 Python」那一段（:nopy）了？'
+    assert _i_np > 0, 'start.bat 里没有「找不到 Python」那一段（:nopy）了？'
     _blk = _bt[_i_np:]
     assert 'No Python 3.10+' in _blk, ':nopy 段里没有那句结论'
     assert re.search(r'^\s*if not defined PY goto nopy\s*$', _bt, re.M), (
-        'install.bat 没有 `if not defined PY goto nopy` —— 那一支要是又被塞回 '
+        'start.bat 没有 `if not defined PY goto nopy` —— 那一支要是又被塞回 '
         '`if (...)` 块里，菜单的 set /p 会在解析时展开、永远走同一支，而且不报错')
     assert re.search(r'>\s*"%LOG%"|>\s*"%~dp0install\.log"', _blk), (
-        'install.bat 的「找不到 Python」那一支没有把结论写进 install.log —— '
+        'start.bat 的「找不到 Python」那一支没有把结论写进 install.log —— '
         '而 install.py 起不来时它是【唯一】留得下记录的地方，'
         '窗口一关就查无对证')
     assert re.search(r'^\s*type "%LOG%"|^\s*type "%~dp0install\.log"', _blk, re.M), (
-        'install.bat 的「找不到 Python」那一支只写了日志没显示出来 —— '
+        'start.bat 的「找不到 Python」那一支只写了日志没显示出来 —— '
         '屏幕上一片空白比不写更糟')
 
     # 🔴 那一支还要说清**这台机器到底有什么** —— 只报「没找到」分不出
@@ -2987,7 +2991,7 @@ def t_windows_boot_path():
     #   判据：真的把探测命令的输出重定向进日志，不是在文案里写一句提示。
     _probe = re.findall(r'^\s*(\S[^\r\n]*?)\s+>>"%LOG%" 2>&1\s*$', _blk, re.M)
     assert len(_probe) >= 3, (
-        'install.bat 的「找不到 Python」那一支没有探测这台机器上有什么 —— '
+        'start.bat 的「找不到 Python」那一支没有探测这台机器上有什么 —— '
         '「没装」和「装了但版本不够 / 是商店存根 / 没进 PATH」'
         '在屏幕上长得一模一样，而它们要做的事不同（探到 %d 条）' % len(_probe))
 
@@ -2995,11 +2999,11 @@ def t_windows_boot_path():
     #   （同「配股不自动执行：要掏钱、可以放弃」「定时任务不自动装」那两条）。
     #   判据是**位置**：问一句的那行必须排在第一条安装命令之前。
     _m_ask = re.search(r'^\s*set /p ', _blk, re.M)
-    assert _m_ask, 'install.bat 没有问一句就要装 Python？那是替人做系统级决定'
+    assert _m_ask, 'start.bat 没有问一句就要装 Python？那是替人做系统级决定'
     _m_do = re.search(r'^\s*(winget install|"%PYEXE%")', _blk, re.M)
-    assert _m_do, 'install.bat 里没有自动安装那条路'
+    assert _m_do, 'start.bat 里没有自动安装那条路'
     assert _m_ask.start() < _m_do.start(), (
-        'install.bat 在问人之前就开始装 Python —— 装软件是系统级副作用，'
+        'start.bat 在问人之前就开始装 Python —— 装软件是系统级副作用，'
         '不该在人没表态时替他做')
 
     # 🔴 per-user 安装，**不要管理员**：winget 的 manifest 里那一档带
@@ -3018,7 +3022,7 @@ def t_windows_boot_path():
     # 🔴 装完【必须】说"开新窗口"：PATH 改动到不了已经开着的 cmd，
     #   不说的话人会以为没装上（而它不报错）。
     assert re.search(r'open a NEW one', _blk, re.I), (
-        'install.bat 装完没说「关掉这个窗口、开一个新的」—— '
+        'start.bat 装完没说「关掉这个窗口、开一个新的」—— '
         'PATH 改动进不了已经开着的 cmd，不说的话看着就像没装上')
 
 
@@ -3030,25 +3034,34 @@ def t_windows_boot_path():
         _sp.loader.exec_module(_m)
         return _m
 
-    # ---- J) 一个文件点到底：start.bat + install.py --serve ---------------
+    # ---- J) 一个文件点到底：start.bat --serve -----------------------------
     #   用户 2026-09-27：「一个执行文件，能将项目启动起来，后面就能直接
-    #   执行 server，打开 web 页面」。
-    _st = os.path.join(REPO, 'start.bat')
-    assert os.path.isfile(_st), (
-        '缺 start.bat —— 用户要的是【一个文件】点下去就装好并起看板，'
-        '而 install.bat 只管环境')
-    _stt = io.open(_st, 'rb').read().decode('ascii')
+    #   执行 server，打开 web 页面」+「两个脚本反而混乱」。
+    _stt = _bt                       # 唯一那个 .bat，上面已读
 
-    # 🔴 它**只转发**：那套「找 Python / 装 Python」的菜单只许有一份。
-    #   抄一份进 start.bat 的话两边迟早分叉，而分叉的那份正是新机器会点的
-    #   （同「两处实现必然分叉」「共享的是实现不是形状」）。
-    assert re.search(r'^\s*call "%~dp0install\.bat"[^\r\n]*--serve', _stt, re.M), (
-        'start.bat 没有 `call "%~dp0install.bat" --serve` —— '
-        '它必须转发，不能自己再实现一遍')
-    for _dup in ('py -3 -c', 'winget install', ':nopy'):
-        assert _dup not in _stt, (
-            'start.bat 里出现了 %r —— 那是 install.bat 的活，'
-            '复制一份出来两边会分叉' % _dup)
+    # 🔴 它必须**无条件**把 --serve 传下去：少了它，双击之后只装环境就停，
+    #   而人要的是"点一下就能用"（`--check` 那一支在 install.py 里压过它）。
+    assert re.search(r'^\s*%PY% "%~dp0install\.py" --serve', _stt, re.M), (
+        'start.bat 没有无条件转发 --serve —— 双击之后只装环境不起看板，'
+        '而用户要的是一个文件点到底')
+
+    # 🔴🔴 **脚本让人"再跑一次"时，说的必须是它自己的名字**（`%~nx0`）。
+    #   写死一个 .bat 文件名，就是当初 install.bat / start.bat 两个文件时
+    #   那个真缺陷：你双击 start.bat，装完 Python 它说「Run install.bat
+    #   again」—— 指向另一个文件，而它不报错。
+    #   ★ 判据**先剥 rem 注释再查** —— 那段解释"为什么只有一个 .bat"的注释
+    #     里本来就提着另一个名字（同「查字符串会命中自己写的注释」，第 8 次）。
+    _vis = '\n'.join(L for L in _stt.splitlines()
+                     if not L.strip().lower().startswith('rem'))
+    _hard = re.findall(r'[^\s"\\/]+\.bat', _vis)
+    assert not _hard, (
+        'start.bat 的可见文案里写死了 .bat 文件名 %r —— 要用 %%~nx0 自称。'
+        '写死的话改名 / 多一个副本时，"再跑一次"会指向另一个文件，'
+        '而它不报错' % sorted(set(_hard)))
+    assert _vis.count('%~nx0') >= 3, (
+        'start.bat 里 %%~nx0 只出现 %d 次 —— 三处「再跑一次」'
+        '（手工装完 / 自动装完 / 装失败）都要说得出自己叫什么'
+        % _vis.count('%~nx0'))
 
     # 🔴 端口不许在 install.py 里写死：serve.py 的 argparse 默认值才是正本。
     #   写死之后改了 serve.py 的端口，印出来的地址与自动打开的那个标签页
@@ -3068,6 +3081,24 @@ def t_windows_boot_path():
     _sv = io.open(os.path.join(REPO, 'serve.py'), encoding='utf-8').read()
     assert re.search(r"'--port'[^\n]*default=%d" % _port, _sv), (
         'serve_port() 给的 %d 与 serve.py 里 --port 的默认值对不上' % _port)
+
+    # 🔴 `--check`（只报不动手）必须**压过** `--serve` —— 而 start.bat 是
+    #   无条件带 --serve 的，所以 `start.bat --check` 必然走到这个组合。
+    #   说了"一个字节都不改"却起一个服务进程，那是自相矛盾。
+    #   ★ 判据是**行为**：它必须自己退出来，且不许打出起看板那句
+    #     （只查源码里有没有 `not a.check` 的话，改个变量名就绕过去了）。
+    _cp = subprocess.run(
+        [sys.executable, _ins, '--check', '--serve'],
+        cwd=REPO, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, ASSAY_INSTALL_LOG=os.path.join(
+            tempfile.mkdtemp(prefix='_ins_log_'), 'install.log')))
+    # ★ 标记要挑 `_serve()` **独有**的那一句 —— 只查"起看板"三个字的话，
+    #   正常输出里那句「下一步 —— 起看板」也命中，判据当场自伤（实测）。
+    _mark = '▶ 起看板中'
+    assert _mark in _im._serve.__doc__ or _mark in io.open(
+        _ins, encoding='utf-8').read(), '判据用的标记在 install.py 里找不到了'
+    assert _mark not in _cp.stdout, (
+        '`--check --serve` 还是把看板起起来了 —— --check 说的是"只报不动手"')
 
     # 🔴 浏览器要等端口【真的起来】再开，而子进程死了就**不开** ——
     #   打一个 Connection refused 的标签页比不打更糟（同 backLink 那条）。
@@ -3123,7 +3154,7 @@ def t_windows_boot_path():
             '目录挂载三条路（symlink -> junction -> 响亮失败，'
             '不退回 492 MB 的复制），真挂一次读得到里面的文件；'
             'requirements.txt 盖住运行时真的 import 的 %d 个第三方包；'
-            'install.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数；'
+            'start.bat 纯 ASCII + CRLF（含签出属性）、py -3 优先、转发参数；'
             '跑完有结论且落盘（窗口关了还查得到）'
             % (len(files), len(got - TRANSITIVE)))
 
