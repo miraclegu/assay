@@ -3304,6 +3304,140 @@ def t_windows_boot_path():
     assert 'dashboard' in _v4.split(':vend')[0], (
         'start.bat 的 RC==4 那一支没说清是【看板】停了')
 
+    # ── K5 读子进程输出必须【指定编码】，别用 locale ────────────────────
+    # 🔴🔴 2026-09-27 真机根因：`subprocess.run(..., text=True)` 不带
+    #   `encoding=` 时按 **locale 编码**解码，中文 Windows 上就是 GBK ——
+    #   子进程一吐非 ASCII，**读取线程当场死掉**：
+    #       UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 …
+    #   而那是后台线程，这边只看到 stdout 是**空的** -> "缺了哪几个包"的
+    #   清单变成空清单 -> 复查报「都在」-> 装机说 ✅ -> serve.py 崩在
+    #   `import duckdb`。**空输出被当成"没有缺的"**（同「空结果一律当失败」）。
+    # ★ 判据钉**结构**（每一处捕获输出的调用都要指定编码），不钉"这次恰好
+    #   没有中文" —— 后者在 macOS 上永远是绿的（同「守卫不要钉坏成什么样，
+    #   要钉和正本一不一样」）。
+    _ist = io.open(os.path.join(REPO, 'install.py'), encoding='utf-8').read()
+    _itree = ast.parse(_ist)
+    # ★ 判据看**值**不看键名：`capture_output=False` 是不捕获的（输出直接
+    #   继承控制台），要求它指定编码是**判据比要证的事宽** —— 第一版就这么
+    #   误报了一处（而那一处的真问题是别的：它的输出进不了日志，见 K7）。
+    _caps = []
+    for _n in ast.walk(_itree):
+        if not (isinstance(_n, ast.Call) and isinstance(_n.func, ast.Attribute)
+                and _n.func.attr in ('run', 'Popen')):
+            continue
+        _kw = {k.arg: k.value for k in _n.keywords}
+        _cap = isinstance(_kw.get('capture_output'), ast.Constant) \
+            and _kw['capture_output'].value is True
+        _pipe = 'stdout' in _kw and 'PIPE' in ast.dump(_kw['stdout'])
+        if _cap or _pipe:
+            _caps.append((_n.lineno, set(_kw)))
+    assert _caps, '构造不对：install.py 里一处捕获输出的子进程调用都没有'
+    for _ln, _kw in _caps:
+        assert 'encoding' in _kw, (
+            'install.py:%d 的 subprocess.run 捕获了输出却没指定 encoding —— '
+            '中文 Windows 上会按 GBK 解码，读取线程死掉而 stdout 变成空的，'
+            '**而它不报错**' % _ln)
+    # 子进程那一侧也要钉：只钉这边的话，换个 locale 又对不上
+    assert 'PYTHONIOENCODING' in _ist and "'PYTHONUTF8'" in _ist, \
+        'install.py 没让子进程按 UTF-8 输出（两头只钉一头不够）'
+
+    # ── K6 复查要有【哨兵】：读不到输出 != 一个都不缺 ──────────────────
+    _im = _load_mod('_im_enc', os.path.join(REPO, 'install.py'))
+    assert _im.importable(sys.executable, ['os', 'json'])[0] is True
+    _ok, _miss = _im.importable(sys.executable, ['os', 'zz_no_such_pkg'])
+    assert _ok is False and any('zz_no_such_pkg' in x for x in _miss), _miss
+    # 构造「子进程什么都没打」：哨兵在的话这必须判**失败**而不是"都在"
+    _src2 = _ist
+    try:
+        _mut = _src2.replace("'sys.stdout.write(", "'pass  # ", 1)
+        assert _mut != _src2, '构造不对：找不到那行 stdout.write'
+        io.open(os.path.join(REPO, 'install.py'), 'w',
+                encoding='utf-8').write(_mut)
+        _bad_ok, _bad_why = _load_mod(
+            '_im_nosent', os.path.join(REPO, 'install.py')).importable(
+                sys.executable, ['os'])
+    finally:
+        io.open(os.path.join(REPO, 'install.py'), 'w',
+                encoding='utf-8').write(_src2)
+    assert io.open(os.path.join(REPO, 'install.py'),
+                   encoding='utf-8').read() == _src2, '还原失败'
+    assert _bad_ok is False, \
+        '子进程什么都没打，复查却说「都在」—— 空结果必须当失败'
+
+    # ── K7 看板的输出要【进日志】，不能只在控制台 ──────────────────────
+    # 用户 2026-09-27：「错误信息只在控制台，没有打印到日志文件中」。
+    # 上一轮把日志留到跑完再关修了一半，这一半是**内容压根没喂进来**：
+    # 子进程直接继承控制台，`say()` 碰都碰不到它。
+    _sv_fn = [n for n in ast.walk(_itree)
+              if isinstance(n, ast.FunctionDef) and n.name == '_serve']
+    assert len(_sv_fn) == 1, _sv_fn
+    _pop = [n for n in ast.walk(_sv_fn[0])
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == 'Popen']
+    assert len(_pop) == 1, '_serve 里 Popen 不止一处？'
+    _pkw = {k.arg for k in _pop[0].keywords}
+    for _need in ('stdout', 'stderr', 'encoding'):
+        assert _need in _pkw, (
+            '_serve 的 Popen 没有 %s —— 子进程输出进不了 install.log，'
+            '窗口一关「看板为什么没起来」就永远查不到了' % _need)
+    # 抄进日志那一步收在 `_tee` 一处（pip 与看板共用）—— 判据跟着它走
+    _tee_fn = [n for n in ast.walk(_itree)
+               if isinstance(n, ast.FunctionDef) and n.name == '_tee']
+    assert len(_tee_fn) == 1, '_tee 不是唯一一处'
+    assert any(isinstance(a, ast.Name) and a.id == 'line'
+               for c in ast.walk(_tee_fn[0])
+               if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and c.func.id == 'say' for a in c.args), \
+        '_tee 读了管道却没把每行喂给 say() —— 那就只打屏幕、不进日志'
+    for _fn_name in ('_serve', '_run'):     # 看板那条 + pip 那条
+        _f = [n for n in ast.walk(_itree)
+              if isinstance(n, ast.FunctionDef) and n.name == _fn_name]
+        if not _f:
+            continue
+        assert any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                   and c.func.id == '_tee' for c in ast.walk(_f[0])), \
+            '%s 里的子进程输出没走 _tee —— 它进不了 install.log' % _fn_name
+
+    # ── K8 装配总时长要【加起来】，不是把各步的文案串起来 ───────────────
+    # 空 lake 上原来横条写的是「约需 约 1 分钟 + 约 30~60 分钟（下载为主）
+    # + 约 2 分钟 + 全量约 6 分钟 + …」—— 读不通，而人要的是**一个总数**。
+    _ss2 = _sm          # 上面已加载的 setup_stages
+    # 🔴 **构造**，不靠"这台机器恰好还差几步" —— 数据齐的机器上待办是空的，
+    #   那样这一段整个空转（同「断言要在能触发的构造上跑」，第一版就这样）。
+    _fake = [{'cmd': ['x'], 'eta_min': (1, 1), 'eta': '约 1 分钟'},
+             {'cmd': ['x'], 'eta_min': (30, 60), 'eta': '约 30~60 分钟（下载）'},
+             {'cmd': ['x'], 'eta_min': (44, 44), 'eta': '首建约 44 分钟'},
+             {'cmd': None, 'eta_min': (999, 999), 'eta': '人工'}]
+    _tot = _ss2._eta_total(_fake)
+    assert _tot and '+' not in _tot, \
+        '总时长还是把各步文案串起来的（原来横条上就是那串读不通的东西）：%r' % _tot
+    # 1+30+44=75 ~ 1+60+44=105 分钟 -> 上限过 90 折小时，**两端同单位**
+    #   （75/60=1.25，`%.1f` 取偶到 1.2）
+    assert _tot == '1.2~1.8 小时', _tot
+    # ⑦ 人工那步不算进"还要多久"（它不是跑出来的）
+    assert '16' not in _tot and '999' not in _tot, _tot
+    # 一步都没声明时长 -> None，**不猜一个数**
+    assert _ss2._eta_total([{'cmd': ['x']}]) is None
+    # 🔴 **消费端也要钉**：上面只验了 helper，而 `summary()` 完全可以不用它
+    #   （变异「退回 ' + '.join(各步文案)」第一轮就是这么漏的 —— 同
+    #   「生产端算对了不等于消费端用上了」）。空目录**构造**出 6 步待办。
+    _tmp_lake = tempfile.mkdtemp(prefix='_eta_')
+    try:
+        _sum = _ss2.summary(DL=_tmp_lake, ROOT=_tmp_lake)
+        assert _sum['n_todo'] >= 4, '构造不对：空目录上待办只有 %d 步' % _sum['n_todo']
+        assert _sum['eta_text'] and '+' not in _sum['eta_text'], (
+            '横条上的总时长还是把各步文案串起来的：%r' % _sum['eta_text'])
+        assert _sum['eta_text'].count('分钟') + _sum['eta_text'].count('小时') == 1, \
+            _sum['eta_text']
+    finally:
+        shutil.rmtree(_tmp_lake, ignore_errors=True)
+    # 反向自证：**真阶段每一步都声明了 eta_min** —— 漏一步它就静默不计入
+    #   总时长，而那不报错（同「照清单拼会漏掉新文件的全部组合」）。
+    for _st2 in _ss2.stages():
+        if _st2.get('cmd'):
+            assert _st2.get('eta_min'), \
+                '阶段 %s 没声明 eta_min —— 它会静默不计入总时长' % _st2['id']
+
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '
             '不许直接引用 SIGKILL / 不许 shell=True；'
@@ -4589,6 +4723,74 @@ def t_setup_stages():
         'TProtocolException: Invalid data in file "%s/mart/panel_daily/'
         'panel_2026.parquet"' % root))
     assert not corrupt.get('no_data'), corrupt
+
+    # ── D2 【自己吞异常】的那几个接口也必须走翻译器 ────────────────────
+    # 🔴🔴 翻译器原来只挂在 `server.py` 的 HTTP 500 分支上，而
+    #   api_alerts / api_alerts_suggest / api_watchlist / api_live_bench /
+    #   api_live_exec_diff 这五处是 `except Exception` **自己吞掉、用
+    #   HTTP 200 返回 `{'error': 裸异常}`** —— 整条翻译被绕过。
+    #   2026-09-27 空 lake 全路由普查：21 个翻译到位、**5 个吐裸 SQL 报错**
+    #   （页面上就是 `IOException: … LINE 1: SELECT max(date) …`）。
+    # ★ 判据是**真跑那条路**（stub 掉底层让它抛那句话），不是查源码里有没有
+    #   `explain_err` 这个名字 —— 后者改个写法就绕过去了。
+    import assay.srv.watch as _w
+    import assay.srv.live as _lvr
+
+    def _boom(*a, **kw):
+        raise Exception('IOException: IO Error: No files found that match '
+                        'the pattern "%s/mart/panel_daily/panel_*.parquet"'
+                        % root)
+
+    class _Stub(object):
+        def __getattr__(self, k):
+            return _boom
+
+    _sav = (_w._alerts, _w._watch)
+    _bench = sys.modules.get('assay.lv.bench')
+    if _bench is None:
+        from assay.lv import bench as _bench
+    _savb = (_bench.compute, _bench.diff_history)
+    try:
+        _w._alerts = _w._watch = lambda: _Stub()
+        _bench.compute = _bench.diff_history = _boom
+        _got = {
+            '/api/alerts': _w.api_alerts(None),
+            '/api/alerts/suggest': _w.api_alerts_suggest({'code': 'x'}),
+            '/api/watchlist': _w.api_watchlist({}),
+            '/api/live/bench': _lvr.api_live_bench({'id': 'a1'}),
+            '/api/live/exec_diff': _lvr.api_live_exec_diff({'id': 'a1'}),
+        }
+    finally:
+        _w._alerts, _w._watch = _sav
+        _bench.compute, _bench.diff_history = _savb
+    for _p, _r in _got.items():
+        assert _r.get('no_data') is True, \
+            '%s 把「本地还没有数据」原样吐成了裸报错：%r' % (_p, _r)
+        # 那段 SQL 是诊断信息，不该出现在给人看的句子里
+        for _k in ('IOException', 'read_parquet', 'LINE 1', 'SELECT'):
+            assert _k not in _r['error'], (_p, _r['error'])
+    # 反向自证：**真 bug 仍要原样透传**（不然这几处就成了"一律说没数据"）
+    def _real(*a, **kw):
+        raise KeyError('close_hfq')
+    _sav2 = _w._alerts
+    try:
+        _w._alerts = lambda: type('S', (), {'__getattr__':
+                                            lambda s, k: _real})()
+        _r2 = _w.api_alerts(None)
+    finally:
+        _w._alerts = _sav2
+    assert not _r2.get('no_data') and 'KeyError' in _r2['error'], _r2
+    # 翻译器**只有一处定义** —— server.py 那个名字是转发（对外契约）
+    _defs = 0
+    for _dp, _dd, _df in os.walk(os.path.join(REPO, 'assay')):
+        if '__pycache__' in _dp:
+            continue
+        for _fn in _df:
+            if not _fn.endswith('.py'):
+                continue
+            _st = io.open(os.path.join(_dp, _fn), encoding='utf-8').read()
+            _defs += len(re.findall(r'^def explain_err\(', _st, re.M))
+    assert _defs == 1, '`explain_err` 有 %d 处定义 —— 两处必然分叉' % _defs
 
     # ── E 正本是 .py；`.sh` 只是一行转发（Windows 上没有 bash）────
     dlp = sbase._datalake_dir()

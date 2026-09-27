@@ -68,21 +68,93 @@ function num(x, d) {
 /* ---- 取数 -------------------------------------------------------------
    ★ 404 要说"服务端可能是旧进程" —— 页面每次请求都从磁盘读，而 Python
      模块只在进程启动时加载一次，长时间开着的服务会出现"新页面 + 旧 API"。 */
+/* 🔴🔴 服务端说了人话，就别再拿 HTTP 外壳把它埋掉。
+     原来 500 那支直接吐 `${path} 返回 HTTP 500：{"error": "本地还没有…"}` ——
+     屏幕上就是一行带引号的 JSON，而**那句人话就在里面**。空 lake 上首页
+     四块全是这个样子（用户原话：「看起来还是有一些报错信息」）。
+     现在先解析 body：服务端给了 `error` 就用它，解析不出来才退回原文。
+   🔴 `no_data` / `missing` 要**挂到 Error 对象上**带出去 —— 调用方
+     统统是 `catch(e => ...String(e))`，标志丢在这里的话页面分不出
+     「本地还没有数据」（安静的空态 + 一个入口）与「真出错了」（红字）。 */
+function _errOf(txt, path, status) {
+  let o = null;
+  try { o = JSON.parse(txt); } catch (e) { o = null; }
+  const msg = (o && o.error) ? o.error
+    : (status === 404
+        ? `接口 ${path} 不存在（服务端可能是旧进程，重启 serve.py 再试）`
+        : status
+          ? `${path} 返回 HTTP ${status}：${txt.slice(0, 120)}`
+          : `${path} 返回的不是 JSON：${txt.slice(0, 120)}`);
+  const err = new Error(msg);
+  if (o && o.no_data) { err.no_data = true; err.missing = o.missing || ''; }
+  return err;
+}
+
 async function j(u) {
   const r = await fetch(u);
   const txt = await r.text();
-  if (!r.ok) {
-    const path = u.split('?')[0];
-    throw new Error(r.status === 404
-      ? `接口 ${path} 不存在（服务端可能是旧进程，重启 serve.py 再试）`
-      : `${path} 返回 HTTP ${r.status}：${txt.slice(0, 120)}`);
-  }
+  const path = u.split('?')[0];
+  if (!r.ok) throw _errOf(txt, path, r.status);
   let o;
   try { o = JSON.parse(txt); }
-  catch (e) { throw new Error(`${u.split('?')[0]} 返回的不是 JSON：${txt.slice(0, 120)}`); }
-  if (o && o.error) throw new Error(o.error);
+  catch (e) { throw _errOf(txt, path, 0); }
+  if (o && o.error) throw _errOf(txt, path, 200);
   return o;
 }
+
+/* ---- 一块内容取不到时的统一渲染 --------------------------------------
+   🔴 **本地还没有数据 != 出错了**，所以不能都刷成红字：顶上那条横条已经
+     说过一次「本地还没有数据 · ▷ 开始建本地数据」，下面四块再各喊一遍红的
+     就是**常驻告警**，而常驻告警等于教人忽略这个位置。所以 `no_data` 走
+     安静的空态（`.lvmsg` 不带 `.bad`），真出错了才红。
+   ★ 缺的那个 glob 路径进 `title` —— 它是诊断信息，摆在屏幕上会把
+     「我该做什么」挤没（同「能进 tooltip 的就别占列」）。
+   ★ 入参既收 Error（页面的 catch）也收 `{error, no_data, missing}`
+     （首页那种把异常转成对象的），免得调用方各自判一遍。 */
+function errHtml(e, what) {
+  const o = (e && typeof e === 'object') ? e : {};
+  const nd = !!o.no_data;
+  const msg = String(o.error || (o.message != null ? o.message : '')
+                     || e || ('取不到' + (what || '数据')));
+  const t = (nd && o.missing) ? ' title="' + esc('缺：' + o.missing) + '"' : '';
+  return '<div class="lvmsg' + (nd ? '' : ' bad') + '"' + t + '>'
+       + esc(msg) + '</div>';
+}
+
+
+/* ---- A 腿「落后几个交易日」的三态判断（唯一一处）--------------------
+   🔴🔴 **`null`（不知道）与 `0`（真的最新）是两件事。** home.js 原来写的是
+     `x.lag_days ? 落后 : 最新` —— 于是空 lake 上服务端诚实给的 `null` 被
+     说成绿色的「最新」，**本地一个字节数据都没有，首页却三行「最新」**
+     （同 `upc` 那条「判据要 > 0 / < 0 两头夹」、同「拿不到分红那一格标
+     查不到，不猜一个数」）。而 sync.js 里那份判断一直是对的 ——
+     两处各写一份，必然分叉。
+   ★ 共享的是**判断**，不是标记：两页的表样式不同，各自包自己的 <td>。 */
+function lagTag(x, unit) {
+  const u = unit || '交易日';
+  /* 🔴 顺序要紧：**先问"有没有这份数据"，再问"是不是出错了"**。
+     反过来的话，空 lake 上这一格是一长串
+     `Catalog Error: Table with name "t.raw_kline_daily" does not exist …` ——
+     技术上没错，却答不了人要做的事。异常文本进 `title`（同「能进 tooltip
+     的就别占列」）。**真有数据却又报错**才是异常，那时才红。 */
+  if (!x || x.max == null)
+    return {t: '还没有', c: 'var(--dim)',
+            title: (x && x.error) ? String(x.error) : ''};
+  if (x.error) return {t: String(x.error), c: 'var(--up)', title: ''};
+  const lag = x.lag_days;
+  if (lag == null) return {t: '—', c: 'var(--dim)', title: ''};
+  if (lag === 0) return {t: '最新', c: 'var(--down)', title: ''};
+  return {t: '落后 ' + lag + ' ' + u, c: 'var(--warn)', title: ''};
+}
+
+/* lagTag 的结果 -> 一段 <span>（两页共用，免得 title 只有一边挂上）。 */
+function lagSpan(x, unit) {
+  const t = lagTag(x, unit);
+  return '<span style="color:' + t.c + '"'
+       + (t.title ? ' title="' + esc(t.title) + '"' : '')
+       + '>' + esc(t.t) + '</span>';
+}
+
 
 async function post(u, body) {
   const r = await fetch(u, {method: 'POST',

@@ -51,7 +51,7 @@ async function load() {
       ev.preventDefault(); CODE = e.dataset.c; nav(); });
     if ($('#sdate')) $('#sdate').onchange = () => { DATE = $('#sdate').value; nav(); };
   } catch (e) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+    pg.innerHTML = errHtml(e, '板块');
   }
 }
 function nav() {

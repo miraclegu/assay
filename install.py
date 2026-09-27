@@ -171,6 +171,69 @@ def _hash_seed():
     return str(mod.SEED)
 
 
+
+# 复查子进程的输出哨兵 —— 见 importable 里那段。
+_SENT = '<<assay-check-done>>'
+
+# 看板的输出往日志里最多抄这么多行 —— 启动失败都在头几十行里。
+_SERVE_LOG_LINES = 400
+
+
+def _kid_env():
+    """给"要读它输出"的子进程用的 env —— **两头都钉成 UTF-8**。
+
+    🔴🔴 这是 2026-09-27 真机那次「报 ✅ 装好了、而看板崩在 duckdb」的
+      **根因**。`subprocess.run(..., text=True)` 不带 `encoding=` 时，
+      Python 用 **locale 编码**解码子进程的输出 —— 中文 Windows 上那是
+      **GBK**。子进程一吐非 ASCII 字节，读取线程当场死掉：
+
+          Exception in thread Thread-1 (_readerthread):
+            File "subprocess.py", line 1599, in _readerthread
+              buffer.append(fh.read())
+          UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 …
+
+      而那是**后台线程**，`subprocess.run` 这边只看到 stdout 是空的 ——
+      于是"缺了哪几个包"的清单变成空清单，**复查报「都在」**，
+      装机照样说 ✅，然后 serve.py 崩在 `import duckdb`。
+      **空输出被当成"没有缺的"**，正是「空结果一律当失败」那条的反面。
+    ★ 两件事要一起做：这边 `encoding='utf-8'` 解码，那边
+      `PYTHONUTF8/PYTHONIOENCODING` 保证它真的吐 UTF-8 ——
+      只钉一头的话，换个 locale 又会对不上。
+    """
+    e = dict(os.environ)
+    e['PYTHONUTF8'] = '1'
+    e['PYTHONIOENCODING'] = 'utf-8'
+    e['PYTHONUNBUFFERED'] = '1'
+    return e
+
+
+
+def _tee(proc, cap=None):
+    """把子进程的输出**同时**喂给屏幕和日志，返回它的退出码。
+
+    🔴 用户 2026-09-27：「错误信息只在控制台，没有打印到日志文件中」。
+      子进程原来直接继承控制台 —— `say()` 碰都碰不到它，于是
+      「看板起没起来、为什么没起来」窗口一关就没了。上一轮把日志
+      **留到跑完再关**只修了一半，这一半是"内容压根没喂进来"。
+    ★ `cap` 是给**长跑**的（看板会一直打）：超过之后只打屏幕，并**说一句**
+      —— 静默截断比截断更糟。pip 那条是有限的，不设上限。
+    ★ 子进程那侧的 `PYTHONUNBUFFERED`（在 `_kid_env` 里）不能省：stdout
+      变管道之后是**块缓冲**，不设就要攒够 4 KB 才出来，看着像卡住了。
+    """
+    n = 0
+    for line in proc.stdout:
+        line = line.rstrip('\n')
+        if cap is None or n < cap:
+            say(line)
+        else:
+            if n == cap:
+                say('… 还在跑：往下的输出只打屏幕，不再写日志'
+                    '（日志是装机用的，不该被一天的运行日志撑爆）。')
+            print(line)
+        n += 1
+    return proc.wait()
+
+
 def _serve(py):
     """起看板并打开浏览器 —— `--serve` 那条路。
 
@@ -211,14 +274,25 @@ def _serve(py):
     say('★ 要停：在这个窗口按 Ctrl-C，或者直接关掉它。')
     say('★ 下次再用，还是双击 start.bat —— 环境已经好了，它会直接起看板。')
     say('')
-    env = dict(os.environ)
+    env = _kid_env()
     env['PYTHONHASHSEED'] = _hash_seed()
-    env.setdefault('PYTHONUTF8', '1')
-    proc = subprocess.Popen([py, srv], env=env, cwd=HERE)
+    # 🔴 **看板的输出要进日志。** 原来是直接继承控制台 —— 于是
+    #   「看板起没起来、为什么没起来」全程只在窗口里，**窗口一关就没了**，
+    #   而 `install.log` 里只剩一个退出码（用户 2026-09-27 原话：
+    #   「错误信息只在控制台，没有打印到日志文件中」）。
+    #   上一轮把日志**留到跑完再关**修了一半，这一半是"内容压根没喂进来"。
+    # ★ `PYTHONUNBUFFERED`（在 `_kid_env` 里）不能省：stdout 变成管道之后
+    #   是**块缓冲**，不设的话启动横幅要攒够 4 KB 才出来，看着像卡住了
+    #   （同「`--all` 重定向到文件时 tail -f 看到的永远是几十条之前的」）。
+    proc = subprocess.Popen([py, srv], env=env, cwd=HERE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True, encoding='utf-8', errors='replace',
+                            bufsize=1)
     threading.Thread(target=_open_when_up, args=(port, proc),
                      daemon=True).start()
     try:
-        return proc.wait()
+        return _tee(proc, _SERVE_LOG_LINES)
     except KeyboardInterrupt:
         proc.terminate()
         return 0
@@ -270,15 +344,28 @@ def importable(py, pkgs):
             '    except BaseException as e:\n'
             '        bad.append(p + " (" + type(e).__name__ + ": "\n'
             '                   + str(e)[:120] + ")")\n'
-            'sys.stdout.write("\\u0001".join(bad))\n')
+            # 🔴 **末尾必须打一个哨兵**：`subprocess` 的读取线程死掉时
+            #   （GBK 解不开 UTF-8 那次就是）stdout 回来是**空的**，
+            #   而空的 `bad` 清单恰好等于"一个都不缺" —— 于是复查报
+            #   「都在」、装机说 ✅、serve.py 再崩在 import 上。
+            #   有哨兵才分得出「真的一个都不缺」与「我根本没读到」
+            #   （同「空结果一律当失败」）。
+            'sys.stdout.write("\\u0001".join(bad) + "%s")\n' % _SENT)
     try:
         r = subprocess.run([py, '-c', code], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace',
+                           env=_kid_env(),
                            timeout=300, cwd=HERE)
     except (OSError, subprocess.SubprocessError) as e:
         return False, ['(跑不起来: %s)' % e]
     if r.returncode != 0:
         return False, ['(解释器报错: %s)' % (r.stderr or '').strip()[-160:]]
-    miss = [x for x in (r.stdout or '').split('\u0001') if x.strip()]
+    out = r.stdout or ''
+    if _SENT not in out:
+        # 读不到哨兵 = 这次复查**没有结论**，不是"没有缺的"。
+        return False, ['(读不到复查结果 —— 子进程输出没收全：%r)'
+                       % (out[-80:] or r.stderr[-80:] if r.stderr else out)]
+    miss = [x for x in out.split(_SENT)[0].split('\u0001') if x.strip()]
     return (not miss), miss
 
 
@@ -301,6 +388,8 @@ def app_imports(py):
             'import assay.server\n')
     try:
         r = subprocess.run([py, '-c', code], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace',
+                           env=_kid_env(),
                            timeout=600, cwd=HERE)
     except (OSError, subprocess.SubprocessError) as e:
         return False, '跑不起来: %s' % e
@@ -376,7 +465,9 @@ def _run():
     else:
         say('  · 建虚拟环境 %s …' % venv)
         r = subprocess.run([sys.executable, '-m', 'venv', venv],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           encoding='utf-8', errors='replace',
+                           env=_kid_env())
         if r.returncode != 0 or not os.path.isfile(py):
             say(BAD + '建不起来：%s' % (r.stderr or r.stdout)[-300:])
             if os.name != 'nt':
@@ -385,6 +476,12 @@ def _run():
         say(OK + '虚拟环境已建')
 
     # ---- ④ 装包（缺了才装）----
+    # 🔴 **这一步要先打一行**：它是起子进程真 import 那几个包，冷 venv 上
+    #   Windows 第一次要几十秒（读几百 MB 的扩展模块）。不打的话日志里
+    #   就是一段没有解释的静默 —— 人分不出"还在跑"与"卡死了"
+    #   （同「`--all` 的进度行要排在用例【跑之前】」那条）。
+    if os.path.isfile(py):
+        say('  · 复查这 4 个包 import 得起来吗（第一次会慢几十秒）…')
     have, miss = (False, pkgs) if not os.path.isfile(py) else importable(py, pkgs)
     if have:
         say(OK + '%d 个包都在' % len(pkgs))
@@ -393,15 +490,20 @@ def _run():
         bad.append('packages')
     else:
         say('  · pip install -r %s …' % os.path.relpath(REQ, ROOT))
-        r = subprocess.run([py, '-m', 'pip', 'install', '-r', REQ],
-                           capture_output=False)
+        # 🔴 pip 的记录**也要进日志** —— 2026-09-27 定位那次，决定性的
+        #   证据正是它那几行 `Requirement already satisfied … (1.5.5)`，
+        #   而它当时只在控制台里，窗口一关就没了。
+        rc = _tee(subprocess.Popen(
+            [py, '-m', 'pip', 'install', '-r', REQ], env=_kid_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding='utf-8', errors='replace', bufsize=1))
         # 🔴 **不看 r.returncode 就下结论** —— 见文件头第 2 条
         have, miss = importable(py, pkgs)
         if not have:
             say(BAD + '装完仍然 import 不到：%s' % ' '.join(miss))
             say('     pip 返回 %d，但判据是"现在 import 得到吗" —— '
                 '多半是装到了别的解释器上，或者 wheel 与本机架构不符'
-                % r.returncode)
+                % rc)
             say('     手工看一眼：%s -m pip -V' % py)
             return 2
         say(OK + '%d 个包装好并复查通过' % len(pkgs))
@@ -411,6 +513,7 @@ def _run():
     #   这一层直接 import 要跑的那个模块 —— 它不依赖清单，也不依赖我对
     #   "缺了谁"的判断（同「判据永远是现在的状态，不是记录」）。
     if os.path.isfile(py):
+        say('  · 复查看板 import 得起来吗（assay.server）…')
         _ok, _why = app_imports(py)
         if _ok:
             say(OK + '看板 import 得起来（assay.server）')

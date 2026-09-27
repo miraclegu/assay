@@ -227,37 +227,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 
-def _explain_err(e):
-    """把「本地还没有这份数据」翻译成一句可执行的话。
-
-    空 lake 上有 9 个接口会抛 duckdb 的
-    `IOException: No files found that match the pattern ".../panel_*.parquet"`
-    或 `FileNotFoundError` —— 那串话**技术上指名了文件**，却答不了人真正
-    要做的事（"我该去哪把它建出来"）。同「报错必须指向真正的原因」。
-
-    🔴 **只翻译落在 datalake 根下面的缺文件**：别的异常原样透传 ——
-      把真 bug 一律说成"还没装数据"是更糟的静默（同「判据比要证的事宽」）。
-    ★ **不在这里维护一张 glob -> 阶段名 的表** —— 那就是第二份阶段清单，
-      加一个阶段它不会跟着变。路径本身已经够具体，下一步统一指向「🔄 数据」。
-    """
-    msg = '%s: %s' % (type(e).__name__, e)
-    low = str(e)
-    if ('No files found that match the pattern' not in low
-            and 'No such file or directory' not in low):
-        return {'error': msg}
-    try:
-        root = os.path.abspath(base._datalake_dir())
-    except Exception:                                   # noqa: BLE001
-        return {'error': msg}
-    m = re.search(r'["\']([^"\']*)["\']', low)
-    path = m.group(1) if m else ''
-    if not path or not os.path.abspath(path).startswith(root):
-        return {'error': msg}
-    return {'error': '本地还没有这份数据：%s —— '
-                     '去顶栏「🔄 数据」页开始装配（每一步都可中断、可续跑）。'
-                     % path,
-            'no_data': True, 'missing': path, 'next': '#/sync'}
-
+# ★ 翻译器的正本在 `srv/base.py` —— 吞异常的那几个接口（alerts /
+#   watchlist / bench / exec_diff）也要用它，放这里的话它们够不着，
+#   于是同一件事两种说法（实测空 lake 上 5 个接口吐裸 SQL 报错）。
+#   这里保留原名：selftest 与对外契约用的是 `sv._explain_err`。
+_explain_err = base.explain_err
 
 def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):
     base.ALLOW_BACKTEST = bool(allow_backtest)

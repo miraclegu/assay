@@ -53,7 +53,7 @@ async function load() {
       .catch(() => ({}))).signals) || [];
     render();
   } catch (e) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+    pg.innerHTML = errHtml(e, '买点清单');
   }
 }
 

@@ -50,7 +50,7 @@ async function load() {
     drawDist(o);
     window.addEventListener('resize', () => drawDist(o));
   } catch (e) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+    pg.innerHTML = errHtml(e, '盘面');
   }
 }
 function go() { const u = new URL(location.href);

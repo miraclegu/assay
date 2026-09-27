@@ -12,7 +12,12 @@ async function showHome(){
   stopPoll();
   enterView();
   $('#main').innerHTML='<div class="lvwhy" style="padding:20px">加载中…</div>';
-  const one=u=>j(u).catch(e=>({error:String(e)}));
+  /* 🔴 `no_data`/`missing` 要一起带出来 —— 只留 `String(e)` 的话，
+     「本地还没有数据」与「真出错了」在下面就分不开了，四块会一起刷红。 */
+  /* ★ 用 `e.message` 不是 `String(e)` —— 后者给的是 `Error: 本地还没有…`，
+     那个 `Error:` 前缀是 JS 的内部形状，不该出现在屏幕上。 */
+  const one=u=>j(u).catch(e=>({error:(e&&e.message)||String(e),
+    no_data:!!(e&&e.no_data), missing:(e&&e.missing)||''}));
   const [accts, sync, mkt, watch, marks, alerts] = await Promise.all([
     one('/api/live/accounts'), one('/api/sync'),
     one('/api/market/overview?top=5'), one('/api/watchlist'), one('/api/marks'),
@@ -83,7 +88,7 @@ function homeAlert(todo, sync){
 
 function homeLive(accts, todo){
   if(!accts || accts.error) return homeCard('实盘', '#/live',
-    `<div class="lvmsg bad">${esc((accts||{}).error||'取不到账户')}</div>`);
+    errHtml(accts, '账户'));
   const rows = todo.filter(x=>x.d && !x.d.error);
   if(!rows.length) return homeCard('实盘', '#/live',
     '<div class="none">还没有实盘账户 —— 去实盘页建一个'
@@ -129,7 +134,7 @@ function homeLive(accts, todo){
 
 function homeMarket(o){
   if(!o || o.error) return homeCard('盘面', '/market.html',
-    `<div class="lvmsg bad">${esc((o||{}).error||'取不到盘面')}</div>`);
+    errHtml(o, '盘面'));
   const rate = o.n ? (o.up/o.n*100) : null;
   return homeCard(`盘面 · ${esc(o.date)}`, '/market.html', `
     <div class="kpi" style="margin-bottom:8px">
@@ -154,7 +159,7 @@ function homeMarket(o){
 
 function homeWatch(w){
   if(!w || w.error) return homeCard('自选', '/watchlist.html',
-    `<div class="lvmsg bad">${esc((w||{}).error||'取不到自选')}</div>`);
+    errHtml(w, '自选'));
   const rows=(w.rows||[]).filter(x=>x.change_pct!=null)
     .sort((a,b)=>Math.abs(b.change_pct)-Math.abs(a.change_pct));
   if(!rows.length) return homeCard('自选', '/watchlist.html',
@@ -180,7 +185,7 @@ function homeWatch(w){
      全清单在买点页（标题就是入口）。 */
 function homeAlerts(o){
   if(!o || o.error) return homeCard('买点', '/alerts.html',
-    `<div class="lvmsg bad">${esc((o||{}).error||'取不到买点清单')}</div>`);
+    errHtml(o, '买点清单'));
   const rows=(o.rows||[]);
   if(!rows.length) return homeCard('买点清单', '/alerts.html',
     '<div class="none">清单是空的 —— 去买点页加几只票、写几档想买的价（分红自动填）</div>');
@@ -215,7 +220,7 @@ function homeAlerts(o){
 
 function homeData(o){
   if(!o || o.error) return homeCard('数据', '#/sync',
-    `<div class="lvmsg bad">${esc((o||{}).error||'取不到数据状态')}</div>`);
+    errHtml(o, '数据状态'));
   const st=o.status||{};
   const A=(st.items||[]).filter(x=>x.leg==='A');
   const B=(st.items||[]).filter(x=>x.leg==='B');
@@ -225,8 +230,7 @@ function homeData(o){
       <th class="tx">状态</th></tr>
       ${A.map(x=>`<tr><td class="tx">${esc(x.name)}</td>
         <td class="tx">${esc(x.max||'—')}</td>
-        <td class="tx">${x.lag_days?`<b style="color:var(--warn)">落后 ${x.lag_days} 交易日</b>`
-          :'<span style="color:var(--down)">最新</span>'}</td></tr>`).join('')}
+        <td class="tx">${lagSpan(x)}</td></tr>`).join('')}
       <tr><td class="tx lvwhy" colspan="3">财务（事件驱动，不按交易日算落后）</td></tr>
       ${B.slice(0,3).map(x=>`<tr><td class="tx">${esc(x.name)}</td>
         <td class="tx">${esc(x.max||'—')}</td>

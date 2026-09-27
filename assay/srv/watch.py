@@ -28,7 +28,10 @@ def api_alerts(_q):
                             == datetime.now().date().isoformat()]
         return v
     except Exception as e:                                  # noqa: BLE001
-        return {'error': '%s: %s' % (type(e).__name__, e)}
+        # 🔴 走翻译器：空 lake 上这里接到的是 duckdb 的
+        #   `IOException: No files found ...` —— 原样返回的话页面上是
+        #   一段裸 SQL 报错，而人要的是「我该去哪把数据建出来」。
+        return base.explain_err(e)
 
 
 
@@ -66,7 +69,7 @@ def api_alerts_suggest(q):
         jc = st.norm_code(code)
         return {'code': jc, 'suggest': d.get(jc)}
     except Exception as e:                                  # noqa: BLE001
-        return {'error': '%s: %s' % (type(e).__name__, e)}
+        return base.explain_err(e)
 
 
 
@@ -112,7 +115,10 @@ def api_watchlist(q):
             pass            # 补抓失败不该让自选打不开
         return w.valued(q.get('group'))
     except Exception as e:                                  # noqa: BLE001
-        return {'error': '%s: %s' % (type(e).__name__, e)}
+        # 🔴 走翻译器：空 lake 上这里接到的是 duckdb 的
+        #   `IOException: No files found ...` —— 原样返回的话页面上是
+        #   一段裸 SQL 报错，而人要的是「我该去哪把数据建出来」。
+        return base.explain_err(e)
 
 
 

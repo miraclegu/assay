@@ -1045,7 +1045,10 @@ def api_live_bench(q):
     try:
         return _b.compute(aid, force=(q.get('force') == '1'))
     except Exception as e:                                  # noqa: BLE001
-        return {'error': '%s: %s' % (type(e).__name__, e)}
+        # 🔴 走翻译器：空 lake 上这里接到的是 duckdb 的
+        #   `IOException: No files found ...` —— 原样返回的话页面上是
+        #   一段裸 SQL 报错，而人要的是「我该去哪把数据建出来」。
+        return base.explain_err(e)
 
 
 def api_live_exec_diff(q):
@@ -1068,4 +1071,7 @@ def api_live_exec_diff(q):
             return _b.diff_one(aid, d)
         return {'items': _b.diff_history(aid, limit=int(q.get('limit') or 60))}
     except Exception as e:                                  # noqa: BLE001
-        return {'error': '%s: %s' % (type(e).__name__, e)}
+        # 🔴 走翻译器：空 lake 上这里接到的是 duckdb 的
+        #   `IOException: No files found ...` —— 原样返回的话页面上是
+        #   一段裸 SQL 报错，而人要的是「我该去哪把数据建出来」。
+        return base.explain_err(e)

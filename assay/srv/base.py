@@ -300,6 +300,47 @@ def _datalake_dir():
 
 
 
+def explain_err(e):
+    """把「本地还没有这份数据」翻译成一句**可执行**的话。
+
+    🔴🔴 **这是唯一的正本。** 它原来只挂在 `server.py` 的 HTTP 500 分支上，
+      而 `api_alerts` / `api_watchlist` / `api_live_bench` / `api_live_exec_diff`
+      / `api_alerts_suggest` 这五处是 `except Exception` **自己吞掉、用
+      HTTP 200 返回 `{'error': 裸异常}`** —— 于是整条翻译被绕过，
+      空 lake 上页面给出的是
+      `IOException: IO Error: No files found ... LINE 1: SELECT max(date) …`。
+      实测：空 lake 全路由普查，21 个翻译到位、**5 个吐裸 SQL 报错**
+      （同「两处实现必然分叉」）。所以翻译器进 base，谁吞异常谁调它。
+
+    🔴 **只翻译落在 datalake 根下面的缺文件**：别的异常原样透传 ——
+      把真 bug 一律说成"还没装数据"是更糟的静默（同「判据比要证的事宽」）。
+    🔴 **两道护栏会互相遮蔽，缺一条就误伤**：① 看异常消息是不是"缺文件"
+      （挡住**坏文件** —— 路径就在 lake 里，但那是并发写坏的 parquet）；
+      ② 看路径在不在 lake 根下（挡住 KeyError 之类的**真 bug**）。
+    ★ **不在这里维护一张 glob -> 阶段名 的表** —— 那就是第二份阶段清单，
+      加一个阶段它不会跟着变。
+    ★ 话里**不写那个 glob 路径**：页面上它会被原样渲染成一长串，把"我该
+      做什么"挤没了。路径进 `missing`，由页面放进 tooltip
+      （同「能进 tooltip 的就别占列」）。
+    """
+    msg = '%s: %s' % (type(e).__name__, e)
+    low = str(e)
+    if ('No files found that match the pattern' not in low
+            and 'No such file or directory' not in low):
+        return {'error': msg}
+    try:
+        root = os.path.abspath(_datalake_dir())
+    except Exception:                                   # noqa: BLE001
+        return {'error': msg}
+    m = re.search(r'["\']([^"\']*)["\']', low)
+    path = m.group(1) if m else ''
+    if not path or not os.path.abspath(path).startswith(root):
+        return {'error': msg}
+    return {'error': '本地还没有数据 —— 用页面顶上那条横条的'
+                     '「▷ 开始建本地数据」开始装配（可中断、可续跑）。',
+            'no_data': True, 'missing': path, 'next': '#/sync'}
+
+
 def _market():
     from assay import market as m
     return m

@@ -36,7 +36,7 @@ async function load() {
     W = await j('/api/watchlist');
     render();
   } catch (e) {
-    pg.innerHTML = '<div class="lvmsg bad">' + esc(String(e)) + '</div>';
+    pg.innerHTML = errHtml(e, '自选');
   }
 }
 

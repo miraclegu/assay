@@ -1146,6 +1146,130 @@ def t_nav_merge():
     return '；'.join(notes)
 
 
+@case('本地还没有数据：页面给【安静的空态 + 一个入口】，不是裸报错', tag='web')
+def t_no_data_ui():
+    """用户 2026-09-27：「页面应该是更友好的提示，看起来还是有一些报错信息」。
+
+    空 lake 上首页四块长这样（真机截图）：
+
+        Error: /api/market/overview 返回 HTTP 500: {"error": "本地还没有这份
+        数据: E:\\...\\panel_*.parquet —— 去顶栏「数据」页…"
+        Error: IOException: IO Error: No files found that match the pattern
+        "E:\\...\\panel_*.parquet" LINE 1: SELECT max(date) FROM read_parquet(
+
+    三层都坏了，而**每一层单独看都"没报错"**：
+      ① 服务端 5 个接口 `except Exception` 自己吞掉、用 **HTTP 200** 返回
+         裸异常 -> 翻译器根本够不着（已在 test_data 的 D2 钉住）；
+      ② `j()` 把服务端那句人话**埋进** `返回 HTTP 500：{json}` 的外壳里；
+      ③ 页面一律刷成红色 `.lvmsg.bad` —— 而顶上那条横条已经说过一次
+         「本地还没有数据 · ▷ 开始建本地数据」，四块再各喊一遍红的就是
+         **常驻告警**，而常驻告警等于教人忽略这个位置。
+
+    🔴 判据**构造**（`pg.route` 假造三种响应），不靠"这台机器恰好没数据"
+      —— 本机数据是齐的，不构造的话整条用例空转。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    old_live = sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    SENT = '本地还没有数据 —— 用页面顶上那条横条的「▷ 开始建本地数据」'
+    ND = json.dumps({'error': SENT + '开始装配（可中断、可续跑）。',
+                     'no_data': True, 'missing': '/lake/mart/panel_x.parquet',
+                     'next': '#/sync'}, ensure_ascii=False)
+    REAL = json.dumps({'error': 'KeyError: close_hfq'}, ensure_ascii=False)
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1600, 'height': 1100})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            # 盘面那条走 **HTTP 500**（服务端翻译过的正常路径）
+            pg.route('**/api/market/overview*', lambda r: r.fulfill(
+                status=500, content_type='application/json', body=ND))
+            # 买点那条走 **HTTP 200 + error**（自己吞异常的那几个接口）
+            pg.route('**/api/alerts*', lambda r: r.fulfill(
+                status=200, content_type='application/json', body=ND))
+            # 自选那条是**真 bug** —— 它必须仍然是红的
+            pg.route('**/api/watchlist*', lambda r: r.fulfill(
+                status=200, content_type='application/json', body=REAL))
+            pg.goto(base + '/', wait_until='networkidle')
+            pg.wait_for_timeout(1200)
+
+            got = pg.evaluate("""() => [...document.querySelectorAll(
+                '#main .lvmsg')].map(e => ({
+                  cls: e.className,
+                  t: e.innerText.trim(),
+                  title: e.getAttribute('title') || '',
+                  color: getComputedStyle(e).color}))""")
+            assert len(got) >= 3, '构造不对：只渲染出 %d 块空态' % len(got)
+            quiet = [g for g in got if SENT in g['t']]
+            red = [g for g in got if 'KeyError' in g['t']]
+            assert len(quiet) == 2, (
+                '两条路（HTTP 500 与 200+error）里有一条没给出服务端那句人话：%r'
+                % got)
+            assert len(red) == 1, '真 bug 那块不见了：%r' % got
+
+            # ① 服务端那句人话不许被 HTTP 外壳埋掉，也不许带 JS 的 Error: 前缀
+            for g in quiet:
+                for k in ('HTTP 500', '{"error"', 'Error:', 'IOException',
+                          'read_parquet', 'LINE 1'):
+                    assert k not in g['t'], (
+                        '空态里漏出了技术外壳 %r：%r' % (k, g['t']))
+            # ② 安静 vs 红 —— 两者必须**看得出来不一样**（反向自证）
+            for g in quiet:
+                assert 'bad' not in g['cls'], (
+                    '「本地还没有数据」被刷成了红色告警：%r —— 横条已经说过'
+                    '一次，四块再各喊一遍等于常驻告警' % g['cls'])
+            assert 'bad' in red[0]['cls'], '真 bug 反而不红了：%r' % red[0]
+            assert quiet[0]['color'] != red[0]['color'], (
+                '安静的空态与真报错颜色一样，屏幕上分不出来：%s' % quiet[0]['color'])
+            # ③ 缺的那个路径进 title（诊断信息不该占屏幕）
+            assert any('panel_x.parquet' in g['title'] for g in quiet), \
+                '缺的路径没进 tooltip：%r' % [g['title'] for g in quiet]
+            notes.append('空态 %d 块安静 / 真 bug 1 块红' % len(quiet))
+
+            # ④ 「落后几个交易日」三态：null(不知道) / 0(最新) / >0(落后)
+            lag = pg.evaluate("""() => ({
+                none:  lagTag({name:'x', max:null}),
+                err0:  lagTag({name:'x', max:null, error:'Catalog Error: …'}),
+                zero:  lagTag({name:'x', max:'2026-09-26', lag_days:0}),
+                two:   lagTag({name:'x', max:'2026-09-24', lag_days:2}),
+                unk:   lagTag({name:'x', max:'2026-09-26', lag_days:null})})""")
+            assert lag['none']['t'] == '还没有', lag['none']
+            # 🔴 **顺序要紧**：没有数据时先说"还没有"，异常文本进 title ——
+            #   反过来的话空 lake 上这一格是一长串 `Catalog Error: …`
+            assert lag['err0']['t'] == '还没有' and 'Catalog' in lag['err0']['title'], \
+                lag['err0']
+            assert lag['zero']['t'] == '最新', lag['zero']
+            assert '2' in lag['two']['t'] and '落后' in lag['two']['t'], lag['two']
+            # 🔴 `null` 与 `0` 是两件事：`lag ? 落后 : 最新` 会把**不知道**
+            #   说成绿色的「最新」—— 本地一个字节都没有，首页却三行「最新」
+            assert lag['unk']['t'] != '最新', (
+                'lag_days 是 null（不知道）却说「最新」：%r' % lag['unk'])
+            assert lag['none']['t'] != lag['zero']['t'], lag
+            notes.append('lag 三态 null/0/>0 分得开')
+            assert not errs, errs[:3]
+            br.close()
+    finally:
+        sv.ALLOW_LIVE = old_live
+        httpd.shutdown()
+    return '；'.join(notes)
+
+
 @case('总览首页 / 顶栏分组 / 数据页签（playwright）', tag='web')
 def t_home_ui():
     """信息架构那一层的自证。

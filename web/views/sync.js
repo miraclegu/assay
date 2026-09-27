@@ -264,11 +264,8 @@ async function showSync(){
      pub_date，按交易日算落后是必然误报。判据在服务端，这里只负责显示。 */
   const row=x=>{
     let tag;
-    if(x.error) tag=`<span style="color:var(--up)">${esc(x.error)}</span>`;
-    else if(x.leg==='A'){
-      const lag=x.lag_days;
-      tag = lag===0 ? '<span style="color:var(--down)">最新</span>'
-          : (lag ? `<span style="color:var(--warn)">落后 ${lag} 个交易日</span>` : '—');
+    if(x.leg==='A' || x.error){
+      tag=lagSpan(x, '个交易日');
     } else {
       const ds=x.days_since;
       tag = ds==null ? '—'
