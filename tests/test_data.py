@@ -2840,20 +2840,31 @@ def t_windows_boot_path():
     #   —— 而那**不报错**，表现是后半截命令变成乱码或整段被跳过。
     #   所以中文一律由 `install.py` 打（它那侧的 UTF-8 是验过的）。
     #   ⚠ 这条在 macOS 上**测不到行为**，只能钉住"不许出现非 ASCII"。
+    # ★ 判据**扫目录**得出，不照清单拼 —— 新加一个 .bat 自动进保护范围
+    #   （同「断言直接扫目录而不是照清单拼」那条；`.gitattributes` 的
+    #   `*.bat text eol=crlf` 同理，也是按模式而不是按文件名）。
+    _bats = sorted(glob.glob(os.path.join(REPO, '*.bat')))
+    assert len(_bats) >= 2, (
+        '仓库根只有 %d 个 .bat —— install.bat（装环境）与 start.bat'
+        '（一个文件点到底）都该在' % len(_bats))
+    for _p1 in _bats:
+        _n1 = os.path.basename(_p1)
+        _b1 = io.open(_p1, 'rb').read()
+        _bad = [i for i, b in enumerate(_b1) if b > 127]
+        assert not _bad, (
+            '%s 里有 %d 个非 ASCII 字节（首个在偏移 %d）—— '
+            'chcp 之后 cmd 按字节偏移续读，多字节字符会让解析错位，'
+            '而它不报错。中文交给 install.py 打'
+            % (_n1, len(_bad), (_bad or [-1])[0]))
+        assert not _b1.startswith(b'\xef\xbb\xbf'), (
+            '%s 带了 UTF-8 BOM —— cmd 会把它当成命令的一部分，'
+            '第一行直接报「不是内部或外部命令」' % _n1)
+        # 🔴 CRLF：LF-only 的 .bat 在 label / goto 上有已知的解析问题
+        assert _b1.count(b'\n') == _b1.count(b'\r\n'), (
+            '%s 有 LF-only 的行 —— .bat 要 CRLF' % _n1)
     _bat = os.path.join(REPO, 'install.bat')
     assert os.path.isfile(_bat), '缺 install.bat（Windows 装机脚本）'
     _bb = io.open(_bat, 'rb').read()
-    _bad = [i for i, b in enumerate(_bb) if b > 127]
-    assert not _bad, (
-        'install.bat 里有 %d 个非 ASCII 字节（首个在偏移 %d）—— '
-        'chcp 之后 cmd 按字节偏移续读，多字节字符会让解析错位，'
-        '而它不报错。中文交给 install.py 打' % (len(_bad), (_bad or [-1])[0]))
-    assert not _bb.startswith(b'\xef\xbb\xbf'), (
-        'install.bat 带了 UTF-8 BOM —— cmd 会把它当成命令的一部分，'
-        '第一行直接报「不是内部或外部命令」')
-    # 🔴 CRLF：LF-only 的 .bat 在 label / goto 上有已知的解析问题
-    assert _bb.count(b'\n') == _bb.count(b'\r\n'), (
-        'install.bat 有 LF-only 的行 —— .bat 要 CRLF')
     # 🔴🔴 上面那条查的是【工作区】那份——而 `core.autocrlf=input` 会在 add
     #   时把 CR 剥掉存进 blob，于是「工作区 CRLF / 仓库 LF」，守卫照样绿，
     #   **而新 clone 拿到的是坏的**（同 requirements.txt 被 .gitignore 挡住
@@ -2952,18 +2963,21 @@ def t_windows_boot_path():
     #   90 秒仍显示」那条：任务结束就消失 = 完全不知道到底成没成）。
     # ★ 判据要**切到那一支里面**去查：全文查 `install.log` 会被转发之后
     #   那句 `echo Log:` 满足（判据比要证的事宽）。
-    _i_np = _bt.find('No Python 3.10+')
-    assert _i_np > 0, 'install.bat 里没有「找不到 Python」那一支了？'
-    _i_hd = _bt.rfind('if not defined PY (', 0, _i_np)
-    assert _i_hd > 0, 'install.bat：「找不到 Python」那段不在 if 块里'
-    _m_end = re.compile(r'^\)\s*$', re.M).search(_bt, _i_np)
-    assert _m_end, 'install.bat：「找不到 Python」那个 if 块没有闭合'
-    _blk = _bt[_i_hd:_m_end.end()]
-    assert re.search(r'>\s*"%~dp0install\.log"', _blk), (
+    # 🔴 那一支现在是个【标签】不是 `if (...)` 块 —— 因为菜单要用 `set /p`，
+    #   而在括号块里 `%ANS%` 是**解析时**展开的（读到的是进块之前的值），
+    #   于是菜单永远走同一支，**且静默**。判据跟着切到 `:nopy` 段。
+    _i_np = _bt.find(':nopy')
+    assert _i_np > 0, 'install.bat 里没有「找不到 Python」那一段（:nopy）了？'
+    _blk = _bt[_i_np:]
+    assert 'No Python 3.10+' in _blk, ':nopy 段里没有那句结论'
+    assert re.search(r'^\s*if not defined PY goto nopy\s*$', _bt, re.M), (
+        'install.bat 没有 `if not defined PY goto nopy` —— 那一支要是又被塞回 '
+        '`if (...)` 块里，菜单的 set /p 会在解析时展开、永远走同一支，而且不报错')
+    assert re.search(r'>\s*"%LOG%"|>\s*"%~dp0install\.log"', _blk), (
         'install.bat 的「找不到 Python」那一支没有把结论写进 install.log —— '
         '而 install.py 起不来时它是【唯一】留得下记录的地方，'
         '窗口一关就查无对证')
-    assert 'type "%~dp0install.log"' in _blk, (
+    assert re.search(r'^\s*type "%LOG%"|^\s*type "%~dp0install\.log"', _blk, re.M), (
         'install.bat 的「找不到 Python」那一支只写了日志没显示出来 —— '
         '屏幕上一片空白比不写更糟')
 
@@ -2971,12 +2985,137 @@ def t_windows_boot_path():
     #   「没装」/「装了但 <3.10」/「Microsoft Store 存根」/「装了没进 PATH」，
     #   而这四种要做的事完全不同（同「报错必须指向真正的原因」那条）。
     #   判据：真的把探测命令的输出重定向进日志，不是在文案里写一句提示。
-    _probe = re.findall(r'^\s*(\S[^\r\n]*?)\s+>>"%~dp0install\.log" 2>&1\s*$',
-                        _blk, re.M)
-    assert len(_probe) >= 2, (
+    _probe = re.findall(r'^\s*(\S[^\r\n]*?)\s+>>"%LOG%" 2>&1\s*$', _blk, re.M)
+    assert len(_probe) >= 3, (
         'install.bat 的「找不到 Python」那一支没有探测这台机器上有什么 —— '
         '「没装」和「装了但版本不够 / 是商店存根 / 没进 PATH」'
         '在屏幕上长得一模一样，而它们要做的事不同（探到 %d 条）' % len(_probe))
+
+    # 🔴🔴 装 Python 是【系统级副作用】—— 给入口，不替人决定
+    #   （同「配股不自动执行：要掏钱、可以放弃」「定时任务不自动装」那两条）。
+    #   判据是**位置**：问一句的那行必须排在第一条安装命令之前。
+    _m_ask = re.search(r'^\s*set /p ', _blk, re.M)
+    assert _m_ask, 'install.bat 没有问一句就要装 Python？那是替人做系统级决定'
+    _m_do = re.search(r'^\s*(winget install|"%PYEXE%")', _blk, re.M)
+    assert _m_do, 'install.bat 里没有自动安装那条路'
+    assert _m_ask.start() < _m_do.start(), (
+        'install.bat 在问人之前就开始装 Python —— 装软件是系统级副作用，'
+        '不该在人没表态时替他做')
+
+    # 🔴 per-user 安装，**不要管理员**：winget 的 manifest 里那一档带
+    #   `InstallAllUsers=0 PrependPath=1`（2026-09-27 查过真 manifest）。
+    #   少了 --scope user 会去装 machine 档 -> 弹 UAC -> 没权限就装不上。
+    assert '--scope user' in _blk, (
+        'winget 那条没带 --scope user —— 会走 machine 档要管理员权限')
+    assert 'InstallAllUsers=0' in _blk and 'PrependPath=1' in _blk, (
+        '直下那条没写 InstallAllUsers=0 / PrependPath=1 —— '
+        '前者要管理员，后者不写的话装完 python 仍然不在 PATH 上')
+
+    # 🔴 winget 在老 Windows 上没有 -> 必须有回落到 python.org 的那条路
+    assert 'www.python.org/ftp/python/' in _blk, (
+        'winget 失败没有回落 —— 老 Windows 上没有 winget，那时只剩一句报错')
+
+    # 🔴 装完【必须】说"开新窗口"：PATH 改动到不了已经开着的 cmd，
+    #   不说的话人会以为没装上（而它不报错）。
+    assert re.search(r'open a NEW one', _blk, re.I), (
+        'install.bat 装完没说「关掉这个窗口、开一个新的」—— '
+        'PATH 改动进不了已经开着的 cmd，不说的话看着就像没装上')
+
+
+    import ast, socket, threading, types, importlib.util as _ilu2
+
+    def _load_mod(nm, path):
+        _sp = _ilu2.spec_from_file_location(nm, path)
+        _m = _ilu2.module_from_spec(_sp)
+        _sp.loader.exec_module(_m)
+        return _m
+
+    # ---- J) 一个文件点到底：start.bat + install.py --serve ---------------
+    #   用户 2026-09-27：「一个执行文件，能将项目启动起来，后面就能直接
+    #   执行 server，打开 web 页面」。
+    _st = os.path.join(REPO, 'start.bat')
+    assert os.path.isfile(_st), (
+        '缺 start.bat —— 用户要的是【一个文件】点下去就装好并起看板，'
+        '而 install.bat 只管环境')
+    _stt = io.open(_st, 'rb').read().decode('ascii')
+
+    # 🔴 它**只转发**：那套「找 Python / 装 Python」的菜单只许有一份。
+    #   抄一份进 start.bat 的话两边迟早分叉，而分叉的那份正是新机器会点的
+    #   （同「两处实现必然分叉」「共享的是实现不是形状」）。
+    assert re.search(r'^\s*call "%~dp0install\.bat"[^\r\n]*--serve', _stt, re.M), (
+        'start.bat 没有 `call "%~dp0install.bat" --serve` —— '
+        '它必须转发，不能自己再实现一遍')
+    for _dup in ('py -3 -c', 'winget install', ':nopy'):
+        assert _dup not in _stt, (
+            'start.bat 里出现了 %r —— 那是 install.bat 的活，'
+            '复制一份出来两边会分叉' % _dup)
+
+    # 🔴 端口不许在 install.py 里写死：serve.py 的 argparse 默认值才是正本。
+    #   写死之后改了 serve.py 的端口，印出来的地址与自动打开的那个标签页
+    #   会指到一个没人监听的端口，**而它不报错**（同「列定义写一处」）。
+    #   ★ 判据走 **ast 找整数常量**，不查字符串 —— install.py 的注释里就
+    #     写着那个端口号，查字符串必然命中自己写的注释（第 8 次了）。
+    _ins = os.path.join(REPO, 'install.py')
+    _inst = io.open(_ins, encoding='utf-8').read()
+    _im = _load_mod('_ins_probe', _ins)
+    _port = _im.serve_port()
+    _lits = [n.value for n in ast.walk(ast.parse(_inst))
+             if isinstance(n, ast.Constant) and isinstance(n.value, int)
+             and not isinstance(n.value, bool) and n.value == _port]
+    assert not _lits, (
+        'install.py 里写死了端口 %d —— 它该从 serve.py 的 --port 默认值读'
+        % _port)
+    _sv = io.open(os.path.join(REPO, 'serve.py'), encoding='utf-8').read()
+    assert re.search(r"'--port'[^\n]*default=%d" % _port, _sv), (
+        'serve_port() 给的 %d 与 serve.py 里 --port 的默认值对不上' % _port)
+
+    # 🔴 浏览器要等端口【真的起来】再开，而子进程死了就**不开** ——
+    #   打一个 Connection refused 的标签页比不打更糟（同 backLink 那条）。
+    #   判据是**行为**：两个方向各构造一次。
+    class _FakeProc(object):
+        def __init__(self, dead):
+            self._d = dead
+
+        def poll(self):
+            return 1 if self._d else None
+
+    _opened = []
+    _real_wb = _im.webbrowser
+    _im.webbrowser = types.SimpleNamespace(open=lambda u: _opened.append(u))
+    try:
+        _srv = socket.socket()
+        _srv.bind(('127.0.0.1', 0))
+        _srv.listen(5)
+        _p0 = _srv.getsockname()[1]
+        _im._open_when_up(_p0, _FakeProc(False))
+        assert _opened == ['http://127.0.0.1:%d' % _p0], (
+            '端口起来了却没打开浏览器（opened=%r）' % _opened)
+        _opened[:] = []
+        # 🔴 还要证它**真的在等端口** —— 只钉上面那条的话，"不探测、直接开"
+        #   照样绿，而那时浏览器打在一个还没 bind 的端口上（Connection
+        #   refused），看着就像"起失败了"。构造：端口没人听 + 进程活着。
+        _free = socket.socket()
+        _free.bind(('127.0.0.1', 0))
+        _pdead = _free.getsockname()[1]
+        _free.close()
+        _th = threading.Thread(target=_im._open_when_up,
+                               args=(_pdead, _FakeProc(False)), daemon=True)
+        _th.start()
+        _th.join(1.5)
+        assert _opened == [], (
+            '端口还没起来就打开了浏览器（opened=%r）—— '
+            '那会打在一个 Connection refused 上' % _opened)
+
+        _opened[:] = []
+        # 反向自证：端口照样通着，但子进程已经退了 -> 一个都不许开
+        _im._open_when_up(_p0, _FakeProc(True))
+        assert _opened == [], (
+            'serve.py 已经退了还去打开浏览器（opened=%r）—— '
+            '端口通不等于它在跑（比如端口被别的进程占着，'
+            '实测：bind 失败当场退出）' % _opened)
+        _srv.close()
+    finally:
+        _im.webbrowser = _real_wb
 
     return ('扫 %d 个文件（启动+建库阶段+每日链，清单都是派生的）：'
             '没有 POSIX-only 模块 / 外部命令都有平台分支 / '

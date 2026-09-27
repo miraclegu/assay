@@ -38,11 +38,16 @@
   不该在人没表态时替他做 —— 横条上有入口（同「配股不自动执行」那条）。
 """
 import argparse
+import ast
 import datetime
 import io
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
+import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))        # …/assay
 # 🔴 UTF-8 要在【任何打印】之前 —— 这个脚本本身满屏 ✓✗⚠，而中文 Windows
@@ -101,6 +106,85 @@ def say(s=''):
             pass
 
 
+def serve_port():
+    """看板端口 —— 🔴 **从 serve.py 的 argparse 默认值读，不在这里再写一遍**。
+
+    写死一个 8770 就是第二份口径：改了 serve.py 的默认端口之后，这里印出来
+    的地址、以及自动打开的那个浏览器标签都会指到一个没人监听的端口，
+    **而它不报错**（同「列定义写一处」「清单在服务端」那两条）。
+    """
+    src = io.open(os.path.join(HERE, 'serve.py'), encoding='utf-8').read()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if not (isinstance(f, ast.Attribute) and f.attr == 'add_argument'):
+            continue
+        if not (node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == '--port'):
+            continue
+        for kw in node.keywords:
+            if kw.arg == 'default' and isinstance(kw.value, ast.Constant):
+                return int(kw.value.value)
+    # 找不到就响亮失败 —— 静默退回一个猜的端口正是这条注释要防的事
+    raise RuntimeError('serve.py 里找不到 --port 的默认值')
+
+
+def _open_when_up(port, proc):
+    """等端口真的起来了再开浏览器。
+
+    🔴 不能一上来就开：serve.py 要建面板、扫归档，端口还没 bind，
+    浏览器会打在一个 Connection refused 上 —— 而那看着就像"起失败了"。
+    🔴 serve.py 半路崩掉就**不开** —— 开一个打不开的标签页比不开更糟
+    （同 backLink 那条）。
+    """
+    for _ in range(120):                 # 最多等 60 秒
+        if proc.poll() is not None:
+            return                       # 它已经退了，别开
+        try:
+            socket.create_connection(('127.0.0.1', port), 0.4).close()
+            break
+        except OSError:
+            time.sleep(0.5)
+    else:
+        return
+    try:
+        webbrowser.open('http://127.0.0.1:%d' % port)
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+def _serve(py):
+    """起看板并打开浏览器 —— `--serve` 那条路。
+
+    ★ 用 Popen 起子进程而不是 `os.execv`：execv 会把进程映像整个换掉，
+      "等端口起来再开浏览器"那个线程**当场就没了**（而它不报错，
+      只是浏览器永远不弹）。父进程留着当个薄薄的看门人。
+    """
+    port = serve_port()
+    srv = os.path.join(HERE, 'serve.py')
+    say('')
+    say('=' * 62)
+    say(' ▶ 起看板中 —— 起来之后浏览器会自己打开')
+    say('=' * 62)
+    say('')
+    say('    %s %s' % (py, srv))
+    say('    http://127.0.0.1:%d' % port)
+    say('')
+    say('★ 要停：在这个窗口按 Ctrl-C，或者直接关掉它。')
+    say('★ 下次再用，还是双击 start.bat —— 环境已经好了，它会直接起看板。')
+    say('')
+    proc = subprocess.Popen([py, srv])
+    threading.Thread(target=_open_when_up, args=(port, proc),
+                     daemon=True).start()
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        return 0
+
+
 def venv_python(venv):
     """虚拟环境里那个解释器 —— Windows 是 Scripts\\python.exe。"""
     if os.name == 'nt':
@@ -143,6 +227,8 @@ def importable(py, pkgs):
 def _run():
     ap = argparse.ArgumentParser(description='装好运行环境（不碰数据）')
     ap.add_argument('--check', action='store_true', help='只报不动手')
+    ap.add_argument('--serve', action='store_true',
+                    help='装好之后直接起看板并打开浏览器')
     ap.add_argument('--venv', default=None,
                     help='虚拟环境位置（默认 <父目录>/.venv）')
     a = ap.parse_args()
@@ -252,16 +338,24 @@ def _run():
     if bad:
         say('🔴 --check 只报不动手。去掉它再跑一次就会补上：%s' % ' / '.join(bad))
         return 1
+    if a.serve:
+        # 🔴 起看板这件事**排在结论之后**（见 main()）—— serve.py 会一直
+        #   阻塞着，夹在中间的话那句"装好了没有"要等到服务停掉才打出来。
+        _LAUNCH['py'] = py
+        say(OK + '环境好了 —— 接着起看板')
+        return 0
     say('=' * 62)
     say(' ✅ 环境好了。下一步 —— 起看板，然后在横条上点「▷ 开始建本地数据」')
     say('=' * 62)
     say('')
     say('    %s %s' % (py, os.path.join(HERE, 'serve.py')))
     say('')
-    say('    然后打开 http://127.0.0.1:8770')
+    say('    然后打开 http://127.0.0.1:%d' % serve_port())
     say('')
     say('★ 上面那个是【虚拟环境里】的 python 绝对路径 —— 直接敲 `python`'
         ' 的话可能是系统那个（没装 duckdb，serve.py 起不来）。')
+    say('★ 想一步到位：双击 start.bat（Windows）或 `python3 install.py'
+        ' --serve` —— 装好之后直接起看板并打开浏览器。')
     return 0
 
 
@@ -276,6 +370,9 @@ _VERDICT = {
     1: '⚠  只检查没动手（--check）—— 去掉 --check 再跑一次就会补上',
     2: '🔴 没装成 —— 原因见上面那条 ✗，修好再跑一次',
 }
+
+
+_LAUNCH = {}          # --serve 时装完要起看板，见 _run() 收尾
 
 
 def main():
@@ -301,6 +398,12 @@ def main():
             _LOGF.close()
         except Exception:                                # noqa: BLE001
             pass
+    # 🔴 起看板排在**结论与日志之后**：serve.py 一起来就阻塞在这里，
+    #   夹在中间的话「装好了没有」要等服务停掉才打出来，而那正是
+    #   人这一刻最想知道的（同「结论必须是最后一行」那条的另一半 ——
+    #   结论仍然是最后一行，只是后面接着干活）。
+    if rc == 0 and _LAUNCH.get('py'):
+        return _serve(_LAUNCH['py'])
     return rc
 
 if __name__ == '__main__':
