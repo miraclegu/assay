@@ -597,6 +597,10 @@ def api_setup_run(_q, body):
             j = _runs._JOBS[job_id]
             ids = [x['id'] for x in auto]
             rc = 0
+            dlog = _day_setup()
+            _day_say(dlog, '=' * 60)
+            _day_say(dlog, '建本地数据（一键）—— 还差 %d 步：%s'
+                     % (len(auto), ' / '.join(x['name'] for x in auto)))
             while True:
                 # 🔴 **每跑完一个就重新查状态**，不照一开始那份清单硬跑到底
                 #   —— 判据永远是"现在磁盘上是什么"（同 launchd 那条）。
@@ -620,9 +624,13 @@ def api_setup_run(_q, body):
                 _runs._JOBS[sub] = {'state': 'running', 'lines': j['lines'],
                                     'cmd': list(nxt['cmd']), 'sha': None,
                                     'run_id': None, 'rc': None}
+                _day_say(dlog, '───── %s ─────' % nxt['name'])
+                _t0 = time.time()
                 _runs._run_job(sub, list(nxt['cmd']), _datalake_dir(),
                                log_path=log_path)
                 rc = _runs._JOBS[sub].get('rc') or 0
+                _day_done(dlog, nxt['name'], rc, int(time.time() - _t0),
+                          _runs._JOBS[sub].get('lines'), log_path)
                 _runs._JOBS.pop(sub, None)
                 if pg:
                     pg.finish_step('ok' if rc == 0 else 'bad')
@@ -637,6 +645,9 @@ def api_setup_run(_q, body):
                     break
             j['rc'] = rc
             j['state'] = 'done' if rc == 0 else 'failed'
+            _day_say(dlog, '全部结束  rc=%s' % rc)
+            if dlog is not None:
+                dlog.close()                # 把最后那段折叠计数写出去
             if pg:
                 pg.finish(rc)
             _setup_summary(force=True)      # 建完了，横条要立刻反映
@@ -673,9 +684,17 @@ def api_setup_run(_q, body):
         pass                    # 进度坏了不许挡住装配本身
 
     def _go():
-        _runs._run_job(job_id, cmd, _datalake_dir(),
-                       log_path=_setup_log_path('setup-%s-%s.log' % (
-                           sid, datetime.now().strftime('%Y%m%d-%H%M%S'))))
+        dlog = _day_setup()
+        _lp = _setup_log_path('setup-%s-%s.log' % (
+            sid, datetime.now().strftime('%Y%m%d-%H%M%S')))
+        _day_say(dlog, '───── %s（单步）─────' % st[0]['name'])
+        _t0 = time.time()
+        _runs._run_job(job_id, cmd, _datalake_dir(), log_path=_lp)
+        _day_done(dlog, st[0]['name'], _runs._JOBS[job_id].get('rc'),
+                  int(time.time() - _t0),
+                  _runs._JOBS[job_id].get('lines'), _lp)
+        if dlog is not None:
+            dlog.close()
         if pg:
             rc = _runs._JOBS[job_id].get('rc')
             pg.finish_step('ok' if rc == 0 else 'bad')
@@ -701,6 +720,58 @@ def _sync_log_dir():
       页面于是走进"状态读取失败"那条分支（实测踩过，查了一轮）。
     """
     return os.path.join(_datalake_dir(), '_manifest', 'sync_logs')
+
+
+def _day_setup():
+    """建本地数据那条链的【按天】日志 —— 拿不到就返回 None（不许把装配搞挂）。
+
+    🔴 **只进骨架**（哪一步开始 / rc / 用时 / 失败时的尾部 + 指到明细文件），
+      不是每一行。每步的完整输出仍然写 `sync_logs/setup-<阶段>-<时间戳>.log`
+      —— 数据页上「看完整日志」点的就是它。两者分工与同步链那边一样：
+
+          setup-<天>.log       今天这台机器建数据都跑了什么、成没成
+          setup-<阶段>-<ts>    那一步的全部输出（几百 MB 下载进度都在里面）
+
+      合成一个的话，tdx2db init 那几万行进度会把"哪一步失败了"整个淹掉。
+    """
+    try:
+        dl = _datalake_dir()
+        if dl not in sys.path:
+            sys.path.insert(0, dl)
+        import logs as _logs                                # noqa: E402
+        # 🔴 **这里不清日志** —— 清理归 sync / tick 那两条定时链（它们每
+        #   10 分钟 / 每小时跑一次，足够了）。放在这里有两个害处：职责不对，
+        #   而且那一次 glob 会**把 `_go_all` 的启动拖慢**，
+        #   实测把一个既有竞态的窗口撑宽到 3/4 必现
+        #   （同 corp 那轮「我把既有竞态的窗口撑宽了」）。
+        return _logs.DayLog(_logs.KIND_SETUP, dl, 'setup')
+    except Exception as e:                                  # noqa: BLE001
+        # 🔴 不许静默：没有这份日志，"那台机器上建到哪一步崩的"就查无对证，
+        #   而屏幕上一切正常（同「保护分支不该静默跳过」）。
+        print('⚠ 建库按天日志没接上：%s: %s' % (type(e).__name__, e),
+              flush=True)
+        return None
+
+
+def _day_say(d, s):
+    if d is not None:
+        try:
+            d.line(s)
+        except Exception:                                   # noqa: BLE001
+            pass            # 日志写不动不许让装配停下来；接不上那次已经说过了
+
+
+def _day_done(d, name, rc, sec, lines, log_path):
+    """一步跑完 —— 成功一行，失败要把尾部带上并指到明细文件。"""
+    if d is None:
+        return
+    if rc == 0:
+        _day_say(d, '✅ %s  %ds' % (name, sec))
+        return
+    _day_say(d, '❌ %s 失败（rc=%s，%ds）—— 明细见 %s'
+             % (name, rc, sec, os.path.basename(log_path or '(无)')))
+    for ln in (lines or [])[-8:]:
+        _day_say(d, '    ' + ln)
 
 
 def _setup_log_path(name):

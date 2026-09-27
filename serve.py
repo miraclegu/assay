@@ -63,6 +63,27 @@ from assay.hashseed import ensure_utf8_console as _euc      # noqa: E402
 #   子进程靠 `PYTHONUTF8=1`，两条路都不要求"在 exec 之前设"。
 _ehs()
 _euc()
+
+# 🔴🔴 **日志要在【任何重依赖 import 之前】接上。**
+#   用户真机上那次崩的是 `from assay.server import serve` 里面的
+#   `import duckdb`（见 install.py 那节）—— 接在 `__main__` 里的话，
+#   那段 traceback 一个字都进不了文件，窗口一关就没了。
+#   而"程序不在本机执行、要能事后排查"正是这份日志存在的理由。
+# ★ tee 不是重定向：前台跑时终端照样看得见（同 install.py 的 `_tee`）。
+_daylog = None
+try:
+    from assay import paths as _dlp                          # noqa: E402
+    _dlroot = _dlp.datalake()
+    if _dlroot not in _sys.path:
+        _sys.path.insert(0, _dlroot)
+    import logs as _dllogs                                   # noqa: E402
+    _daylog, _ = _dllogs.tee_stdio(_dllogs.KIND_DAILY, _dlroot, 'serve')
+except Exception as _e:                                      # noqa: BLE001
+    # 🔴 不许静默：日志没接上时，人事后翻不到任何东西，而屏幕上一切正常
+    #   （同「保护分支不该静默跳过」）。这里不抛 —— 日志坏了不该让看板起不来。
+    _sys.stderr.write('⚠ 日志没接上（%s: %s）—— 输出只在屏幕上\n'
+                      % (type(_e).__name__, _e))
+
 import argparse
 import json
 import os

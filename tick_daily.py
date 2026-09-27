@@ -126,6 +126,19 @@ def main():
     ap.add_argument('--dry', action='store_true', help='只报判据，不算不写')
     a = ap.parse_args()
 
+    # 🔴 **按天汇总的日志**：tick 这条链此前【只有 launchd 的 .out】——
+    #   而那是 macOS 独有的，Windows 上信号重算的输出一个字都没地方留。
+    #   接在最前面：后面那三道判据每一条都会 print 一句拒绝的理由，
+    #   而"为什么今天没重算"正是事后要查的东西。
+    try:
+        _dl = lv._lake()
+        if _dl not in sys.path:
+            sys.path.insert(0, _dl)
+        import logs as _logs                                  # noqa: E402
+        _logs.tee_stdio(_logs.KIND_DAILY, _dl, 'tick')
+    except Exception as _e:                                   # noqa: BLE001
+        print('⚠ 按天日志没接上：%s: %s' % (type(_e).__name__, _e), flush=True)
+
     # 日志按天保留 —— launchd 的 .out/.err **永不轮转**（见 datalake/logs.py）。
     # ★ 包在 try 里：日志是给人看的，清理坏了不许把信号重算搞挂
     #   （同 progress 那条「进度坏了不影响主链」）。
@@ -137,6 +150,7 @@ def main():
         import paths as _dlpaths                              # noqa: E402
         for _p in _dlpaths.launchd_logs('tick'):
             _logs.trim_by_days(_p, days=30)
+        _logs.prune_day_logs(_dl, days=30)
     except Exception as _e:                                   # noqa: BLE001
         # 🔴 **不许静默跳过。** 第一版写的是 `pass` —— 于是"日志没被裁"
         #   与"根本没跑到这里"在屏幕上一模一样，我为此查了一轮才发现

@@ -16,6 +16,9 @@
   `.../assay/srv`，`/api/marks` 返回 {}、7 个实盘接口 500"）。
 """
 import argparse
+import atexit
+import shutil
+import tempfile
 import os
 import re
 import sys
@@ -299,6 +302,20 @@ def _guard_msg(bad, who):
 
 def main():
     import time as _t
+    # 🔴🔴 **按天日志整轮重定向到临时目录 —— 守卫不许写生产数据。**
+    #   这份日志的写入方有四个（serve / sync / tick / 装配），其中
+    #   sync 那条还是**子进程**（网页点「立即同步」起的）—— 所以逐个用例
+    #   打桩必然漏，而漏了不报错：实测第一版就往生产
+    #   `datalake/_manifest/logs/` 里写了两份（同「selftest 在往生产归档
+    #   里写东西」那次）。
+    # ★ 走 env 而不是模块属性：子进程继承得到，模块属性继承不到。
+    #   `logs.DIR` 在 import 时读它，而这里排在任何用例之前。
+    # ★ 与 `ASSAY_RUNS` 同一条路子：**整轮一把**，将来新加的用例自动在
+    #   保护范围里（照清单逐个打桩的话，范围会悄悄缩小）。
+    _logtmp = tempfile.mkdtemp(prefix='assay_selftest_logs_')
+    os.environ['ASSAY_LOG_DIR'] = _logtmp
+    atexit.register(shutil.rmtree, _logtmp, True)
+
     ap = argparse.ArgumentParser(description='assay 自检')
     g = ap.add_mutually_exclusive_group()
     g.add_argument('--fast', action='store_true', help='只跑 fast 层（约 18s，无浏览器）')

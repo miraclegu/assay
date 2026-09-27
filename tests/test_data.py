@@ -5840,6 +5840,19 @@ def t_setup_running_visible():
         sy._SETUP_SUM['at'] = 0
         sy._SETUP_SUM['d'] = None
         P.DIR, P.TIMES = old_dir, old_times
+        # 🔴🔴 **先等自己那条线程跑完，再动 `_JOBS`。** 这条用例**故意**在
+        #   装配还跑着的时候断言（那正是它要证的事），而 `_go_all` 是
+        #   daemon 线程 —— 清理抢在它前面的话，它下一次读 `_JOBS[sub]`
+        #   就是 KeyError。而它在**线程里**抛，`threading` 只打一段
+        #   traceback，**用例照样绿**：典型的"单跑全绿、只有全量才红"。
+        #   （实测：给 `_go_all` 加了几次日志 I/O 之后 5 次里 3 次复现；
+        #   窗口本来就在，我只是把它撑宽了 —— 同 corp 那轮那条。）
+        _t_end = time.time() + 20
+        while time.time() < _t_end:
+            if not [1 for k, j in list(_rn._JOBS.items())
+                    if k.startswith('setup-') and j.get('state') == 'running']:
+                break
+            time.sleep(0.05)
         # ★ 只删**自己新增**的，不无脑清空 —— 别的用例可能有自己的 job
         for _k in [k for k in _rn._JOBS
                    if k not in _jobs0 and k.startswith('setup-')]:
@@ -6092,3 +6105,194 @@ def t_bootstrap_zip_guard():
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)
+
+
+@case('日志按天切分：四个写入方都接上 / tee 不是重定向 / 过期的自己清', tag='fast')
+def t_day_logs():
+    """用户 2026-09-27：「因为程序不在本机执行，可能有各种错误，所以一定要
+    打印充分的日志，以排查困难。assay 和 datalake 的日志。数据初始化的日志
+    可以打印在一个单独的一个文件中，后续日常运行的日志打印在一个文件中，
+    可以按天切分文件，每天生成一个新的日志文件，清理超出时间的日志文件。」
+
+    改之前**两个写入方根本没有文件**：`tick_daily` 只有 launchd 的 .out
+    （macOS 独有），`serve.py` 只往终端打 —— 而它是长跑的那个。
+
+    判据一律落在**运行时与结构**上，不查字符串（那会命中自己写的注释）。
+    """
+    import ast
+    import importlib
+    import datetime as _dt
+    from assay.srv import base as sbase
+    DL = sbase._datalake_dir()
+    if DL not in sys.path:
+        sys.path.insert(0, DL)
+    lg = importlib.import_module('logs')
+
+    # ── A 正本只有一处 ───────────────────────────────────────────
+    hits = []
+    for rt in (REPO, DL):
+        for r, ds, fs in os.walk(rt):
+            ds[:] = [d for d in ds
+                     if d not in ('__pycache__', '.git', 'runs', 'node_modules')]
+            for f in fs:
+                if not f.endswith('.py'):
+                    continue
+                p = os.path.join(r, f)
+                try:
+                    src = io.open(p, encoding='utf-8').read()
+                except Exception:                           # noqa: BLE001
+                    continue
+                if re.search(r'^def day_path\(', src, re.M) or \
+                        re.search(r'^class DayLog\(', src, re.M):
+                    hits.append(os.path.relpath(p, os.path.dirname(REPO)))
+    assert hits == ['datalake/logs.py'], \
+        '按天日志的正本不止一处（或搬走了）：%s' % hits
+
+    # ── B 整轮重定向真的生效（守卫不许写生产日志）────────────────
+    prod = os.path.join(DL, '_manifest', 'logs')
+    assert not lg.day_dir(DL).startswith(prod), \
+        '🔴 按天日志没被重定向，守卫会写进生产目录 %s' % prod
+    prod_n0 = len(os.listdir(prod)) if os.path.isdir(prod) else -1
+
+    # ── C 行为：按天切 / 连续重复折叠 / 进度行不落盘 ─────────────
+    td = tempfile.mkdtemp(prefix='assay_dlg_')
+    try:
+        old_dir = lg.DIR
+        lg.DIR = os.path.join(td, 'L')
+        old_datetime = lg.datetime
+
+        # ★ 继承真 datetime，只换 `now()` —— `prune_dir_by_days` 还会用
+        #   `fromtimestamp`、`strptime`，自己拼一个壳必然漏（漏一个报一次）。
+        class _FakeDT(_dt.datetime):
+            now_val = _dt.datetime(2026, 3, 1, 10, 0, 0)
+
+            @classmethod
+            def now(cls):
+                return cls.now_val
+        # ★ 桩要把 `timedelta` / `date` 也带上 —— `prune_dir_by_days`
+        #   用得到，只塞一个 `datetime` 会报 AttributeError。
+        lg.datetime = type('m', (), {'datetime': _FakeDT,
+                                     'timedelta': _dt.timedelta,
+                                     'date': _dt.date})
+
+        d = lg.DayLog('daily', td, 'x')
+        d.line('第一行')
+        for _ in range(4):
+            d.line('重复的那句')
+        _FakeDT.now_val = _dt.datetime(2026, 3, 2, 10, 0, 0)   # 跨午夜
+        d.line('第二天')
+        d.close()
+        f1 = os.path.join(lg.DIR, 'daily-2026-03-01.log')
+        f2 = os.path.join(lg.DIR, 'daily-2026-03-02.log')
+        assert os.path.isfile(f1) and os.path.isfile(f2), \
+            '🔴 跨午夜没换文件 —— 长跑的 serve.py 会把几天写进同一个文件'
+        t1 = io.open(f1, encoding='utf-8').read()
+        # ★ 拆成两句，让两种坏法各自落在自己那句上（同「别把功劳记在
+        #   错的那句上」）：没折叠 vs 折叠了但那句写错了文件。
+        assert t1.count('重复的那句') == 1, \
+            '连续重复行没折叠（每 10 分钟一条"不是交易日"会把真错误埋掉）：%r' % t1
+        assert '共 4 次' in t1, \
+            '🔴 折叠那句没落在末次所在的那个文件里：%r' % t1
+        # 🔴 折叠出来那句要落在【末次那条所在的文件】—— 不指定 path 的话
+        #   它会写进"现在这一天"，昨天那段的计数就跑到今天的文件里去了。
+        #   （守卫第一次跑就抓到过这个真 bug。）
+        assert '共 4 次' not in io.open(f2, encoding='utf-8').read(), \
+            '🔴 昨天那段的折叠计数落进了今天的文件'
+        assert '[x]' in t1, '没带来源标记 —— daily 里混着四个来源，分不出谁说的'
+
+        # 进度行（\r 原地刷新）不许落盘，否则整片看不懂的乱码
+        d2 = lg.DayLog('daily', td, 'x')
+        tee = lg.Tee(io.StringIO(), d2)
+        tee.write('  12/548 MB\r  40/548 MB\r  548/548 MB\n')
+        d2.close()
+        t2 = io.open(f2, encoding='utf-8').read()
+        assert '548/548 MB' in t2 and '12/548 MB' not in t2, \
+            '进度行的中间态落盘了（或末态没落）：%r' % t2
+
+        # ── D 写不进去要【返回 False】，不许抛也不许静默当成功 ──
+        lg.DIR = '/dev/null/nope'
+        assert lg.DayLog('daily', td, 'x').line('x') is False, \
+            '写不进去时没报 False —— 调用方无从知道日志丢了'
+
+        # ── E 清理按天 ───────────────────────────────────────────
+        lg.DIR = os.path.join(td, 'P')
+        os.makedirs(lg.DIR)
+        now = _dt.datetime(2026, 3, 40 - 9)          # 2026-03-31
+        for k in ('daily', 'setup'):
+            for day in (1, 2, 3, 28, 29, 30, 31):
+                p = os.path.join(lg.DIR, '%s-2026-03-%02d.log' % (k, day))
+                io.open(p, 'w', encoding='utf-8').write('x\n')
+                os.utime(p, (0, _dt.datetime(2026, 3, day).timestamp()))
+        n = lg.prune_day_logs(td, days=7, now=now)
+        assert isinstance(n, int), 'prune_day_logs 返回的不是个数：%r' % n
+        left = sorted(os.listdir(lg.DIR))
+        assert not [x for x in left if '-03-01' in x or '-03-02' in x], \
+            '7 天之外的没清掉：%s' % left
+        assert [x for x in left if '-03-31' in x], '把最近的也清了：%s' % left
+    finally:
+        lg.DIR, lg.datetime = old_dir, old_datetime
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ── F 四个写入方：**真起子进程**，看文件里有没有它说的话 ──────
+    #   🔴 判据不能是"源码里有没有 tee_stdio" —— 那会命中注释，而且
+    #     接上了却没生效（DIR 解错、异常被吞）照样绿。
+    td2 = tempfile.mkdtemp(prefix='assay_dlg2_')
+    try:
+        env = dict(os.environ, ASSAY_LOG_DIR=td2)
+        day = _dt.date.today().strftime('%Y-%m-%d')
+        DAILY = os.path.join(td2, 'daily-%s.log' % day)
+        for who, cmd in (('serve', [sys.executable, os.path.join(REPO, 'serve.py'),
+                                    '--status']),
+                         ('tick', [sys.executable, os.path.join(REPO, 'tick_daily.py'),
+                                   '--dry']),
+                         ('sync', [sys.executable, os.path.join(DL, 'sync_daily.py'),
+                                   '--if-stale'])):
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                               encoding='utf-8', errors='replace', timeout=180)
+            got = io.open(DAILY, encoding='utf-8').read() if os.path.isfile(DAILY) else ''
+            assert ('[%s]' % who) in got, \
+                '🔴 %s 的输出没进按天日志 —— 它在别的机器上出了错就查无对证。' \
+                '文件 %s；它自己打的是 %r' % (who, DAILY, (r.stdout or '')[-300:])
+            # tee 不是重定向：终端（这里是被捕获的 stdout）照样要有东西
+            assert (r.stdout or '').strip(), \
+                '🔴 %s 变成了重定向 —— 前台跑时屏幕上什么都看不见' % who
+    finally:
+        shutil.rmtree(td2, ignore_errors=True)
+
+    # ── G 顺序：两处"排在什么之前"，错了就最常走的那条路不落盘 ────
+    #   用 ast 比**真实的行号**（注释不是 AST 节点）。
+    def _lineno(src, pred):
+        tree = ast.parse(src)
+        return [n.lineno for n in ast.walk(tree) if pred(n)]
+
+    sv_src = io.open(os.path.join(REPO, 'serve.py'), encoding='utf-8').read()
+    tee_at = _lineno(sv_src, lambda n: isinstance(n, ast.Call) and
+                     getattr(n.func, 'attr', '') == 'tee_stdio')
+    heavy = _lineno(sv_src, lambda n: isinstance(n, ast.ImportFrom) and
+                    (n.module or '').startswith('assay.server'))
+    assert tee_at and heavy and min(tee_at) < min(heavy), \
+        '🔴 serve.py 的日志要接在 `from assay.server import serve` 之前 —— ' \
+        'import 崩掉那次（真机上就是 duckdb）一个字都进不了文件，而那正是' \
+        '这份日志存在的理由。tee@%s heavy@%s' % (tee_at, heavy)
+
+    sy_src = io.open(os.path.join(DL, 'sync_daily.py'), encoding='utf-8').read()
+    tee2 = _lineno(sy_src, lambda n: isinstance(n, ast.Call) and
+                   getattr(n.func, 'attr', '') == 'tee_stdio')
+    early = _lineno(sy_src, lambda n: isinstance(n, ast.Call) and
+                    getattr(n.func, 'id', '') == '_if_stale')
+    # ⚠ **分工如实记**：非交易日时 F 段那条 `--if-stale` 已经覆盖了同一件事
+    #   （提前返回之前没接上就没日志）—— 但它**依赖今天是不是交易日**。
+    #   交易日上整条链都会跑，两种顺序都有日志，那时只剩下面这条 AST 判据。
+    #   所以今天构造不出"只打中这一条"的变异，留着它是为了不看日子。
+    assert tee2 and early and min(tee2) < min(early), \
+        '🔴 sync 的日志要接在 `--if-stale` 提前返回之前 —— 轮询绝大多数' \
+        '时候走的就是那条路，接在后面等于最常走的那条一个字都不落盘。' \
+        'tee@%s if_stale@%s' % (tee2, early)
+
+    prod_n = len(os.listdir(prod)) if os.path.isdir(prod) else -1
+    assert prod_n == prod_n0, \
+        '🔴 守卫往生产的按天日志里写了东西：%d -> %d' % (prod_n0, prod_n)
+    return ('正本 1 处（datalake/logs.py）；跨午夜换文件、重复行折叠、'
+            '进度行不落盘、写不进去返 False；按天清 7 天外的、留最近的；'
+            'serve/tick/sync 三条真起子进程验过输出进了 daily 且屏幕仍有；'
+            'serve 接在重依赖 import 之前、sync 接在 --if-stale 之前')
