@@ -923,10 +923,27 @@ function prgHtml(j){
        元素连 title 都不触发），但先把原因说在前面 —— 让人点一下才知道
        "起不来"是把解释藏在了一次点击后面。 */
     if(!j.can_run && j.why) bits.push(esc(j.why));
-    return '<span class="pgi">📦</span>' +
+    /* 🔴 上次跑失败过就**说出来**，并把按钮改成「再试一次」——
+       原来这一行与"从来没跑过"长得一模一样，于是"我刚才那次到底怎么了"
+       在页面上查无对证（同「删了要留痕」）。 */
+    const lf = j.last_fail;
+    if(lf){
+      const t = lf.at ? new Date(lf.at * 1000) : null;
+      bits.unshift('🔴 上次失败' + (lf.step
+        ? '（停在第 ' + lf.i + ' / ' + (lf.total || '?') + ' 步「'
+          + esc(lf.step) + '」）' : '')
+        + (lf.rc != null ? '，rc=' + esc(String(lf.rc)) : '')
+        + (t ? ' · ' + String(t.getMonth() + 1).padStart(2, '0') + '-'
+             + String(t.getDate()).padStart(2, '0') + ' '
+             + String(t.getHours()).padStart(2, '0') + ':'
+             + String(t.getMinutes()).padStart(2, '0') : ''));
+      if(lf.log) bits.push('日志 ' + esc(lf.log));
+    }
+    return '<span class="pgi">' + (lf ? '🔴' : '📦') + '</span>' +
       '<b>' + esc(j.title) + '</b>' +
       '<span class="pgs">' + bits.join(' · ') + '</span>' +
-      '<a href="#" class="btn" id="prgsetup">▷ 开始建本地数据</a>' +
+      '<a href="#" class="btn" id="prgsetup">' +
+      (lf ? '↻ 再试一次（从失败那步接着跑）' : '▷ 开始建本地数据') + '</a>' +
       '<a href="/#/sync">看清单 ›</a>';
   }
   /* 数据齐了，但定时任务没装 —— 新机器上最容易漏掉的一步。
@@ -987,6 +1004,24 @@ function prgHtml(j){
       + String(t.getMinutes()).padStart(2,'0') + '）' : '') + ' —— 去数据页重跑');
   }
   if(!run && !bad) bits.push('完成');
+  /* 🔴🔴 **失败必须说"失败"。** 原来这里什么都不 push —— 屏幕上就是
+       `🔴 建本地数据 · 已用 12 秒`，没有"失败"两个字、没有 rc、
+       也没有停在哪一步（`finish()` 会把 `step` 清成 null）。
+       一个红圈配一个时长，分不出"失败了"还是"跑完了"。
+     ★ 步名从 `done` 里最后那条非 ok 的取 —— 那才是停下来的地方。 */
+  if(!run && j.rc){
+    const dn = j.done || [];
+    let k = -1;
+    for(let i = 0; i < dn.length; i++)
+      if(dn[i] && dn[i].state && dn[i].state !== 'ok') k = i;
+    const nm = k >= 0 ? (dn[k].name || '') : '';
+    bits.push('失败' + (k >= 0
+      ? '（停在第 ' + (k + 1) + ' / ' + (j.total || dn.length) + ' 步「'
+        + esc(nm) + '」）' : '') + '，rc=' + esc(String(j.rc)));
+    /* 下一步要说出来：这条链是**接着跑**的，不是从头再来一遍 548 MB。 */
+    bits.push('修好再点一次，会从这一步接着跑');
+    if(j.log) bits.push('日志 ' + esc(j.log));
+  }
 
   /* 🔴 展开区是**浮层**（绝对定位贴在横条下方），不撑高横条自己 ——
      `body.hasprog{padding-top}` 是个固定值，横条一变高就会盖住顶栏、

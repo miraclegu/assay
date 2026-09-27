@@ -5057,6 +5057,7 @@ def t_load_progress():
     import tempfile
     from assay import server as sv
     from assay.srv import base as sbase
+    from assay.srv import sync as sy
 
     dl = sbase._datalake_dir()
     if dl not in sys.path:
@@ -5104,6 +5105,7 @@ def t_load_progress():
     td = tempfile.mkdtemp(prefix='_prg_')
     old_dir, old_times = P.DIR, P.TIMES
     P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+    out = []
     try:
         # ── B 进度来自【文件】，所以 launchd 跑的也看得见 ──────────
         pg = P.Progress('sync', '每日数据同步', 13)
@@ -5175,13 +5177,83 @@ def t_load_progress():
         d['ended'] = time.time() - 600
         json.dump(d, io.open(f, 'w', encoding='utf-8'))
         assert 'sync' not in _jobs(), '完成的横条常驻了'
+
+        # ── F 🔴🔴 **失败要留在页面上**（2026-09-27）─────────────────
+        #   用户："不仅仅是出错的问题，而且是数据处理失败，在页面没有任何
+        #   提示，我完全不知道当前在干什么。"
+        #   查下来 `_show()` 对失败与成功用**同一条 90 秒规则** —— 于是建库
+        #   失败 90 秒之后横条退场、回到「本地还没有数据 · ▷ 开始建本地
+        #   数据」，**与从来没跑过一模一样**（同「删了要留痕，否则"空"与
+        #   "本来就没有"分不出来」）。
+        import time as _tm
+        for fn in os.listdir(P.DIR):
+            os.remove(os.path.join(P.DIR, fn))
+        pf = P.Progress('setup', '建本地数据（首次批量加载）', 7)
+        pf.step('① 抓数程序 tdx2db', at=1)
+        pf.finish_step('ok')
+        pf.step('② 全量日线包', at=2)
+        pf.finish_step('bad')
+        pf.finish(1)
+        # 把"跑完那一刻"推到 10 分钟前 —— 90 秒那档早就过了
+        _pp = os.path.join(P.DIR, 'setup.json')
+        _d = json.load(io.open(_pp, encoding='utf-8'))
+        _d['ended'] = _tm.time() - 600
+        json.dump(_d, io.open(_pp, 'w', encoding='utf-8'))
+
+        rows = sy.api_progress(None)['jobs']
+        fail = [r for r in rows if r.get('job') == 'setup' and r.get('rc')]
+        assert fail, ('🔴 失败的任务 90 秒之后就退场了 —— 页面回到'
+                      '「还没有数据」，与从来没跑过一模一样，'
+                      '"刚才那次怎么了"查无对证')
+        f0 = fail[0]
+        assert f0.get('rc') == 1, f0.get('rc')
+        kk = [i for i, x in enumerate(f0.get('done') or [])
+              if x.get('state') != 'ok']
+        assert kk == [1], '失败停在哪一步没记下来：%s' % (f0.get('done'),)
+
+        # ★ 反向自证：**成功**的那条仍然按 90 秒退场 —— 否则"一律留着"
+        #   也能让上面那条通过，而横条会常驻一条"一切正常"（那条纪律的反面）。
+        po = P.Progress('sync', '每日数据同步', 2)
+        po.step('a', at=1); po.finish_step('ok')
+        po.step('b', at=2); po.finish_step('ok')
+        po.finish(0)
+        _op = os.path.join(P.DIR, 'sync.json')
+        _d2 = json.load(io.open(_op, encoding='utf-8'))
+        _d2['ended'] = _tm.time() - 600
+        json.dump(_d2, io.open(_op, 'w', encoding='utf-8'))
+        assert not [r for r in sy.api_progress(None)['jobs']
+                    if r.get('job') == 'sync'], \
+            '跑成功的任务也常驻了 —— 常驻一条"一切正常"等于教人忽略这个位置'
+        out.append('失败留 24 小时、成功仍 90 秒退场')
+
+        # ── G `setup_needed` 要带上【上次失败】，24 小时之外也不许装没事 ──
+        _d['ended'] = _tm.time() - 86400 * 2          # 连 24 小时都过了
+        json.dump(_d, io.open(_pp, 'w', encoding='utf-8'))
+        _oss = sy._SETUP_SUM.copy()
+        sy._SETUP_SUM['at'] = 0
+        sy._SETUP_SUM['d'] = {'ready': False, 'n_todo': 6,
+                              'next_name': '② 全量日线包', 'eta_text': '2 小时',
+                              'stages': [], 'n_auto_todo': 6, 'os': 'probe'}
+        sy._SETUP_SUM['at'] = _tm.time()
+        try:
+            need = [r for r in sy.api_progress(None)['jobs']
+                    if r.get('kind') == 'setup_needed']
+            assert need, '数据没齐却没给入口'
+            lf = need[0].get('last_fail')
+            assert lf and lf.get('rc') == 1 and lf.get('i') == 2 \
+                and '全量日线包' in (lf.get('step') or ''), (
+                '🔴 「还没有数据」那条没带上次失败 —— 它与从来没跑过'
+                '长得一模一样：%r' % (lf,))
+        finally:
+            sy._SETUP_SUM.update(_oss)
+        out.append('setup_needed 带上次失败（第 2 步、rc=1）')
     finally:
         P.DIR, P.TIMES = old_dir, old_times
         shutil.rmtree(td, ignore_errors=True)
 
     return ('活性探测分平台（Windows 上 os.kill 会杀进程）｜ 链 %d 步（分母只有一处、步号生成）｜ 进度走文件所以 launchd 也可见'
             ' ｜ 第一次不猜 ETA、跑完有基准且两条链不串 ｜ 死进程报中断、'
-            '隔夜与完成都自己退场' % n_decl)
+            '隔夜与完成都自己退场 ｜ %s' % (n_decl, ' ｜ '.join(out)))
 
 
 @case('数据加载进度横条：在最上侧、每页都有、没任务时整条不渲染（playwright）', tag='web')
@@ -5503,6 +5575,48 @@ def t_load_progress_bar():
                 sy._stages_mod, sv.ALLOW_LIVE = _old_mod, _old_live
                 sy._SETUP_SUM['at'] = 0
                 sy._SETUP_SUM['d'] = None
+
+            # ── 🔴🔴 失败那一行要【说得出失败】（2026-09-27）──────────────
+            #   `prgHtml` 是纯函数，直接喂一个 failed 的 job 进去看渲染成什么 ——
+            #   改之前是 `🔴 建本地数据 · 已用 12 秒`：**没有"失败"两个字**、
+            #   没有 rc、也没有停在哪一步（`finish()` 会把 `step` 清成 null），
+            #   一个红圈配一个时长，分不出"失败了"还是"跑完了"。
+            FJ = {'job': 'setup', 'title': '建本地数据（首次批量加载）',
+                  'state': 'failed', 'rc': 1, 'i': 2, 'total': 7, 'step': None,
+                  'elapsed': 12.0, 'log': 'setup-tdx2db-20260927.log',
+                  'done': [{'name': '① 抓数程序 tdx2db', 'state': 'ok', 'sec': 3},
+                           {'name': '② 全量日线包', 'state': 'bad', 'sec': 9}]}
+            html = pg.evaluate('j => prgHtml(j)', FJ)
+            txt = re.sub(r'<[^>]+>', ' ', html)
+            for kw in ('失败', '第 2 / 7 步', '全量日线包', 'rc=1', '接着跑'):
+                assert kw in txt, ('🔴 失败那一行没说 %r —— 屏幕上就是一个红圈'
+                                   '配一个时长，分不出失败还是跑完了：%r' % (kw, txt))
+            assert 'setup-tdx2db-20260927.log' in txt, '没指到那一次的日志'
+
+            # ★ 反向自证：**跑成功**的那条不许出现"失败"，否则上面那几条可能只是
+            #   "一律写失败"（同「判据两头夹」）。
+            OJ = dict(FJ, state='done', rc=0,
+                      done=[{'name': 'a', 'state': 'ok', 'sec': 3},
+                            {'name': 'b', 'state': 'ok', 'sec': 9}])
+            ot = re.sub(r'<[^>]+>', ' ', pg.evaluate('j => prgHtml(j)', OJ))
+            assert '失败' not in ot and '完成' in ot, ot
+
+            # ── 「还没有数据」那条带上次失败时，按钮要改口 ───────────────
+            NJ = {'job': 'setup', 'kind': 'setup_needed', 'title': '本地还没有数据',
+                  'state': 'idle', 'i': 0, 'total': 6, 'n_todo': 6,
+                  'eta_text': '1.9~2.4 小时', 'can_run': True,
+                  'last_fail': {'at': 1759000000, 'rc': 1, 'i': 2, 'total': 7,
+                                'step': '② 全量日线包', 'log': 'setup-x.log'}}
+            nt = re.sub(r'<[^>]+>', ' ', pg.evaluate('j => prgHtml(j)', NJ))
+            for kw in ('上次失败', '第 2 / 7 步', '全量日线包', '再试一次'):
+                assert kw in nt, ('🔴 「还没有数据」那条没说上次失败过（缺 %r）——'
+                                  '它与从来没跑过长得一模一样：%r' % (kw, nt))
+            # 🔴 按钮文案要改口：「开始」会让人以为要从头再下一遍 548 MB
+            assert '开始建本地数据' not in nt, '有过失败还写"开始"'
+            nt0 = re.sub(r'<[^>]+>', ' ',
+                         pg.evaluate('j => prgHtml(j)', dict(NJ, last_fail=None)))
+            assert '开始建本地数据' in nt0 and '上次失败' not in nt0, \
+                '没失败过的时候也写"再试一次"了：%r' % nt0
 
             assert not errs, errs[:3]
             b.close()

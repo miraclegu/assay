@@ -850,6 +850,17 @@ def api_progress(_q):
         #   下一次跑会覆盖同名文件，所以正常情况下它自己就消失了。
         if st == 'stale':
             return now - r.get('started', now) < 86400
+        # 🔴🔴 **失败与成功不能用同一条 90 秒规则。**
+        #   用户 2026-09-27："不仅仅是出错的问题，而且是数据处理失败，
+        #   在页面没有任何提示，我完全不知道当前在干什么。"
+        #   —— 原来两者都是「跑完 90 秒就退场」，于是建库失败之后 90 秒，
+        #   横条回到「本地还没有数据 · ▷ 开始建本地数据」，**与从来没跑过
+        #   一模一样**：失败在哪一步、为什么、日志在哪，一个字都没有
+        #   （同「删了要留痕，否则"空"与"本来就没有"分不出来」）。
+        #   失败是**真的要做什么**，所以按 stale 那档留 24 小时；
+        #   下一次跑会覆盖同名文件，修好之后它自己就消失。
+        if r.get('rc'):
+            return now - r.get('ended', now) < 86400
         return bool(r.get('ended')) and now - r['ended'] < 90
     live = [r for r in rows if _show(r)]
 
@@ -862,6 +873,26 @@ def api_progress(_q):
     #   **正是**真的要做什么；数据齐了它自己就消失，不是常驻横幅。
     if not [r for r in live if r.get('state') == 'running']:
         su = _setup_summary()
+        # 🔴 **上次失败过这件事，不许在 24 小时之后凭空消失。**
+        #   `setup_needed` 原来只说"还差 N 步"—— 与从来没跑过一模一样。
+        #   翻一眼最近那次 setup 的记录，把"停在哪一步"带上；修好之后
+        #   下一次跑会覆盖它，这一行自己就没了。
+        lf = None
+        for r in rows:
+            if r.get('job') != 'setup' or not (r.get('rc') or
+                                               r.get('state') == 'stale'):
+                continue
+            if lf is None or (r.get('ended') or 0) > (lf.get('ended') or 0):
+                lf = r
+        if lf is not None:
+            dn = lf.get('done') or []
+            kk = [i for i, x in enumerate(dn)
+                  if x and x.get('state') and x['state'] != 'ok']
+            lf = {'at': lf.get('ended') or lf.get('started'),
+                  'rc': lf.get('rc'), 'log': lf.get('log'),
+                  'step': (dn[kk[-1]].get('name') if kk else None),
+                  'i': (kk[-1] + 1) if kk else None,
+                  'total': lf.get('total')}
         if su and not su.get('ready'):
             live.append({'job': 'setup', 'kind': 'setup_needed',
                          'title': '本地还没有数据',
@@ -869,6 +900,7 @@ def api_progress(_q):
                          'total': su.get('n_todo') or 0,
                          'n_todo': su.get('n_todo'),
                          'next_name': su.get('next_name'),
+                         'last_fail': lf,
                          # ⚠ 阶段自己声明的估计，**不是实测** —— 页面上写「估」
                          'eta_text': su.get('eta_text'),
                          **_setup_flags()})
