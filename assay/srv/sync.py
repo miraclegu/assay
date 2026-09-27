@@ -507,6 +507,76 @@ def _stages_mod():
     return m, None
 
 
+
+# 全量日线包的上限：真包约 548 MB，留出余量；上游哪天变大也不至于硬拦。
+VIPDOC_MAX = 3 * 1000 * 1000 * 1000
+
+
+def api_setup_vipdoc(headers, rfile, n):
+    """POST /api/setup/vipdoc —— 把浏览器下好的 `hsjday.zip` 交回来。
+
+    🔴🔴 **流式写盘，不 `rfile.read(n)`。** 聚宽那条上传（几十 MB）整块
+      读进内存没问题，这个是 **548 MB** —— 整块读再写一遍是两份内存
+      加一次全量复制。这里边读边写 `.part`。
+
+    🔴 **判据是「它是不是一个 zip」，不是「有没有收到字节」**（同
+      `_download` 那条：真机上收到的是 200 + 长度对得上的反爬 JS）。
+      验不过就**不 rename**，坏的那份留成 `.part` 当证据。
+
+    ★ 落地之后 `setup_tdx._zip_ready` 会认它，`bootstrap` 直接跳过下载
+      （「已有 hsjday.zip（548 MB），跳过下载」）—— 所以这条路走通之后
+      建库不会再去碰那个被挡住的 URL。
+    """
+    if not base.ALLOW_LIVE:
+        return {'error': '服务以只读模式启动（--readonly），不接收上传。'}
+    m, err = _stages_mod()
+    if err:
+        return {'error': err}
+    up = None
+    for s in m.stages():
+        if s.get('upload'):
+            up = s['upload']
+            break
+    if not up:
+        return {'error': '没有哪个阶段声明了可以手工放包 —— 清单在服务端，'
+                         '这条路是它给的（页面不写死）。'}
+    if n <= 0:
+        return {'error': '没有上传内容'}
+    if n > VIPDOC_MAX:
+        return {'error': '文件太大（%.0f MB > 上限 %.0f MB）—— 确认选的是'
+                         '日线包而不是别的东西'
+                         % (n / 1e6, VIPDOC_MAX / 1e6)}
+    dst = up['dst']
+    tmp = dst + '.part'
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    got = 0
+    with open(tmp, 'wb') as f:
+        while got < n:
+            chunk = rfile.read(min(1 << 20, n - got))
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+    if got != n:
+        # 🔴 截断【比没传更糟】：半个 zip 照样占着正名，之后每次建库都
+        #   BadZipFile（同 `_download` 那条）。所以不 rename。
+        return {'error': '只收到 %.1f / %.1f MB（连接中断）—— 没有落地，'
+                         '重传一次即可' % (got / 1e6, n / 1e6)}
+    try:
+        import zipfile
+        with zipfile.ZipFile(tmp) as z:
+            entries = len(z.namelist())
+    except Exception as e:                                  # noqa: BLE001
+        with open(tmp, 'rb') as f:
+            head = f.read(64)
+        return {'error': '这不是一个 zip（开头是 %r，%s）—— 是不是选错了'
+                         '文件？坏的那份留在 %s。'
+                         % (head[:4], type(e).__name__, tmp)}
+    os.replace(tmp, dst)
+    return {'ok': True, 'size': got, 'mb': round(got / 1e6, 1),
+            'entries': entries, 'dst': dst}
+
+
 def api_setup(_q):
     """GET /api/setup —— 现在有什么数据、还差哪几步。
 

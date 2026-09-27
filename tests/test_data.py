@@ -6345,6 +6345,35 @@ def t_bootstrap_zip_guard():
         out.append('反爬 JS 校验单独认出来并给出路；普通拦截页仍走原句；'
                    'UA 不是 curl/8')
 
+        # ── ⑥ 抓数程序【自己崩了】要说出来，不是一句"退出码 2" ────────
+        #   🔴 2026-09-27 真机：`tdx2db.exe init` 吐了几十行 Go runtime 栈
+        #     （`fatal error: fault` / `signal 0xc0000006`），而我们只打
+        #     「✗ 退出码 2」—— 人看不出那是**第三方二进制自己挂了**，
+        #     会去查自己的数据（同「报错必须指向真正的原因」）。
+        TAIL = ['unexpected fault address 0x7ff7db012d40',
+                'fatal error: fault',
+                '[signal 0xc0000006 code=0x0 addr=0x7ff7db012d40]',
+                'goroutine 1 gp=0xc0000021c0 m=0 [running]:',
+                'github.com/duckdb/duckdb-go/v2.NewConnector(...)']
+        why = st._why_failed([r'X:\a\tdx2db.exe', 'init'], 2, TAIL)
+        for kw in ('自己崩了', '0xc0000006', '网络盘', '杀毒', '--install --force',
+                   'version'):
+            assert kw in why, '崩溃诊断里没说 %r：%s' % (kw, why)
+        assert '**' not in why, '终端文案里有 markdown 星号'
+        # ★ 反向自证：**普通**的非零退出仍然只说退出码 —— 否则"一律当崩溃"
+        #   会把"磁盘满了"这种也说成二进制有问题（判据两头夹）。
+        plain = st._why_failed(['x'], 3, ['error: 磁盘满了'])
+        assert plain.strip() == '✗ 退出码 3', plain
+        # 🔴 stderr 要【边跑边出】，不能攒到最后 —— init 要十几分钟
+        _rs = io.open(st.__file__, encoding='utf-8').read()
+        _rb = _rs[_rs.index('def _run('):]
+        _rb = _rb[:_rb.index('\ndef ')]
+        assert 'Popen' in _rb and 'for ln in p.stderr' in _rb, \
+            '_run 又退回 subprocess.run 了 —— 那样 Go 栈一个字都留不下来'
+        assert 'flush()' in _rb, 'stderr 没逐行 flush，十几分钟里屏幕是空的'
+        out.append('抓数程序崩溃能认出来（0xc0000006 给三条原因 + 自查命令）；'
+                   '普通非零退出仍只说退出码')
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)

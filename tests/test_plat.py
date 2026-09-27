@@ -1247,13 +1247,19 @@ def t_err500_log():
                                   type_ignores=[]))
         if "'_err_500'" in seg:
             n_err500 += 1
+        else:
+            # 🔴 判据从「恰好 2 处」改成「**每一个** 500 出口都走 _err_500」
+            #   —— 写死个数的话，加一个出口就打挂断言，而**失败的是断言
+            #   不是产品**（2026-09-27 加 /api/setup/vipdoc 时踩到）；
+            #   反过来漏掉新出口也不报错。按结构判，加多少个都不用手改。
+            bad.append(('没走 _err_500', nd.lineno))
         if "'_explain_err'" in seg:
-            bad.append(nd.lineno)
-    assert n_err500 == 2, (
-        'do_GET / do_POST 两个 500 出口都该走 _err_500，实际 %d 处' % n_err500)
+            bad.append(('绕开出口自己翻译', nd.lineno))
+    assert n_err500 >= 2, (
+        'do_GET / do_POST 的 500 出口少了：只有 %d 处走 _err_500' % n_err500)
     assert not bad, (
-        'server.py:%s 的 _send(500, …) 里直接用了 _explain_err —— 那是绕开出口'
-        '自己翻译，于是日志那半又回到无条件打栈' % bad)
+        'server.py 的 _send(500, …) 有出口没走 _err_500（或绕开它自己'
+        '翻译）—— 于是日志那半又回到无条件打栈：%s' % bad)
 
     return ('no_data 一行不打栈；同条不重复、换路由/换文件仍要说；'
             '真 bug 仍打完整栈且原样透传；两个 500 出口都走 _err_500')

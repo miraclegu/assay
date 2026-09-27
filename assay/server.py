@@ -159,6 +159,17 @@ class Handler(BaseHTTPRequestHandler):
         # ★ 上传走【原始字节】分支：几十 MB 的包不该先变成 base64 再
         #   json.loads（多传 33% + 整包再复制一遍）。所以它不能和下面的
         #   JSON 解析共用一条路。
+        # 🔴 **全量日线包单开一条流式分支** —— 它是 548 MB，走下面那条
+        #   `rfile.read(n)` 会整块进内存（聚宽那个几十 MB 才没事）。
+        #   handler 自己边读边写 `.part`，验过是 zip 才 rename。
+        if u.path == '/api/setup/vipdoc':
+            try:
+                n = int(self.headers.get('Content-Length') or 0)
+                r = sync.api_setup_vipdoc(self.headers, self.rfile, n)
+            except Exception as e:                          # noqa: BLE001
+                return self._send(500, _err_500(u.path, e))
+            return self._send(200, json.dumps(r, ensure_ascii=False,
+                                              default=str))
         if u.path == '/api/sync/jq_upload':
             try:
                 n = int(self.headers.get('Content-Length') or 0)
@@ -173,11 +184,11 @@ class Handler(BaseHTTPRequestHandler):
                 raw = self.rfile.read(n)
                 r = sync.api_sync_jq_upload(self.headers, raw)
             except Exception as e:                          # noqa: BLE001
-                import traceback
-                traceback.print_exc()
-                return self._send(500, json.dumps(
-                    {'error': '%s: %s' % (type(e).__name__, e)},
-                    ensure_ascii=False))
+                # ★ 并进 `_err_500` 这个唯一出口 —— 上传失败是**真异常**，
+                #   而 `_err_500` 对真异常本来就打完整栈：行为与原来那句
+                #   `traceback.print_exc()` 一模一样，却少了一处要记得
+                #   同步的分叉（同「一件事只许有一份实现」）。
+                return self._send(500, _err_500(u.path, e))
             return self._send(200, json.dumps(r, ensure_ascii=False, default=str))
         fn = POSTS.get(u.path)
         if fn is None:
