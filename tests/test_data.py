@@ -6356,9 +6356,20 @@ def t_bootstrap_zip_guard():
                 'goroutine 1 gp=0xc0000021c0 m=0 [running]:',
                 'github.com/duckdb/duckdb-go/v2.NewConnector(...)']
         why = st._why_failed([r'X:\a\tdx2db.exe', 'init'], 2, TAIL)
-        for kw in ('自己崩了', '0xc0000006', '网络盘', '杀毒', '--install --force',
-                   'version'):
+        for kw in ('自己崩了', '0xc0000006', '分页文件', '网络盘', '杀毒',
+                   '--install --force', 'version'):
             assert kw in why, '崩溃诊断里没说 %r：%s' % (kw, why)
+        # 🔴 **分页文件要排第一**：崩的是映像里的脏数据页，它的后备存储
+        #   就是分页文件（默认在系统盘）。上一版把"exe 在网络盘"排第一，
+        #   于是建议人搬数据 —— 而那台机器恰恰是系统盘满、数据盘很空
+        #   （用户原话：「一定要在 c 盘跑？c 盘空间不够」）。
+        assert why.index('分页文件') < why.index('网络盘'), \
+            '原因顺序不对：分页文件那条要排在盘那条前面'
+        assert '数据不用动' in why, '没说清"不用搬数据"'
+        # 🔴 光给原因不够 —— 要把【这台机器现在什么样】一起打出来，
+        #   否则人得手敲一串 PowerShell 才判得了是哪一条（同「充分日志」）。
+        assert '这台机器现在是这样' in why and 'GB' in why, \
+            '崩的时候没把盘余量/分页文件这些事实打出来：%s' % why
         assert '**' not in why, '终端文案里有 markdown 星号'
         # ★ 反向自证：**普通**的非零退出仍然只说退出码 —— 否则"一律当崩溃"
         #   会把"磁盘满了"这种也说成二进制有问题（判据两头夹）。
