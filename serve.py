@@ -77,7 +77,10 @@ try:
     if _dlroot not in _sys.path:
         _sys.path.insert(0, _dlroot)
     import logs as _dllogs                                   # noqa: E402
-    _daylog, _ = _dllogs.tee_stdio(_dllogs.KIND_DAILY, _dlroot, 'serve')
+    # ★ 看板单独一个文件（`web-<天>.log`）—— 原来它和同步链、信号重算
+    #   混在 `daily` 里，而「看板报了个错」与「昨晚同步失败了」是两件
+    #   不同的事，混在一起查哪一件都要先把另一件滤掉。
+    _daylog, _ = _dllogs.tee_stdio(_dllogs.KIND_WEB, _dlroot, 'web')
 except Exception as _e:                                      # noqa: BLE001
     # 🔴 不许静默：日志没接上时，人事后翻不到任何东西，而屏幕上一切正常
     #   （同「保护分支不该静默跳过」）。这里不抛 —— 日志坏了不该让看板起不来。

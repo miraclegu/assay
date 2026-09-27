@@ -6500,10 +6500,44 @@ def t_day_logs():
         '按天日志的正本不止一处（或搬走了）：%s' % hits
 
     # ── B 整轮重定向真的生效（守卫不许写生产日志）────────────────
-    prod = os.path.join(DL, '_manifest', 'logs')
-    assert not lg.day_dir(DL).startswith(prod), \
-        '🔴 按天日志没被重定向，守卫会写进生产目录 %s' % prod
-    prod_n0 = len(os.listdir(prod)) if os.path.isdir(prod) else -1
+    import paths as _dlp                                     # noqa: E402
+    prod = _dlp.LOGS
+    for _k in (lg.KIND_SETUP, lg.KIND_DAILY, lg.KIND_WEB):
+        assert not lg.day_dir(_k, DL).startswith(prod), \
+            '🔴 按天日志（%s）没被重定向，守卫会写进生产目录 %s' % (_k, prod)
+    # 🔴 `runs/`（某一次跑的明细）也要跟着重定向 —— 它曾经是模块级常量
+    #   `LOGDIR = paths.RUNS_LOGS`，于是自检真的往生产目录塞文件，
+    #   而那不报错（同 `ASSAY_RUNS` / `lv.LIVE` / `progress.DIR` 那套）。
+    assert not lg.runs_dir().startswith(prod), \
+        '🔴 runs 日志没被重定向，守卫会写进生产目录 %s' % prod
+
+    def _prod_snap():
+        n = 0
+        for _r, _ds, _fs in os.walk(prod):
+            n += len([f for f in _fs if f.endswith('.log')])
+        return n if os.path.isdir(prod) else -1
+    prod_n0 = _prod_snap()
+
+    # ── B2 每一类各占一个目录（用户 2026-09-27 定）────────────────
+    #   平铺时三类按天的文件与「那一次跑」的明细混在一个目录里，
+    #   找"今天同步说了什么"要先在一堆文件名里挑。
+    _dirs = {}
+    for _k in (lg.KIND_SETUP, lg.KIND_DAILY, lg.KIND_WEB):
+        _d = lg.day_dir(_k, DL)
+        assert os.path.basename(_d) == _k, \
+            '🔴 %s 的日志目录不是它自己那一个：%s' % (_k, _d)
+        _dirs[_k] = _d
+    assert len(set(_dirs.values())) == 3, \
+        '🔴 三类按天日志挤在同一个目录里：%s' % sorted(set(_dirs.values()))
+    assert lg.runs_dir() not in _dirs.values(), \
+        '🔴 「那一次跑」的明细与按天日志同目录：%s' % lg.runs_dir()
+    # ★ 文件名仍带类型前缀 —— 拷一份出来单看时还认得出它是谁。
+    for _k, _d in _dirs.items():
+        _f = os.path.basename(lg.day_path(_k, DL))
+        assert _f.startswith(_k + '-') and _f.endswith('.log'), \
+            '🔴 %s 的日志文件名认不出类型：%s' % (_k, _f)
+        assert os.path.dirname(lg.day_path(_k, DL)) == _d, \
+            '🔴 %s 的文件没落在自己那个目录里' % _k
 
     # ── C 行为：按天切 / 连续重复折叠 / 进度行不落盘 ─────────────
     td = tempfile.mkdtemp(prefix='assay_dlg_')
@@ -6533,8 +6567,11 @@ def t_day_logs():
         _FakeDT.now_val = _dt.datetime(2026, 3, 2, 10, 0, 0)   # 跨午夜
         d.line('第二天')
         d.close()
-        f1 = os.path.join(lg.DIR, 'daily-2026-03-01.log')
-        f2 = os.path.join(lg.DIR, 'daily-2026-03-02.log')
+        # ★ 目录走 `day_dir`（每类一个子目录，结构由 B2 段独立钉），
+        #   文件名自己拼 —— 全用 `day_path` 的话就是拿被测对象当期望。
+        _dd = lg.day_dir('daily', td)
+        f1 = os.path.join(_dd, 'daily-2026-03-01.log')
+        f2 = os.path.join(_dd, 'daily-2026-03-02.log')
         assert os.path.isfile(f1) and os.path.isfile(f2), \
             '🔴 跨午夜没换文件 —— 长跑的 serve.py 会把几天写进同一个文件'
         t1 = io.open(f1, encoding='utf-8').read()
@@ -6567,16 +6604,19 @@ def t_day_logs():
 
         # ── E 清理按天 ───────────────────────────────────────────
         lg.DIR = os.path.join(td, 'P')
-        os.makedirs(lg.DIR)
         now = _dt.datetime(2026, 3, 40 - 9)          # 2026-03-31
         for k in ('daily', 'setup'):
             for day in (1, 2, 3, 28, 29, 30, 31):
-                p = os.path.join(lg.DIR, '%s-2026-03-%02d.log' % (k, day))
+                _kd = lg.day_dir(k)
+                os.makedirs(_kd, exist_ok=True)
+                p = os.path.join(_kd, '%s-2026-03-%02d.log' % (k, day))
                 io.open(p, 'w', encoding='utf-8').write('x\n')
                 os.utime(p, (0, _dt.datetime(2026, 3, day).timestamp()))
         n = lg.prune_day_logs(td, days=7, now=now)
         assert isinstance(n, int), 'prune_day_logs 返回的不是个数：%r' % n
-        left = sorted(os.listdir(lg.DIR))
+        left = sorted(f for k in (lg.KIND_SETUP, lg.KIND_DAILY, lg.KIND_WEB)
+                      if os.path.isdir(lg.day_dir(k))
+                      for f in os.listdir(lg.day_dir(k)))
         assert not [x for x in left if '-03-01' in x or '-03-02' in x], \
             '7 天之外的没清掉：%s' % left
         assert [x for x in left if '-03-31' in x], '把最近的也清了：%s' % left
@@ -6591,22 +6631,34 @@ def t_day_logs():
     try:
         env = dict(os.environ, ASSAY_LOG_DIR=td2)
         day = _dt.date.today().strftime('%Y-%m-%d')
-        DAILY = os.path.join(td2, 'daily-%s.log' % day)
-        for who, cmd in (('serve', [sys.executable, os.path.join(REPO, 'serve.py'),
-                                    '--status']),
-                         ('tick', [sys.executable, os.path.join(REPO, 'tick_daily.py'),
-                                   '--dry']),
-                         ('sync', [sys.executable, os.path.join(DL, 'sync_daily.py'),
-                                   '--if-stale'])):
+
+        def _kf(kind):
+            return os.path.join(td2, kind, '%s-%s.log' % (kind, day))
+        # ★ `serve` 归【web】那一类，`sync`/`tick` 归【daily】—— 看板是长跑的、
+        #   每天都在说话，与"今天同步干了什么"混在一起会把后者淹掉。
+        for who, kind, cmd in (
+                ('web', lg.KIND_WEB,
+                 [sys.executable, os.path.join(REPO, 'serve.py'), '--status']),
+                ('tick', lg.KIND_DAILY,
+                 [sys.executable, os.path.join(REPO, 'tick_daily.py'), '--dry']),
+                ('sync', lg.KIND_DAILY,
+                 [sys.executable, os.path.join(DL, 'sync_daily.py'), '--if-stale'])):
             r = subprocess.run(cmd, capture_output=True, text=True, env=env,
                                encoding='utf-8', errors='replace', timeout=180)
-            got = io.open(DAILY, encoding='utf-8').read() if os.path.isfile(DAILY) else ''
+            f = _kf(kind)
+            got = io.open(f, encoding='utf-8').read() if os.path.isfile(f) else ''
             assert ('[%s]' % who) in got, \
-                '🔴 %s 的输出没进按天日志 —— 它在别的机器上出了错就查无对证。' \
-                '文件 %s；它自己打的是 %r' % (who, DAILY, (r.stdout or '')[-300:])
+                '🔴 %s 的输出没进【%s】那一类的按天日志 —— 它在别的机器上' \
+                '出了错就查无对证。文件 %s；它自己打的是 %r' \
+                % (who, kind, f, (r.stdout or '')[-300:])
             # tee 不是重定向：终端（这里是被捕获的 stdout）照样要有东西
             assert (r.stdout or '').strip(), \
                 '🔴 %s 变成了重定向 —— 前台跑时屏幕上什么都看不见' % who
+        # 🔴 看板不许混进 daily —— 混了的话「今天同步说了什么」会被
+        #   serve.py 每天几百行冲掉（同「天天报的告警等于没有告警」）。
+        _dly = _kf(lg.KIND_DAILY)
+        _t = io.open(_dly, encoding='utf-8').read() if os.path.isfile(_dly) else ''
+        assert '[web]' not in _t, '🔴 看板的输出混进了 daily 那一类'
     finally:
         shutil.rmtree(td2, ignore_errors=True)
 
@@ -6640,12 +6692,12 @@ def t_day_logs():
         '时候走的就是那条路，接在后面等于最常走的那条一个字都不落盘。' \
         'tee@%s if_stale@%s' % (tee2, early)
 
-    prod_n = len(os.listdir(prod)) if os.path.isdir(prod) else -1
+    prod_n = _prod_snap()
     assert prod_n == prod_n0, \
-        '🔴 守卫往生产的按天日志里写了东西：%d -> %d' % (prod_n0, prod_n)
+        '🔴 守卫往生产日志目录里写了东西：%d -> %d 个 .log' % (prod_n0, prod_n)
     return ('正本 1 处（datalake/logs.py）；跨午夜换文件、重复行折叠、'
             '进度行不落盘、写不进去返 False；按天清 7 天外的、留最近的；'
-            'serve/tick/sync 三条真起子进程验过输出进了 daily 且屏幕仍有；'
+            '每类各占一个目录（setup/daily/web + runs）；serve/tick/sync 三条真起子进程验过：看板进 web、另两条进 daily、屏幕仍有；'
             'serve 接在重依赖 import 之前、sync 接在 --if-stale 之前')
 
 

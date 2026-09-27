@@ -148,7 +148,10 @@ def main():
             sys.path.insert(0, _dl)
         import logs as _logs                                  # noqa: E402
         import paths as _dlpaths                              # noqa: E402
-        for _p in _dlpaths.launchd_logs('tick'):
+        # ★ 连**搬家之前**那一对一起裁：plist 里写的还是旧路径，要等人
+        #   重装定时器才会变 —— 在那之前只裁新的等于没裁，旧的又会无限涨。
+        for _p in (_dlpaths.launchd_logs('tick')
+                   + _dlpaths.launchd_logs_legacy('tick')):
             _logs.trim_by_days(_p, days=30)
         _logs.prune_day_logs(_dl, days=30)
     except Exception as _e:                                   # noqa: BLE001

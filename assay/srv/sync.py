@@ -446,7 +446,7 @@ _LOG_RE = re.compile(
 
 def api_sync_log(q):
     """GET /api/sync/log?name=... —— ★ 只接受 8位日期-6位时间.log 这个形状，
-    且只在 _manifest/sync_logs 下找。文件名来自 URL，不能直接 join。"""
+    且只在 `logs/runs/` 下找。文件名来自 URL，不能直接 join。"""
     name = (q.get('name') or '').strip()
     if not _LOG_RE.match(name):
         return {'error': '日志名格式不对：%r' % name}
@@ -636,7 +636,7 @@ def api_setup_run(_q, body):
         if not [x for x in auto if x['state'] == 'todo']:
             return {'error': '本地数据已经齐了 —— 没有要建的步骤。'}
         job_id = 'setup-all-%s' % datetime.now().strftime('%H%M%S')
-        # ★ 落盘复用 `_manifest/sync_logs/`：那一套已经有列表（api_sync 的
+        # ★ 落盘复用 `logs/runs/`：那一套已经有列表（api_sync 的
         #   logs）、有防穿越的读取（api_synclog）、也已经被 logs.trim_by_days
         #   按天清理。另造一个目录就是第二份实现（先查有没有，再决定写不写）。
         log_path = _setup_log_path(
@@ -783,20 +783,28 @@ def _sync_log_dir():
     重定向到临时目录之后，读那边照旧去生产目录找，报「日志不存在」。
     **两处实现必然分叉**，这次分叉是当场造出来的。
 
-    复用 `_manifest/sync_logs/`：那一套已经有列表、有防穿越的读取、
+    复用 `logs/runs/`：那一套已经有列表、有防穿越的读取、
     也已经被 logs.trim_by_days 按天清理（先查有没有，再决定写不写）。
     ★ 抽成函数还有一个用处：守卫要把它重定向到临时目录，而**打桩整个
       datalake 根会误伤** —— `/api/sync` 也读那个根，一指到空目录它就报错，
       页面于是走进"状态读取失败"那条分支（实测踩过，查了一轮）。
     """
-    return os.path.join(_datalake_dir(), '_manifest', 'sync_logs')
+    # 🔴 正本在 `datalake/logs.py` 的 `runs_dir()` —— 日志全都挪到了两个
+    #   仓库的同级 `finacial/logs/`，每类一个目录（用户：每次找日志都很难找）。
+    #   走 `logs.runs_dir()` 而不是 `paths.RUNS_LOGS`，是为了跟着
+    #   `ASSAY_LOG_DIR` 一起重定向（守卫不许写生产日志）。
+    dl = _datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    import logs as _dllogs                                  # noqa: E402
+    return _dllogs.runs_dir()
 
 
 def _day_setup():
     """建本地数据那条链的【按天】日志 —— 拿不到就返回 None（不许把装配搞挂）。
 
     🔴 **只进骨架**（哪一步开始 / rc / 用时 / 失败时的尾部 + 指到明细文件），
-      不是每一行。每步的完整输出仍然写 `sync_logs/setup-<阶段>-<时间戳>.log`
+      不是每一行。每步的完整输出仍然写 `logs/runs/setup-<阶段>-<时间戳>.log`
       —— 数据页上「看完整日志」点的就是它。两者分工与同步链那边一样：
 
           setup-<天>.log       今天这台机器建数据都跑了什么、成没成

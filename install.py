@@ -69,7 +69,25 @@ OK, BAD, WARN = '  ✓ ', '  ✗ ', '  ⚠ '
 
 # 窗口关掉之后还看得到。🔴 环境变量可覆盖 —— 守卫要验「结论落盘了没有」
 #   而又不许写生产目录（同 `lv.LIVE` / `progress.DIR` 那套重定向）
-LOG = os.environ.get('ASSAY_INSTALL_LOG') or os.path.join(HERE, 'install.log')
+def _log_path():
+    """装机日志 —— 与别的日志放在一起（`finacial/logs/install.log`）。
+
+    ★ 取不到 datalake 那个正本就退回 `assay/install.log`：这个脚本要在
+      **什么都还没有**的机器上跑，不能因为找不到一个目录就写不出日志
+      —— 而那恰恰是最需要日志的时候。
+    """
+    env = os.environ.get('ASSAY_INSTALL_LOG')
+    if env:
+        return env
+    try:
+        sys.path.insert(0, DL)
+        import paths as _p                                    # noqa: E402
+        return _p.INSTALL_LOG
+    except Exception:                                         # noqa: BLE001
+        return os.path.join(HERE, 'install.log')
+
+
+LOG = _log_path()
 _LOGF = None
 
 
@@ -87,6 +105,12 @@ def _logopen():
     """
     global _LOGF
     try:
+        # 🔴 目录不存在时 `io.open` 直接抛，而下面那个 except 会**静默**退回
+        #   "只打屏幕" —— 日志文件从此永远不生成，且一个字都不报。
+        #   每类日志各占一个目录之后（logs/install/），这一句不能省。
+        d = os.path.dirname(LOG)
+        if d:
+            os.makedirs(d, exist_ok=True)
         _LOGF = io.open(LOG, 'w', encoding='utf-8', errors='replace')
         _LOGF.write('# %s  %s\n' % (
             datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
