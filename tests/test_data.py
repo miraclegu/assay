@@ -6385,6 +6385,74 @@ def t_bootstrap_zip_guard():
         out.append('抓数程序崩溃能认出来（0xc0000006 给三条原因 + 自查命令）；'
                    '普通非零退出仍只说退出码')
 
+        # ── ⑦ 【我们下的可以删，人放的不许删】────────────────────
+        #   🔴 真机 2026-09-27：那个 URL 被 CDN 反爬挡住，用户用浏览器
+        #     手工下了 551 MB 放进来 —— 解包成功之后我们**把它删了**
+        #     （`if not keep_zip: os.remove(zp)`，而阶段命令没带
+        #     `--keep-zip`），下一次跑又去下、又被挡。
+        #     删一个自己没创建的文件本来就不对，这里的代价还是"再下 548 MB"。
+        import zipfile as _zf2
+
+        def _mkzip(d, n=2000):
+            """要 > 1 MB，否则 `_zip_ready` 判成残骸、根本走不到那个分支"""
+            zp = os.path.join(d, 'hsjday.zip')
+            with _zf2.ZipFile(zp, 'w', _zf2.ZIP_STORED) as f:
+                for i in range(n):
+                    f.writestr('sh/lday/sh%06d.day' % i, b'x' * 700)
+            return zp
+
+        def _boot(downloaded):
+            d = tempfile.mkdtemp(prefix='assay_kz_')
+            st.TDX, st.VIPDOC = d, os.path.join(d, 'vipdoc')
+            st.DB = os.path.join(d, 'tdx.db')
+            zp = _mkzip(d)
+            if downloaded:
+                # 造"我们自己下的"那条路：先让判据说"不可用"，再由
+                # `_download` 把同一份放回去（downloaded 因此为 True）
+                body = io.open(zp, 'rb').read()
+                os.remove(zp)
+
+                def _dl(url, dst, expect=None, is_zip=False):
+                    io.open(dst, 'wb').write(body)
+                    return dst
+                st._download = _dl
+            else:
+                st._download = lambda *a, **k: (_ for _ in ()).throw(
+                    AssertionError('人放了包却还去下载'))
+
+            def _ex(z, dd):
+                for sub in ('sh', 'sz', 'bj'):
+                    os.makedirs(os.path.join(dd, sub, 'lday'), exist_ok=True)
+                    io.open(os.path.join(dd, sub, 'lday', 'a.day'),
+                            'wb').write(b'x')
+                return 3
+            st._extract_zip = _ex
+            st._bin_version = lambda: '1.2.3'
+            st._run = lambda *a, **k: (_ for _ in ()).throw(SystemExit('到此为止'))
+            _so2, _b2 = sys.stdout, io.StringIO()
+            try:
+                sys.stdout = _b2
+                try:
+                    st.bootstrap()
+                except SystemExit:
+                    pass
+            finally:
+                sys.stdout = _so2
+            alive = os.path.isfile(zp)
+            shutil.rmtree(d, ignore_errors=True)
+            return alive, _b2.getvalue()
+
+        alive, said = _boot(downloaded=False)
+        assert alive, ('🔴 把【人放进来的】包删了 —— 那台机器上再下一次'
+                       '就是又被反爬挡一次')
+        assert '不是我们下的' in said, '留着它却没说为什么：%s' % said[-200:]
+        # ★ 反向自证：**我们自己下的**那份仍然照删（否则每台机器白占 548 MB）
+        alive2, said2 = _boot(downloaded=True)
+        assert not alive2, '我们自己下的包也不删了 —— 白占 548 MB'
+        assert '删掉' in said2 and '--keep-zip' in said2, \
+            '删了没留痕、也没说怎么留住它：%s' % said2[-200:]
+        out.append('人放的包不许删（并说明原因）；我们下的照删且留痕')
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)
