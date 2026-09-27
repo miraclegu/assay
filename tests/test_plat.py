@@ -2367,7 +2367,12 @@ def t_serve_ctl():
     #     活性探测在 do_stop 里有两处（轮询 + 强杀后再确认），
     #     只查存在性时把轮询那处删掉照样全绿。
     #     （同 pruned 那条用例踩过的坑：字符串存在性检查抓不到"逻辑被绕过"。）
-    poll = body[body.index('while time.time()'):body.index('else:')]
+    #   🔴 `else:` 要【从 while 之后】再找 —— 取「文件里第一个」的话，
+    #     函数前半段任何一个 if/else（2026-09-27 加的「取不到命令行」
+    #     那支就是）都会把锚点抢走，切出【空串】，于是这条断言必然
+    #     失败 —— 而失败的是断言不是产品（实测踩到）。
+    _i = body.index('while time.time()')
+    poll = body[_i:body.index('else:', _i)]
     assert '_alive(pid)' in poll, \
         'do_stop 的轮询里没有确认进程退出 —— 「发了信号」不等于「停了」'
     kill9 = body.split('SIGKILL')[-1]

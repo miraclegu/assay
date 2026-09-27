@@ -6186,6 +6186,51 @@ def t_bootstrap_zip_guard():
         out.append('拦截页（200+长度对得上）当场拒绝、不占正名、留证据、'
                    '说清收到了什么；真 zip 照常落地')
 
+        # ── ⑤ 反爬 JS 校验要【单独认出来】，别说成"你的网络问题" ────
+        #   🔴 2026-09-27 真机第三轮：正文是一段混淆 JS（`EO_Bot_Ssid`，
+        #     腾讯云 EdgeOne 的 Bot 管理）。上一版把它归进「多半是网关/
+        #     代理的拦截页」，用户照着去查网络 —— 而那与他的网络无关，
+        #     是对方 CDN 把脚本挡了，浏览器能过、脚本过不去。
+        #     （同「报错必须指向真正的原因」。）
+        BOT = (b'<script>function a(a){var _0x649a=1;'
+               b't+="EO_Bot_Ssid=";}</script>')
+        srv3, url3 = _serve_once(BOT, 'text/html')
+        p3 = os.path.join(td, 'bot_probe.zip')
+        _so, _buf = sys.stdout, io.StringIO()
+        try:
+            sys.stdout = _buf
+            try:
+                st._download(url3, p3, is_zip=True)
+                raised3 = ''
+            except SystemExit as e:
+                raised3 = str(e)
+        finally:
+            sys.stdout = _so
+            srv3.shutdown()
+        assert '反爬' in raised3 and '不是你的网络问题' in raised3, (
+            '🔴 反爬 JS 校验没被单独认出来 —— 报成"网关/代理拦截"会'
+            '把人引到网络上去查：%s' % raised3)
+        assert '用浏览器打开' in raised3, '没给"浏览器下好放过来"这条出路'
+        assert '**' not in raised3, '终端文案里有 markdown 星号（渲染不了）'
+        assert not os.path.isfile(p3), '反爬页却占了正名'
+        os.remove(p3 + '.part')
+
+        # ★ 反向自证：**普通**的 HTML 拦截页仍然走原来那句（否则"一律说
+        #   反爬"也能让上面通过，而那对真被公司网关挡住的人是误导）。
+        assert '反爬' not in raised, \
+            '普通拦截页也被说成反爬了：%s' % raised
+
+        # 🔴 UA 不许再是 `curl/8` —— 那是一眼可见的机器人签名，正是被
+        #   Bot 管理挑中的原因（改不改得过去没法在本机验，但这条能钉住
+        #   "别再退回去"）。
+        _src = io.open(st.__file__, encoding='utf-8').read()
+        _dl_src = _src[_src.index('def _download'):_src.index('def _check_zip')]
+        assert "'curl/8'" not in _dl_src, \
+            '下日线包又退回 curl/8 那个机器人 UA 了'
+        assert 'Mozilla/5.0' in _src, '没有正常浏览器 UA'
+        out.append('反爬 JS 校验单独认出来并给出路；普通拦截页仍走原句；'
+                   'UA 不是 curl/8')
+
     finally:
         shutil.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)

@@ -258,7 +258,7 @@ def do_stop(port, wait=10.0):
         print('   PID %-7s %s'
               % (pid, cmd if len(cmd) <= 88 else '…' + cmd[-87:]))
     for pid, _ in unknown:
-        print('🔴 端口 %d 上有 PID %s，但**取不到它的命令行**，'
+        print('🔴 端口 %d 上有 PID %s，但【取不到它的命令行】，'
               '无法确认是不是我们的看板 —— 不动它。' % (port, pid))
         if platform.system() == 'Windows':
             print('   多半是 wmic 被移除了（Win11 24H2 起）而 PowerShell '
