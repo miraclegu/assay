@@ -6579,3 +6579,75 @@ def t_day_logs():
             '进度行不落盘、写不进去返 False；按天清 7 天外的、留最近的；'
             'serve/tick/sync 三条真起子进程验过输出进了 daily 且屏幕仍有；'
             'serve 接在重依赖 import 之前、sync 接在 --if-stale 之前')
+
+
+@case('装机复查被【系统杀掉】时要点名 —— 不是一对空括号', tag='fast')
+def t_install_recheck_kill():
+    """用户 2026-09-27：「改完后 start 都起不来了」，日志里只有
+
+        ✗ 装完仍然 import 不到：(解释器报错: )
+
+    —— 空括号。查下来是 `importable()` 里那一行把**退出码吞了**：
+
+        return False, ['(解释器报错: %s)' % (r.stderr or '').strip()[-160:]]
+
+    而真机上 stderr 本来就是空的（非 0 退出 + 什么都不打 = 进程被系统
+    直接杀掉，与同一台机器上 tdx2db 崩的 `0xc0000006` 是同一种）。
+    **那个退出码就是唯一的证据**，而它没被打出来。
+    ★ 顺带：`install.py` 自 14:08 起一个字没改，14:09 那次成功用的就是
+      这份代码 —— 所以这不是"改坏了"，是机器变了而我们说不出发生了什么。
+    """
+    import importlib.util
+    import stat as _stat
+    sp = importlib.util.spec_from_file_location(
+        'ins_probe', os.path.join(REPO, 'install.py'))
+    ins = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(ins)
+
+    # ① 退出码要翻成人话（Windows 上进程被杀就只剩这个码）
+    for rc, kw in ((-1073741819, 'ACCESS_VIOLATION'),
+                   (-1073741510, '0xC000013A'),
+                   (-1073741515, 'DLL_NOT_FOUND'),
+                   (1, 'rc=1')):
+        got = ins._rc_why(rc)
+        assert kw in got, '退出码 %d 没翻对：%s' % (rc, got)
+    # 🔴 与 tdx2db 那次同一个码，必须指到同一个方向（系统盘/分页文件）
+    assert '分页文件' in ins._rc_why(-1073741818), ins._rc_why(-1073741818)
+
+    td = tempfile.mkdtemp(prefix='assay_rc_')
+    try:
+        # ② 造一个"import numpy 就被系统杀掉"的解释器：非 0 退出 + 空 stderr
+        stub = os.path.join(td, 'python')
+        io.open(stub, 'w', encoding='utf-8').write(
+            '#!%s\nimport os, sys\ncode = sys.argv[-1]\n'
+            'if "numpy" in code:\n    os._exit(245)\n'
+            'sys.stdout.write("%s")\n' % (sys.executable, ins._SENT))
+        os.chmod(stub, os.stat(stub).st_mode | _stat.S_IEXEC)
+        ok, why = ins.importable(stub, ['duckdb', 'pandas', 'numpy', 'pyarrow'])
+        txt = '\n'.join(why)
+        assert not ok, '被杀掉的复查居然报"都在"'
+        assert 'rc=245' in txt, \
+            '🔴 退出码被吞了 —— 空 stderr 时它是唯一的证据：%s' % txt
+        assert '被系统直接杀掉' in txt, \
+            '没说清这不是 Python 报的错，于是人会去查 pip：%s' % txt
+        # 🔴 **要点名是哪个包**：一次 import 四个的话崩了只知道"崩了"，
+        #   而"numpy 的 DLL 坏了"与"系统盘满了"要做的事完全不同。
+        assert 'numpy ✗' in txt and 'duckdb ✓' in txt, '没逐个点名：%s' % txt
+        assert '**' not in txt, '终端文案里有 markdown 星号（渲染不了）'
+
+        # ③ ★ 反向自证：一切正常时不许误报，也不许留下噪声
+        ok2, why2 = ins.importable(sys.executable, ['sys', 'json'])
+        assert ok2 and not why2, '正常的复查被误报了：%r' % (why2,)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ④ 原因**不许猜死一个**：上一版无条件写「多半是装到了别的解释器上」，
+    #    而真机上根本不是（包都装着）—— 那句话把人引错了方向。
+    src = io.open(os.path.join(REPO, 'install.py'), encoding='utf-8').read()
+    seg = src[src.index("装完仍然 import 不到"):]
+    seg = seg[:seg.index('return 2')]
+    assert 'killed' in seg and '装到了别的解释器上' in seg, \
+        '装完仍 import 不到时，两种原因要分开说（被杀 vs 真没装上）'
+    return ('退出码翻成人话（含 0xC0000005/0135/0006 三个已知码）；'
+            '被系统杀掉时点名到具体的包并说清"不是 Python 报的错"；'
+            '正常时不误报；原因分两支不猜死一个')

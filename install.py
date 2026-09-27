@@ -179,6 +179,76 @@ _SENT = '<<assay-check-done>>'
 _SERVE_LOG_LINES = 400
 
 
+def _facts(py):
+    """这台机器现在什么样 —— 盘余量 / 分页文件。**正本在 setup_tdx**。
+
+    ★ 两处各写一份的话，哪天加一条（比如内存）只会有一边跟着变
+      （同「一件事只许有一份实现」）。取不到就安静退回空 ——
+      装机不该被一条诊断拖垮，而"为什么崩"上面已经说了。
+    """
+    try:
+        sys.path.insert(0, DL)
+        import setup_tdx as _st                             # noqa: E402
+        return _st._machine_facts([os.path.dirname(py) or '.', ROOT,
+                                   'C:\\' if os.name == 'nt' else '/'])
+    except Exception:                                       # noqa: BLE001
+        return []
+
+
+def _rc_why(rc):
+    """把退出码翻成人话 —— **空 stderr + 非 0 退出时，它是唯一的证据**。
+
+    🔴🔴 2026-09-27 真机：复查子进程非 0 退出而 stderr 是空的，屏幕上
+      只剩一对空括号 `(解释器报错: )` —— 人完全看不出发生了什么，
+      而**那个退出码本来就说明了一切**（被我吞了）。
+      Windows 上进程被系统杀掉时就是这样：什么都来不及打，
+      只留一个 0xCxxxxxxx 的码（同 tdx2db 那次 0xc0000006）。
+    """
+    if rc is None:
+        return 'rc=?'
+    if rc >= 0:
+        return 'rc=%d' % rc
+    u = rc & 0xFFFFFFFF
+    NT = {
+        0xC0000005: 'ACCESS_VIOLATION —— 多半是某个扩展模块的 DLL 崩了',
+        0xC0000006: 'IN_PAGE_ERROR —— 读不回内存页：系统盘快满 / 分页文件'
+                    '不够 / 那个盘有 I/O 错误（与 tdx2db 崩的是同一种）',
+        0xC0000135: 'DLL_NOT_FOUND —— 缺运行库（常见：VC++ 运行时）',
+        0xC0000409: 'STACK_BUFFER_OVERRUN',
+        0xC000007B: 'INVALID_IMAGE_FORMAT —— 32/64 位不匹配',
+        0xC00000FD: 'STACK_OVERFLOW',
+    }
+    return 'rc=%d (0x%08X%s)' % (rc, u, ('：' + NT[u]) if u in NT else '')
+
+
+def _blame_one(py, pkgs):
+    """**逐个包**再试一遍 —— 哪个把解释器搞崩了，得点名。
+
+    🔴 一次 import 四个包的话，进程一崩我们只知道"崩了"，不知道是谁。
+      而"numpy 的 DLL 装坏了"与"系统盘满了"要做的事完全不同。
+    ★ 只在批量那次失败之后才跑（四个子进程，平时不付这个钱）。
+    """
+    out = []
+    for p in pkgs:
+        try:
+            r = subprocess.run([py, '-c', 'import %s' % p],
+                               capture_output=True, text=True,
+                               encoding='utf-8', errors='replace',
+                               env=_kid_env(), timeout=300, cwd=HERE)
+        except (OSError, subprocess.SubprocessError) as e:
+            out.append('%s 跑不起来：%s' % (p, e))
+            continue
+        if r.returncode == 0:
+            out.append('%s ✓' % p)
+        else:
+            tail = (r.stderr or '').strip().splitlines()
+            out.append('%s ✗ %s%s' % (
+                p, _rc_why(r.returncode),
+                ('  ' + tail[-1][:100]) if tail else '（stderr 全空 —— '
+                '进程是被系统直接杀掉的，不是 Python 报的错）'))
+    return out
+
+
 def _kid_env():
     """给"要读它输出"的子进程用的 env —— **两头都钉成 UTF-8**。
 
@@ -359,7 +429,18 @@ def importable(py, pkgs):
     except (OSError, subprocess.SubprocessError) as e:
         return False, ['(跑不起来: %s)' % e]
     if r.returncode != 0:
-        return False, ['(解释器报错: %s)' % (r.stderr or '').strip()[-160:]]
+        # 🔴 **退出码一定要带上**：空 stderr + 非 0 退出是"进程被系统
+        #   杀掉"的签名，而那个码就是唯一的证据（上一版把它吞了，
+        #   屏幕上只剩一对空括号）。再逐个包试一遍，点名是谁。
+        err = (r.stderr or '').strip()
+        why = ['复查子进程没跑完：%s' % _rc_why(r.returncode)]
+        if err:
+            why.append('stderr 末尾：%s' % err[-160:])
+        else:
+            why.append('stderr 全空 —— 它不是 Python 报的错，'
+                       '是进程被系统直接杀掉了')
+        why += ['逐个再试：'] + ['  ' + x for x in _blame_one(py, pkgs)]
+        return False, why
     out = r.stdout or ''
     if _SENT not in out:
         # 读不到哨兵 = 这次复查**没有结论**，不是"没有缺的"。
@@ -500,10 +581,29 @@ def _run():
         # 🔴 **不看 r.returncode 就下结论** —— 见文件头第 2 条
         have, miss = importable(py, pkgs)
         if not have:
-            say(BAD + '装完仍然 import 不到：%s' % ' '.join(miss))
-            say('     pip 返回 %d，但判据是"现在 import 得到吗" —— '
-                '多半是装到了别的解释器上，或者 wheel 与本机架构不符'
-                % rc)
+            # 🔴 **逐行打，不要 join 成一行**：`miss` 现在可能是一段诊断
+            #   （退出码 + 逐个包的结果），挤成一行就没人读得下去。
+            say(BAD + '装完仍然 import 不到：')
+            for _m in miss:
+                say('     ' + _m)
+            # 🔴 **原因不要猜死一个。** 上一版无条件写「多半是装到了别的
+            #   解释器上，或 wheel 与架构不符」—— 而真机上是**进程被系统
+            #   杀掉**（stderr 全空、非 0 退出），那句话把人引错了方向
+            #   （同「报错必须指向真正的原因」）。
+            killed = any('被系统直接杀掉' in x or '0xC000' in x.upper()
+                         for x in miss)
+            if killed:
+                say('     pip 返回 %d，包也都装着 —— 问题不在"装没装上"，'
+                    '在于【这台机器跑不起来那个解释器】。' % rc)
+                for _f in _facts(py):
+                    say('     ' + _f)
+                say('     常见就三条：系统盘快满 / 分页文件不够（数据不用动，'
+                    '清空间或把分页文件挪到别的盘）；杀毒软件拦了；'
+                    '那个盘有 I/O 错误。')
+            else:
+                say('     pip 返回 %d，但判据是"现在 import 得到吗" —— '
+                    '多半是装到了别的解释器上，或者 wheel 与本机架构不符'
+                    % rc)
             say('     手工看一眼：%s -m pip -V' % py)
             return 2
         say(OK + '%d 个包装好并复查通过' % len(pkgs))
