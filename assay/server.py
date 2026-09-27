@@ -191,10 +191,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             r = fn({}, body)
         except Exception as e:                   # noqa: BLE001
-            import traceback
-            traceback.print_exc()
-            return self._send(500, json.dumps(_explain_err(e),
-                                              ensure_ascii=False))
+            return self._send(500, _err_500(u.path, e))
         # ★ default=str 与 GET 分支保持一致 —— POST 的返回里也可能带
         #   date/Timestamp（实盘持仓的建仓日就是），少这一个参数就是 500。
         return self._send(200, json.dumps(r, ensure_ascii=False, default=str))
@@ -207,10 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                 r = ROUTES[u.path](q)
             except Exception as e:           # noqa: BLE001
                 # 错误要显式返回，不能静默给空 —— 前端才好判断是没数据还是出错了
-                import traceback
-                traceback.print_exc()
-                return self._send(500, json.dumps(
-                    _explain_err(e), ensure_ascii=False))
+                return self._send(500, _err_500(u.path, e))
             if r is None:
                 return self._send(404, json.dumps({'error': 'run_id 不存在或无效'},
                                                   ensure_ascii=False))
@@ -232,6 +226,45 @@ class Handler(BaseHTTPRequestHandler):
 #   于是同一件事两种说法（实测空 lake 上 5 个接口吐裸 SQL 报错）。
 #   这里保留原名：selftest 与对外契约用的是 `sv._explain_err`。
 _explain_err = base.explain_err
+
+
+# ★ 500 分支的【唯一】出口：翻译 + 决定这一条日志怎么记。
+#   🔴 **空 lake 是预期状态，不是异常。** 而 `do_GET`/`do_POST` 原来一律
+#     `traceback.print_exc()` —— 打开一次首页就往 stderr 灌三段完整
+#     traceback（实测真机 install.log：`api_market_overview` 与
+#     `api_live_account` 各一段，全是同一个 `panel_*.parquet` 不存在）。
+#     页面那侧已经改成安静的空态了（`explain_err` 的 `no_data`），
+#     **而控制台这半没跟着改** —— 同一件事只修了一半
+#     （同 `hist._feed` 与 `perf.equity_curve`、同 `today_bars` 那两次）。
+#   🔴 **危害是可量的，不是洁癖**：`install.py` 的 `_tee` 给看板那条的
+#     日志配额是 400 行，而一段 traceback 约 15 行 —— 空 lake 上点几页
+#     就把配额吃光，**之后真正的错误一个字都进不了 install.log**，
+#     而那正是这个文件存在的理由（同「天天报的告警等于没有告警」）。
+#   ★ 两路的分工别记反：
+#       no_data  -> 只说**一行**，且同一个 (路由, 缺的文件) **只说一次**
+#                   —— 它的复发不带任何新信息，横条已经在每一页上说着
+#       其余     -> 照旧打**完整 traceback**，真 bug 要的就是那个栈
+#   🔴 dedupe 的键必须是 **(路由, 缺的文件)** 两者：只按路由的话，
+#     同一条路由换了一个缺的文件就再也不说；只按文件的话，
+#     另一条路由缺同一个文件也被吞掉 —— **两种都是静默少报**。
+#   ★ `no_data` 也**不许完全不说**：那样"这条路由到底走没走到"在日志里
+#     查无对证（同「保护分支不该静默跳过」）。
+_SAID_NO_DATA = set()
+
+
+def _err_500(path, e):
+    info = _explain_err(e)
+    if info.get('no_data'):
+        k = (path, info.get('missing') or '')
+        if k not in _SAID_NO_DATA:
+            _SAID_NO_DATA.add(k)
+            print('· %s：本地还没有这份数据（%s）—— 数据建好之前它一直会这样，'
+                  '同一条不再重复记' % (path, info.get('missing') or '?'),
+                  flush=True)
+    else:
+        import traceback
+        traceback.print_exc()
+    return json.dumps(info, ensure_ascii=False)
 
 def serve(host='127.0.0.1', port=8770, allow_backtest=False, allow_live=False):
     base.ALLOW_BACKTEST = bool(allow_backtest)

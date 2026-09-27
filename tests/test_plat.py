@@ -1146,6 +1146,119 @@ def t_nav_merge():
     return '；'.join(notes)
 
 
+@case('空 lake 的 500 只记一行：预期状态不许刷 traceback（日志配额有限）', tag='fast')
+def t_err500_log():
+    """页面那侧已经给安静的空态了，而【控制台那半】原来没跟着改 ——
+    `do_GET`/`do_POST` 一律 `traceback.print_exc()`：真机 install.log
+    里打开一次首页就是三段完整 traceback，全是同一个
+    `panel_*.parquet` 不存在。
+
+    🔴 危害是可量的：`install.py` 的 `_tee` 给看板那条的日志配额是 400 行，
+      一段 traceback 约 15 行 —— 空 lake 上点几页就把配额吃光，
+      【之后真正的错误一个字都进不了 install.log】，而那正是它存在的理由。
+
+    判据六段，分工别记反：
+      ① no_data -> 一行、不打栈、返回体带 no_data
+      ② 同一条再来 -> 一个字都不再输出
+      ③ 换路由、同一个缺的文件 -> 仍要说（dedupe 键含【路由】）
+      ④ 同路由、换一个缺的文件 -> 仍要说（dedupe 键含【文件】）
+      ⑤ 真 bug -> 完整 traceback + 原样透传（反向自证：只钉 ① 的话
+         「一律不打栈」也全绿）
+      ⑥ 结构：两个 500 出口都必须走 `_err_500`，且 `_send(500, …)` 里
+         不许再出现 `_explain_err`（那正是"绕开出口自己翻译"的形状）
+    """
+    import ast
+    import contextlib
+    from assay import paths
+    from assay import server as sv
+
+    LAKE = os.path.abspath(paths.datalake())
+    MISS = os.path.join(LAKE, 'mart', 'panel_daily', 'panel_*.parquet')
+
+    def _nodata(p=MISS):
+        return RuntimeError(
+            'IO Error: No files found that match the pattern "%s"' % p)
+
+    def _call(path, exc):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                raise exc
+            except Exception as e:              # noqa: BLE001
+                body = sv._err_500(path, e)
+        return json.loads(body), out.getvalue(), err.getvalue()
+
+    said = sv._SAID_NO_DATA
+    keep = set(said)
+    try:
+        said.clear()
+
+        # ① 一行、不打栈
+        b, o, e = _call('/api/market/overview', _nodata())
+        assert b.get('no_data') is True, '空 lake 那条没被翻译成 no_data：%s' % b
+        lines = [x for x in o.strip().splitlines() if x.strip()]
+        assert len(lines) == 1, (
+            'no_data 应当只说一行，实际 %d 行：%r' % (len(lines), o[:300]))
+        assert '本地还没有' in lines[0], '那一行没说清是什么事：%r' % lines[0]
+        assert 'Traceback' not in e, (
+            '空 lake 是【预期状态】，不该打完整 traceback —— 它会把 install.log '
+            '的 400 行配额吃光，之后真错误一个字都进不去')
+
+        # ② 同一条再来：一个字都不再输出
+        b2, o2, e2 = _call('/api/market/overview', _nodata())
+        assert not o2.strip() and not e2.strip(), (
+            '同一个 (路由, 缺的文件) 复发不带任何新信息，不该重复记：%r / %r'
+            % (o2[:200], e2[:200]))
+
+        # ③ 换一条路由、同一个缺的文件 —— dedupe 键必须含路由
+        _, o3, _ = _call('/api/live/account', _nodata())
+        assert o3.strip(), (
+            '另一条路由缺同一个文件被吞掉了 —— dedupe 键只按文件是静默少报')
+
+        # ④ 同一条路由、换一个缺的文件 —— dedupe 键必须含文件
+        _, o4, _ = _call('/api/market/overview',
+                         _nodata(os.path.join(LAKE, 'factors', 'ic', 'x.parquet')))
+        assert o4.strip(), (
+            '同一条路由换了个缺的文件就再也不说 —— dedupe 键只按路由是静默少报')
+
+        # ⑤ 反向自证：真 bug 仍然要完整 traceback，且原样透传
+        b5, o5, e5 = _call('/api/whatever', KeyError('boom'))
+        assert not b5.get('no_data'), '真 bug 被当成了"还没装数据"：%s' % b5
+        assert 'KeyError' in b5.get('error', ''), '真 bug 的异常没原样透传：%s' % b5
+        assert 'Traceback' in e5, (
+            '真 bug 必须打完整 traceback —— 那个栈正是查它唯一的依据')
+        assert not o5.strip(), '真 bug 不该走那条一行的安静路径：%r' % o5
+    finally:
+        said.clear()
+        said.update(keep)
+
+    # ⑥ 结构：500 的出口只有 _err_500 一个，且里面不许再出现 _explain_err
+    src = io_open_text(os.path.join(REPO, 'assay', 'server.py'))
+    tree = ast.parse(src)
+    n_err500, bad = 0, []
+    for nd in ast.walk(tree):
+        if not (isinstance(nd, ast.Call) and isinstance(nd.func, ast.Attribute)
+                and nd.func.attr == '_send' and nd.args):
+            continue
+        a0 = nd.args[0]
+        if not (isinstance(a0, ast.Constant) and a0.value == 500):
+            continue
+        seg = ast.dump(ast.Module(body=[ast.Expr(x) for x in nd.args[1:]],
+                                  type_ignores=[]))
+        if "'_err_500'" in seg:
+            n_err500 += 1
+        if "'_explain_err'" in seg:
+            bad.append(nd.lineno)
+    assert n_err500 == 2, (
+        'do_GET / do_POST 两个 500 出口都该走 _err_500，实际 %d 处' % n_err500)
+    assert not bad, (
+        'server.py:%s 的 _send(500, …) 里直接用了 _explain_err —— 那是绕开出口'
+        '自己翻译，于是日志那半又回到无条件打栈' % bad)
+
+    return ('no_data 一行不打栈；同条不重复、换路由/换文件仍要说；'
+            '真 bug 仍打完整栈且原样透传；两个 500 出口都走 _err_500')
+
+
 @case('本地还没有数据：页面给【安静的空态 + 一个入口】，不是裸报错', tag='web')
 def t_no_data_ui():
     """用户 2026-09-27：「页面应该是更友好的提示，看起来还是有一些报错信息」。
