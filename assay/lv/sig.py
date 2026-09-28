@@ -23,6 +23,43 @@ from . import ver as _ver
 from assay import paths as _paths   # datalake 根 / 面板读法的唯一解析
 
 
+
+# 🔴🔴 决策日面板里【pb 算不出来】的票占比上限。超了就不出信号。
+#
+#   2026-09-28 实测事故：聚宽增量抽取漏了 `indicator`（净资产的来源），
+#   三大报表补到了 2026 中报而它还停在 8-24 那一版，面板取净资产是
+#   `(code, report_date)` 严格相等 -> 3622 只配不上 -> `equities` 为 NULL
+#   -> `pb` 为 NULL -> froec 的 `base` 里 `pb > 0` 把它们整片剔掉 ->
+#   候选池从 3273 塌到 1097 -> 当晚出了一版【卖 8 买 8】的假信号。
+#   全程零报错，是人看出"大面积调仓"才查出来的。
+#
+# ★ **阈值是量出来的**：面板每日该占比，2022~2026 五年的**最大值 4.39%**
+#   （2022），近三年不超过 1.6%；而事故当时是 **69.6%**。取 10% ——
+#   比历史最大高一倍有余，比事故低得多，两头都不贴边。
+# ★ 判据钉在**后果**（pb 有多少票算不出来），不钉"净资产回退了多少行" ——
+#   后者换个实现就绕过去了，而前者正是候选池塌掉的直接原因。
+PB_NULL_MAX_PCT = 10.0
+
+
+def pb_health(feed, day):
+    """决策日面板的 pb 可算率 -> (占比%, 总行数, 算不出来的行数)。
+
+    读不到就返回 (None, 0, 0) —— **未知不是缺**，拿不到判据时不拦
+    （一次读文件失败不该让实盘从此再也出不了信号）。
+    """
+    try:
+        df = feed.query(
+            "SELECT count(*) AS n,"
+            " sum(CASE WHEN pb IS NULL OR pb <= 0 THEN 1 ELSE 0 END) AS bad"
+            " FROM {panel} WHERE date = DATE '%s'" % day)
+        n = int(df['n'][0])
+        bad = int(df['bad'][0] or 0)
+        if n <= 0:
+            return None, 0, 0
+        return 100.0 * bad / n, n, bad
+    except Exception:                                       # noqa: BLE001
+        return None, 0, 0
+
 def _load_snapshot(aid, sha):
     """从版本快照加载策略模块。**不读磁盘当前文件** ——
     账户绑的是那个快照，磁盘改了是另一个版本。
@@ -446,6 +483,27 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
         warn.append('最新数据日是 %s，距今 %d 天 —— datalake 可能没刷新'
                     % (t1, (datetime.date.today() - t1).days))
 
+    # ---- 🔴🔴 闸：决策日面板的 pb 大面积算不出来时，**不出信号** ----
+    #   这不是提示而是拦截 —— 池子塌掉时算出来的买卖清单看着完全正常
+    #   （2026-09-28 那版「卖 8 买 8」每一栏都填得好好的）。
+    # ★ 与「同步有失败就不出信号」同一条纪律：宁可没有信号，
+    #   也不要用半截数据算出来的信号。
+    _pb_pct, _pb_n, _pb_bad = pb_health(feed, t1)
+    blocked = None
+    if _pb_pct is not None and _pb_pct > PB_NULL_MAX_PCT:
+        blocked = ('决策日 %s 的面板里有 %d/%d（%.1f%%）只票算不出 pb，'
+                   '超过上限 %.1f%%（2022~2026 历年最大 4.39%%）—— '
+                   '候选池会整片塌掉，这一版清单不作数。'
+                   '多半是净资产（raw/jq/financials/indicator.parquet）'
+                   '落后于三大报表：看数据页「财务指标(年度)」那一行，'
+                   '去聚宽重抽一次增量即可。'
+                   % (t1, _pb_bad, _pb_n, _pb_pct, PB_NULL_MAX_PCT))
+        warn.insert(0, '🔴 ' + blocked)
+        # ★ 清空清单而不是照发 —— 「点了没反应的按钮比不给更糟」的反面：
+        #   一份看着正常、其实是坏数据算出来的清单，比没有清单更危险。
+        sells, buys, plan, left = [], [], [], money + freed
+        bad_px = []
+
     # ---- 选股理由：把记下来的过程拼成「候选池 + 每只票为什么」----
     # ★ 状态只从三个**事实**推：买了 / 持有着 / 卖了。不从"排名够不够"推
     #   —— 那是策略的规则，复述一遍就等于又抄了一份（见 lv/explain.py）。
@@ -490,7 +548,8 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
 
     fp = feed.fingerprint() if hasattr(feed, 'fingerprint') else {}
     return {
-        'warnings': warn, 'calendar_source': cm.get('source'),
+        'warnings': warn, 'blocked': blocked,
+        'calendar_source': cm.get('source'),
         # ★ 调仓日是【纯日历】的，所以提前算得出来；清单不是（要 T-1 数据）。
         #   页面上要把这两件事分清楚，别让人以为提前几天就能看到买什么。
         'upcoming': upcoming[:UPCOMING_DAYS],

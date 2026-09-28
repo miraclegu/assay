@@ -8697,10 +8697,19 @@ def t_exec_diff_as_of():
         for _f in sorted(_g.glob(os.path.join(
                 lv.LIVE, aid, 'signals', '*.json')), reverse=True):
             _o = _j.load(open(_f, encoding='utf-8'))
-            if _o.get('revisions'):
+            # 🔴 光有 revisions 还不够，**主文件必须是开盘之后才改的** ——
+            #   否则"下单时那一版"就是主文件本身，`signal_as_of` 返回
+            #   `rev=None` 完全正确，而下面那条断言会冤枉产品。
+            #   2026-09-28 实测：那天晚上连改三版（22:30/23:06/23:27）
+            #   加主文件 23:49，**四版全在开盘线之前**，这条用例当场打挂
+            #   而产品一点没错（同「失败的是断言不是产品」）。
+            if (_o.get('revisions')
+                    and _o.get('built_at', '') > _o['for_date'] + 'T09:30'):
                 cur, day = _o, _o['for_date']
                 break
-        assert cur, '构造不对：%s 没有任何被覆盖过的信号' % aid
+        assert cur, (
+            '构造不对：%s 找不到「主文件建于开盘之后、且有归档版本」的日子 —— '
+            '这条用例要验的正是那种情形，没有它就是空转' % aid)
         # ---- ① 照【下单时那一版】比 ----
         old, used = _sg.signal_as_of(aid, day)
         assert used and used.get('rev'), \
@@ -9515,3 +9524,88 @@ def t_corp_actions():
     finally:
         lv.LIVE = real
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@case('pb 大面积算不出来时【不出信号】（2026-09-28 那版卖8买8的闸）', tag='fast')
+def t_pb_health_gate():
+    """2026-09-28 实测事故的现场：
+
+      聚宽增量抽取漏了 `indicator`（净资产的来源），三大报表补到了 2026
+      中报而它还停在 8-24 那一版。面板取净资产是 `(code, report_date)`
+      严格相等 -> 3622 只配不上 -> `equities` NULL -> `pb` NULL ->
+      froec 的 `base` 里 `pb > 0` 把它们整片剔掉 -> 候选池 3273 塌到 1097
+      -> 出了一版【卖 8 买 8】的假信号。**每一栏都填得好好的**，
+      是人看出"大面积调仓"才查出来的。
+
+    🔴 阈值不是拍的：面板每日该占比，2022~2026 五年最大 **4.39%**（2022），
+      近三年不超过 1.6%；事故当时 **69.6%**。取 10%，两头都不贴边。
+    🔴 判据钉在**后果**（pb 有多少票算不出来），不钉"净资产回退了多少行"
+      —— 后者换个实现就绕过去了。
+    ★ 「未知不是缺」：读不到面板时**不拦**，否则一次读文件失败就让实盘
+      再也出不了信号。
+    """
+    import importlib
+
+    from assay.lv import sig as _sig
+    importlib.reload(_sig)
+
+    class _Feed(object):
+        """只实现 `query` —— 闸就是从这一个通道拿数的。"""
+
+        def __init__(self, n, bad, boom=False):
+            self.n, self.bad, self.boom = n, bad, boom
+
+        def query(self, sql, **kw):
+            import pandas as pd
+            if self.boom:
+                raise RuntimeError('面板读不到')
+            return pd.DataFrame({'n': [self.n], 'bad': [self.bad]})
+
+    day = '2026-09-28'
+    # ---- ① 正常水平（1.2%，与 2026 年实测中位一致）-> 不拦 ----
+    pct, n, bad = _sig.pb_health(_Feed(5206, 62), day)
+    assert n == 5206 and bad == 62 and abs(pct - 1.19) < 0.05, (pct, n, bad)
+    assert pct <= _sig.PB_NULL_MAX_PCT, '正常水平被判成异常，实盘会再也出不了信号'
+
+    # ---- ② 🔴 事故当时的比例（69.6%）-> 必须超阈值 ----
+    pct, _n, _b = _sig.pb_health(_Feed(5206, 3621), day)
+    assert abs(pct - 69.55) < 0.1, pct
+    assert pct > _sig.PB_NULL_MAX_PCT, (
+        '🔴 事故当时 %.1f%% 都没超过上限 %.1f%% —— 这道闸拦不住它'
+        % (pct, _sig.PB_NULL_MAX_PCT))
+
+    # ---- ③ 历史最大值（2022 年的 4.39%）不许被误拦 ----
+    pct, _n, _b = _sig.pb_health(_Feed(10000, 439), day)
+    assert pct <= _sig.PB_NULL_MAX_PCT, (
+        '🔴 2022 年的历史最大 %.2f%% 会被拦下 —— 那几年的信号全出不来' % pct)
+
+    # ---- ④ 「未知不是缺」：读不到就放行 ----
+    assert _sig.pb_health(_Feed(0, 0, boom=True), day) == (None, 0, 0)
+    assert _sig.pb_health(_Feed(0, 0), day) == (None, 0, 0), \
+        '面板 0 行时应返回 None（不猜），而不是 0%%'
+
+    # ---- ⑤ 🔴 闸**真的接在**出信号那条路上（走 ast，不查字符串）----
+    #   只验 `pb_health` 的话，算出来却没人用也照样全绿 —— 那正是
+    #   2026-09-28 的原样（新鲜度打了"没跑成功"，汇总照写"成功"）。
+    import ast
+    import io
+    src = io.open(os.path.join(REPO, 'assay/lv/sig.py'), encoding='utf-8').read()
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and any(isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                       and x.func.id == 'pb_health' for x in ast.walk(n))), None)
+    assert fn is not None, '🔴 没有任何函数调用 pb_health —— 闸是悬空的'
+    names = [x.id for x in ast.walk(fn) if isinstance(x, ast.Name)]
+    for _v in ('buys', 'sells', 'blocked'):
+        assert names.count(_v) >= 1, '闸所在的函数里没提到 %r' % _v
+    # 清单必须被**清空**，不是只加一句警告
+    assign = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Tuple) for t in n.targets)]
+    tgt = [[e.id for e in t.elts if isinstance(e, ast.Name)]
+           for n in assign for t in n.targets if isinstance(t, ast.Tuple)]
+    assert any('buys' in g and 'sells' in g for g in tgt), (
+        '🔴 超阈值时没有把 buys/sells 清空 —— 一份看着正常、其实是坏数据'
+        '算出来的清单，比没有清单更危险')
+
+    return ('正常 1.19%% 放行 · 事故 69.6%% 拦下 · 历史最大 4.39%% 不误拦 · '
+            '读不到不拦（未知不是缺）· 闸确实接在出信号那条路上并清空清单')
