@@ -525,6 +525,96 @@ def t_sync():
                '/'.join(str(i.get('days_since')) for i in b)))
 
 
+@case('跑不动的那一步：页面要说清下一步，且不给必然报错的按钮（playwright）',
+      tag='web')
+def t_setup_blocked_ui():
+    """真机 2026-09-27：一键建库跑到 ③ 崩在
+    `Table with name security_universe does not exist!` —— 那句话技术上
+    准确，却答不了"我现在该做什么"。
+
+    页面这一侧要两件事同时成立：
+      ① 那一行【不给「▷ 开始」】 —— 起了也是崩，而让人点一个必然报错的
+         按钮比不给更糟（同 backLink 那条）；
+      ② 但【不许静默变灰】 —— 要说清缺什么、要先做哪一步。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    from assay.srv import sync as sy
+
+    BT = ('要先有「⑦ 财务数据（聚宽 · 人工）」—— 缺 security_universe'
+          '（还没有这份数据）。去数据页「财务数据」那块上传导出的包。')
+
+    class _Fake(object):
+        def stages(self, **kw):
+            mk = lambda i, n, blk: {                        # noqa: E731
+                'id': i, 'name': n, 'why': '', 'state': 'todo',
+                'detail': '还没有', 'eta': '2 分钟',
+                'cmd': [sys.executable, '-c', 'pass'],
+                **({'blocked': {'by': ['jq'], 'by_name': '⑦ 财务数据',
+                                'missing': [], 'text': BT}} if blk else {})}
+            return [mk('one', '阶段ONE', False), mk('two', '阶段TWO', True)]
+
+        def summary(self, *a, **k):
+            st = self.stages()
+            return {'stages': st, 'n_todo': 2, 'ready': False,
+                    'next_name': '阶段ONE', 'n_auto_todo': 2,
+                    'n_runnable': 1, 'n_blocked': 1,
+                    'blocked_name': '阶段TWO', 'blocked_text': BT,
+                    'eta_text': '2 分钟', 'os': 'T'}
+
+    old_mod, old_live = sy._stages_mod, sv.ALLOW_LIVE
+    sy._stages_mod = lambda: (_Fake(), None)
+    sv.ALLOW_LIVE = True
+    sy._SETUP_SUM['at'], sy._SETUP_SUM['d'] = 0, None
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            pg = br.new_page(viewport={'width': 1440, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/sync' % port,
+                    wait_until='networkidle')
+            pg.wait_for_selector('#subox table.lvt tr', timeout=20000)
+            rows = pg.eval_on_selector_all(
+                '#subox table.lvt tr',
+                "rs => rs.map(r => ({t: r.innerText.replace(/\\s+/g,' '),"
+                " btn: !!r.querySelector('button.susbtn')}))")
+            one = [r for r in rows if '阶段ONE' in r['t']]
+            two = [r for r in rows if '阶段TWO' in r['t']]
+            assert one and two, [r['t'][:40] for r in rows]
+            assert one[0]['btn'], (
+                '没被拦的那一步也不给按钮了（一刀切）：%r' % one[0]['t'][:120])
+            assert not two[0]['btn'], (
+                '跑不动的那一步还摆着「▷ 开始」—— 点了必然崩在一个表名上')
+            assert '缺 security_universe' in two[0]['t'], (
+                '那一行静默变灰了，没说缺什么：%r' % two[0]['t'][:200])
+            assert '⑦ 财务数据' in two[0]['t'], (
+                '没点名要先做哪一步：%r' % two[0]['t'][:200])
+            # 一键那一行：说的是【这次真跑得到几步】，不是"剩下的 2 步"
+            head = ' '.join(pg.inner_text('#subox .lvwarn').split())
+            assert '接下来的 1 步' in head, (
+                '一键那行还写着"剩下的 N 步" —— 点下去只跑得到 1 步就停，'
+                '那是在说谎：%s' % head)
+            assert '阶段TWO' in head and 'security_universe' in head, head
+            assert not errs, errs
+            br.close()
+    finally:
+        httpd.shutdown()
+        sy._stages_mod, sv.ALLOW_LIVE = old_mod, old_live
+        sy._SETUP_SUM['at'], sy._SETUP_SUM['d'] = 0, None
+    return ('跑不动那一步：不给按钮、说清缺什么与要先做哪一步；'
+            '没被拦的照样能点；一键那行写的是这次真跑得到几步')
+
+
 @case('数据同步页面真实渲染（playwright）', tag='web')
 def t_sync_ui():
     """两条腿的表格要显示【不同语义】，并且告警必须真的渲染到页面上。
@@ -4837,6 +4927,337 @@ def t_setup_stages():
             % (len(ids_src), '/'.join(ids_src), 6, len(body), n_script))
 
 
+@case('阶段依赖：④⑤⑥ 压在人工那步上时要说清下一步，不是抛表名', tag='fast')
+def t_setup_needs():
+    """2026-09-27 真机（Windows 全新 clone）一键建库跑到 ③ 当场崩：
+
+        _duckdb.CatalogException: Table with name security_universe does not exist!
+
+    根因不是那句 SQL —— 是 ③④ 读的几张表由【聚宽 B 腿】产出，而 ⑦ 是
+    人工那一步、还排在最后，**清单里一个字都没声明这条依赖**。
+    于是一键建库在新机器上结构上就跑不完，报出来还是一个表名。
+
+    两道，分工别记反：
+        needs（跑之前）   省掉注定失败的那一跑，并点名卡在哪一步
+        _stage_fail_hint  认子进程真报出来的表名 —— 声明漏了谁它兜得住
+    """
+    import importlib
+    import tempfile
+    import time as _t
+    from assay import server as sv
+    from assay.srv import base as sbase
+    from assay.srv import runs as _rn
+    from assay.srv import sync as sy
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    import duckdb
+    m = importlib.import_module('setup_stages')
+    importlib.reload(m)
+
+    # ── A 正本：needs 里每个名字都得登记谁产的（不然没法说下一步）──
+    for s in m.stages():
+        for t in (s.get('needs') or ()):
+            assert t in m.NEED_OWNER, (
+                '阶段 %s 声明了 needs=%r，而 %r 没登记在 NEED_OWNER 里'
+                % (s['id'], s['needs'], t))
+    assert set(m.JQ_STD) >= {'security_universe', 'security_name',
+                             'security_industry', 'security_status',
+                             'index_member_asof'}, m.JQ_STD
+
+    # ── A2 🔴🔴 产出方必须排在依赖方【前面】 ──
+    #   这才是「把人工那步挪到第一位」真正要钉住的不变式。排在后面时
+    #   **runnable 的前缀一模一样**（④ 照样第一个被拦），所以光看
+    #   "这次跑得到几步"分不出来 —— 分得出来的是页面上那句话：
+    #   清单顺着读下去写着「还差 6 步、约需 2 小时」，而人点下去最多
+    #   跑到 ③ 就停，要做的那件事却列在最后一行。
+    _ids = [x['id'] for x in m.stages()]
+    for _s in m.stages():
+        for _nd in (_s.get('needs') or ()):   # 🔴 别用 `_t`（= time）
+            _ow = m.NEED_OWNER[_nd]
+            assert _ids.index(_ow) < _ids.index(_s['id']), (
+                '%s 依赖 %s（%s 产的），而 %s 排在它【后面】 —— 清单顺着读'
+                '下去就是在说谎：要先做的那件事列在最后一行' 
+                % (_s['id'], _nd, _ow, _ow))
+
+    # ── B 空目录（= 新机器）上：④⑤⑥ 必须拦住，①②③⑦ 不许被误伤 ──
+    td = tempfile.mkdtemp(prefix='_needs_')
+    st = m.stages(DL=td, ROOT=td)
+    blk = dict((s['id'], s.get('blocked')) for s in st)
+    assert blk['std'] and blk['panel'] and blk['factor'], (
+        '新机器上 ④⑤⑥ 没被拦住 —— 那它们会跑进去、崩在一个表名上：%r'
+        % {k: bool(v) for k, v in blk.items()})
+    for sid in ('tdx2db', 'bootstrap', 'faceval'):
+        assert not blk[sid], '%s 不依赖聚宽，却被拦住了（误伤）' % sid
+    txt = blk['std']['text']
+    assert '①' in txt and '财务' in txt, '没点名是哪一步卡住：%r' % txt
+    assert 'security_universe' in txt, '没说缺什么：%r' % txt
+    # 🔴🔴 **新机器的下一步不是"去页面上传包"** —— 那条闭环只管增量，
+    #   它的 tar 里只有 dim_name_history / dim_status_change，而
+    #   `load_jq_dimensions` 是从 dim_security 建 security_universe 的。
+    #   指过去就是**指了一条走不通的路**。
+    assert 'extract_jq_dimensions.py' in txt, (
+        '新机器上没点名要先跑哪个【一次性全量抽取】脚本：%r' % txt)
+    assert '增量' in txt, (
+        '没说清页面上那条「上传导出的包」只管增量、救不了这一步：%r' % txt)
+    assert 'load_jq_dimensions.py' in txt, '没说拿回来要跑哪个 loader：%r' % txt
+    # ① 自己那一行也不许还写着"用下面那条闭环"（同一句谎话的第二处）
+    jq = [x for x in st if x['id'] == 'jq'][0]
+    assert '增量' in jq['detail'] and '全量' in jq['detail'], (
+        '① 那一行在新机器上仍把增量那条闭环说成唯一入口：%r' % jq['detail'])
+
+    # ── B1 🔴🔴 ① 的提示必须**一次点全**：清单从 JQ_SOURCE 派生 ──
+    #   按"这一步缺哪几张"分别提示的话，人跑完 dimensions 回来，到面板那步
+    #   又缺 index_member_asof / fin_indicator_q / … —— **要去聚宽两趟**，
+    #   而第二趟那句话要等他先白跑三四十分钟的日线才看得到。
+    _ex = sorted(set(v[0] for v in m.JQ_SOURCE.values()))
+    _ld = sorted(set(v[1] for v in m.JQ_SOURCE.values()))
+    assert len(_ex) >= 5 and len(_ld) >= 5, (
+        'JQ_SOURCE 只声明了 %d 个抽取 / %d 个 loader —— 少一对就是少一趟'
+        % (len(_ex), len(_ld)))
+    for _n in _ex + _ld:
+        assert _n in jq['detail'], (
+            '① 的提示里没有 %s —— 人照着做完回来还会缺，要去聚宽两趟：%r'
+            % (_n, jq['detail']))
+
+    # ── B1b 🔴🔴 **不是 std 表的那条依赖**（差点整条漏掉）──
+    #   ⑥ 的 `factors/fin.py` 直接 read_parquet 读
+    #   raw/jq/financials/{balance,income,cashflow}.parquet —— 没有 std 层、
+    #   不进 lake.db 视图，所以「std parquet + 同名 view」那套判据看不见它。
+    #   ★ 它是**可达**的：loader 一个个跑，跑了 indicator_q（fin_quarterly
+    #     就有了）还没跑 financials 时，⑥ 会解除拦截然后崩在一个 raw 路径上。
+    assert m.NEED_RAW, 'NEED_RAW 空了 —— 那条不是 std 表的依赖没人盯着'
+    _raw_need = [t for t in ([x for x in st if x['id'] == 'factor'][0]
+                             .get('needs') or ()) if t in m.NEED_RAW]
+    assert _raw_need, (
+        '⑥ 没声明 raw/jq/financials 那条依赖 —— 它会在 std 全齐时解除拦截，'
+        '然后崩在 `read_parquet(.../raw/jq/financials/balance.parquet)` 上')
+    td3 = tempfile.mkdtemp(prefix='_rawneed_')
+    os.makedirs(os.path.join(td3, 'std'), exist_ok=True)
+    for _tb in m.JQ_STD:
+        io.open(os.path.join(td3, 'std', _tb + '.parquet'), 'wb').write(b'x')
+    _con = duckdb.connect(os.path.join(td3, 'lake.db'))
+    for _tb in m.JQ_STD:
+        _con.execute('CREATE VIEW %s AS SELECT 1 AS x' % _tb)
+    _con.close()
+    b3 = dict((x['id'], x.get('blocked')) for x in m.stages(DL=td3, ROOT=td3))
+    assert b3['factor'], (
+        '🔴 std 八张全齐、而 raw/jq/financials 一个文件都没有时 ⑥ 没被拦住')
+    t3 = b3['factor']['text']
+    assert 'raw/jq/financials' in t3, (
+        '拦住了却没说缺什么 —— 报出来要能指到那三个 parquet：%r' % t3)
+    assert 'load_jq_financials.py' in t3, '没说下一步跑哪个 loader：%r' % t3
+    # 反向自证：三个 raw 文件补齐之后就不许再拦（不然天天误报）
+    os.makedirs(os.path.join(td3, 'raw', 'jq', 'financials'), exist_ok=True)
+    for _p in m.NEED_RAW[_raw_need[0]]:
+        io.open(os.path.join(td3, _p), 'wb').write(b'x')
+    assert not [x for x in m.stages(DL=td3, ROOT=td3)
+                if x['id'] == 'factor'][0].get('blocked'), (
+        '三个 raw 文件都补齐了还在拦 ⑥ —— 那会天天误报')
+
+    # ── B2 判据是【那条 SQL 真正要的两件事】，不是只看文件在不在 ──
+    #   `load_jq_dimensions.py` 末尾**删掉 lake.db 重建**，按 std/ 下每个
+    #   parquet 建一个同名 view。所以 parquet 在、而 lake.db 还没建时，
+    #   那句 SQL 照样报 `Table with name ... does not exist`。
+    os.makedirs(os.path.join(td, 'std'), exist_ok=True)
+    for _tb in m.JQ_STD:      # 🔴 别用 `_t` —— 上面 `import time as _t`
+        io.open(os.path.join(td, 'std', _tb + '.parquet'), 'wb').write(b'x')
+    st2 = m.stages(DL=td, ROOT=td)
+    b2 = dict((x['id'], x.get('blocked')) for x in st2)
+    assert b2['std'], (
+        'std/*.parquet 在、而 lake.db 里一个视图都没有 —— 这时那句 SQL '
+        '仍然会报"表不存在"，判据只看文件在不在是不够的')
+    t2 = b2['std']['text']
+    assert '注册' in t2, t2
+    # 这一支的下一步是【重建视图层】，不是再去聚宽抽一次
+    assert 'load_jq_dimensions.py' in t2 and '全量抽取' not in t2, (
+        '"文件在、只是视图没注册"被说成了"要重新去聚宽抽一次"：%r' % t2)
+    # 反向自证：两样都齐了就不该再拦（不然它会天天误报）
+    assert m._blocked(('security_universe',), td, set(m.JQ_STD)) is None, (
+        '两样都齐了还在拦 —— 那会天天误报（同「假告警看多了就不看告警」）')
+    # 🔴 查不出来（lake.db 被锁 / 坏了）**不拦** —— 未知 != 缺
+    assert m._blocked(('security_universe',), td, None) is None, (
+        'lake.db 查不出来（被锁/坏了）时把人挡在了外面 —— 未知不是缺')
+    # 🔴 没登记谁产的名字要【响亮且指得到原因】。
+    #   ⚠ 如实记：去掉那句 assert 之后它也会崩（`NEED_OWNER[t]` 抛
+    #   KeyError），所以 assert 买到的不是"从静默变响亮"，是**报错里有
+    #   一句话说清该去哪登记** —— 判据因此钉在消息上。
+    _bad = None
+    try:
+        m._blocked(('zzz_not_registered',), td, set())
+    except Exception as e:                                  # noqa: BLE001
+        _bad = e
+    assert _bad is not None, '未登记的 needs 名字被静默放过了'
+    assert 'NEED_OWNER' in str(_bad), (
+        '未登记的名字确实会崩，但报的是 %r —— 指不到"该去 NEED_OWNER 登记"'
+        % _bad)
+
+    # ── C 「这次会跑几步」是【前缀】，不是把跑不动的跳过去 ──
+    #   跳过去只会让 ⑤ 在没有面板的情况下崩 —— 换个地方崩而已。
+    run = [x['id'] for x in m.runnable(st)]
+    assert run == ['tdx2db', 'bootstrap'], (
+        '一键这次会跑 %r —— 而 ④ 跑不动，后面每步都吃前一步的产物' % run)
+    sm = m.summary(DL=td, ROOT=td)
+    assert sm['n_runnable'] == 2, sm
+    assert sm['n_blocked'] == len([x for x in st if x.get('blocked')]), sm
+    assert sm['blocked_name'] and '④' in sm['blocked_name'], (
+        '没点名停在哪一步（或点错了）：%r' % sm['blocked_name'])
+    # 「约需」只能算跑得到的那几步：把拦住的也算进去就是在说谎
+    lone = m._eta_total([x for x in st if x['state'] == 'todo'])
+    assert sm['eta_text'] and sm['eta_text'] != lone, (
+        '横条上的「约需」把跑不动的那几步也算进去了：%r' % sm['eta_text'])
+
+    # ── D/E 服务端：一键停在那里（rc 仍 0）、单阶段直接拒 ──
+    old_mod, old_live = sy._stages_mod, sv.ALLOW_LIVE
+    sv.ALLOW_LIVE = True
+    ran = []
+    BT = '要先有「⑦ 财务数据（聚宽 · 人工）」—— 缺 security_universe。去数据页上传导出的包。'
+
+    class Fake(object):
+        NAMES = ('a', 'b', 'c')
+        done = set()
+
+        def stages(self, **kw):
+            out = []
+            for sid in self.NAMES:
+                d = {'id': sid, 'name': '阶段' + sid.upper(), 'why': '',
+                     'state': 'ok' if sid in self.done else 'todo',
+                     'detail': '', 'eta': '1 秒',
+                     'cmd': [sys.executable, '-c', 'pass']}
+                if sid == 'b':
+                    d['blocked'] = {'by': ['jq'], 'by_name': '阶段JQ',
+                                    'missing': [], 'text': BT}
+                out.append(d)
+            return out
+
+        def summary(self, *a, **k):
+            st2 = self.stages()
+            todo = [x for x in st2 if x['state'] == 'todo']
+            return {'stages': st2, 'n_todo': len(todo), 'ready': not todo,
+                    'next_name': todo[0]['name'] if todo else None,
+                    'n_auto_todo': len(todo), 'eta_text': '1 秒', 'os': 'T'}
+
+    fake = Fake()
+    real_run = _rn._run_job
+
+    def run_job(job_id, cmd, cwd, **kw):
+        real_run(job_id, cmd, cwd)
+        sid = [x for x in fake.NAMES if x not in fake.done]
+        ran.append(sid[0] if sid else '?')
+        if _rn._JOBS[job_id].get('rc') == 0 and sid:
+            fake.done.add(sid[0])
+        return _rn._JOBS[job_id].get('rc')
+
+    try:
+        sy._stages_mod = lambda: (fake, None)
+        _rn._run_job = run_job
+        r = sy.api_setup_run(None, {'stage': '__all__'})
+        assert not r.get('error'), r
+        t0 = _t.time()
+        while _t.time() - t0 < 30 and _rn._JOBS[r['job_id']]['state'] == 'running':
+            _t.sleep(0.05)
+        j = _rn._JOBS[r['job_id']]
+        assert j['state'] != 'running', '一键卡住了'
+        assert ran == ['a'], '跑不动的那一步没停住，跑了 %r' % ran
+        assert j['rc'] == 0, (
+            '压在人工那步上不是"失败"（链条没坏），rc 应为 0，实得 %r' % j['rc'])
+        body = '\n'.join(j['lines'])
+        assert '阶段B' in body and BT[:12] in body, (
+            '停下来了却没说是哪一步、为什么：%r' % body[-400:])
+        # 单阶段：起了也是崩 —— 直接拒，并给同一句话
+        e = sy.api_setup_run(None, {'stage': 'b'}).get('error') or ''
+        assert '阶段B' in e and BT[:12] in e, (
+            '跑不动的那一步没被拒 —— 起了也是崩在一个表名上：%r' % e)
+        # 反向自证：没被拦的那一步照样能点（不许一刀切）
+        ok1 = sy.api_setup_run(None, {'stage': 'c'})
+        assert not ok1.get('error'), (
+            '没被拦的那一步也被拒了（一刀切）：%r' % ok1.get('error'))
+        # 🔴 **等它自己跑完再动 `_JOBS`** —— 清理抢在后台线程前面的话，
+        #   它下一句读 `_JOBS[job_id]` 就是 KeyError（CLAUDE.md 记过一次，
+        #   表现是用例绿着、屏幕上多一段栈）。
+        t1 = _t.time()
+        while _t.time() - t1 < 25 and _rn._JOBS.get(
+                ok1['job_id'], {}).get('state') == 'running':
+            _t.sleep(0.05)
+    finally:
+        sy._stages_mod, sv.ALLOW_LIVE = old_mod, old_live
+        _rn._run_job = real_run
+        _rn._JOBS.clear()
+
+    # ── F 第二道：认子进程真报出来的表名 ──
+    hint = sy._stage_fail_hint(m, [
+        'Traceback (most recent call last):',
+        '_duckdb.CatalogException: Catalog Error: Table with name '
+        'security_universe does not exist!'])
+    assert hint and '①' in hint, '子进程报的表名没被翻成下一步：%r' % hint
+    # 认不出的名字【不翻译】—— 硬凑一句"去做 ⑦"比不说更糟
+    assert sy._stage_fail_hint(m, [
+        'Table with name zzz_not_a_real_table does not exist!']) is None, (
+        '认不出的表名被硬翻成了「去做人工那一步」—— 猜一句比不说更糟')
+
+    return ('新机器上 ④⑤⑥ 被拦住并点名 ①（②③⑦ 不误伤）｜ '
+            '① 的提示一次点全 5 对抽取+loader ｜ '
+            'raw/jq/financials 那条不是 std 表的依赖也拦得住 ｜ '
+            '一键停在那一步 rc=0 ｜ 单阶段拒绝 ｜ 子进程表名兜底翻译')
+
+
+@case('逐阶段按钮真的会跑 —— 不许卡在 running', tag='fast')
+def t_setup_one_runs():
+    """2026-09-27 抓到的活 bug：`_go` 里写成 `st[0]['name']`，而上面
+    `st = st[0]` 之后它是个 dict -> `KeyError: 0`。
+
+    异常在 daemon 线程里抛，`_JOBS` 那条【永远停在 running】：
+      ① 点了逐阶段按钮，进度条一直转、什么都不跑；
+      ② `api_setup_run` 开头那道「已经有一个装配任务在跑」从此
+         把【一键建库】也拦死。
+    全程不报错。所以判据是"那条任务真的结束了"，不是"接口返回了 job_id"。
+    """
+    import time as _t
+    from assay import server as sv
+    from assay.srv import runs as _rn
+    from assay.srv import sync as sy
+
+    old_live, old_mod = sv.ALLOW_LIVE, sy._stages_mod
+    sv.ALLOW_LIVE = True
+    real_run = _rn._run_job
+
+    class Fake(object):
+        def stages(self, **kw):
+            return [{'id': 'z', 'name': '阶段Z', 'why': '', 'state': 'todo',
+                     'detail': '', 'eta': '1 秒',
+                     'cmd': [sys.executable, '-c', 'pass']}]
+
+        def summary(self, *a, **k):
+            return {'stages': self.stages(), 'n_todo': 1, 'ready': False,
+                    'next_name': '阶段Z', 'n_auto_todo': 1,
+                    'eta_text': '1 秒', 'os': 'T'}
+
+    try:
+        sy._stages_mod = lambda: (Fake(), None)
+        _rn._run_job = lambda jid, cmd, cwd, **kw: real_run(jid, cmd, cwd)
+        r = sy.api_setup_run(None, {'stage': 'z'})
+        assert not r.get('error'), r
+        jid = r['job_id']
+        t0 = _t.time()
+        while _t.time() - t0 < 25 and _rn._JOBS[jid]['state'] == 'running':
+            _t.sleep(0.05)
+        assert _rn._JOBS[jid]['state'] != 'running', (
+            '逐阶段按钮点下去，任务 %s 跑了 25 秒还停在 running —— '
+            '多半是 `_go` 里抛了异常（daemon 线程里只打一段栈，'
+            '页面上就是"点了没反应"），而它还会把一键建库一起拦死' % jid)
+        _rn._JOBS.clear()
+        # 反向自证：僵尸任务真的会拦住一键（所以上面那条必须绿）
+        _rn._JOBS['setup-zombie'] = {'state': 'running', 'stage': '阶段Z'}
+        assert '已经有一个装配任务在跑' in (
+            sy.api_setup_run(None, {'stage': '__all__'}).get('error') or '')
+    finally:
+        sy._stages_mod, sv.ALLOW_LIVE = old_mod, old_live
+        _rn._run_job = real_run
+        _rn._JOBS.clear()
+    return '单阶段任务真的跑完（不是停在 running）｜ 僵尸任务确实会拦死一键'
+
+
 @case('首次建库：一个按钮跑到底 / 失败就停 / 齐了入口自己退场', tag='fast')
 def t_setup_all():
     """用户："每日同步是系统自动同步，但是首次加载，应该是系统启动后展示一个
@@ -4873,6 +5294,19 @@ def t_setup_all():
         """三步假链：cmd 只是 `python3 -c`，跑完把自己记进 done。"""
         NAMES = ('a', 'b', 'c')
 
+        # 🔴 失败那一步要**真的吐一段异常** —— 原来 cmd 是裸 `sys.exit(1)`、
+        #   一个字都不打，于是"横条上说不说得出为什么失败"这件事在这条链上
+        #   **根本测不到**（同「断言要在能触发的构造上跑」）。
+        #   形状照真机 2026-09-27 那次：异常行**不是最后一行**，duckdb 会在
+        #   它后面再吐一行 `LINE 28: ...`。
+        BAD_SRC = ('import sys\n'
+                   'sys.stderr.write("Traceback (most recent call last):\\n")\n'
+                   'sys.stderr.write("_duckdb.CatalogException: Catalog Error: '
+                   'Table with name security_universe does not exist!\\n")\n'
+                   'sys.stderr.write("LINE 28: FROM k JOIN security_universe u'
+                   '\\n")\n'
+                   'sys.exit(1)\n')
+
         def stages(self, **kw):
             out = []
             for sid in self.NAMES:
@@ -4882,7 +5316,8 @@ def t_setup_all():
                     'state': 'ok' if sid in done else 'todo',
                     'detail': '', 'eta': '1 秒',
                     'cmd': [sys.executable, '-c',
-                            'import sys;sys.exit(%d)' % (1 if bad else 0)]})
+                            self.BAD_SRC if bad
+                            else 'import sys;sys.exit(0)']})
             return out
 
         def summary(self, *a, **k):
@@ -4951,6 +5386,37 @@ def t_setup_all():
             '停下来了却没说是哪一步失败的：%s' % j['lines'][-3:]
         pr = [x for x in P.read() if x['job'] == 'setup'][0]
         assert pr['state'] == 'failed' and pr['i'] == 2, pr
+
+        # 🔴🔴 **走完整条链**验"失败原因进得了进度文件"。
+        #   上面 F 段直接调 `finish_step(note=...)`，那只证明了容器能装；
+        #   而真正会坏的是 `_go_all` 里**忘了算、忘了传** —— 变异实测：
+        #   把 `_note` 改成 None 时 F 段照样全绿（同「生产端算对了不等于
+        #   消费端用上了」的镜像：这次是消费端测不到生产端）。
+        _bad = pr['done'][1]
+        assert _bad.get('state') != 'ok', _bad
+        assert _bad.get('note'), (
+            '🔴 失败那一步没带原因 —— 横条上就只剩 rc 和一个日志路径，'
+            '而 rc=1 说不出任何事：%r' % (_bad,))
+        assert 'CatalogException' in _bad['note'], (
+            '原因不是日志里那行异常：%r' % (_bad['note'],))
+        assert 'LINE 28' not in _bad['note'], (
+            '🔴 取的是日志**最后一行**而不是那行异常 —— duckdb 会在异常'
+            '后面再吐 `LINE 28: ...`，取末行就把真正的原因丢了：%r'
+            % (_bad['note'],))
+
+        # ── B2 **逐阶段**那条路也要给原因 —— 它是一键失败之后的【恢复
+        #   路径】，正是最该说清"这次又是为什么"的地方（改一处先扫同类）。
+        #   变异实测：只测 `__all__` 的话，把单阶段那两行改成 None 照样全绿。
+        fresh()
+        r2 = sy.api_setup_run(None, {'stage': 'b'})
+        assert not r2.get('error'), r2
+        wait(r2['job_id'])
+        pr2 = [x for x in P.read() if x['job'] == 'setup'][0]
+        _b2 = [x for x in (pr2.get('done') or []) if x.get('state') != 'ok']
+        assert _b2 and _b2[-1].get('note') \
+            and 'CatalogException' in _b2[-1]['note'], (
+            '🔴 逐阶段失败时没带原因 —— 而那是一键停下来之后人唯一的'
+            '恢复入口：%r' % (_b2[-1] if _b2 else None,))
 
         # ── C 每跑完一步【重新查状态】，不照初始清单硬跑 ──────────
         # 构造：跑 a 的时候别人（手工 / 另一台机器）顺带把 c 也建好了。
@@ -5247,6 +5713,88 @@ def t_load_progress():
         finally:
             sy._SETUP_SUM.update(_oss)
         out.append('setup_needed 带上次失败（第 2 步、rc=1）')
+
+        # ── F 🔴🔴 **结束了计时器就得停** + **失败要说得出为什么** ────
+        #   用户：「页面展示的还是不够详细，而且已经明确失败后，
+        #          计时器也没有停止。」两条都是实测复现过的：
+        #     ① `read()` 里 `elapsed` 无条件拿 `now` 减起点 —— 而失败那条
+        #        按设计要留 24 小时，于是「已用」一路涨到 24:00:00，
+        #        **而 `finish()` 早就把 `ended` 写进去了**（写了没人读）
+        #     ② 失败时横条上只有 `rc=1` 加一个日志路径 ——「为什么」
+        #        只写进了日志框（`_stage_fail_hint` 的结果没进进度文件），
+        #        人得自己去翻（同「报错必须指向真正的原因」）
+        # 阶段清单用**真的**那份（`_stage_fail_hint` 只读 NEED_OWNER /
+        # stages() / blocked_text()，都是纯函数，不写盘）。
+        _m_stage, _merr = sy._stages_mod()
+        assert _m_stage is not None, _merr
+        pg = P.Progress('setup', '建本地数据', 3, log='logs/x.log')
+        pg.step('① 财务数据', at=1)
+        pg.finish_step('ok')
+        pg.step('② 全量日线', at=2)
+        _tm.sleep(0.25)
+        # 真机 2026-09-27 那次的日志尾巴（用户贴回来的原文形状）——
+        # 🔴 异常行**不是最后一行**：duckdb 会在它后面再吐一行 `LINE 28:`。
+        _dk = ['  building...', 'Traceback (most recent call last):',
+               '  File "build/load_std.py", line 91, in <module>',
+               '_duckdb.CatalogException: Catalog Error: Table with name '
+               'security_universe does not exist!',
+               'LINE 28: FROM k FULL OUTER JOIN security_universe u '
+               'ON u.code = k.jq_code']
+        _hint = sy._stage_fail_hint(_m_stage, _dk)
+        assert _hint and '①' in _hint, (
+            '缺表没翻成"要先做哪一步"：%r' % (_hint,))
+        pg.finish_step('bad', note=_hint)
+        pg.finish(1)
+
+        r = P.read('setup')[0]
+        _e1 = r['elapsed']
+        assert r['state'] == 'failed' and r.get('ended'), r['state']
+        _tm.sleep(1.2)
+        _e2 = P.read('setup')[0]['elapsed']
+        assert _e1 == _e2, (
+            '🔴 失败之后「已用」还在涨：%s -> %s（1.2 秒后）—— 而 ended '
+            '里记着真实耗时。页面上那个数会一路涨到 24 小时' % (_e1, _e2))
+        # ★ 反向自证：**跑着的时候必须涨** —— 否则"一律用 ended"也全绿
+        pg2 = P.Progress('sync', '每日同步', 2)
+        pg2.step('抓数', at=1)
+        _r1 = P.read('sync')[0]['elapsed']
+        _tm.sleep(1.2)
+        _r2 = P.read('sync')[0]['elapsed']
+        assert _r2 > _r1, ('running 时「已用」不涨了（%s -> %s）—— '
+                           '那是把计时器整个停掉了' % (_r1, _r2))
+
+        # 失败那一步要带着原因落盘，而且主行那句要短到放得下
+        r = P.read('setup')[0]
+        _k = [i for i, x in enumerate(r['done']) if x['state'] != 'ok']
+        assert _k, r['done']
+        _bad = r['done'][_k[-1]]
+        assert _bad.get('note') and '①' in _bad['note'], (
+            '🔴 失败原因没跟着那一步落盘 —— 横条上就只剩 rc 和一个日志'
+            '路径，而 rc=1 说不出任何事：%r' % (_bad,))
+        _n1 = _bad.get('note1')
+        assert _n1 and len(_n1) <= 72 and len(_n1) < len(_bad['note']), (
+            '🔴 主行那句没派生/没短过完整版（%s 字 vs %s 字）—— 横条是'
+            '**一行**，整句 130+ 字塞进去会被 ellipsis 截没，'
+            '而它正是最该看到的东西' % (len(_n1 or ''), len(_bad['note'])))
+
+        # 🔴 认不出的错**不翻译，但要给原文那行异常** —— 多数失败不是缺表
+        _net = ['downloading...', 'Traceback (most recent call last):',
+                '  File "x.py", line 3, in <module>',
+                'urllib.error.URLError: <urlopen error [Errno 8] nodename '
+                'nor servname provided>']
+        assert sy._stage_fail_hint(_m_stage, _net) is None, \
+            '认不出的错被硬凑成了"去做某一步" —— 那比不说更糟'
+        _b = sy._err_brief(_net)
+        assert _b and 'URLError' in _b, (
+            '认不出时没给原文异常：%r' % (_b,))
+        _b2 = sy._err_brief(_dk)
+        assert _b2 and 'CatalogException' in _b2 and 'LINE 28' not in _b2, (
+            '🔴 取的是日志**最后一行**而不是那行异常 —— duckdb 会在异常'
+            '后面再吐一行 `LINE 28: ...`，取末行就把真正的原因丢了：%r'
+            % (_b2,))
+        out.append('结束即停表（failed/running 两向）｜失败原因进进度文件'
+                   '（缺表翻成下一步、认不出给原文异常）｜主行 %d 字 / '
+                   '完整 %d 字' % (len(_n1), len(_bad['note'])))
     finally:
         P.DIR, P.TIMES = old_dir, old_times
         shutil.rmtree(td, ignore_errors=True)

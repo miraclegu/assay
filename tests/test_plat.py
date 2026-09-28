@@ -5267,3 +5267,76 @@ def t_shared_widgets_single_source():
             'tbl 在 shared/common.js 一处；calGrid 几何 周一起始/pad %d/日格 %d、'
             'head+note 两个开关各自生效；独立页面上 tbl 可用、点表头排序、'
             'ⓘ 字号 %spx' % (lead, nd, out['fs']))
+
+
+@case('CLAUDE.md 分层：正本只留纪律+索引，详情在 lessons/，两边不许分叉',
+      tag='fast')
+def t_claude_layered():
+    """2026-09-28：CLAUDE.md 曾长到 **9557 行 / 33 万字符**，每开一个会话
+    就把上下文吃掉一多半 —— 于是"几乎每个问题都要 compact"。
+
+    拆成【正本 = 跨域铁律 + 索引】+【`docs/lessons/<域>.md` = 实测定案】，
+    拆的时候逐块做过字节级自证（62/62 段整段逐字落在分册里）。
+
+    🔴🔴 这条守卫防的是**它慢慢长回去**，以及**索引与分册分叉** ——
+      后者尤其隐蔽：加了一节而索引没更新，那一节**从此没人找得到**，
+      而它不报错（同「照清单拼会漏掉新文件的全部组合」）。
+    ★ 判据两向都要：索引里的每一节必须在分册里、分册里的每一节必须在
+      索引里 —— 只钉一头的话另一头可以悄悄空掉。
+    """
+    import re
+    p = os.path.join(REPO, 'CLAUDE.md')
+    txt = io.open(p, encoding='utf-8').read()
+    lines = txt.split('\n')
+
+    # ── A 正本不许长回去 ──────────────────────────────────────
+    #   600 行是给铁律留的余量（拆完 321 行）。超了说明详情又被写回正本
+    #   —— 那正是当初 9557 行的来路：每轮把现场原样贴进来。
+    assert len(lines) < 600, (
+        '🔴 CLAUDE.md 涨到 %d 行 —— 详情该写进 docs/lessons/<域>.md，'
+        '正本只留【跨域铁律 + 索引】。它每开一个会话都要全量进上下文，'
+        '长回去就又是"每个问题都得 compact"' % len(lines))
+
+    # ── B 索引里列的分册都得真的存在 ──────────────────────────
+    idx = re.findall(r'^### `docs/lessons/(\w+)\.md` —— (.+?)（(\d+) 节 / '
+                     r'(\d+) 行）$', txt, re.M)
+    assert len(idx) >= 6, '索引里只列了 %d 册 —— 目录是空的？' % len(idx)
+    out = []
+    for dom, name, n_sec, n_ln in idx:
+        f = os.path.join(REPO, 'docs', 'lessons', dom + '.md')
+        assert os.path.isfile(f), (
+            '🔴 索引指向一个不存在的分册 %s —— 死链比不给更糟' % f)
+        body = io.open(f, encoding='utf-8').read()
+
+        # ── C 索引里那一节的标题，分册里必须真有 ────────────────
+        blk = txt[txt.index('### `docs/lessons/%s.md`' % dom):]
+        nxt = blk.find('\n### ', 4)
+        if nxt < 0:
+            nxt = blk.find('\n## ', 4)
+        titles = [x[2:].strip() for x in
+                  (blk[:nxt] if nxt > 0 else blk).split('\n')
+                  if x.startswith('- ')]
+        assert len(titles) == int(n_sec), (
+            '%s：索引说 %s 节，实际列了 %d 条' % (dom, n_sec, len(titles)))
+        have = [x[3:].strip() for x in body.split('\n')
+                if x.startswith('## ')]
+        miss = [t for t in titles if t not in have]
+        assert not miss, (
+            '🔴 %s.md 里找不到索引列的这几节：%r —— 索引在说谎'
+            % (dom, miss[:3]))
+
+        # ── D **反向**：分册里有而索引里没有 = 从此没人找得到 ──────
+        extra = [h for h in have if h not in titles]
+        assert not extra, (
+            '🔴 %s.md 多出这几节而索引里没有：%r —— 加了一节忘了更新索引，'
+            '那一节从此没人找得到，而它不报错' % (dom, extra[:3]))
+        out.append('%s %d 节' % (dom, len(have)))
+
+    # ── E 反向自证：分册确实装着【详情】，不是被掏空的壳 ──────────
+    tot = sum(len(io.open(os.path.join(REPO, 'docs', 'lessons', d + '.md'),
+                          encoding='utf-8').read().split('\n'))
+              for d, _, _, _ in idx)
+    assert tot > 6000, (
+        '六册加起来才 %d 行 —— 详情被掏空了，而索引看着还在' % tot)
+    return ('正本 %d 行（上限 600）｜ %d 册两向对齐：%s ｜ 详情共 %d 行'
+            % (len(lines), len(idx), ' / '.join(out), tot))

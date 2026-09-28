@@ -603,6 +603,71 @@ def api_setup(_q):
     return d
 
 
+_CATALOG_RE = re.compile(r'Table with name ([A-Za-z_][\w]*) does not exist')
+_NOFILE_RE = re.compile(r'No files found that match the pattern '
+                        r'"[^"]*[/\\]std[/\\]([A-Za-z_][\w]*)\.parquet"')
+
+
+def _stage_fail_hint(m, lines):
+    """子进程崩在「那张表不存在」上时，翻成【下一步做什么】。
+
+    🔴 **与 `needs` 那道分工不同，别记反**：
+
+        needs（跑之前）  省掉一次注定失败的运行，并点名是哪一步卡住了 ——
+                         但它认的是我**声明**的那份清单，清单会过期
+        这一道（跑之后）  认的是子进程**真的报出来的表名** ——
+                         所以声明漏了谁，它照样兜得住
+                         （同「守卫不要钉坏成什么样，要钉和正本一不一样」）
+
+    ★ 认不出来的表名**不翻译** —— 硬凑一句"去做 ⑦"比不说更糟
+      （同「拿不到分红那一格标查不到，不猜一个数」）。
+    """
+    txt = '\n'.join(lines or [])[-8000:]
+    hit = set(_CATALOG_RE.findall(txt)) | set(_NOFILE_RE.findall(txt))
+    own = getattr(m, 'NEED_OWNER', {})
+    miss = sorted(t for t in hit if t in own)
+    if not miss:
+        return None
+    b = {'by': sorted(set(own[t] for t in miss)),
+         'missing': [{'table': t, 'why': '子进程报了这张表不存在'}
+                     for t in miss]}
+    names = dict((s['id'], s['name']) for s in m.stages())
+    b['by_name'] = '、'.join(names.get(i, i) for i in b['by'])
+    return m.blocked_text(b)
+
+
+_ERRLINE_RE = re.compile(
+    r'^\s*(?:[\w.]+\.)?(\w*(?:Error|Exception|Exit))\b\s*:?\s*(.*)$')
+
+
+def _err_brief(lines, cap=160):
+    """认不出表名时，**给日志里那行真正的异常** —— 不猜，也不沉默。
+
+    🔴 `_stage_fail_hint` 只认「缺哪张表」这一类，而多数失败不是它
+      （网络断、磁盘满、上游脚本自己 raise）。那时横条上原来只有
+      `rc=1` 加一个日志路径 —— 人得翻日志才知道出了什么事，
+      而这条横条存在的全部理由就是"不用翻日志也知道现在什么状态"。
+
+    ★ 取的是**原文**不是解释：从后往前找第一行 `XxxError: ...`；
+      一行都认不出就退回最后一行非空的。两者都是**日志里真有的字**，
+      不是我编的（同「认不出的表名不翻译」那条的另一半）。
+    🔴 `Traceback` 的最后一行才是异常，而 duckdb 那种会在它后面再吐
+      `LINE 28: FROM k FULL OUTER JOIN ...` —— 所以不能直接取末行。
+    """
+    xs = [x.rstrip() for x in (lines or []) if x and x.strip()]
+    if not xs:
+        return None
+    for x in reversed(xs[-80:]):
+        m = _ERRLINE_RE.match(x)
+        if m and m.group(1):
+            s = x.strip()
+            break
+    else:
+        s = xs[-1].strip()
+    s = ' '.join(s.split())
+    return (s[:cap] + '…') if len(s) > cap else s
+
+
 def api_setup_run(_q, body):
     """POST /api/setup/run {stage} —— 跑某一个阶段（后台子进程，复用 _JOBS）。
 
@@ -684,6 +749,20 @@ def api_setup_run(_q, body):
                 nxt = next((x for x in cur if x['state'] == 'todo'), None)
                 if not nxt:
                     break
+                if nxt.get('blocked'):
+                    # 🔴 **停在这里，不跳过它接着跑下一个** —— 后面每步都吃
+                    #   前一步的产物（⑤ 因子面板吃 ④ 的面板），跳过去只是
+                    #   换个地方崩（同下面那条「失败就停」）。
+                    #   而这不是"失败"：链条没坏，只是**压在人工那一步上**，
+                    #   所以 rc 留 0、话里要说清下一步点哪里。
+                    j['lines'].append('')
+                    j['lines'].append('⏸ 「%s」现在还跑不动 —— %s'
+                                      % (nxt['name'], nxt['blocked']['text']))
+                    j['lines'].append('   做完那一步再点一次「开始建本地数据」，'
+                                      '会从这一步接着跑。')
+                    _day_say(dlog, '⏸ %s 跑不动：%s'
+                             % (nxt['name'], nxt['blocked']['text']))
+                    break
                 if pg:
                     pg.step(nxt['name'], at=ids.index(nxt['id']) + 1)
                 j['stage'] = nxt['name']
@@ -702,8 +781,14 @@ def api_setup_run(_q, body):
                 _day_done(dlog, nxt['name'], rc, int(time.time() - _t0),
                           _runs._JOBS[sub].get('lines'), log_path)
                 _runs._JOBS.pop(sub, None)
+                # 🔴 摘要要在 `finish_step` **之前**算出来 —— 它得跟着
+                #   那一步一起落盘，横条与展开面板才说得出"为什么停"。
+                _hint = _note = None
+                if rc != 0:
+                    _hint = _stage_fail_hint(m, j['lines'])
+                    _note = _hint or _err_brief(j['lines'])
                 if pg:
-                    pg.finish_step('ok' if rc == 0 else 'bad')
+                    pg.finish_step('ok' if rc == 0 else 'bad', note=_note)
                 if rc != 0:
                     # 🔴 **失败就停**：后面每步都吃前一步的产物，带着坏数据
                     #   往下跑会一路传播，**而下游不报错**（同 sync 链那条
@@ -712,6 +797,11 @@ def api_setup_run(_q, body):
                         '❌ 「%s」失败（rc=%s）—— 后面几步吃它的产物，'
                         '就停在这里了。修好再点一次，会从这一步接着跑。'
                         % (nxt['name'], rc))
+                    if _hint:
+                        j['lines'].append('   %s' % _hint)
+                        _day_say(dlog, _hint)
+                    elif _note:
+                        _day_say(dlog, _note)
                     break
             j['rc'] = rc
             j['state'] = 'done' if rc == 0 else 'failed'
@@ -733,6 +823,14 @@ def api_setup_run(_q, body):
     st = st[0]
     if not st.get('cmd'):
         return {'error': '「%s」要人工完成，没有可跑的命令。' % st['name']}
+    if st.get('blocked'):
+        # 🔴 起了也是崩 —— 而 duckdb 报出来的是一个**表名**，答不了
+        #   "我现在该做什么"（真机上就是那句
+        #   `Table with name security_universe does not exist!`）。
+        #   判据是**那条 SQL 真正要的两件事**（std 下的 parquet 在不在 +
+        #   lake.db 里注册了没有），不是启发式；查不出来时不拦（不猜）。
+        return {'error': '「%s」现在还跑不动 —— %s'
+                         % (st['name'], st['blocked']['text'])}
     cmd = list(st['cmd'])
     job_id = 'setup-%s-%s' % (sid, datetime.now().strftime('%H%M%S'))
     _runs._JOBS[job_id] = {'state': 'running', 'lines': [], 'cmd': cmd,
@@ -757,17 +855,27 @@ def api_setup_run(_q, body):
         dlog = _day_setup()
         _lp = _setup_log_path('setup-%s-%s.log' % (
             sid, datetime.now().strftime('%Y%m%d-%H%M%S')))
-        _day_say(dlog, '───── %s（单步）─────' % st[0]['name'])
+        # 🔴 这里曾经写成 `st[0]['name']`，而上面 `st = st[0]` 之后它是个
+        #   **dict** -> `KeyError: 0`。异常在 daemon 线程里抛，`_JOBS` 那条
+        #   **永远停在 running** —— 表现是「点了逐阶段按钮，进度条一直转、
+        #   什么都不跑」，而且 `api_setup_run` 开头那道「已经有一个装配任务
+        #   在跑」会从此**把一键建库也拦死**。全程不报错。
+        _day_say(dlog, '───── %s（单步）─────' % st['name'])
         _t0 = time.time()
         _runs._run_job(job_id, cmd, _datalake_dir(), log_path=_lp)
-        _day_done(dlog, st[0]['name'], _runs._JOBS[job_id].get('rc'),
+        _day_done(dlog, st['name'], _runs._JOBS[job_id].get('rc'),
                   int(time.time() - _t0),
                   _runs._JOBS[job_id].get('lines'), _lp)
         if dlog is not None:
             dlog.close()
         if pg:
             rc = _runs._JOBS[job_id].get('rc')
-            pg.finish_step('ok' if rc == 0 else 'bad')
+            # 逐阶段这条路**同样要给原因** —— 它是一键失败之后的恢复路径，
+            # 正是最该说清"这次又是为什么"的地方（改一处之前先扫同类）。
+            _ln = _runs._JOBS[job_id].get('lines')
+            _nt = None if rc == 0 else (_stage_fail_hint(m, _ln)
+                                        or _err_brief(_ln))
+            pg.finish_step('ok' if rc == 0 else 'bad', note=_nt)
             pg.finish(rc if rc is not None else 1)
         _setup_summary(force=True)
 
@@ -969,6 +1077,10 @@ def api_progress(_q):
             lf = {'at': lf.get('ended') or lf.get('started'),
                   'rc': lf.get('rc'), 'log': lf.get('log'),
                   'step': (dn[kk[-1]].get('name') if kk else None),
+                  # 🔴 **为什么失败**要一起带上 —— 「上次失败（停在第 3 步）」
+                  #   答不了"我现在该做什么"，而那正是新机器上人唯一要问的
+                  #   问题（同「报错必须指向真正的原因」）。
+                  'note': (dn[kk[-1]].get('note') if kk else None),
                   'i': (kk[-1] + 1) if kk else None,
                   'total': lf.get('total')}
         if su and not su.get('ready'):
@@ -979,8 +1091,18 @@ def api_progress(_q):
                          'n_todo': su.get('n_todo'),
                          'next_name': su.get('next_name'),
                          'last_fail': lf,
-                         # ⚠ 阶段自己声明的估计，**不是实测** —— 页面上写「估」
+                         # ⚠ 阶段自己声明的估计，【不是实测】—— 页面上写「估」
                          'eta_text': su.get('eta_text'),
+                         # 🔴 有步骤压在人工那一步上时，横条不能只写
+                         #   「还差 6 步 · 约需 2 小时」—— 点下去只会跑到
+                         #   ④ 就停（同「悄悄截断比查不出来更糟」）。
+                         'n_blocked': su.get('n_blocked'),
+                         'n_runnable': su.get('n_runnable'),
+                         'blocked_name': su.get('blocked_name'),
+                         'blocked_text': su.get('blocked_text'),
+                         # ★ 「要先有谁」由服务端给 —— 前端拼死一句
+                         #   「要先有聚宽财务数据」的话，换个产出方它会说谎。
+                         'blocked_by_name': su.get('blocked_by_name'),
                          **_setup_flags()})
         elif su and su.get('ready'):
             # 🔴🔴 **数据建好了 != 它会自己更新。** 装定时任务的入口有三个

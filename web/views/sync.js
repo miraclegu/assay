@@ -131,7 +131,7 @@ let SU=null;
      会在「文件被删了 / 手工跑过 / 换了台机器」时说谎（同 launchd 那条）。 */
 /* 🔴🔴 「到底是卡住了还是在干活」的**唯一**可证判据是「最后一次有输出
    是多久以前」—— 不是"进程在不在"（项目里早有这条：realtime 那次
-   「线程还活着不等于链条还在工作」）。第 ② 步要跑 30~60 分钟，
+   「线程还活着不等于链条还在工作」）。第 ③ 步要跑 30~60 分钟，
    而改之前屏幕上它与"卡死了"长得一模一样。
    ★ **只给事实，不下结论**：有些步骤（tdx2db init）中途本来就长时间
      不吐东西，说死"卡住了"就是假告警；说死"在跑"又可能是在骗人。
@@ -166,18 +166,24 @@ function setupBlock(su){
      「等人动手」三种（用户原话：我都不知道是卡住了还是等人手工操作）。
      判据用服务端给的 running.stage_id —— 按 id 不按名字，名字改了
      它还认得（同「按位置对齐，names 只给显示用」那条）。 */
-  const ico={ok:'\u2705', todo:'\u2b1c', manual:'\u270b', running:'\u27f3'};
+  const ico={ok:'\u2705', todo:'\u2b1c', manual:'\u270b', running:'\u27f3',
+             blocked:'\ud83d\udd12'};
   const busy = !!su.running;
   const rows=(su.stages||[]).map(s=>{
     const run = busy && su.running.stage_id===s.id;
     /* 有任务在跑时，其余「开始」不该还是可点的 —— 服务端本来就会拒
        （一次只许跑一个，它们有先后依赖），而让人点一个必然报错的按钮
        比不给更糟（同 backLink 那条）。 */
-    const can = s.state==='todo' && s.cmd && su.can_run && !busy;
+    /* 🔴 现在跑不动的那一步（要先有聚宽那腿）**不给按钮** —— 起了也是
+       崩在一个表名上（真机实测），而让人点一个必然报错的按钮比不给更糟。
+       但【不许静默变灰】：那一格要说清缺什么、下一步点哪里。 */
+    const blk = s.blocked;
+    const can = s.state==='todo' && s.cmd && su.can_run && !busy && !blk;
     return '<tr'+(run?' class="surun"':'')+'><td class="tx">'+
-      (run?ico.running:ico[s.state])+' '+esc(s.name)+
+      (run?ico.running:(blk?ico.blocked:ico[s.state]))+' '+esc(s.name)+
       '<div class="cd">'+esc(s.why||'')+'</div></td>'+
-      '<td class="tx">'+esc(s.detail||'')+'</td>'+
+      '<td class="tx">'+esc(s.detail||'')+
+      (blk?'<div class="cd">\ud83d\udd12 '+esc(blk.text)+'</div>':'')+'</td>'+
       '<td class="tx">'+esc(s.eta||'')+'</td>'+
       '<td class="tx">'+(run
         ? '<b>正在跑…</b>'
@@ -185,8 +191,10 @@ function setupBlock(su){
         ? '<button class="btn susbtn" data-sid="'+esc(s.id)+'">\u25b7 开始</button>'
         : (s.state==='ok'?'<span class="cd">已完成</span>'
           :(s.state==='manual'?'<span class="cd">人工</span>'
+          :(blk?'<span class="cd">\u8981\u5148\u505a\u5b8c\uff1a'+
+                esc(blk.by_name||'')+'</span>'
             :'<span class="cd">'+(su.can_run
-               ?(busy?'排队中':'等上一步'):esc(su.why||'只读'))+'</span>'))))+
+               ?(busy?'排队中':'等上一步'):esc(su.why||'只读'))+'</span>')))))+
       '</td></tr>';
   }).join('');
   const tbl='<div class="pw"><table class="lvt">'+
@@ -215,9 +223,19 @@ function setupBlock(su){
         : '')
     : (su.can_run
        ? '<button class="btn" id="suall">\u25b7 开始建本地数据</button>'+
-         '<span class="cd" style="margin-left:8px">一次跑完剩下的 '+
-         su.n_auto_todo+' 步'+(su.eta_text?'，约需 '+esc(su.eta_text)+'（估）':'')+
-         '；中途失败会停下并说清是哪一步</span>'
+         '<span class="cd" style="margin-left:8px">一次跑完'+
+         /* 🔴 有步骤被拦住时，写「剩下的 6 步」是在说谎 —— 点下去只会跑到
+            ④ 就停。所以说的是【这次真的跑得到几步】，并把停在哪、
+            为什么、下一步点哪里一起给出来。 */
+         (su.n_blocked
+           ? '接下来的 '+(su.n_runnable||0)+' 步'
+           : '剩下的 '+su.n_auto_todo+' 步')+
+         (su.eta_text?'，约需 '+esc(su.eta_text)+'（估）':'')+
+         '；中途失败会停下并说清是哪一步</span>'+
+         (su.n_blocked&&su.blocked_text
+           ? '<div class="lvwhy" style="margin-top:6px">\ud83d\udd12 跑到'+
+             esc(su.blocked_name||'')+' 会停下来：'+esc(su.blocked_text)+'</div>'
+           : '')
        : '<span class="cd">'+esc(su.why||'只读模式，不能跑')+'</span>');
   return '<div class="lvwarn"><b>\u8fd8\u5dee '+su.n_todo+' \u6b65\u624d\u80fd\u7528</b><br>'+
     '本机 '+esc(su.os||'')+'。<b>首次</b>点下面那个按钮一次建完；'+
@@ -557,7 +575,7 @@ async function pollSync(tok){
     el.scrollTop=el.scrollHeight;
     if(o.state==='running'){
       /* 🔴 阶段表也要跟着动 —— 改之前 pollSync 只写 #syout，于是那七行
-         与按钮**整场冻结在点击那一刻的快照上**（第 ② 步要跑 30~60 分钟）。
+         与按钮**整场冻结在点击那一刻的快照上**（第 ③ 步要跑 30~60 分钟）。
          用户原话：「按钮仍处于可用状态……其他阶段都没有任何进度」。
          ★ 每 5 轮（10 秒）才查一次：/api/setup 那侧有 20 秒缓存，
            2 秒一发纯属白打。

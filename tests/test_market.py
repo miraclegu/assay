@@ -4244,7 +4244,16 @@ def t_alerts_by_indicator():
                          % (cell.replace('\n', ' '), (st2 or '').strip()))
 
             # ---- ④ 改一行：回填的是【条件】不是触发价 ----
-            pg.locator('a.aed').first.click()
+            # 🔴 **不能点 `first`** —— 这一页默认按【接近度】排，而哪一行排
+            #   最前取决于**当天行情**：实测 2026-09-28 长江电力那一行（只有
+            #   1 个指标档）比中国石油最近的那档还近，于是 first 点开的是它，
+            #   判据报「没回填出三个指标档：1」，**看着像产品坏了**。
+            #   同「判据不许依赖真实数据碰巧如此」—— 这条用例自己已经为
+            #   "阈值要运行时挑"写过两处，唯独漏了"入口点到哪一行"。
+            _row = pg.locator('table.pkt tr').filter(has_text='601857')
+            assert _row.count() == 1, (
+                '构造的那一行不在页面上（或匹配到多行）：%d' % _row.count())
+            _row.locator('a.aed').first.click()
             pg.wait_for_timeout(600)
             sel = pg.locator('.asig')
             assert sel.count() == 3, '编辑器里没回填出三个指标档：%d' % sel.count()

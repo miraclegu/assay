@@ -1078,6 +1078,10 @@ tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
 #prgbar .pgdcur{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 #prgbar .pgdcur .pgdn,#prgbar .pgdcur .pgdt{color:var(--accent)}
 #prgbar .pgdbad .pgdn,#prgbar .pgdbad .pgdt{color:var(--down)}
+/* 失败那一步的原因：缩进对齐步名、**允许折行**（duckdb 那种报错是一整句，
+   nowrap 会把它截没，而它正是这一栏最该看到的东西）。 */
+#prgbar .pgdw{margin:0 12px 4px 34px;color:var(--down);font-size:11px;
+  line-height:1.5;white-space:normal;word-break:break-word}
 /* 还没跑到的那几步压暗 —— 它们是【上次】的名字，不是这次的事实 */
 #prgbar .pgdq{opacity:.55}
 #prgbar .pgdf{padding:4px 12px 2px;margin-top:4px;

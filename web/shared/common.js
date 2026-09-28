@@ -897,7 +897,11 @@ function prgSteps(j){
     rows.push('<div class="pgdr ' + cls + '">' +
       '<span class="pgdi">' + ico + '</span>' +
       '<span class="pgdn">' + (k + 1) + '. ' + esc(label) + '</span>' +
-      '<span class="pgdt">' + esc(right) + '</span></div>');
+      '<span class="pgdt">' + esc(right) + '</span></div>' +
+      /* 失败那一步的原因**另起一行**：它常常是一整句 duckdb 报错，
+         挤进右边那一格会把耗时挤没（同「能进 tooltip 的就别占列」，
+         只是这一条反过来——它太重要，不能进 tooltip）。 */
+      (d && d.note ? '<div class="pgdw">' + esc(d.note) + '</div>' : ''));
   }
   const foot = [];
   if(!plan.length && j.state === 'running')
@@ -918,6 +922,12 @@ function prgHtml(j){
   if(j.kind === 'setup_needed'){
     const bits = ['还差 ' + j.n_todo + ' 步'];
     if(j.eta_text) bits.push('约需 ' + esc(j.eta_text) + '（估）');
+    /* 🔴 有步骤要先有【人工】那一步（聚宽财务）时必须说出来 —— 否则
+       「还差 6 步 · 约需 2 小时」是在说谎：点下去只跑得到第 2 步就停，
+       而人会以为是卡住了。真机 2026-09-27 就崩在这里（报的是一个表名）。*/
+    if(j.n_blocked) bits.push('这次只跑得到 ' + (j.n_runnable || 0) +
+      ' 步，' + esc(j.blocked_name || '') + ' 要先有' +
+      esc(j.blocked_by_name || '前一步'));
     bits.push('之后每天自动增量同步，不用再点');
     /* 只读模式下**按钮照样在**（项目纪律：一律不设 disabled，disabled 的
        元素连 title 都不触发），但先把原因说在前面 —— 让人点一下才知道
@@ -937,6 +947,7 @@ function prgHtml(j){
              + String(t.getDate()).padStart(2, '0') + ' '
              + String(t.getHours()).padStart(2, '0') + ':'
              + String(t.getMinutes()).padStart(2, '0') : ''));
+      if(lf.note) bits.push(esc(lf.note));
       if(lf.log) bits.push('日志 ' + esc(lf.log));
     }
     return '<span class="pgi">' + (lf ? '🔴' : '📦') + '</span>' +
@@ -984,6 +995,8 @@ function prgHtml(j){
 
   const el = fmtDur(j.elapsed), eta = fmtDur(j.eta);
   const bits = [];
+  /* 完整那句原因（主行放不下时进 title —— 挪走可以，藏没了不行）。 */
+  let badNote = null;
   if(run && j.total) bits.push('第 ' + j.i + ' / ' + j.total + ' 步');
   if(j.step) bits.push(esc(j.step));
   if(el) bits.push('已用 ' + el);
@@ -1018,6 +1031,14 @@ function prgHtml(j){
     bits.push('失败' + (k >= 0
       ? '（停在第 ' + (k + 1) + ' / ' + (j.total || dn.length) + ' 步「'
         + esc(nm) + '」）' : '') + '，rc=' + esc(String(j.rc)));
+    /* 🔴🔴 **为什么失败**：原来这里只有 rc 与一个日志路径 —— 而 rc=1
+         说不出任何事，人得去翻日志。服务端现在把原因跟着那一步落了盘
+         （认得出缺哪张表就翻成"要先做哪一步"，认不出就给日志里那行原始
+         异常），这里照直显示（同「报错必须指向真正的原因」）。 */
+    if(k >= 0 && dn[k].note){
+      badNote = dn[k].note;
+      bits.push(esc(dn[k].note1 || dn[k].note));
+    }
     /* 下一步要说出来：这条链是**接着跑**的，不是从头再来一遍 548 MB。 */
     bits.push('修好再点一次，会从这一步接着跑');
     if(j.log) bits.push('日志 ' + esc(j.log));
@@ -1026,13 +1047,20 @@ function prgHtml(j){
   /* 🔴 展开区是**浮层**（绝对定位贴在横条下方），不撑高横条自己 ——
      `body.hasprog{padding-top}` 是个固定值，横条一变高就会盖住顶栏、
      把导航**点不到**（同「position:fixed 会盖住页面最下面那行」）。 */
+  /* 🔴 失败时**默认展开明细** —— 失败正是最需要看"哪一步、为什么"的
+       时候，而展开是收起的话人得再点一下才知道（同「合并的风险不是少两个
+       按钮，是把功能藏起来」）。
+     ★ 只在**从没被人碰过**这一条时自动开（`PRGOPEN[job]` 还是 undefined）：
+       人手动收起之后就是 false，不再替他打开 —— 那是他的选择。 */
+  if(bad && PRGOPEN[j.job] === undefined) PRGOPEN[j.job] = true;
   const open = !!PRGOPEN[j.job];
   return '<div class="pgrow" data-job="' + esc(j.job) + '">' +
          '<i class="pgfill' + (bad ? ' bad' : '') + '" style="width:' +
          (pct * 100).toFixed(1) + '%"></i>' +
          '<span class="pgi">' + ico + '</span>' +
          '<b>' + esc(j.title || j.job) + '</b>' +
-         '<span class="pgs">' + bits.join(' · ') + '</span>' +
+         '<span class="pgs"' + (badNote ? ' title="' + esc(badNote) + '"' : '')
+         + '>' + bits.join(' · ') + '</span>' +
          '<a href="#" class="pgmore" data-job="' + esc(j.job) + '">' +
          (open ? '收起 ▴' : '明细 ▾') + '</a>' +
          '<a href="/#/sync">看日志 ›</a>' +
