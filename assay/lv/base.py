@@ -501,8 +501,25 @@ def transfer_is_extra(model, code):
 
 
 def _calendar():
+    """交易日历 —— 🔴 **它是公共数据，不属于任何用户。**
+
+    2026-09-28 加用户隔离之后 `LIVE` 会被指到 `live/u/<用户>/`，而日历
+    一直躺在 `live/` 下（它混在私有数据里，但它不是谁的）。只按 `LIVE`
+    找的话，一登录就报「缺少未来交易日历」—— 而那句话指的是一条完全
+    走不通的路（人会去聚宽重导一份，可它明明就在旁边）。
+
+    ★ 顺序是 **`LIVE` 优先、公共兜底**，不是反过来：selftest 把 `LIVE`
+      指到临时目录并**往里拷了一份日历**（`test_live.py` 那两处），
+      反过来的话那些用例的构造就静默失效了。
+    """
     p = os.path.join(LIVE, 'trade_calendar.json')
     d = _read_json(p, None)
+    if not d or not d.get('days'):
+        _pub = os.path.join(ROOT, 'live', 'trade_calendar.json')
+        if os.path.abspath(_pub) != os.path.abspath(p):
+            d = _read_json(_pub, None)
+            if d and d.get('days'):
+                p = _pub
     if not d or not d.get('days'):
         raise LiveError(
             '缺少未来交易日历（%s）。\n'

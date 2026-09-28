@@ -40,6 +40,9 @@ from .srv import base
 # ★ 这几个名字指的是 `srv/` 下的**路由模块**，不是 assay/live.py 那些业务模块
 #   （业务模块一律通过 base 里的延迟导入封装拿：base._live() / base._rt() …）
 from .srv import docs, factors, live, market, rt, runs, stock, sync, watch
+# ★ 单独一行 import 并起个别名：`auth` 这个名字在 srv 下已经够短，
+#   而 Handler 里用得密集，别名能一眼看出"这是认证那一层"。
+from .srv import auth as auth_mod
 
 
 ROUTES = {
@@ -124,14 +127,25 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):       # 静音访问日志，别淹没终端
         pass
 
-    def _send(self, code, body, ctype='application/json; charset=utf-8'):
+    def _send(self, code, body, ctype='application/json; charset=utf-8',
+              extra=None):
         data = body if isinstance(body, bytes) else body.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
+        # ★ 登录/登出要下发 Set-Cookie —— 只多这一个可选参数，
+        #   别为它另开一条发送路径（同「一件事只许有一份实现」）。
+        for k, v in (extra or ()):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    # ---------------------------------------------------------- 认证
+    # 🔴 **实现全在 `srv/auth.py`** —— 守卫「server.py 又长回去了」当场
+    #   抓到我把 70 行认证塞在这里。骨架里只留调用（同别的域）。
+    def _who(self):
+        return auth_mod.who_of(self.headers.get('Cookie'))
 
     def do_POST(self):                       # noqa: N802
         u = urlparse(self.path)
@@ -191,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, _err_500(u.path, e))
             return self._send(200, json.dumps(r, ensure_ascii=False, default=str))
         fn = POSTS.get(u.path)
-        if fn is None:
+        if fn is None and not u.path.startswith('/api/auth/'):
             return self._send(404, json.dumps({'error': 'no such endpoint'}))
         try:
             n = int(self.headers.get('Content-Length') or 0)
@@ -199,8 +213,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                   # noqa: BLE001
             return self._send(400, json.dumps({'error': '请求体不是合法 JSON: %s' % e},
                                               ensure_ascii=False))
+        if auth_mod.try_auth(self, u.path, {}, body):
+            return
+        cx = auth_mod.ctx(u.path, self._who())   # 见 srv/auth.py：默认私有
+        if cx is None:
+            return self._send(401, json.dumps(auth_mod.need_login(u.path),
+                                              ensure_ascii=False))
         try:
-            r = fn({}, body)
+            with cx:
+                r = fn({}, body)
         except Exception as e:                   # noqa: BLE001
             return self._send(500, _err_500(u.path, e))
         # ★ default=str 与 GET 分支保持一致 —— POST 的返回里也可能带
@@ -210,9 +231,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):                        # noqa: N802
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if auth_mod.try_auth(self, u.path, q, {}):
+            return
         if u.path in ROUTES:
+            # 🔴 **默认私有**（见 srv/auth.py）：`ctx` 是 None 就要先登录。
+            cx = auth_mod.ctx(u.path, self._who())
+            if cx is None:
+                return self._send(401, json.dumps(
+                    auth_mod.need_login(u.path), ensure_ascii=False))
             try:
-                r = ROUTES[u.path](q)
+                with cx:
+                    r = ROUTES[u.path](q)
             except Exception as e:           # noqa: BLE001
                 # 错误要显式返回，不能静默给空 —— 前端才好判断是没数据还是出错了
                 return self._send(500, _err_500(u.path, e))

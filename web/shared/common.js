@@ -90,10 +90,28 @@ function _errOf(txt, path, status) {
   return err;
 }
 
-async function j(u) {
+async function j(u, op) {
   const r = await fetch(u);
   const txt = await r.text();
   const path = u.split('?')[0];
+  /* 🔴 **401 一律跳登录页，而且带上 next** —— 不跳的话页面上是一句
+     「请先登录」的红字，人得自己想起来去哪儿登（同「报错必须指向真正
+     的原因」，这里更进一步：直接把人送到能解决问题的那一页）。
+     ★ 登录页自己不许再跳（会死循环），所以判一下当前是不是它。 */
+  /* 🔴🔴 **公共页面上的私有块不许把整页踢走。** 个股页是公共的，而它
+     顺带问两件私有的事（我持有多少 / 我在这只票上的买卖点）—— 默认跳转
+     的话，建了账号之后**没登录看不了行情**，那就把一个公共页面变成私有的了
+     （同「合并的风险不是少两个按钮，是把功能藏起来」）。
+     ★ 所以这两处显式传 `{soft:1}`：401 当成"这一块看不到"，页面照常渲染。 */
+  /* ★ 参数叫 `op` 不叫 `o` —— 函数体下面有 `let o = JSON.parse(txt)`，
+     重名是 `Identifier 'o' has already been declared`，**整个文件
+     SyntaxError、整页白屏**（`node --check` 当场抓到，第一版就这么写的）。 */
+  if (r.status === 401 && !(op && op.soft)
+      && !location.pathname.endsWith('/login.html')) {
+    location.href = '/login.html?next=' +
+      encodeURIComponent(location.pathname + location.search + location.hash);
+    throw _errOf(txt, path, 401);
+  }
   if (!r.ok) throw _errOf(txt, path, r.status);
   let o;
   try { o = JSON.parse(txt); }
@@ -355,9 +373,115 @@ function pageHead(cur, title, extra) {
   el.innerHTML = `<h1><a href="/" class="${cur === 'home' ? 'homeon' : ''}"
       style="text-decoration:none" title="回总览首页"><b>assay</b></a>
       ${esc(title)}</h1>${backLink()}${extra || ''}
-    <div class="sp"></div>${navHtml(cur)}`;
+    <div class="sp"></div>${navHtml(cur)}<span id="whoami"></span>`;
   wireBack();
   navAlert();
+  whoAmI();
+}
+
+/* ---- 我是谁（顶栏最右）------------------------------------------------
+   ★ 挂在 `pageHead` 里，所以**每个页面都有** —— 与指数带子、进度横条
+     同一条理由（6 个独立 .html 与 index.html 都走它）。
+   🔴 未登录时给的是**登录入口**，不是一片空白：公共页面照常能看，
+     但"怎么才能看到我的账户"得在屏幕上有个答案。 */
+let WHO = null;
+async function whoAmI() {
+  const el = $('#whoami');
+  if (!el) return null;
+  try { WHO = await j('/api/auth/me'); } catch (e) { return null; }
+  /* 🔴 **还没建过账号 = 没启用多用户 -> 这一格一个字都不出现。**
+     多一个"登录 ›"既是噪声，又会把顶栏那排入口挤换行（实测 web 用例
+     大批点击超时就是它）。同「没任务时整条不渲染」。 */
+  if (!WHO || !WHO.enabled) { el.innerHTML = ''; return WHO; }
+  if (WHO && WHO.user) {
+    el.innerHTML = `<a href="#" class="btn" id="whobtn" title="${
+      esc(WHO.user.admin ? '管理员' : '普通用户')}">👤 ${esc(WHO.user.name)}</a>`;
+    $('#whobtn').onclick = (ev) => { ev.preventDefault(); whoMenu(); };
+  } else {
+    el.innerHTML = `<a href="/login.html?next=${
+      encodeURIComponent(location.pathname + location.search)
+      }" class="btn">登录 ›</a>`;
+  }
+  return WHO;
+}
+
+/* 点用户名：改密码 / 退出 /（管理员）看所有人。
+   ★ 复用 `.stmodal` 的样式（common.css 里，所有页面都有）；开关逻辑
+     自己写 —— `modal()` 在 views/app.js，6 个独立 .html 没有它。 */
+function whoMenu() {
+  const u = (WHO || {}).user;
+  if (!u) return;
+  let box = $('#whowrap');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'whowrap';
+    document.body.appendChild(box);
+  }
+  box.className = 'stmodal on';
+  box.innerHTML = `<div class="stbg"></div><div class="stbox">
+    <div class="lvhead"><h2>👤 ${esc(u.name)}${
+      u.admin ? ' <span class="cd">管理员</span>' : ''}</h2>
+      <div class="sp"></div><a href="#" class="btn" id="whox">关闭</a></div>
+    <div class="lvsec">
+      <h3>改密码</h3>
+      <div class="lvrow"><label>新密码 <input id="whopw" type="password"
+        style="width:160px"></label>
+        <a href="#" class="btn" id="whopwgo">保存</a>
+        <span class="cd" id="whomsg"></span></div>
+    </div>
+    <div class="lvsec" id="whoadm"></div>
+    <div class="lvsec"><a href="#" class="btn" id="whoout">退出登录</a>
+      <span class="cd">退出之后行情、因子、回测这些照样能看 ——
+        只有实盘/自选/买点/标星要登录</span></div></div>`;
+  const close = () => { box.className = 'stmodal'; box.innerHTML = ''; };
+  $('#whox').onclick = (e) => { e.preventDefault(); close(); };
+  box.querySelector('.stbg').onclick = close;
+  $('#whopwgo').onclick = async (e) => {
+    e.preventDefault();
+    const r = await post('/api/auth/user_pw',
+                         {name: u.name, pw: $('#whopw').value});
+    $('#whomsg').textContent = r && r.error ? ('🔴 ' + r.error) : '✅ 改好了';
+  };
+  $('#whoout').onclick = async (e) => {
+    e.preventDefault();
+    await post('/api/auth/logout', {});
+    location.href = '/login.html';
+  };
+  if (u.admin) whoAdmin();
+}
+
+/* 管理员那一块：所有用户 + 密码（用户明确要求）+ 加人。
+   🔴 页面上要**说清这是明文** —— 不说的话人会以为它是哈希过的，
+     而这个服务一旦被别人访问到，那就是所有人的密码（同「口径不一致
+     要响亮地说出来」）。 */
+async function whoAdmin() {
+  const el = $('#whoadm');
+  if (!el) return;
+  let o;
+  try { o = await j('/api/auth/users'); } catch (e) { el.innerHTML = ''; return; }
+  const rows = (o.users || []).map(x => `<tr><td class="tx">${esc(x.name)}</td>
+    <td class="tx"><code>${esc(x.pw || '')}</code></td>
+    <td class="tx">${x.admin ? '管理员' : ''}</td>
+    <td class="tx cd">${esc(x.created || '')}</td></tr>`).join('');
+  el.innerHTML = `<h3>所有用户（${(o.users || []).length}）</h3>
+    <div class="lvwhy">密码是<b>明文</b>存在 <code>live/_users.json</code> 里
+      —— 你要求管理员能看到它，那就只能这样存。所以<b>别把这个服务暴露到
+      公网</b>，也别拿这里的密码去别处用。</div>
+    <table class="lvt"><thead><tr><th class="tx">用户</th><th class="tx">密码</th>
+      <th class="tx">角色</th><th class="tx">建于</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <div class="lvrow" style="margin-top:8px">
+      <label>新用户 <input id="whonew" style="width:120px"></label>
+      <label>密码 <input id="whonewpw" style="width:120px"></label>
+      <a href="#" class="btn" id="whoadd">+ 加一个</a>
+      <span class="cd" id="whoaddmsg"></span></div>`;
+  $('#whoadd').onclick = async (e) => {
+    e.preventDefault();
+    const r = await post('/api/auth/user_add',
+                         {name: $('#whonew').value, pw: $('#whonewpw').value});
+    if (r && r.error) { $('#whoaddmsg').textContent = '🔴 ' + r.error; return; }
+    whoAdmin();
+  };
 }
 
 /* ---- 个股搜索框 ------------------------------------------------------
@@ -813,9 +937,17 @@ function idxCfgOpen(){
 /* ★ 与炸板提示同一套：`setInterval` 而不是 stopPoll 那套 POLL ——
    视图切换不该把这条带子停掉。
    ★ 收盘后仍然**显示**最后的收盘值（带子不空），只是不再轮询。 */
+/* 🔴 带子是【看板 chrome】的一部分，跟顶栏同进同退 —— 登录页也 load 了
+   common.js（为了 `j()`），而它没有顶栏：不卡这一下的话，“还没登录”
+   那一屏的下方会凭空挂一条行情带子。
+   ★ 判据用 `#top` 而不是页面名：再加一个没有导航的页它自动就对，
+     而写死名字的话新那个会悄悄冒出来、且不报错。
+   ★ 这一下要放在 `tick` **里面** —— 顶栏是各页自己调 `pageHead()` 建的，
+     在 common.js 的顶层跑时它还不存在（放外面等于每页都判成“没有 chrome”）。 */
 if(typeof window !== 'undefined' && !window.__idxOn){
   window.__idxOn = true;
   const tick = async () => {
+    if(!document.getElementById('top')) return;
     const live = await idxScan();
     if(live !== false) setTimeout(tick, IDX_MS);
     /* live === false -> 已收盘，停掉；下次打开页面自然会再取一次。 */
@@ -1047,12 +1179,16 @@ function prgHtml(j){
   /* 🔴 展开区是**浮层**（绝对定位贴在横条下方），不撑高横条自己 ——
      `body.hasprog{padding-top}` 是个固定值，横条一变高就会盖住顶栏、
      把导航**点不到**（同「position:fixed 会盖住页面最下面那行」）。 */
-  /* 🔴 失败时**默认展开明细** —— 失败正是最需要看"哪一步、为什么"的
-       时候，而展开是收起的话人得再点一下才知道（同「合并的风险不是少两个
-       按钮，是把功能藏起来」）。
-     ★ 只在**从没被人碰过**这一条时自动开（`PRGOPEN[job]` 还是 undefined）：
-       人手动收起之后就是 false，不再替他打开 —— 那是他的选择。 */
-  if(bad && PRGOPEN[j.job] === undefined) PRGOPEN[j.job] = true;
+  /* 🔴🔴 **失败时【不】自动展开明细。**
+     我加过一版"失败就自动展开"（理由是"失败正是最需要看哪一步"），
+     而它当天就造成一个真 bug：展开区是**浮层**（绝对定位贴在横条下方），
+     一展开就盖住页面顶部一大片、**把所有点击吃掉** —— playwright 报得
+     很清楚：`<span class="pgdn">9. ETF lake…</span> from
+     <div id="prgbar">…</div> subtree intercepts pointer events`，
+     而真实用户同样点不动（那天同步链真的失败了，于是每个页面都中招）。
+     ★ 代价完全不对称：自动展开省的是**一次点击**，换来的是**整页不能用**。
+       所以"为什么失败"由**主行**说清（它已经带了停在第几步、原因、
+       下一步），明细仍然留给人自己点。 */
   const open = !!PRGOPEN[j.job];
   return '<div class="pgrow" data-job="' + esc(j.job) + '">' +
          '<i class="pgfill' + (bad ? ' bad' : '') + '" style="width:' +

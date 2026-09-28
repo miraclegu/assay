@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · assay</title>
+<link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/shared/common.css">
+</head><body>
+<div id="lg">
+  <h1><a href="/" style="text-decoration:none"><b>assay</b></a></h1>
+  <div id="lgwhat" class="cd"></div>
+  <div class="lvrow"><label for="u">用户名</label><input id="u" autocomplete="username"></div>
+  <div class="lvrow"><label for="p">密码</label>
+    <input id="p" type="password" autocomplete="current-password"></div>
+  <a href="#" class="btn" id="go">登录</a>
+  <div id="lgmsg"></div>
+  <div class="lvwhy" style="margin-top:18px">
+    只有【实盘 / 自选 / 买点 / 选中的规则】要登录 —— 它们是你自己的数据。
+    行情、个股、盘面、因子、回测归档、数据字典不用登录也能看。
+  </div>
+</div>
+<script src="/shared/common.js"></script>
+<script>
+/* 🔴 **一个页面两种状态**：一个用户都没有时它是「创建第一个账号」。
+     摆一个登不进去的登录框在新机器上等于死路（同 backLink 那条：
+     给一个点了没反应的入口比不给更糟）。 */
+let NEED = false;
+const NEXT = new URLSearchParams(location.search).get('next') || '/';
+
+async function boot(){
+  let o = null;
+  try { o = await j('/api/auth/me'); } catch(e) {}
+  /* 已经登录了就别停在这一页 —— 直接把人送到他本来要去的地方。 */
+  if (o && o.user) { location.replace(NEXT); return; }
+  NEED = !!(o && o.need_signup);
+  $('#lgwhat').textContent = NEED
+    ? '还没有任何账号 —— 建第一个，它自动是管理员，现有的实盘/自选/买点会一起归到它名下。'
+    : '';
+  $('#go').textContent = NEED ? '创建并登录' : '登录';
+  document.title = (NEED ? '创建第一个账号' : '登录') + ' · assay';
+  $('#u').focus();
+}
+
+async function go(ev){
+  if (ev) ev.preventDefault();
+  const name = $('#u').value.trim(), pw = $('#p').value;
+  if (!name || !pw) { $('#lgmsg').innerHTML =
+    '<span class="bad">用户名和密码都要填</span>'; return; }
+  $('#lgmsg').textContent = '…';
+  const r = await post(NEED ? '/api/auth/signup' : '/api/auth/login',
+                       {name: name, pw: pw});
+  if (r && r.error) {
+    $('#lgmsg').innerHTML = '<span class="bad">🔴 ' + esc(r.error) + '</span>';
+    return;
+  }
+  /* ★ 建号那次把搬过去的东西**说出来** —— 不说的话人不知道老数据去哪了
+       （同「删了要留痕」）。 */
+  if (r && r.moved && r.moved.length) {
+    $('#lgmsg').textContent = '已把 ' + r.moved.length + ' 项归到你名下，进去了…';
+  }
+  location.replace(NEXT);
+}
+
+$('#go').onclick = go;
+/* 回车就登录 —— 这一页只有两个框，还要人去点按钮是多一步。 */
+['u','p'].forEach(id => $('#' + id).addEventListener('keydown',
+  e => { if (e.key === 'Enter') go(e); }));
+boot();
+</script></body></html>

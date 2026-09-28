@@ -5391,3 +5391,124 @@ def t_picks_redirected():
     return ('运行时 %s（不是生产）｜ base 仍指生产 ｜ 底子 %d 条'
             % (os.path.basename(os.path.dirname(_r.MARKS_FILE)),
                n_tmp if os.path.isfile(real) else -1))
+
+
+@case('用户认证：默认私有 / 没建号就照旧 / 数据按人隔离', tag='fast')
+def t_auth():
+    """用户 2026-09-28：「做个简单的用户认证……用户更多是为了方便区分
+    收藏、账户等信息。」
+
+    🔴🔴 **默认私有，公共要显式登记** —— 两种漏标的代价完全不对称：
+      漏标公共 -> 那条路由要登录（**响亮**，一秒看得见）；
+      漏标私有 -> 两个人的数据串了（**静默**，可能几天后才发现）。
+      所以这条守卫最要紧的一句是「没登记的新路由必须判成私有」。
+    ★ 全程跑在**临时 live/** 上（同 `lv.LIVE` 那条纪律）：真账本一个
+      字节都不碰。
+    """
+    import json as _j
+    import shutil as _sh
+    import tempfile as _tf
+    from assay import users as U
+    from assay.srv import auth as A
+
+    old_live, old_root = U.LIVE, U.ROOT
+    td = _tf.mkdtemp(prefix='authcase_')
+    out = []
+    try:
+        U.LIVE = os.path.join(td, 'live')
+        U.ROOT = td
+        os.makedirs(U.LIVE)
+        A._EN.update(at=0, v=False)          # 清掉 mtime 缓存
+
+        # ── A 🔴 没登记的路由【默认私有】——失败方向选在安全那侧 ──────
+        assert not A.is_public('/api/新加的没登记的'), (
+            '🔴 没登记的路由被判成公共 —— 那样新加一条读私有数据的接口，'
+            '**任何人都看得到，而且不报错**')
+        assert not A.is_public('/api/live/accounts'), 'live 那族必须私有'
+        assert not A.is_public('/api/marks'), '标星是个人判断，必须私有'
+        # `/api/stock/links` 前缀是公共、内容是私有（我持有多少）
+        assert A.is_public('/api/stock/kline'), '行情该是公共的'
+        assert not A.is_public('/api/stock/links'), (
+            '/api/stock/links 答的是「我持有多少 / 哪几次回测买过它」——'
+            '那是我的持仓，不能跟着 /api/stock/ 一起放行')
+        assert A.is_public('/api/runs') and A.is_public('/api/equity'), (
+            '回测归档按用户 2026-09-28 的决定是**公共**的')
+        out.append('默认私有（未登记/live/marks/stock.links）+ 公共清单')
+
+        # ── B 一个账号都没有 = 一切照旧（向后兼容）─────────────────
+        assert not A.enabled(), '还没建号就说启用了'
+        assert A.ctx('/api/live/accounts', None) is not None, (
+            '🔴 没建号却拦住了私有路由 —— 那等于"升级一下，系统不能用了"，'
+            '而用户要的是区分数据、不是上锁')
+        out.append('没建号 -> 不拦')
+
+        # ── C 建第一个号：自动管理员 + 老数据迁过去 ──────────────────
+        _j.dump([{'id': 'x1'}], io.open(os.path.join(U.LIVE, 'accounts.json'),
+                                        'w', encoding='utf-8'))
+        io.open(os.path.join(td, 'picks.json'), 'w',
+                encoding='utf-8').write('{"r":{"mark":"star"}}')
+        r = A.api_signup({}, {'name': 'alice', 'pw': 'pw1'})
+        assert r.get('ok') and r['user']['admin'], r
+        assert 'accounts.json' in r['moved'] and 'picks.json' in r['moved'], (
+            '🔴 建号没把老数据迁过去 —— 第一次登录进去是空的，'
+            '人会以为账户全没了（而它不报错）：%r' % (r.get('moved'),))
+        assert os.path.isfile(os.path.join(U.user_root('alice'),
+                                           'accounts.json')), '没搬到用户目录'
+        assert not os.path.isfile(os.path.join(U.LIVE, 'accounts.json')), (
+            '老位置还留着一份 —— "页面上改的是哪一份"从此说不清')
+        A._EN.update(at=0, v=False)
+        assert A.enabled(), '建了号还说没启用'
+        out.append('建号：自动管理员 + 迁走 %d 项' % len(r['moved']))
+
+        # ── D 建号之后，私有路由没登录就要拦 ────────────────────────
+        assert A.ctx('/api/live/accounts', None) is None, '建号之后还不拦'
+        assert A.ctx('/api/stock/kline', None) is not None, '公共的不该拦'
+        out.append('建号后：私有拦、公共放行')
+
+        # ── E 🔴 数据真的按人隔离（判据是**根指到哪**，不是"有没有拦"）─
+        from assay import live as _lv
+        from assay.srv import runs as _rn
+        A.api_user_add({}, {'name': 'bob', 'pw': 'x'}, {'name': 'alice',
+                                                        'admin': True})
+        seen = {}
+        # 🔴 **进去之前那个值**要先记下来 —— 判据得拿它比。
+        #   第一版我写的是 `not _lv.LIVE.endswith('alice')`，而循环最后
+        #   一个是 bob：不还原时它指向 bob 的目录，那个判据**照样通过**
+        #   （同「判据比要证的事宽」，变异 M4 当场漏过）。
+        _b4 = (_lv.LIVE, _rn.MARKS_FILE)
+        for who in ('alice', 'bob'):
+            with A.as_user(who):
+                seen[who] = (_lv.LIVE, _rn.MARKS_FILE)
+            assert (_lv.LIVE, _rn.MARKS_FILE) == _b4, (
+                '🔴 `as_user(%r)` 出来没还原（%r -> %r）—— 下一个请求会'
+                '读到上一个人的数据，而它不报错'
+                % (who, _b4, (_lv.LIVE, _rn.MARKS_FILE)))
+        assert seen['alice'][0] != seen['bob'][0], (
+            '两个用户的数据根一样 —— 那就没隔离：%r' % (seen,))
+        assert seen['alice'][0].endswith(os.path.join('u', 'alice')), seen
+        assert seen['alice'][1] != seen['bob'][1], (
+            '标星文件两人指着同一个 —— picks.json 也得按人分')
+        out.append('隔离：两人根不同且出栈还原')
+
+        # ── F 🔴 用户名不许路径穿越（本模块唯一真正与安全有关的地方）──
+        for bad in ('../x', 'a/b', '', 'x' * 33, '.'):
+            try:
+                U.user_root(bad)
+                raise AssertionError('用户名 %r 被放行了 —— 它会拼进路径，'
+                                     '`../` 能把数据根指到仓库外面' % (bad,))
+            except ValueError:
+                pass
+        out.append('用户名校验（5 种都拒）')
+
+        # ── G 管理员才看得到密码；普通用户不行 ──────────────────────
+        adm = U.find('alice')
+        assert A.api_users({}, adm).get('users'), '管理员看不到用户表'
+        assert A.api_users({}, U.find('bob')).get('error'), (
+            '普通用户也能看所有人的密码 —— 那不是用户要的"管理员可以查看"')
+        assert A.api_users({}, None).get('error'), '没登录也能看密码'
+        out.append('看密码：只有管理员')
+    finally:
+        U.LIVE, U.ROOT = old_live, old_root
+        A._EN.update(at=0, v=False)
+        _sh.rmtree(td, ignore_errors=True)
+    return ' ｜ '.join(out)

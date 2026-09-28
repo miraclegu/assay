@@ -164,9 +164,11 @@ async function load() {
     one('/api/stock/events?code=' + encodeURIComponent(CODE)),
     one('/api/stock/peers?n=12&code=' + encodeURIComponent(CODE)),
     one('/api/stock/sectors?code=' + encodeURIComponent(CODE)),
-    one('/api/stock/links?code=' + encodeURIComponent(CODE)),
-    /* ★ 取不到（没开实盘 / 没这只票）就是空数组，不该让整页打不开 */
-    one('/api/live/trades_of?code=' + encodeURIComponent(CODE))
+    /* 🔴 这两条是**私有**的（我持有多少 / 我的买卖点）—— 走 `soft`：
+       没登录时它们 401，但这一页是**公共**的，不该因此被踢去登录页。 */
+    j('/api/stock/links?code=' + encodeURIComponent(CODE), {soft: 1})
+      .catch(e => ({error: String(e), need_login: /401/.test(String(e))})),
+    j('/api/live/trades_of?code=' + encodeURIComponent(CODE), {soft: 1})
       .catch(() => ({trades: []})),
   ]);
   if (p.error) { b.innerHTML = '<div class="lvmsg bad">' + esc(p.error) + '</div>'; return; }

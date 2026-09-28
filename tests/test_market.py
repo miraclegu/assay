@@ -4924,8 +4924,24 @@ def t_index_bar():
             # ★ 逐个页面验 —— 清单**扫出来**（同 `_pages()` 那条纪律）
             pages = ['#/'] + [x for x in _pages()]
             seen = 0
+            # 🔴 **登录页按设计没有看板 chrome** —— 顶栏里就摆着账户菜单，
+            #   把它放在"还没登录"的页面上是循环；指数带子同理（那是给
+            #   已经进来的人看行情的）。
+            # ★ 不把它从 `_pages()` 里剔掉：那份清单还被"配色不许蓝字压蓝底"
+            #   与"窄屏不许横向滚"两条用着，**那两条该管到登录页**。
+            #   排除只在这一条里做，而且**排除本身也要断言**（钉住"它没有
+            #   顶栏是刻意的"，而不是某天被改坏了没人发现）。
+            NO_CHROME = ('/login.html',)
             for u in pages:
                 pg.goto(base + u.lstrip('/'), wait_until='networkidle')
+                if u.split('?')[0] in NO_CHROME:
+                    pg.wait_for_timeout(300)
+                    assert not pg.locator('#top').count(), (
+                        '%s 现在有顶栏了 —— 要么产品变了（那就把它从 '
+                        'NO_CHROME 里拿掉、按普通页面验），要么是误加的' % u)
+                    assert not pg.locator('#idxbar').count(), \
+                        '%s 上冒出了指数带子' % u
+                    continue
                 # 🔴 **不要直接等选择器** —— 带子没挂上时那是一句 25 秒
                 #   超时，**报错指不到原因**（同「报错必须指向真正的原因」）。
                 #   等页面渲染完，再自己判有没有这条带子。

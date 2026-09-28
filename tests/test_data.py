@@ -2310,7 +2310,10 @@ def t_etf_price_precision():
     # ③c 正本比库里落后时（vipdoc 整包约 17:25~17:55 才带上当天，而轮询
     #     16:00 就开始）：今天那批行核对不了，必须**非零退出**让 5~8 跳过
     #     —— 返回 0 的话 1/10 的价格会一路进面板，而它不报错。
-    assert fx._lag_stop('2026-09-17', 20260916) != 0, (
+    #     ★ 2026-09-28 起签名改成**按市场**（谁落后、各自到哪天），
+    #       这条只管"非零退出"，点名那半在「ETF 正本落后」那条用例里。
+    assert fx._lag_stop('2026-09-17', {'sh': 20260916, 'sz': 20260916},
+                        ['sh', 'sz']) != 0, (
         '正本落后时返回了 0 —— 没核对过的 ETF 行会被放行进面板')
 
     # ③d HEAD 预检：Last-Modified 要折成【北京日期】才是"正本最多到哪天"。
@@ -5348,6 +5351,25 @@ def t_setup_all():
             _t.sleep(0.05)
         raise AssertionError('装配任务 %s 跑了 %d 秒还没结束' % (jid, sec))
 
+    def wait_pg(sec=20):
+        """等**进度文件**真的收尾 —— 不是等 `_JOBS`。
+
+        🔴 `wait()` 等的是 `_runs._JOBS[jid]['state']`，而那是在
+          `pg.finish_step()` / `pg.finish()` **之前**设的（`_go_all` 与
+          `_go` 两条都是）。于是 `wait()` 返回时进度文件里 `done` 可能
+          还是空的 —— 断言读到空就报「没带原因：None」，**看着像产品坏了**
+          （实测 2026-09-28：note 明明写进去了，是我等错了东西）。
+        ★ 判据取**这条进度自己的状态**，不是别处的记录（同「判据永远是
+          现在的状态」）。
+        """
+        t0 = _t.time()
+        while _t.time() - t0 < sec:
+            rs = [x for x in P.read() if x['job'] == 'setup']
+            if rs and rs[0].get('state') in ('done', 'failed', 'stale'):
+                return rs[0]
+            _t.sleep(0.05)
+        raise AssertionError('进度文件 %d 秒还没收尾' % sec)
+
     def fresh():
         sy._SETUP_SUM['at'] = 0
         sy._SETUP_SUM['d'] = None
@@ -5384,7 +5406,7 @@ def t_setup_all():
             '**而那不报错**' % ran)
         assert any('阶段B' in x and '失败' in x for x in j['lines']), \
             '停下来了却没说是哪一步失败的：%s' % j['lines'][-3:]
-        pr = [x for x in P.read() if x['job'] == 'setup'][0]
+        pr = wait_pg()
         assert pr['state'] == 'failed' and pr['i'] == 2, pr
 
         # 🔴🔴 **走完整条链**验"失败原因进得了进度文件"。
@@ -5411,7 +5433,7 @@ def t_setup_all():
         r2 = sy.api_setup_run(None, {'stage': 'b'})
         assert not r2.get('error'), r2
         wait(r2['job_id'])
-        pr2 = [x for x in P.read() if x['job'] == 'setup'][0]
+        pr2 = wait_pg()
         _b2 = [x for x in (pr2.get('done') or []) if x.get('state') != 'ok']
         assert _b2 and _b2[-1].get('note') \
             and 'CatalogException' in _b2[-1]['note'], (
@@ -7319,3 +7341,507 @@ def t_install_recheck_kill():
     return ('退出码翻成人话（含 0xC0000005/0135/0006 三个已知码）；'
             '被系统杀掉时点名到具体的包并说清"不是 Python 报的错"；'
             '正常时不误报；原因分两支不猜死一个')
+
+
+@case('进度横条失败时不许挡住页面 —— 展开区是浮层，一展开整页点不动',
+      tag='web')
+def t_prg_no_block():
+    """2026-09-28 实测的真 bug（我自己引入、当天就推送了）：
+
+    我加过一版「失败时默认展开明细」，理由是"失败正是最需要看哪一步"。
+    而展开区是**浮层**（绝对定位贴在横条下方）—— 一展开就盖住页面顶部
+    一大片，**所有点击被它吃掉**。那天同步链真的失败了，于是每个页面
+    都中招；playwright 报得很清楚：
+
+        <span class="pgdn">9. ETF lake…</span> from <div id="prgbar">…</div>
+        subtree intercepts pointer events
+
+    🔴 **判据钉在"用户后果"上，不是"有没有自动展开"** —— 后者换个实现
+      （比如改成 hover 展开）照样能把页面挡住。这里直接问：
+      **失败横条在的时候，页面上的东西还点不点得动。**
+    ★ 代价不对称是这条的根据：自动展开省的是一次点击，而它换来的是
+      整页不能用。
+    """
+    import shutil as _sh
+    import tempfile as _tf
+    import threading as _th
+    from http.server import ThreadingHTTPServer
+    from playwright.sync_api import sync_playwright
+    import importlib
+    from assay import server as sv
+    from assay.srv import base as sbase
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    importlib.reload(P)
+    old_dir, old_times = P.DIR, P.TIMES
+    td = _tf.mkdtemp(prefix='prgblock_')
+    httpd = None
+    try:
+        P.DIR, P.TIMES = os.path.join(td, 'p'), os.path.join(td, 't.json')
+        # 造一条**失败**的进度：名字要够长，展开后浮层才够大（真实那次
+        # 就是「9. ETF lake（ETF 策略跑在它上面）」那种长名字挡住的）
+        pg_ = P.Progress('sync', '每日数据同步（增量补全到最新）', 13,
+                         log='logs/x.log')
+        for i, nm in enumerate(('① tdx2db cron', '② PIT 快照',
+                                '③ ETF 价格按 .day 正本重写'), 1):
+            pg_.step(nm, at=i)
+            pg_.finish_step('ok')
+        pg_.step('④ 全量日线（load_tdx_kline）', at=4)
+        pg_.finish_step('bad', note='子进程报了这张表不存在：security_universe')
+        pg_.finish(1)
+
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+        port = httpd.server_address[1]
+        _th.Thread(target=httpd.serve_forever, daemon=True).start()
+        with sync_playwright() as pw:
+            br = pw.chromium.launch()
+            page = br.new_page(viewport={'width': 1440, 'height': 1000})
+            page.goto('http://127.0.0.1:%d/market.html' % port,
+                      wait_until='networkidle')
+            page.wait_for_selector('#prgbar', timeout=20000)
+            # ── 反向自证：构造真的生效（横条在、而且是失败态）──────
+            bar = page.locator('#prgbar').inner_text()
+            assert '失败' in bar, (
+                '构造没生效：横条上没有"失败"两个字 —— 下面那条会空转：%r'
+                % bar[:80])
+            # ── 🔴 真正要证的事：页面上那几个点，**最上层是谁** ──────
+            #   第一版我只点了顶栏第一个按钮 —— 而真实被盖住的是 y≈210
+            #   的页签，顶栏那个按钮没被盖到，**变异当场漏过**
+            #   （同「判据比要证的事宽/窄」）。
+            # 🔴 也不能量 `#prgbar` 的高度：展开区是**绝对定位**的，
+            #   根本不计入它的 boundingBox —— 那条判据对"展开"完全无感。
+            # ★ `elementFromPoint` 直接回答用户后果：这个位置我点得到吗。
+            blocked = page.evaluate("""() => {
+              const pts = [[200, 90], [400, 150], [700, 210], [900, 260]];
+              const out = [];
+              for (const [x, y] of pts) {
+                const e = document.elementFromPoint(x, y);
+                if (e && e.closest('#prgbar'))
+                  out.push([x, y, (e.innerText || e.tagName).slice(0, 30)]);
+              }
+              return out;
+            }""")
+            assert not blocked, (
+                '🔴 页面这几个点被进度横条盖住了：%r —— 展开区是绝对定位的'
+                '浮层，一展开就把页面顶部整片吃掉，**真实用户也点不动**'
+                % (blocked,))
+            # ★ 高度要在**点击之前**量 —— 点了顶栏就跳页了，那时
+            #   `#prgbar` 还没挂回来，`getBoundingClientRect` 当场 null
+            #   （第一版就这么写的，报的是一句看不懂的 TypeError）。
+            #   这条防的是另一种坏法：横条**自己**变得很高（`:not()` 特异度
+            #   那次把它从 27px 撑到 337px，直接盖住顶栏）。
+            hit = page.evaluate(
+                "() => document.querySelector('#prgbar')"
+                ".getBoundingClientRect().height")
+            # 顶栏那几个入口也要点得动（离横条最近）
+            try:
+                page.locator('#top a.nav').first.click(timeout=8000)
+            except Exception as e:               # 不加 force —— force 会
+                raise AssertionError(            # 把"被挡住"这件事绕过去
+                    '🔴 失败横条在的时候顶栏点不动了。原始报错：%s'
+                    % str(e)[:260].replace('\n', ' / '))
+            # ── 🔴 人【主动】展开之后，横条**自己**不许变高 ────
+            #   浮层盖住页面正文是它的设计（人自己点开的）；但它是
+            #   `position:fixed`，一旦展开区**不是绝对定位**，横条本体
+            #   就被撑高，顶栏当场被盖住（`:not()` 特异度那次 27px → 337px）。
+            # ★ 不补这一段，"展开区必须是浮层"这件事**一条判据都没有** ──
+            #   上面全在**默认收起**态下跑，`.pgd` 压根不渲染，
+            #   把它的定位去掉（变异 M2）观察不到任何差别、实测漏过。
+            page.goto('http://127.0.0.1:%d/market.html' % port,
+                      wait_until='networkidle')
+            page.wait_for_selector('#prgbar .pgmore', timeout=20000)
+            page.locator('#prgbar .pgmore').first.click()
+            page.wait_for_timeout(500)
+            assert page.locator('#prgbar .pgd').count(), '点了明细却没展开'
+            h2 = page.evaluate(
+                "() => document.querySelector('#prgbar')"
+                ".getBoundingClientRect().height")
+            assert h2 < 120, (
+                '\U0001f534 展开之后横条自己涨到 %s px -- 它是 position:fixed,'
+                '这么高会盖住顶栏、导航点不到。展开区必须是【浮层】' % h2)
+            # ★ 这里**不**再断言"顶栏没被盖住" —— 下拉面板盖住它下方的
+            #   东西正是人点开它时要的效果，那条断言当场打挂（y=54 被盖），
+            #   **错的是断言不是产品**。站得住的不变量只有上面一条：
+            #   面板是浮层，所以横条本体的高度不随展开变化。
+            br.close()
+    finally:
+        if httpd:
+            httpd.shutdown()
+        P.DIR, P.TIMES = old_dir, old_times
+        _sh.rmtree(td, ignore_errors=True)
+    return '失败横条在（%s…）时顶栏仍可点、横条高 %.0fpx' % (bar[:14], hit)
+
+
+@case('ETF 正本落后：按【市场】分开判，并点名是哪个包', tag='fast')
+def t_etf_truth_lag_per_market():
+    """2026-09-28 实测两件事，一件是报错不清楚、一件是**判据本身有洞**。
+
+    当天沪市 `shlday.zip` 已经放出 09-28、深市 `szlday.zip` 还是 09-25 那版，
+    而日志里只有一句「vipdoc 最新到 2026-09-25」—— **看不出在等谁**，
+    也看不出另一半其实已经好了（同「报错必须指向真正的原因」）。
+
+    🔴🔴 顺着查下去发现真洞：权威判定原来是
+        `truth_max = max(d for _s, d in truth)`
+      —— 两个市场混在一起取 max。沪市带上了今天、深市没带，它照样判
+      "没落后"，于是**深市那批 ETF 一行都没核对过**却报 ✅ 完成。
+      当天是 HEAD 预检先拦住的，而预检自己写着「是省流量的，不是判据」。
+    ★ 判据落在 `lag_markets()` 上（纯函数），**在能触发的构造上跑** ——
+      真实数据里"一个市场落后、另一个没落后"不是每天都有。
+    """
+    import importlib.util
+
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    fp = os.path.join(dl, 'raw', 'tdx', '_ingest', 'scripts',
+                      'fix_etf_price_from_dayfile.py')
+    sp = importlib.util.spec_from_file_location('_fx_guard', fp)
+    fx = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(fx)
+
+    assert fx.MARKETS == ('sh', 'sz'), '市场清单变了，下面的构造要跟着改'
+
+    # ---- ① 两边都带上今天 -> 不落后 ----
+    _, lag = fx.lag_markets([('sh501205', 20260928), ('sz159583', 20260928)],
+                            '2026-09-28')
+    assert lag == [], '两个市场都到今天了，却判成落后：%r' % lag
+
+    # ---- ② 🔴 沪到了、深没到 —— 正是 2026-09-28 的现场 ----
+    mkm, lag = fx.lag_markets([('sh501205', 20260928), ('sz159583', 20260925)],
+                              '2026-09-28')
+    assert lag == ['sz'], (
+        '🔴 沪市已放出 09-28、深市还停在 09-25，却判成【%r】—— 两个市场'
+        '混着取 max 的话这里是空，深市那批 ETF 一行没核对过也会报 ✅ 完成'
+        % (lag,))
+    assert mkm == {'sh': 20260928, 'sz': 20260925}, mkm
+
+    # ---- ③ 某个市场一行都没取到，也算落后（空结果一律当失败）----
+    _, lag = fx.lag_markets([('sh501205', 20260928)], '2026-09-28')
+    assert lag == ['sz'], (
+        '深市一行都没取到，却没算落后 —— 它不在 truth 里不等于它不存在：%r'
+        % (lag,))
+
+    # ---- ④ 反向自证：库里没有当天时不许乱拦 ----
+    _, lag = fx.lag_markets([('sh501205', 20260924), ('sz159583', 20260924)],
+                            '2026-09-24')
+    assert lag == [], '正本与库同为 09-24，却判落后（那会让整条链天天红）'
+
+    # ---- ⑤ 停下时必须【点名是哪个包】，并说清另一个到哪天 ----
+    said = []
+    _old_say, fx._say = fx._say, lambda *a: said.append(
+        ' '.join(str(x) for x in a))
+    try:
+        rc = fx._lag_stop('2026-09-28', {'sh': 20260928, 'sz': 20260925},
+                          ['sz'], pre=True)
+    finally:
+        fx._say = _old_say
+    txt = '\n'.join(said)
+    assert rc == 3, '落后时的退出码必须非 0（否则 5~13 会在没核对的数据上跑）'
+    for _w in ('szlday.zip', '深市', '2026-09-25'):
+        assert _w in txt, ('🔴 停下来的那句话里没有「%s」—— 看不出在等谁：\n%s'
+                           % (_w, txt))
+    assert 'shlday.zip' in txt and '已经到位' in txt, (
+        '🔴 没说清沪市其实已经好了 —— 人会以为两个包都没更新：\n%s' % txt)
+    # ★ 反向自证：两个都落后时**不许**冒出"已经到位"那一行
+    said.clear()
+    fx._say = lambda *a: said.append(' '.join(str(x) for x in a))
+    try:
+        fx._lag_stop('2026-09-28', {'sh': 0, 'sz': 0}, ['sh', 'sz'])
+    finally:
+        fx._say = _old_say
+    assert '已经到位' not in '\n'.join(said), \
+        '两个包都没到，却还说有谁"已经到位"：\n%s' % '\n'.join(said)
+
+    return ('按市场分判（沪到深没到 -> 拦住 · 一行都没取到 -> 拦住 · '
+            '同日不误拦）｜ 停下时点名 szlday.zip 并说明沪市已到位')
+
+
+@case('同步链：子进程 rc=0 但自己说失败了，必须记成失败', tag='fast')
+def t_sync_swallowed_fail():
+    """2026-09-28 实测的真事故（日志俱在）：
+
+        ✅ 已下载 20260928 的数据
+        ⚠️ 解压文件 …/20260928day.zip 失败: zip: not a valid zip file
+        🌲 日线数据无需更新
+        🚀 今日任务执行成功          <- 而且 **exit 0**
+        ✅ 1/13 tdx2db cron（抓日线+复权因子）  86s
+
+    于是整条链在**缺当天行情**的库上跑完 13 步、出了信号，汇总写
+    「成功 13 失败 0」—— 同一份日志的新鲜度段里却写着「A 腿落后 1 个
+    交易日 —— 同步没跑成功」。**两个说法打架，而屏幕上只看得到成功的
+    那个。**
+
+    🔴 判据钉在**行为**上（那一步到底进 `ok` 还是 `bad`），不是"源码里
+      有没有写这个正则" —— 后者换个实现照样能把失败吞掉。
+    ★ 网撒得宽是**量出来的**：拿 305 份历史日志的第 1 步输出跑这个正则，
+      命中 1 份（正是出事那天），误报 0。窄到只匹配 `not a valid zip`
+      就只防得住这一种坏法。
+    """
+    import ast
+    import importlib
+    import io
+    import shutil as _sh
+    import sys
+    import tempfile
+
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    sd = importlib.import_module('sync_daily')
+    importlib.reload(sd)
+    # ★ 这里**不**重定向 stdout：第一版用 `redirect_stdout` 把 Runner 的
+    #   print 吞掉，而 `__exit__` 只写在成功路径上 —— 断言一炸 stdout 就
+    #   一直被吞着，连 selftest 自己的 `✗` 都打不出来，于是**五条变异
+    #   全报"漏了"**（实测，差点当成判据没用）。屏幕上多四行，比静默好。
+
+    td = tempfile.mkdtemp(prefix='swal_')
+    BAD = '⚠️ 解压文件 /tmp/20260928day.zip 失败: zip: not a valid zip file'
+    _n = [0]
+
+    class _Pg(object):
+        """假进度 —— 只记下 `finish_step` 收到的 note。
+
+        🔴 那句 note 才是**横条上看得到**的东西；只查日志的话，子进程
+          自己写的那一行本来就在日志里（`_tail()` 还会再贴一遍），
+          "有没有把原因带出来"这件事**验不到**（实测：变异 M5 漏过）。
+        """
+
+        def __init__(self):
+            self.notes = []
+
+        def step(self, *a, **k):
+            pass
+
+        def finish_step(self, state='ok', note=None):
+            self.notes.append((state, note))
+
+    def _mk():
+        # 🔴 **每个 Runner 一个新日志** —— 共用一个的话，"正常的一步不许
+        #   被误判"那条会读到**上一步**留下的报错，于是它替第三段把变异
+        #   抓了（实测 M4 就是这么被记在错的那句上的）。
+        _n[0] += 1
+        r = sd.Runner(os.path.join(td, 'x%d.log' % _n[0]), total=1)
+        r.pg = _Pg()          # job=None 时 Runner 自己不建进度（不写生产数据）
+        return r
+
+    def _cmd(line):
+        # 🔴 内容走**环境变量**，不写进 argv —— 写进 argv 的话，日志里
+        #   `$ (cd … python -c …)` 那行就含着这句话，于是"只看本步输出"
+        #   那条变异（从头扫）会**先被别的断言抓到**，第三段永远验不到
+        #   （实测：M4 一开始就是这么被记在错的那句上的）。
+        os.environ['_SWAL_LINE'] = line
+        return [sys.executable, '-c',
+                'import os,sys;sys.stdout.write(os.environ["_SWAL_LINE"]'
+                ' + chr(10));sys.exit(0)']
+
+    # ---- ① 吞掉的失败要被抓出来 ----
+    r = _mk()
+    got = r.run('假一步', td, _cmd(BAD), bad_pat=sd.SWALLOWED_FAIL)
+    assert got is False, 'rc=0 且输出里写着失败，run() 还返回了 %r' % got
+    assert r.bad and not r.ok, ('没记成失败：ok=%r bad=%r' % (r.ok, r.bad))
+    _txt = io.open(r.log, encoding='utf-8').read()
+    assert 'rc=0' in _txt, (
+        '🔴 日志里没说"子进程 rc=0 但自己说失败了"：%r' % _txt[-400:])
+    assert r.pg.notes and r.pg.notes[0][0] == 'bad', \
+        '进度里没记成 bad：%r' % (r.pg.notes,)
+    assert '20260928day.zip' in (r.pg.notes[0][1] or ''), (
+        '🔴 横条上那句 note 没带上**原因那一行** —— 页面上只会看到'
+        '"失败"两个字，人还得自己去翻日志：%r' % (r.pg.notes[0][1],))
+
+    # ---- ② 反向自证：正常输出不许被误判成失败 ----
+    r2 = _mk()
+    got2 = r2.run('假一步', td, _cmd('✅ 数据库已是最新 (2026-09-28)，全部任务跳过'),
+                  bad_pat=sd.SWALLOWED_FAIL)
+    assert got2 is True and r2.ok and not r2.bad, (
+        '正常的一步被误判成失败：ok=%r bad=%r' % (r2.ok, r2.bad))
+
+    # ---- ③ 只看**自己这一步**的输出 ----
+    #   日志是整条链共用一个文件。从头扫的话，前一步的报错会算到后一步
+    #   头上 —— 那正是「别把功劳记在错的那句上」的反面。
+    r3 = _mk()
+    r3.run('前一步', td, _cmd(BAD), bad_pat=sd.SWALLOWED_FAIL)     # 这步该失败
+    got3 = r3.run('后一步', td, _cmd('一切正常'), bad_pat=sd.SWALLOWED_FAIL)
+    assert got3 is True, (
+        '🔴 后一步被**前一步**留在同一个日志文件里的报错连坐了 —— '
+        '偏移量没起作用')
+
+    # ---- ④ 正则真的盖得住现场那一行，也盖得住别的吞法 ----
+    for _s in (BAD, 'panic: runtime error', 'Error: connection refused',
+               '导入失败'):
+        assert sd.SWALLOWED_FAIL.search(_s), '正则漏了：%r' % _s
+    for _s in ('🎉 20260925 为节假日，跳过', '✅ 已下载 20260928 的数据',
+               '📅 日线数据最新日期为 2026-09-24'):
+        assert not sd.SWALLOWED_FAIL.search(_s), '正则误伤正常输出：%r' % _s
+
+    # ---- ⑤ 第 1 步**真的**传了 bad_pat（走 ast，不查字符串）----
+    #   查字符串会命中我自己写的注释（踩过 7 次）。
+    src = io.open(os.path.join(dl, 'sync_daily.py'), encoding='utf-8').read()
+    hits = []
+    for nd in ast.walk(ast.parse(src)):
+        if not (isinstance(nd, ast.Call)
+                and isinstance(nd.func, ast.Attribute)
+                and nd.func.attr in ('run', 'run_soft')):
+            continue
+        if not (nd.args and isinstance(nd.args[0], ast.Constant)
+                and str(nd.args[0].value).startswith('tdx2db cron')):
+            continue
+        hits.append([k.arg for k in nd.keywords])
+    assert len(hits) == 1, 'tdx2db cron 那一步的调用点找到 %d 个' % len(hits)
+    assert 'bad_pat' in hits[0], (
+        '🔴 tdx2db cron 那一步没传 bad_pat —— 它 rc=0 吞失败的本事还在，'
+        '而屏幕上会一直是绿的。实参：%r' % hits[0])
+
+    _sh.rmtree(td, ignore_errors=True)
+    return ('吞掉的失败记成 bad · 正常输出不误判 · 只看本步输出（前一步不连坐）'
+            '· 正则 4 中 0 误伤 · 第 1 步调用点确实传了 bad_pat')
+
+
+@case('同步链两道闸：A 腿落后 / 体检看的不是现库 —— 13 步全绿也不出信号',
+      tag='fast')
+def t_sync_hold_gates():
+    """2026-09-28 16:10 那一轮的现场（日志俱在）：
+
+        ✅ 1/13 … ✅ 13/13          13 步全绿
+          🔴 A 腿（行情）落后 1 个交易日 —— 同步没跑成功     <- 自己打的
+        ───── 实盘出信号 ─────                              <- 照样出了
+          [hongli] 2026-09-28  卖0 买0 持有15
+         完成 1962s   成功 13  失败 0                        <- 人只看这一行
+
+    用的是**缺当天行情**的库（那时 tdx.db 最新 09-24）。「自己的输出里
+    已经说了没跑成功，就不许当成功」——与第 1 步 rc=0 吞失败同一条病。
+
+    第二道闸是当天查出来的另一件事：体检 16:16:45 通过时
+    `raw_kline_daily` 最新还是 09-24，而 16:42:24 新鲜度读**同一张表**
+    已经是 09-28 —— **体检是在旧库上通过的**，它的结论对不上后面 9 步
+    吃到的数据。谁写的至今没定位，所以先让它有声音。
+
+    🔴 判据落在 `hold_reasons()` 上（纯函数）+ 留痕的**端到端**读写，
+      不是"源码里有没有这几个字"。
+    """
+    import importlib
+    import io
+    import json
+    import subprocess
+    import sys
+    import shutil as _sh
+    import tempfile
+
+    import duckdb
+
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    sd = importlib.import_module('sync_daily')
+    importlib.reload(sd)
+
+    # ---- ① 都正常 -> 作数（反向自证：否则"全空 == 全空"也算过）----
+    assert sd.hold_reasons(0, '2026-09-28', '2026-09-28') == [], \
+        '一切正常却被拦下 —— 那会让实盘从此再也出不了信号'
+
+    # ---- ② 🔴 A 腿落后 -> 不作数 ----
+    h = sd.hold_reasons(1, '2026-09-28', '2026-09-28')
+    assert len(h) == 1 and 'A 腿' in h[0] and '1 个交易日' in h[0], (
+        '🔴 A 腿落后没被拦：13 步全绿就会拿缺当天行情的数据出信号（'
+        '2026-09-28 16:10 实测）：%r' % (h,))
+
+    # ---- ③ 🔴 体检看的是旧库 -> 不作数 ----
+    h = sd.hold_reasons(0, '2026-09-24', '2026-09-28')
+    assert len(h) == 1 and '09-24' in h[0] and '09-28' in h[0], (
+        '🔴 体检与现库对不上没被拦，而且两个日期都要说出来（只说"对不上"'
+        '指不到下一步）：%r' % (h,))
+
+    # ---- ④ 拿不到就【不拦】——「未知不是缺」----
+    for _s, _n in ((None, '2026-09-28'), ('2026-09-28', None), (None, None)):
+        assert sd.hold_reasons(0, _s, _n) == [], (
+            '读不到留痕/状态时把整条链拦死了（%r, %r）—— 一次读文件失败'
+            '就再也出不了信号' % (_s, _n))
+
+    # ---- ⑤ 留痕是【端到端】的：体检自己写，sync_daily 自己读 ----
+    td = tempfile.mkdtemp(prefix='stamp_')
+    db = os.path.join(td, 'k.db')
+    con = duckdb.connect(db)
+    con.execute('CREATE TABLE raw_kline_daily(symbol VARCHAR, date DATE,'
+                ' close DOUBLE, volume BIGINT, amount DOUBLE)')
+    con.execute('CREATE TABLE raw_symbol_class(symbol VARCHAR, "class" VARCHAR)')
+    con.execute("INSERT INTO raw_symbol_class VALUES ('sh600000','stock')")
+    con.executemany('INSERT INTO raw_kline_daily VALUES (?,?::DATE,?,?,?)',
+                    [('sh600000', d, 10.0, 100, 1000.0)
+                     for d in ('2026-09-24', '2026-09-25', '2026-09-28')])
+    con.close()
+    stamp = os.path.join(td, 's.json')
+    chk = os.path.join(dl, 'raw', 'tdx', '_ingest', 'scripts',
+                       'check_data_anomaly.py')
+    p = subprocess.run([sys.executable, chk, '--db', db,
+                        '--since', '2026-09-20', '--stamp', stamp],
+                       capture_output=True, text=True)
+    assert os.path.exists(stamp), (
+        '🔴 体检没留痕（rc=%s）：%s' % (p.returncode, (p.stdout + p.stderr)[-300:]))
+    got = json.loads(io.open(stamp, encoding='utf-8').read())
+    assert got.get('max_date') == '2026-09-28', (
+        '🔴 留痕记的不是体检**真的看过**的那一天：%r' % (got,))
+    # ★ sync_daily 读的就是这份文件 —— 两头对上才算通
+    _old = sd.STAMP
+    try:
+        sd.STAMP = stamp
+        assert sd._stamp_max() == '2026-09-28', \
+            '留痕写出来了，但 sync_daily 读不到（两头对不上）：%r' % sd._stamp_max()
+    finally:
+        sd.STAMP = _old
+
+    # ---- ⑥ 体检那一步**真的**传了 --stamp（走 ast，不查字符串）----
+    import ast
+    src = io.open(os.path.join(dl, 'sync_daily.py'), encoding='utf-8').read()
+    hit = []
+    for nd in ast.walk(ast.parse(src)):
+        if not (isinstance(nd, ast.Call)
+                and isinstance(nd.func, ast.Attribute)
+                and nd.func.attr in ('run', 'run_soft')):
+            continue
+        if not (nd.args and isinstance(nd.args[0], ast.Constant)
+                and str(nd.args[0].value).startswith('更新体检')):
+            continue
+        hit.append([x.value for x in ast.walk(nd)
+                    if isinstance(x, ast.Constant) and x.value == '--stamp'])
+    assert len(hit) == 1, '体检那一步的调用点找到 %d 个' % len(hit)
+    assert hit[0], '🔴 体检那一步没传 --stamp —— 痕根本不会产生，而闸看着还在'
+
+    # ---- ⑦ 🔴 `hold` 必须【真的接上】三处：结论 / 不出信号 / 汇总 ----
+    #   只验 `hold_reasons()` 的话，算出来却没人用也照样全绿 —— 而那正是
+    #   2026-09-28 的原样（新鲜度打了"没跑成功"，汇总照写"成功 13 失败 0"）。
+    assert sd.run_rc([], []) == 0 and sd.run_rc([], ['x']) == 1 \
+        and sd.run_rc(['s'], []) == 1, (
+            '🔴 结论没跟着 hold 走：13 步全绿而数据不齐时会返回 0，'
+            '轮询与页面都会当成"这一轮成功了"')
+    _main = next(n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.FunctionDef) and n.name == 'main')
+    _uses = [n.id for n in ast.walk(_main) if isinstance(n, ast.Name)]
+    assert _uses.count('hold') >= 3, (
+        '🔴 main 里只提到 hold %d 次 —— 三处（算出来 / 不出信号 / 汇总）'
+        '至少要各用一次' % _uses.count('hold'))
+    # ★ 「不出信号」那条分支：顺着 `if a.no_live` 的 elif 链走，
+    #   `hold` 必须排在 `not a.dry`（真正去出信号的那支）**之前**。
+    _chain, _nd = [], None
+    for n in ast.walk(_main):
+        if (isinstance(n, ast.If) and isinstance(n.test, ast.Attribute)
+                and n.test.attr == 'no_live'):
+            _nd = n
+            break
+    assert _nd is not None, '没找到「触发实盘出信号」那条 if 链'
+    while _nd is not None:
+        _chain.append(ast.dump(_nd.test))
+        _nxt = _nd.orelse
+        _nd = (_nxt[0] if len(_nxt) == 1 and isinstance(_nxt[0], ast.If)
+               else None)
+    _i_hold = next((i for i, t in enumerate(_chain) if "'hold'" in t), None)
+    _i_dry = next((i for i, t in enumerate(_chain) if "'dry'" in t), None)
+    assert _i_hold is not None and _i_dry is not None, (
+        '🔴 出信号那条 if 链里没有 hold 这一支 —— 闸算出来了却没拦住任何'
+        '东西：%r' % (_chain,))
+    assert _i_hold < _i_dry, (
+        '🔴 hold 那支排在"去出信号"那支后面 —— 永远轮不到它：%r' % (_chain,))
+
+
+    _sh.rmtree(td, ignore_errors=True)
+    return ('A 腿落后 / 体检看旧库 各自拦下 · 正常不误拦 · 读不到不拦 · '
+            '留痕端到端（体检写 09-28 -> sync_daily 读到 09-28）· 调用点传了 --stamp')

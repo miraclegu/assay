@@ -1100,3 +1100,15 @@ body.hasprog{padding-top:28px}
 #main tr.surun>td{background:rgba(91,156,240,.10)}
 #main tr.surun>td:first-child{box-shadow:inset 2px 0 var(--accent)}
 #main tr.sybad>td{background:rgba(224,163,60,.10)}
+
+/* ---- 登录页（web/login.html）------------------
+   ★ 样式集中在这里，页面里不留内联 <style> —— 守卫钉着这条
+     （分散在各页的话，改一次配色要翻 N 个文件）。 */
+  /* 这一页只有一个框，所以不走 .pgrid —— 居中、窄、别撑满 */
+  #lg{max-width:360px;margin:12vh auto 0;padding:0 16px}
+  #lg h1{font-size:20px;margin:0 0 4px}
+  #lg .lvrow{display:block;margin:10px 0}
+  #lg input{width:100%;box-sizing:border-box;padding:7px 9px;font-size:14px}
+  #lg label{display:block;font-size:12px;color:var(--dim);margin-bottom:3px}
+  #lg .btn{width:100%;text-align:center;padding:8px 0;margin-top:14px}
+  #lgmsg{margin-top:10px;font-size:12px;min-height:16px}
