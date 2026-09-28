@@ -229,7 +229,16 @@ def _via_pop(pg, loc, want=None):
     return href
 
 
-_GUARD_FILES = ('picks.json',)
+# 🔴🔴 **现在一个都不盯** —— `picks.json` 已改成【整轮重定向】（见
+#   `main()` 里那段）：这个进程**结构上就写不到**生产文件，比"跑完比一比"
+#   硬一档，而且**不会再冤枉人**（归属分的是时机不是因果，人点一下星
+#   几乎一定落在某条用例的窗口里，实测当场把一条无辜用例判成失败）。
+# ★ 要加新的生产文件时**先问：能不能重定向？** 能就重定向（那是根治），
+#   不能才放进这里事后比对 —— 而事后比对必须**只报不写**，且要想清楚
+#   "人在这段时间里正常操作它"会不会被算成污染。
+# ⚠ 框架（`_guard_snapshot` / `_guard_changed` / `_guard_msg`）保留：
+#   它是给"重定向不了的那种"留的，不是没人用的尸体。
+_GUARD_FILES = ()
 
 
 def _guard_snapshot():
@@ -339,6 +348,43 @@ def main():
     print('层 %s%s —— %d/%d 个用例\n'
           % ('+'.join(sorted(want)), (' 关键字 %r' % a.k) if a.k else '',
              len(sel), len(CASES)))
+    # 🔴🔴 **`picks.json` 整轮重定向 —— 而不是"跑完比一比"。**
+    #   用户 2026-09-28：「我在页面手动取消了一些选中的规则，这个似乎经常
+    #   会被检测到是误操作了。」**他没做错任何事，是判据错了。**
+    #
+    #   原来靠【归属】分"测试污染"与"人点的"：逐条用例跑完查一次，变了就
+    #   归属到那条用例。而**归属分的是时机、不是因果** —— 全量要跑 21 分钟，
+    #   人在页面上点一下星，那一刻**几乎一定落在某条用例的执行窗口里**，
+    #   于是一条完全无辜的用例被判失败（实测复现：在外面给 picks.json 追加
+    #   一个换行，「清实验归档」当场被冤枉、`8 通过 / 1 失败`）。
+    #   只有"最后一条用例跑完之后"那几毫秒点才不会 —— 那不是判据，是运气。
+    #
+    # ★ 所以改成与 `ASSAY_LOG_DIR` / `ASSAY_RUNS` **同一条路子**：整轮一把
+    #   指到临时目录，让这个进程**结构上就写不到**生产文件。于是
+    #   ① 人怎么点都不会被冤枉；② 将来新加的用例自动在保护范围里
+    #   （照清单逐个打桩的话，范围会悄悄缩小）。
+    # ★ **拷真文件当底子**：有用例要真数据（「★ 选中的规则」冒泡、
+    #   `prune_runs` 的"标星不许删"）—— 空文件会让那几条静默空转。
+    # 🔴 改的是 `srv.runs.MARKS_FILE` 不是 `base.MARKS_FILE`：
+    #   `runs.py` 是 `from .base import MARKS_FILE`（**值副本**），
+    #   改 base 那份对它毫无影响（同 `_BOOT_TS` 那条踩过的坑）。
+    #   `prune_runs` 那条链走 `pr.MARKS = MARKS_FILE`，在 `_prune_mod()` 里
+    #   赋值，所以跟着一起重定向。
+    _mktmp = tempfile.mkdtemp(prefix='assay_selftest_picks_')
+    atexit.register(shutil.rmtree, _mktmp, True)
+    try:
+        from assay.srv import runs as _R
+        _mkfile = os.path.join(_mktmp, 'picks.json')
+        if os.path.isfile(_R.MARKS_FILE):
+            shutil.copy2(_R.MARKS_FILE, _mkfile)
+        _R.MARKS_FILE = _mkfile
+    except Exception as _e:                                 # noqa: BLE001
+        # 🔴 **不静默** —— 重定向没生效的话，用例会去写真 picks.json，
+        #   而那是决策记录（同「保护分支不该静默跳过」）。
+        print('🔴 picks.json 重定向失败（%s）—— 用例可能写到生产文件，'
+              '先别跑' % _e, flush=True)
+        sys.exit(1)
+
     ok = fail = 0
     times = []
     _snap = _guard_snapshot()          # 见 `_guard_snapshot`：不许写生产文件

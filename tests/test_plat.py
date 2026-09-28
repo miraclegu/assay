@@ -5340,3 +5340,54 @@ def t_claude_layered():
         '六册加起来才 %d 行 —— 详情被掏空了，而索引看着还在' % tot)
     return ('正本 %d 行（上限 600）｜ %d 册两向对齐：%s ｜ 详情共 %d 行'
             % (len(lines), len(idx), ' / '.join(out), tot))
+
+
+@case('picks.json 整轮重定向：selftest 结构上写不到生产文件', tag='fast')
+def t_picks_redirected():
+    """用户 2026-09-28：「我在页面手动取消了一些选中的规则，这个似乎经常会
+    被检测到是误操作了。」—— **他没做错任何事，是判据错了。**
+
+    原来那条守卫靠【归属】分"测试污染"与"人在页面上点的"：逐条用例跑完
+    查一次，变了就归属到那条用例、判失败。而**归属分的是时机、不是因果**
+    —— 全量跑 21 分钟，人点一下星，那一刻几乎一定落在某条用例的执行窗口
+    里（实测复现：在外面给 picks.json 追加一个换行，「清实验归档」当场被
+    冤枉、`8 通过 / 1 失败`）。只有"最后一条跑完之后"那几毫秒才不会，
+    那不是判据、是运气。
+
+    🔴 所以改成**整轮重定向**（同 `ASSAY_LOG_DIR` / `ASSAY_RUNS`）。
+      这条守卫就是那件事的**结构判据** —— 内容比对撤掉之后，
+      它是"写不到生产文件"唯一的保证。
+    """
+    from assay.srv import base as _b
+    from assay.srv import runs as _r
+    real = os.path.join(REPO, 'picks.json')
+
+    # ── A 运行时那份必须【不是】真路径 ──────────────────────────
+    assert os.path.abspath(_r.MARKS_FILE) != os.path.abspath(real), (
+        '🔴 srv.runs.MARKS_FILE 还指着生产文件 %s —— 用例一写就把你的'
+        '标星覆盖了，而标星是决策记录，同时是 prune_runs 的保护依据'
+        % real)
+
+    # ── B 反向自证：改的是 runs 那份，**没把 base 改坏** ─────────
+    #   `runs.py` 是 `from .base import MARKS_FILE`（值副本），两份各管各的；
+    #   把 base 也改掉的话，真实 serve.py 的行为跟着变（那是产品路径）。
+    assert os.path.abspath(_b.MARKS_FILE) == os.path.abspath(real), (
+        'base.MARKS_FILE 被改成了 %s —— 那是产品路径，不该动它'
+        % _b.MARKS_FILE)
+
+    # ── C 反向自证：重定向出来的那份**有真数据** ─────────────────
+    #   空文件会让「★ 选中的规则」冒泡与「标星不许删」那几条静默空转
+    #   （同「断言要在能触发的构造上跑」）。
+    if os.path.isfile(real):
+        import json as _j
+        n_real = len(_j.load(io.open(real, encoding='utf-8')) or {})
+        n_tmp = len(_j.load(io.open(_r.MARKS_FILE, encoding='utf-8')) or {}) \
+            if os.path.isfile(_r.MARKS_FILE) else 0
+        assert n_tmp >= n_real, (
+            '重定向出来的 picks 只有 %d 条而真文件有 %d 条 —— 没拷底子的话'
+            '那几条要真数据的用例会空转' % (n_tmp, n_real))
+
+    # ── D 真文件这一刻**没有被动过**（它只该由 serve.py 与人来写）───
+    return ('运行时 %s（不是生产）｜ base 仍指生产 ｜ 底子 %d 条'
+            % (os.path.basename(os.path.dirname(_r.MARKS_FILE)),
+               n_tmp if os.path.isfile(real) else -1))
