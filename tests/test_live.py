@@ -8291,21 +8291,42 @@ def t_live_pages_render():
         hit = None
         for a in accs:
             pv = lv.positions_valued(a['id'])
-            if pv.get('items'):
-                it = pv['items'][0]
-                if it.get('price') and it['shares'] >= 100:
-                    d_now = max([x['rt_at'][:10] for x in pv['items']
-                                 if x.get('rt_at')] or [pv['asof']])
-                    hit = (a['id'], it['code'], it['price'], d_now)
-                    break
-        assert hit, '构造不对：没有一个账户有可卖的持仓'
-        aid0, code0, px0, day = hit
-        lv.add_fill(aid0, day, code0, 'sell', 100, price=px0, fee=3.0,
+            for it in (pv.get('items') or []):
+                if not (it.get('price') and it['shares'] >= 100):
+                    continue
+                # 🔴🔴 **挑的时候要避开"今天跌得多"的那几只。** 卖价取
+                #   `现价 + 1 元`（见下），而已实现 = 100 ×（卖价 − 基准）
+                #   = 100 ×（1 元 + 每股当日涨跌）—— 那只票今天恰好跌
+                #   1 元的话就正好抵消成 0，护栏又会报"构造没生效"。
+                _per = (it.get('pnl_day') or 0) / max(it['shares'], 1)
+                if abs(_per) >= 0.5:
+                    continue
+                d_now = max([x['rt_at'][:10] for x in pv['items']
+                             if x.get('rt_at')] or [pv['asof']])
+                hit = (a['id'], it['code'], it['price'], d_now, _per)
+                break
+            if hit:
+                break
+        assert hit, '构造不对：没有一个账户有可卖的持仓（且当日涨跌不极端）'
+        aid0, code0, px0, day, _per0 = hit
+        # 🔴🔴 **卖价不能用"当前价"。** 那样已实现 = 100 ×（现价 − 昨收）
+        #   = 当日涨跌 × 100 —— 而盘中价格每分钟在动，那只票**在某一刻
+        #   平盘，已实现就是 0**，护栏当场报"构造没生效"。
+        #   实测 2026-09-28 盘中就这么红了一次（600012 当日 −0.01/股，
+        #   而它会穿过 0）。同「判据不许依赖真实数据碰巧如此」——
+        #   这条用例已经为"日期要与 d_now 同源"写过一处，唯独漏了"卖价"。
+        # ★ 改成**现价 + 1 元**（`force_price=True` 本来就在，区间校验绕得过）：
+        #   已实现 ≈ 100 元，与行情无关，而且期望**算得出来**。
+        _sp0 = round(px0 + 1.0, 4)
+        lv.add_fill(aid0, day, code0, 'sell', 100, price=_sp0, fee=3.0,
                     force_price=True)
         _pv0 = lv.positions_valued(aid0)
-        assert _pv0.get('pnl_day_realized'), \
-            ('构造没生效：当天卖出的已实现是 %s —— 下面那几条会空转'
-             % _pv0.get('pnl_day_realized'))
+        _want0 = round(100 * (1.0 + _per0), 2)
+        assert _pv0.get('pnl_day_realized') and \
+            abs(_pv0['pnl_day_realized'] - _want0) < 1.0, \
+            ('构造没生效：当天卖出的已实现是 %s，按【卖价 = 现价 + 1 元】'
+             '算应是 %.2f —— 下面那几条会空转'
+             % (_pv0.get('pnl_day_realized'), _want0))
         # 🔴🔴 已实现要**逐分对得上**，不能只判"非 0"（2026-09-24 实测）：
         #   今日卖出的基准原来写死取 `_last_px` 三元组的 `[0]`（**当天收盘**），
         #   而那一位只有"面板停在昨天"时才等于昨收。收盘后实时为空时它就
@@ -8329,7 +8350,7 @@ def t_live_pages_render():
             "SELECT close_bfq, preclose FROM %s WHERE jq_code = ? AND date = ?"
             % _pth.panel_sql(), [code0, day]).fetchone()
         if _pcq and _pcq[1]:
-            _want = round(100 * (px0 - float(_pcq[1])), 2)
+            _want = round(100 * (_sp0 - float(_pcq[1])), 2)
             assert abs(_pv0['pnl_day_realized'] - _want) < 0.02, \
                 ('今日卖出的已实现基准不对：实得 %.2f，按【昨收 %.4f】'
                  '算应是 %.2f —— 多半是拿【当天收盘】当基准了'
