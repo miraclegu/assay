@@ -325,6 +325,18 @@ def main():
     os.environ['ASSAY_LOG_DIR'] = _logtmp
     atexit.register(shutil.rmtree, _logtmp, True)
 
+    # 🔴🔴 **进度文件同样整轮重定向。** 写它的进程也有好几个，而且
+    #   `sync_daily` 与装配的每个阶段都是**子进程** —— 逐个用例改
+    #   `progress.DIR` 必然漏，实测就漏了：全量跑到一半，生产
+    #   `datalake/_manifest/progress/setup.json` 被一条 web 用例的假阶段
+    #   （名字叫 "G1"、0.0 秒）覆盖掉，于是页面顶上那条横条显示了一个
+    #   **根本不存在的装配任务**。而它不报错。
+    # ★ 走 env 的另一个好处：用例里 `importlib.reload(progress)` 之后
+    #   仍然是临时目录（模块属性会被 reload 打回默认值）。
+    _prgtmp = tempfile.mkdtemp(prefix='assay_selftest_prg_')
+    os.environ['ASSAY_PROGRESS_DIR'] = _prgtmp
+    atexit.register(shutil.rmtree, _prgtmp, True)
+
     ap = argparse.ArgumentParser(description='assay 自检')
     g = ap.add_mutually_exclusive_group()
     g.add_argument('--fast', action='store_true', help='只跑 fast 层（约 18s，无浏览器）')

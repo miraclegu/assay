@@ -5512,3 +5512,69 @@ def t_auth():
         A._EN.update(at=0, v=False)
         _sh.rmtree(td, ignore_errors=True)
     return ' ｜ '.join(out)
+
+
+@case('selftest 不许写生产进度文件（子进程也算）', tag='fast')
+def t_progress_redirected():
+    """2026-09-28 实测：全量跑到一半，生产
+    `datalake/_manifest/progress/setup.json` 被覆盖成了
+
+        {"job": "setup", "title": "建本地数据（首次批量加载）", "total": 1,
+         "done": [{"name": "G1", "sec": 0.0, "state": "ok"}], "state": "done"}
+
+    —— "G1" 是 `t_setup_progress_failure_loud` 里那个**假阶段**的名字。
+    于是页面顶上那条横条显示了一个**根本不存在的装配任务**，而它不报错。
+    `step_times.json`（各步耗时的历史，ETA 靠它）也被一起写脏。
+
+    🔴 判据是**结构上写不到**，不是"哪几条用例记得打桩" —— 照清单打桩
+      的话，新加的用例自动在保护之外，而漏了不报错（同 `ASSAY_LOG_DIR`
+      / `ASSAY_RUNS` / `picks.json` 那三条）。
+    🔴 **子进程也要算**：写进度的有 `sync_daily`、装配的每个阶段，
+      它们是子进程、各自 `import progress` —— 模块属性继承不到，
+      所以根必须走 env。
+    """
+    import importlib
+    import subprocess
+    import sys
+
+    from assay.srv import base as sbase
+
+    dl = sbase._datalake_dir()
+    if dl not in sys.path:
+        sys.path.insert(0, dl)
+    P = importlib.import_module('progress')
+    importlib.reload(P)                  # ★ reload 之后也必须还在临时目录
+
+    prod = os.path.join(dl, '_manifest')
+    for _n, _v in (('DIR', P.DIR), ('TIMES', P.TIMES)):
+        assert not os.path.abspath(_v).startswith(os.path.abspath(prod)), (
+            '🔴 progress.%s 指着**生产**目录 %r —— selftest 一跑就会把'
+            '页面上那条横条写脏（实测：假阶段 "G1" 覆盖了 setup.json）'
+            % (_n, _v))
+
+    # ---- 🔴 子进程继承得到吗（模块属性继承不到，这是走 env 的全部理由）----
+    r = subprocess.run(
+        [sys.executable, '-c',
+         'import sys;sys.path.insert(0, %r);import progress;'
+         'print(progress.DIR);print(progress.TIMES)' % dl],
+        capture_output=True, text=True)
+    assert r.returncode == 0, '子进程起不来：%s' % (r.stdout + r.stderr)[-300:]
+    for _v in r.stdout.strip().split('\n'):
+        assert not os.path.abspath(_v).startswith(os.path.abspath(prod)), (
+            '🔴 子进程里的 progress 还指着生产目录 %r —— `sync_daily` 与'
+            '装配的每个阶段都是子进程，模块属性它们继承不到，根必须走 env'
+            % _v)
+
+    # ---- 反向自证：不设 env 时就该指回生产（否则上面那条恒真）----
+    env = dict(os.environ)
+    env.pop('ASSAY_PROGRESS_DIR', None)
+    r2 = subprocess.run(
+        [sys.executable, '-c',
+         'import sys;sys.path.insert(0, %r);import progress;print(progress.DIR)' % dl],
+        capture_output=True, text=True, env=env)
+    assert os.path.abspath(r2.stdout.strip()).startswith(os.path.abspath(prod)), (
+        '构造不对：不设 env 时 progress.DIR 也不指生产（%r）—— 那上面两条'
+        '判据永远成立，等于没测' % r2.stdout.strip())
+
+    return ('本进程与子进程的 progress 根都在临时目录 · 不设 env 时指回生产'
+            '（反向自证）· reload 之后仍然有效')
