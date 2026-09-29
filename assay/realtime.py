@@ -356,15 +356,26 @@ def micro_members(root=None):
       "今天这批最小的票怎么样"，而不是复现一条可回测的指数。
       两者的口径差要在文档里说清，别混用。
     """
-    import datetime as _dt
-    today = _dt.date.today().isoformat()
-    if _MICRO['day'] == today and _MICRO['syms']:
-        return _MICRO['syms']
+    # 🔴🔴 **缓存键是【面板日】，不是日历日。**（2026-09-29 实测）
+    #
+    #   原来键在 `date.today()` 上：当晚同步把面板建到今天之后，成分表
+    #   **到午夜之前都不会更新** —— 带子拿着昨天的排名、配今天的价。
+    #   实测差 0.11pp（按 09-28 排名 +1.44% vs 按 09-29 排名 +1.33%），
+    #   两个数各自都对，只是**不是同一件事**，而页面上分不出来。
+    #   互证用例因此每天傍晚偶发红 —— 偶发红和偶发绿一样，
+    #   都在教人"重跑一次就好了"。
+    #
+    # ★ 同「判据永远是【现在的状态】，不是记录」：不问"今天是几号"，
+    #   问"面板现在最新到哪一天"。
     try:
         import duckdb
         lake = _lake(root)
         P = _paths.panel_sql(lake)
-        rows = duckdb.connect().execute(
+        con = duckdb.connect()
+        pday = str(con.execute('SELECT max(date) FROM %s' % P).fetchone()[0] or '')
+        if pday and _MICRO['day'] == pday and _MICRO['syms']:
+            return _MICRO['syms']
+        rows = con.execute(
             "SELECT jq_code FROM %s WHERE date = (SELECT max(date) FROM %s) "
             "AND totalmv > 0 AND public_status IN ('正常上市','ST','*ST') "
             "ORDER BY totalmv LIMIT %d" % (P, P, MICRO_N)).fetchall()
@@ -372,7 +383,7 @@ def micro_members(root=None):
         return _MICRO['syms']            # 取不到就沿用上一次，别让这一格消失
     syms = [('sh' if r[0].endswith('XSHG') else 'sz') + r[0][:6] for r in rows]
     if syms:
-        _MICRO.update(day=today, syms=syms)
+        _MICRO.update(day=pday, syms=syms)
     return _MICRO['syms']
 
 

@@ -9654,6 +9654,93 @@ def t_pb_health_gate():
             '误清仓）· 读不到/只有一天不拦 · 闸确实接在出信号那条路上')
 
 
+@case('持仓估值取价：快照只在【比面板新】的时候才盖住面板', tag='fast')
+def t_px_source_rule():
+    """🔴🔴 2026-09-29 实测：页面上「持仓浮盈 2,035 / 累计收益 1,885」自相矛盾。
+
+    `positions_valued` 走实时快照、`equity_curve` 走面板 —— **两处取价分叉**。
+    实时链「收盘不轮」，收盘后一直拿着 14:59 那次轮询的 11.15，而当晚同步把
+    面板建到同一天之后，面板有的是正式收盘价 11.12。差 0.03 × 5000 股 = 150 元，
+    **而它不报错**。
+
+    ★ 判据是**哪一份更新**，不是"有没有实时价"。这里把两种局面都**构造**
+      出来 —— 真实数据一天里只碰得到其中一种，靠它自然发生的话另一半
+      永远在空转（而看着全绿）。
+    """
+    import datetime
+    import importlib
+    import json
+    import os
+    import shutil
+    import tempfile
+
+    lv = importlib.import_module('assay.live')
+    from assay.lv import perf as _perf
+    from assay import realtime as _rtm
+
+    tmp = tempfile.mkdtemp()
+    old_live, old_latest = lv.LIVE, _rtm.latest
+    try:
+        lv.LIVE = tmp
+        lv.upsert_account('t_px', name='px', init_cash=100000)
+        lv.add_fill('t_px', '2026-08-10', '601857.XSHG', 'buy', 1000, 11.0,
+                    fee=0, force_price=True)
+        # 先拿到面板给的价与日期（不打桩）
+        _rtm.latest = lambda *a, **k: {}
+        base = lv.positions_valued('t_px')['items'][0]
+        p_panel, d_panel = base['price'], base['px_date']
+        assert p_panel and d_panel, '面板价拿不到，后面两条都作废：%r' % base
+
+        SNAP = p_panel + 0.37          # 和面板明显不同，才分得出用了哪个
+
+        def _fake(day):
+            return lambda *a, **k: {'601857.XSHG': {
+                'price': SNAP, 'src': 'snap', 'at': day + ' 14:59',
+                'preclose': p_panel}}
+
+        # ---- ① 盘中：快照比面板新 -> 快照赢（盈亏要是活的）----
+        nxt = (datetime.date.fromisoformat(d_panel)
+               + datetime.timedelta(days=1)).isoformat()
+        _rtm.latest = _fake(nxt)
+        it = lv.positions_valued('t_px')['items'][0]
+        assert abs(it['price'] - SNAP) < 1e-9 and it.get('rt_src') == 'snap', \
+            ('快照比面板新（%s > %s）却没用上 —— 盘中持仓盈亏就是死的：'
+             'price=%s src=%r' % (nxt, d_panel, it['price'], it.get('rt_src')))
+
+        # ---- ② 收盘后：同一天 -> 面板赢（正式收盘价）----
+        _rtm.latest = _fake(d_panel)
+        it = lv.positions_valued('t_px')['items'][0]
+        assert abs(it['price'] - p_panel) < 1e-9, \
+            ('面板已有 %s 的收盘价 %.4f，却被同一天 14:59 的快照 %.4f 盖住 '
+             '—— 页面上「持仓浮盈」与「累计收益」会对不上，而它不报错'
+             % (d_panel, p_panel, SNAP))
+        assert not it.get('rt_src'), \
+            '用的是面板收盘价，却还标着实时来源 %r —— 人会以为这是活的' \
+            % it.get('rt_src')
+
+        # ---- ③ 快照比面板【旧】：一样不许盖（陈旧快照更危险）----
+        prv = (datetime.date.fromisoformat(d_panel)
+               - datetime.timedelta(days=1)).isoformat()
+        _rtm.latest = _fake(prv)
+        it = lv.positions_valued('t_px')['items'][0]
+        assert abs(it['price'] - p_panel) < 1e-9, \
+            '比面板还旧的快照盖住了面板收盘价（%s < %s）' % (prv, d_panel)
+
+        # ---- ④ 两处取价必须落到同一个数（这才是用户看得到的那条）----
+        _rtm.latest = _fake(d_panel)
+        pv = lv.positions_valued('t_px')
+        es = lv.equity_curve('t_px')['stats']
+        assert abs(es['pnl_total'] - pv['pnl']) < 0.02, \
+            ('累计收益 %.2f 与持仓浮盈 %.2f 对不上 —— 两处取价又分叉了'
+             % (es['pnl_total'], pv['pnl']))
+        return ('面板 %s 收 %.4f：快照更新(%s)时用快照 %.4f；同一天与更旧时'
+                '都用面板收盘且不标实时来源；累计收益与持仓浮盈同一个数'
+                % (d_panel, p_panel, nxt, SNAP))
+    finally:
+        _rtm.latest = old_latest
+        lv.LIVE = old_live
+        shutil.rmtree(tmp, ignore_errors=True)
+
 @case('交易时段默认不覆盖已发布的待办（盘中只算不写）', tag='fast')
 def t_session_write_guard():
     """2026-09-29 实测：我在盘中（09:06 / 09:55 / 11:11）反复重算，把用户

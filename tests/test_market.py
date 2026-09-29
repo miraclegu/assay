@@ -5208,6 +5208,71 @@ def t_indicator_plaza():
 
 
 
+@case('微盘400 的成分按【面板日】缓存，不是按日历日', tag='fast')
+def t_micro_cache_key():
+    """🔴 2026-09-29 实测：当晚同步把面板建到今天之后，成分表**到午夜之前
+    都不会更新** —— 带子拿着昨天的排名、配今天的价。
+
+    差 0.11pp（按 09-28 排名 +1.44% vs 按 09-29 排名 +1.33%）。两个数各自
+    都对，只是**不是同一件事**，而页面上分不出来；互证用例因此每天傍晚偶发红。
+
+    ★ 今天恰好「面板日 == 日历日」，那样测什么都看不出区别 ——
+      所以这里**造一个面板日 != 今天**的小面板（临时目录），
+      再看缓存键落在哪一个上。
+    """
+    import datetime
+    import os
+    import shutil
+    import tempfile
+
+    import duckdb
+    import pandas as pd
+
+    from assay import realtime as rt
+    FAKE_DAY = '2026-01-05'
+    today = datetime.date.today().isoformat()
+    assert FAKE_DAY != today, '构造的面板日不能正好是今天'
+
+    tmp = tempfile.mkdtemp()
+    d = os.path.join(tmp, 'mart', 'panel_daily')
+    os.makedirs(d)
+    n = rt.MICRO_N + 20
+    pd.DataFrame({
+        'date': [datetime.date.fromisoformat(FAKE_DAY)] * n,
+        'jq_code': ['%06d.XSHG' % (600000 + i) for i in range(n)],
+        'totalmv': [float(i + 1) * 1e8 for i in range(n)],
+        'public_status': ['正常上市'] * n,
+    }).to_parquet(os.path.join(d, 'panel_2026.parquet'), index=False)
+
+    old = dict(rt._MICRO)
+    try:
+        # 先塞一份【键在日历日上】的陈旧缓存：旧写法会直接把它返回
+        rt._MICRO.update(day=today, syms=['sh000001'])
+        syms = rt.micro_members(root=tmp)
+        assert len(syms) == rt.MICRO_N, \
+            ('缓存键还钉在日历日上 —— 面板日是 %s、今天是 %s，两者不同却'
+             '照样把昨天那份返回了（实得 %d 只）' % (FAKE_DAY, today, len(syms)))
+        assert rt._MICRO['day'] == FAKE_DAY, \
+            '缓存键该是面板日 %s，实得 %r' % (FAKE_DAY, rt._MICRO['day'])
+        # 取的是**总市值最小**的那 MICRO_N 只
+        assert syms[0] == 'sh600000' and len(set(syms)) == rt.MICRO_N, \
+            '成分不是按总市值升序取的：%s' % syms[:3]
+        assert '%06d' % (600000 + n - 1) not in ''.join(syms), \
+            '最大市值那只不该进微盘'
+        # 同一个面板日再调一次：走缓存、结果不变
+        again = rt.micro_members(root=tmp)
+        assert again == syms, '同一个面板日两次调用结果不一样'
+        # 🔴 取不到时**沿用上一次**，别让这一格消失（不是返回空）
+        keep = rt.micro_members(root=os.path.join(tmp, '不存在'))
+        assert keep == syms, '面板读不到时该沿用上一次，实得 %d 只' % len(keep)
+        return ('面板日 %s ≠ 今天 %s：缓存键落在面板日上、取到最小市值 %d 只、'
+                '二次调用走缓存、面板读不到时沿用上一次'
+                % (FAKE_DAY, today, rt.MICRO_N))
+    finally:
+        rt._MICRO.clear()
+        rt._MICRO.update(old)
+        shutil.rmtree(tmp, ignore_errors=True)
+
 @case('主要指数常驻带子：每个页面都有 / 清单来自服务端 / 收盘不轮（playwright）',
       tag='web')
 def t_index_bar():

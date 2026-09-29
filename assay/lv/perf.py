@@ -197,7 +197,23 @@ def positions_valued(aid, datalake=None):
         p, pd_, pc = px.get(c, (None, None, None))
         rt_src = rt_at = None
         r = rtp.get(c)
-        if r and r.get('price'):
+        # 🔴🔴 **快照只在比面板【更新】的时候才算数。**（2026-09-29 实测）
+        #
+        #   实时链「收盘不轮」，所以收盘后它会一直拿着最后一次轮询的价
+        #   （实测 14:59 的 11.15）。当晚同步把面板建到同一天之后，面板有
+        #   的是**正式收盘价**（11.12）—— 这时再让 14:59 那个数覆盖它，
+        #   页面上就成了「持仓浮盈 2,035 / 累计收益 1,885」自相矛盾：
+        #   `positions_valued` 走快照、`equity_curve` 走面板，**两处取价分叉**。
+        #   差的正是 0.03 × 5000 股 = 150 元，而它不报错。
+        #
+        # ★ 判据是**哪一份更新**，不是"有没有实时价"：
+        #     盘中   面板停在 D−1、快照是 D  -> D > D−1，快照赢（盈亏是活的）
+        #     收盘后 面板已到 D、快照也是 D  -> 不更新，面板赢（正式收盘价）
+        #   同「判据永远是【现在的状态】」：不问"实时链开着没"，
+        #   问"这两份数据各自截到哪一天"。
+        _rt_day = str((r or {}).get('at') or '')[:10]
+        _pd_day = pd_.isoformat() if pd_ else ''
+        if r and r.get('price') and (not _pd_day or _rt_day > _pd_day):
             p, rt_src, rt_at = r['price'], r.get('src') or 'rt', r.get('at')
             # 🔴 盘中的「昨收」不能用面板那一行的 preclose —— 那是**面板
             #   那一天**的昨收（面板到 09-02 时它是 09-01 收盘），而实时价
