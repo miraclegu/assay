@@ -741,8 +741,14 @@ svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
 #spwrap{position:fixed;inset:0;z-index:8000;background:rgba(0,0,0,.55);
   display:flex;align-items:flex-start;justify-content:center;padding:24px 16px;
   overflow-y:auto}
+/* 🔴 **定高 + 内容区自己滚**：底部的「上一只 / 下一只」要钉在同一个位置。
+   不定高的话浮层高度跟着内容走 —— 换一只票、「我的成交」多一行，整条
+   底栏就上下移（实测自选页翻一只动 8px），而那个按钮正是要连点的。
+   ★ 画布宽度不变（`spDraw` 按 `.spcv` 的 box.width 算），只是内容区多了
+     一条滚动条 —— 340px 的图 + KPI + 成交表本来就常常超过一屏。 */
 #spwrap .spbox{background:var(--panel);border:1px solid var(--line);
-  border-radius:12px;width:min(1180px,100%);box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  border-radius:12px;width:min(1180px,100%);box-shadow:0 18px 50px rgba(0,0,0,.5);
+  height:min(88vh,860px);display:flex;flex-direction:column}
 #spwrap .sphd{display:flex;align-items:center;gap:10px;padding:11px 14px;
   border-bottom:1px solid var(--line);flex-wrap:wrap}
 #spwrap .sphd b{font-size:15px}
@@ -775,7 +781,7 @@ svg .hvt{fill:var(--fg);font-size:11px;font-weight:600}
 #spwrap .spns a{font-size:12px;padding:2px 7px;border:1px solid var(--line);
   border-radius:5px;color:var(--dim);text-decoration:none}
 #spwrap .spns a.on{color:var(--fg);border-color:var(--accent,#6aa7ff)}
-#spwrap .spbody{padding:12px 14px 14px}
+#spwrap .spbody{padding:12px 14px 14px;flex:1;min-height:0;overflow:auto}
 /* KPI 一行 6 格，窄屏折行 —— 🔴 子项要 min-width:0，里面有宽表时
    grid 子项默认 min-width:auto 不收缩，`.pw` 的 overflow-x 就形同虚设。 */
 #spwrap .spkpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));
@@ -1156,3 +1162,20 @@ body.hasprog{padding-top:28px}
 .secscroll thead th{position:sticky;top:0;z-index:2;background:var(--panel)}
 /* 走策略默认的参数：与显式绑定的区分开 —— 「默认」两个字看不出危险 */
 .lvkv.lvdflt{background:var(--panel2);color:var(--up);border:1px dashed var(--line)}
+/* 浮层底部的「上一只 / 下一只」—— 标签固定宽度，跳一只按钮也不移位 */
+#spwrap .spnav{display:flex;align-items:center;gap:10px;padding:8px 14px;
+  border-top:1px solid var(--line);background:var(--panel2);font-size:12px}
+/* 🔴 两侧**固定宽度**：「‹ 上一只」与「已是第一只」字数不同，不定宽的话
+   中间那句「第 2 / 95 只」会跟着左右漂，翻一只动一次（同一天刚修过
+   「切页签时按钮跳 40px」）。定了宽，两种状态占位一模一样。 */
+#spwrap .spnb{padding:3px 10px;border:1px solid var(--line);border-radius:5px;
+  color:var(--fg);text-decoration:none;white-space:nowrap;
+  /* 🔴 **定宽**不是 min-width —— 后者只保底不封顶：「下一只 ›」86px，
+     到底时换成「已是最后一只」就撑到 94px，按钮往左挪 8px。
+     最长的那句是「已是最后一只」（6 个汉字），104px 装得下还有余。 */
+  flex:0 0 104px;text-align:center;overflow:hidden;box-sizing:border-box}
+#spwrap .spnb:hover{border-color:var(--accent);color:var(--accent)}
+#spwrap .spnbx{color:var(--dim);border-style:dashed;cursor:default}
+/* 数字等宽：不然「第 1 / 15」-> 「第 2 / 15」这一下字形宽度就变了，
+   居中的这句话会左右抖 1~2px */
+#spwrap .spnav .spdim{font-variant-numeric:tabular-nums}

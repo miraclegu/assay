@@ -84,6 +84,7 @@ function spClose(){
   if(w) w.remove();
   document.removeEventListener('keydown', spEsc);
   SP = null;
+  SPLIST = null;
 }
 function spEsc(e){ if(e.key === 'Escape') spClose(); }
 
@@ -111,11 +112,21 @@ async function spOpen(code, name, opt){
                class="sptip"></div></div>
           <div id="spmine"></div>
         </div>
+        <div class="spnav" id="spnav"></div>
       </div>`;
     document.body.appendChild(w);
     /* 🔴 点遮罩关闭只认**遮罩自己**（e.target === w）：不判的话点浮层内部
        会冒泡上来把浮层关掉，表现是"刚点开就没了"。 */
     w.onclick = e => { if(e.target === w) spClose(); };
+    /* 🔴 委托在 `#spwrap` 上，不是渲染时逐个绑 —— `#spnav` 每跳一只就换一次
+       innerHTML，绑在按钮上的 handler 换一次就没了（同「innerHTML 填充之后
+       才存在的元素要重新绑事件，或委托在稳定容器上」）。 */
+    w.addEventListener('click', e => {
+      const b = e.target.closest && e.target.closest('.spnb[data-d]');
+      if(!b) return;
+      e.preventDefault();
+      spNav(Number(b.dataset.d));
+    });
     document.getElementById('spx').onclick = spClose;
     document.addEventListener('keydown', spEsc);
   }
@@ -128,6 +139,11 @@ async function spOpen(code, name, opt){
        "那前后发生了什么"，给 250 根会把那根柱子压成一像素。
      `run`：那次回测的 id。浮层要用**它的 datalake**（ETF 回测跑在平行的
        etf_lake 上，主面板里一行都没有）与**它的买卖点**。 */
+  /* ★ `keepList`：跳上一只/下一只时**保持同一份清单**（否则每跳一次就按
+     新位置重算，而浮层开着的时候底下那张表没变，重算等于白算）。
+     不带 `keepList` 就是一次全新的打开 —— 清单跟着这次点击走，
+     取不到就置 null（**不留上一次的**：那会让箭头指向另一张表的邻居）。 */
+  if(!opt.keepList) SPLIST = opt.list || null;
   SP = {code: code, n: (opt.date ? 84 : ((SP && SP.n) || 120)),
         center: opt.date || null, run: opt.run || null};
   document.getElementById('sptitle').textContent = name || code;
@@ -147,6 +163,7 @@ async function spOpen(code, name, opt){
   document.getElementById('spkpi').innerHTML = '<span class="spdim">载入中…</span>';
   document.getElementById('spmine').innerHTML = '';
   spNsBar();
+  spNavBar();
   await spLoad();
 }
 
@@ -437,6 +454,86 @@ if(typeof document !== 'undefined' && !window.__spOn){
     if(e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;  /* 让它照旧开新标签 */
     e.preventDefault();
     spOpen(a.dataset.sp, a.dataset.spn || '',
-           {date: a.dataset.spd || '', run: a.dataset.spr || ''});
+           {date: a.dataset.spd || '', run: a.dataset.spr || '',
+            list: spListOf(a)});
   });
+}
+
+/* ---------------------------------------------------------------- 上一只 / 下一只
+   用户 2026-09-29：「点击成分股中的个股出来弹窗后，弹窗的下面应该有左右箭头
+   按钮，按箭头跳到当前列表中的上一个/下一个。」
+
+   ★ 「当前列表」= **点击那个链接所在的那张表**里的全部 `a[data-sp]`，
+     按 DOM 顺序。不取整个文档 —— 页面上常有好几张表（持仓 / 成交 / 榜单），
+     串在一起走会跳到另一张表里去，而人以为还在同一份清单上。
+   ★ 按 code 去重：同一只票在一块里出现两次（持仓表 + 成交表）时只算一个，
+     否则「第 3 / 42」这个计数会说谎。
+   ★ 只收**可见**的：页签切走的那些还在 DOM 里，算进来的话计数同样说谎。 */
+let SPLIST = null;         /* {items:[{code,name,date,run}], i, what} */
+
+function spListOf(a){
+  /* 就近的容器：表 -> 区块 -> 页面。取不到就不给列表（不硬凑）。 */
+  const box = a.closest('table') || a.closest('.lvsec') || a.closest('#pg');
+  if(!box) return null;
+  const seen = {}, items = [];
+  Array.from(box.querySelectorAll('a[data-sp]')).forEach(x => {
+    const c = x.dataset.sp;
+    if(!c || seen[c]) return;
+    if(x.offsetParent === null) return;          /* 看不见的不算 */
+    seen[c] = 1;
+    items.push({code: c, name: x.dataset.spn || '',
+                date: x.dataset.spd || '', run: x.dataset.spr || ''});
+  });
+  if(items.length < 2) return null;
+  let i = 0;
+  for(let k = 0; k < items.length; k++) if(items[k].code === a.dataset.sp) { i = k; break; }
+  /* 这一组是什么 —— 计数旁边要说得出来，否则「第 3 / 42」指的是哪 42 只没人知道。
+     🔴 **先把 h3 里的按钮剥掉再取文字**：板块页 2026-09-29 把页签与
+       「⚖ 前 6 只去对比」挪到了 h3 开头，直接 textContent 会读成
+       「子行业 成分股 ⚖ 前 6 只去对比 房地产I 成分 95 只」——
+       标题里混着操作按钮，而它不报错，只是那句话读不懂。
+     ★ 剥的是**元素**（clone 之后删掉所有 a），不是按文字裁剪 ——
+       按文字裁会跟着按钮文案一起变。 */
+  const h = box.closest('.lvsec') && box.closest('.lvsec').querySelector('h3');
+  let what = '当前列表';
+  if(h){
+    const c = h.cloneNode(true);
+    Array.from(c.querySelectorAll('a')).forEach(x => x.remove());
+    /* 标题末尾那个「N 只 / N 个」去掉 —— 旁边已经写了「第 2 / 95 只」，
+       留着就成了「第 2 / 95 只 · 房地产I 成分 95 只」，同一个数说两遍。 */
+    what = c.textContent.replace(/\s+/g, ' ').trim()
+             .replace(/\s*\d+\s*[只个](（.*）)?$/, '').trim().slice(0, 28) || what;
+  }
+  return {items: items, i: i, what: what};
+}
+
+/* 🔴 标签**固定**（「‹ 上一只」/「下一只 ›」），邻居的名字放 title ——
+   把名字写进按钮的话，每跳一只按钮宽度就变一次，按钮在手底下**移位**
+   （同一天刚修过「切页签时按钮跳 40px」那条）。
+   🔴 到头了**不设 disabled**（disabled 的元素连 title 都不触发），
+     改成一句「已是第一只」占住同一个位置 —— 位置不动，且说得出为什么不能点。 */
+function spNavBar(){
+  const e = document.getElementById('spnav');
+  if(!e) return;
+  const L = SPLIST;
+  if(!L){ e.innerHTML = ''; e.style.display = 'none'; return; }
+  e.style.display = '';
+  const p = L.items[L.i - 1], n = L.items[L.i + 1];
+  e.innerHTML =
+    (p ? `<a href="#" class="spnb" data-d="-1" title="${esc(p.name || p.code)}">‹ 上一只</a>`
+       : '<span class="spnb spnbx">已是第一只</span>')
+    + `<span class="spgrow"></span><span class="spdim" id="spnavi">第 ${L.i + 1} / ${
+        L.items.length} 只 · ${esc(L.what)}</span><span class="spgrow"></span>`
+    + (n ? `<a href="#" class="spnb" data-d="1" title="${esc(n.name || n.code)}">下一只 ›</a>`
+       : '<span class="spnb spnbx">已是最后一只</span>');
+}
+
+function spNav(d){
+  const L = SPLIST;
+  if(!L) return;
+  const j = L.i + d;
+  if(j < 0 || j >= L.items.length) return;       /* 不绕回 —— 榜单绕回会让人以为还在往下走 */
+  L.i = j;
+  const it = L.items[j];
+  spOpen(it.code, it.name, {date: it.date, run: it.run, keepList: true});
 }

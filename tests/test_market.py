@@ -1585,26 +1585,34 @@ def t_sector_drill():
                 ('边栏每项该只有【名称 + 涨跌幅】两块，实得 %d 块 —— '
                  '变成侧栏之后信息密度要降下来' % cols)
 
-            # ---- ④ 层级：申万一级 -> 二级排行 -> 三级；切页签看成分 ----
+            # ---- ④ 层级：点申万一级**默认落在成分股**，切页签才看子行业 ----
+            #   🔴 2026-09-29 用户第三轮：默认从「子行业」改成「成分股」——
+            #     点一个行业，想看的先是"里面都有哪些票"，下钻看二级是第二步。
+            #     原来这条钉「点一级该先出下属二级排行」，属于被改动作废的
+            #     断言：要保的东西没变（点一级要有确定的落点），只是落点换了，
+            #     所以改成钉新规矩，不是删掉保护。
             h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
-            assert '下属' in h3, '申万一级该先出下属二级排行：%s' % h3
+            assert '成分' in h3 and '下属' not in h3, \
+                '点申万一级该默认落在【成分股】：%s' % h3
+            _on = [t.strip() for t in pg.locator('#secmain a.tb.on').all_inner_texts()]
+            assert _on == ['成分股'], '高亮的页签不对：%s' % _on
+            #   ★ 默认值不写进 URL —— 否则每个链接都拖着 `tab=mem`
+            assert 'tab=' not in pg.evaluate('() => location.search'), \
+                'URL 里带了 tab=，而它就是默认值：%s' % pg.evaluate('() => location.search')
             crumb = pg.locator('.seccrumb a').all_inner_texts()
             assert len(crumb) == 2 and crumb[0] == '全部板块', \
                 '面包屑不对：%s' % crumb
-            pg.locator('#secmain a.tb[data-t="mem"]').click()
+            pg.locator('#secmain a.tb[data-t="sub"]').click()
             try:
                 pg.wait_for_function(
                     "() => { const h = document.querySelector('#secmain h3');"
-                    # 🔴 排版改成「按钮在左、标题在右」之后，h3 的第一行是页签
-                    #   文案（里面就有「成分股」三个字）—— 按第一行判会**永远
-                    #   为真**，等于没等。改成看标题那一段：「… 成分 N 只」。
-                    " return h && /成分\\s+\\d+\\s*只/.test(h.innerText); }",
+                    " return h && h.innerText.indexOf('下属') >= 0; }",
                     timeout=20000)
             except Exception:                               # noqa: BLE001
                 raise AssertionError(
-                    '点了「成分股」页签，右栏标题仍是 %r —— 页签没生效'
+                    '点了「子行业」页签，右栏标题仍是 %r —— 页签没生效'
                     % pg.locator('#secmain h3').first.inner_text().replace('\n', ' '))
-            notes.append('申万一级 -> 二级排行 -> 成分股页签')
+            notes.append('申万一级默认成分股 -> 切页签看子行业')
 
             # ---- ④b 切页签时按钮**一个像素都不许动** ----
             #   🔴 2026-09-29 用户：切到「成分股」右边会多出「⚖ 前 6 只去对比」，
@@ -1615,13 +1623,13 @@ def t_sector_drill():
             def _tabx():
                 return [pg.locator('#secmain a.tb').nth(i).bounding_box()['x']
                         for i in range(pg.locator('#secmain a.tb').count())]
-            x_mem = _tabx()
-            pg.locator('#secmain a.tb[data-t="sub"]').click()
+            x_sub = _tabx()
+            pg.locator('#secmain a.tb[data-t="mem"]').click()
             pg.wait_for_function(
                 "() => { const h = document.querySelector('#secmain h3');"
-                " return h && h.innerText.indexOf('下属') >= 0; }", timeout=20000)
+                " return h && /成分\\s+\\d+\\s*只/.test(h.innerText); }", timeout=20000)
             pg.wait_for_timeout(500)
-            x_sub = _tabx()
+            x_mem = _tabx()
             assert len(x_mem) == 2 and len(x_sub) == 2, \
                 '页签该是两个（子行业 / 成分股），实得 %d / %d' % (len(x_mem), len(x_sub))
             _mv = [round(abs(a_ - b_), 1) for a_, b_ in zip(x_mem, x_sub)]
@@ -1633,6 +1641,24 @@ def t_sector_drill():
                        pg.locator('#secmain a.tb').all_inner_texts()]
             assert _labels == ['子行业', '成分股'], \
                 '页签文案不对：%s' % _labels
+
+            # ---- ④c 默认页签**只有一处定义** ----
+            #   🔴 它出现在 5 个地方（初值 / nav 里不写进 URL 的那个 /
+            #     切分类 / 点板块 / 点面包屑的重置）。写死 5 份的话改默认值
+            #     必然漏掉一两处，而漏了不报错：表现是"点板块落在成分股、
+            #     点面包屑却落回子行业"，同一个页面两种行为。
+            _src = io.open(os.path.join(REPO, 'web', 'sector.html'),
+                           encoding='utf-8').read()
+            _body = '\n'.join(l for l in _src.split('\n')
+                               if not l.strip().startswith(('*', '/*', '//')))
+            #   ★ 只抓**字面量**赋值（`TAB = 'sub'`）—— `TAB = t.dataset.t`
+            #     是点页签时的正常赋值，不是默认值（第一版把它也算进来了）
+            import re as _re2
+            _hard = [l.strip()[:70] for l in _body.split('\n')
+                     if _re2.search(r"\bTAB\s*=\s*['\"]", l) and 'TAB0' not in l]
+            assert not _hard, \
+                ('默认页签被写死在这几行，没走 TAB0：%s' % _hard)
+            assert _body.count('const TAB0') == 1, '"TAB0" 该只有一处定义'
 
             # ---- ⑤ 表头排序真的改了顺序，且空值沉底 ----
             pg.goto(base + '/sector.html', wait_until='networkidle')
@@ -1678,6 +1704,14 @@ def t_sector_drill():
             pg.wait_for_selector('#secmain tbody tr', timeout=40000)
             pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
             pg.wait_for_selector('#secside .secitem', timeout=20000)
+            #   ★ 默认落在【成分股】，成分股那张表里没有 `a.pick`（成分是
+            #     个股链接 `a[data-sp]`）—— 要再下一级得先切到「子行业」。
+            #     2026-09-29 改默认页签时这一步漏了，表现是 click 超时 30s，
+            #     而那个 TimeoutError **指不到**"这张表本来就没有下钻链接"。
+            pg.locator('#secmain a.tb[data-t="sub"]').click()
+            pg.wait_for_function(
+                "() => { const h = document.querySelector('#secmain h3');"
+                " return h && h.innerText.indexOf('下属') >= 0; }", timeout=20000)
             pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
             pg.wait_for_timeout(2500)
             deep = pg.url
@@ -2742,20 +2776,22 @@ def t_new_pages_ui():
             n_sw = pg.locator('.lvsec table.pkt tr').count() - 1
             assert n_sw >= 25, '申万板块行数不对：%d' % n_sw
             clean()
-            #   🔴 2026-09-29 起申万是三级树：点一级默认落在【子行业排行】，
-            #     成分股在页签后面。原来这条直接断言"点了就出成分"，
-            #     改动作废之后要钉的是**新规矩**（点一级 -> 二级排行，
-            #     切页签 -> 成分），不是把保护删掉。
+            #   🔴 2026-09-29 起申万是三级树，而**默认落在【成分股】**
+            #     （当天第三轮：点一个行业先想看里面有哪些票，下钻是第二步）。
+            #     这条原来钉"点了就出成分"、中间又改成钉"先出二级排行"——
+            #     两次都是被改动作废的断言。要保的东西一直没变（点一级要有
+            #     确定的落点 + 另一半在页签后面），改的只是哪一半在前。
             pg.locator('#secmain a.pick').first.click()
             pg.wait_for_timeout(2500)
             h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
-            assert '下属' in h3, '点申万一级该先出下属二级排行：%s' % h3
+            assert '成分' in h3 and '下属' not in h3, \
+                '点申万一级该默认落在【成分股】：%s' % h3
             assert pg.locator('#secside .secitem.on').count() == 1, \
                 '选中后左边该变成边栏、且当前项高亮'
-            pg.locator('#secmain a.tb[data-t="mem"]').click()
+            pg.locator('#secmain a.tb[data-t="sub"]').click()
             pg.wait_for_timeout(2500)
             h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
-            assert '成分' in h3, '切「成分股」页签没出成分表：%s' % h3
+            assert '下属' in h3, '切「子行业」页签没出下属排行：%s' % h3
             clean()
             # 切到概念板块
             pg.locator('.lvhead .kd[data-k="concept"]').click()
@@ -3170,6 +3206,7 @@ def t_stockpop():
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     notes = []
+    _navn = []          # 每一页的「上一只/下一只」验到了什么
     try:
         with sync_playwright() as p:
             b = p.chromium.launch()
@@ -3202,6 +3239,119 @@ def t_stockpop():
                 title = pg.locator('#sptitle').inner_text()
                 assert title and title != '', '%s 页浮层标题是空的' % label
                 assert not errs, '%s 页有 JS 错误：%s' % (label, errs[:2])
+
+                # ---- 浮层底部「上一只 / 下一只」（用户 2026-09-29）----
+                #   🔴 「当前列表」= 点击那个链接**所在那张表**里的全部
+                #     `a[data-sp]`。不取整个文档 —— 页面上常有好几张表
+                #     （持仓 / 成交 / 榜单），串在一起走会跳到另一张表里去，
+                #     而人以为还在同一份清单上。
+                _nav = pg.locator('#spnav')
+                assert _nav.count() == 1, '%s 页浮层没有底部导航条' % label
+                #   ★ 位置**从页面读**，不假设"点开的就是第一只" ——
+                #     点的是第一个【可见】的 `a[data-sp]`，而它未必是所在
+                #     那张表的第一行（第一版就是这么假设的，当场超时 30s）。
+                _pos = pg.evaluate(
+                    "() => { const all = Array.from("
+                    "   document.querySelectorAll('a[data-sp]'))"
+                    "   .filter(x => x.offsetParent !== null);"
+                    " const a = all[0]; if (!a) return null;"
+                    " const bx = a.closest('table') || a.closest('.lvsec')"
+                    "   || a.closest('#pg'); if (!bx) return null;"
+                    " const seen = new Set(), codes = [];"
+                    " bx.querySelectorAll('a[data-sp]').forEach(x => {"
+                    "   if (x.offsetParent === null) return;"
+                    "   if (seen.has(x.dataset.sp)) return;"
+                    "   seen.add(x.dataset.sp); codes.push(x.dataset.sp); });"
+                    " return {n: codes.length, i: codes.indexOf(a.dataset.sp) + 1}; }")
+                assert _pos, '%s 页算不出"当前列表"' % label
+                _txt = _nav.inner_text()
+                if _pos['n'] >= 2:
+                    _want = '第 %d / %d 只' % (_pos['i'], _pos['n'])
+                    assert _want in _txt, \
+                        ('%s 页导航条没说清"第几只 / 共几只"，该是 %r，实得 %r'
+                         % (label, _want, _txt))
+                    #   🔴 到头了**不设 disabled**（disabled 的元素连 title
+                    #     都不触发）—— 用一句话占住同一个位置，位置不动，
+                    #     且说得出为什么不能点。
+                    assert pg.locator('#spnav [disabled]').count() == 0, \
+                        '%s 页导航条用了 disabled —— 它连 title 都不触发' % label
+                    _has_p = pg.locator('#spnav .spnb[data-d="-1"]').count()
+                    _has_n = pg.locator('#spnav .spnb[data-d="1"]').count()
+                    assert _has_p == (1 if _pos['i'] > 1 else 0), \
+                        '%s 页「上一只」该%s：%r' % (
+                            label, '在' if _pos['i'] > 1 else '换成「已是第一只」', _txt)
+                    assert _has_n == (1 if _pos['i'] < _pos['n'] else 0), \
+                        '%s 页「下一只」该%s：%r' % (
+                            label, '在' if _pos['i'] < _pos['n'] else '换成「已是最后一只」', _txt)
+                    if _pos['i'] == 1:
+                        assert '已是第一只' in _txt, \
+                            '%s 页停在第一只却没说：%r' % (label, _txt)
+                    #   🔴 标签**固定**，邻居的名字只进 title ——
+                    #     写进按钮的话，定宽会把它**截断**成半个股票名
+                    #     （`overflow:hidden`），看着像渲染坏了。
+                    #     ⚠ 这条是补的：变异「把名字写进按钮」对上面那条
+                    #       位移判据**不成立**（定宽吸收了宽度变化），
+                    #       不能算"漏了"，但它确实有这个后果，得单独钉。
+                    _lab = set(t.strip() for t in
+                               pg.locator('#spnav .spnb').all_inner_texts())
+                    _ok = {'‹ 上一只', '下一只 ›', '已是第一只', '已是最后一只'}
+                    assert _lab <= _ok, \
+                        ('%s 页导航按钮的文案不在固定那几个里：%s —— '
+                         '邻居的名字只进 title，写进按钮会被定宽截断'
+                         % (label, sorted(_lab - _ok)))
+                    _d = 1 if _has_n else -1
+                    assert pg.locator('#spnav .spnb[data-d="%d"]' % _d).count() == 1, \
+                        ('%s 页算出来该点 data-d=%d，页面上却没有这个按钮 —— '
+                         '导航条是 %r，探针说 第 %d / %d 只'
+                         % (label, _d, _nav.inner_text(), _pos['i'], _pos['n']))
+                    _t1 = pg.locator('#sptitle').inner_text()
+                    #   ★ 位置钉在**两个槽位**上 —— 到头时按钮换成
+                    #     「已是第一只/最后一只」，那个占位符同样带 `.spnb`
+                    #     类，所以 `#spnav .spnb` 永远是 2 个。
+                    #     ⚠ 走过两版弯路：拿按钮自己当锚点，翻到最后一只时
+                    #       它不在了（只有 2 只的自选页当场超时 30s）；
+                    #       改拿中间的计数，而「第 1 / 15」->「第 2 / 15」
+                    #       数字字形宽度就变了，它自己抖 1.2px。槽位才是
+                    #       不随内容变的那个。
+                    _b1 = [pg.locator('#spnav .spnb').nth(i).bounding_box()
+                           for i in range(2)]
+                    _box1 = pg.locator('.spbox').bounding_box()
+                    pg.locator('#spnav .spnb[data-d="%d"]' % _d).click()
+                    pg.wait_for_function(
+                        "t => { const e = document.getElementById('sptitle');"
+                        " return e && e.textContent !== t; }", arg=_t1, timeout=20000)
+                    pg.wait_for_timeout(500)
+                    assert pg.locator('#sptitle').inner_text() != _t1, \
+                        '%s 页翻页没换票' % label
+                    _want2 = '第 %d / %d 只' % (_pos['i'] + _d, _pos['n'])
+                    assert _want2 in _nav.inner_text(), \
+                        '%s 页计数没跟着走，该是 %r：%r' % (
+                            label, _want2, _nav.inner_text())
+                    #   🔴 标签固定、位置不动 —— 把邻居名字写进按钮的话，
+                    #     每跳一只按钮宽度就变一次，按钮在手底下移位
+                    #     （同一天刚修过「切页签时按钮跳 40px」）。
+                    _b2 = [pg.locator('#spnav .spnb').nth(i).bounding_box()
+                           for i in range(2)]
+                    _box2 = pg.locator('.spbox').bounding_box()
+                    _mv = [round(max(abs(a_['x'] - b_['x']), abs(a_['y'] - b_['y'])), 1)
+                           for a_, b_ in zip(_b1, _b2)]
+                    assert max(_mv) < 1, \
+                        ('%s 页翻一只之后按钮移了位（位移 %s px）；'
+                         '浮层框 %s -> %s；导航条 %s -> %s'
+                         % (label, _mv, _box1, _box2, _b1, _b2))
+                    # 回得去
+                    pg.locator('#spnav .spnb[data-d="%d"]' % (-_d)).click()
+                    pg.wait_for_function(
+                        "t => { const e = document.getElementById('sptitle');"
+                        " return e && e.textContent === t; }", arg=_t1, timeout=20000)
+                    _navn.append('%s %d只可前后翻' % (label, _pos['n']))
+                else:
+                    #   ★ 只有一只时不该给导航 —— 两句"已是…"都摆着等于
+                    #     教人忽略这个位置
+                    assert _txt.strip() == '', \
+                        '%s 页这一块只有 %d 只，不该出导航条：%r' \
+                        % (label, _pos['n'], _txt)
+                assert not errs, '%s 页翻页时有 JS 错误：%s' % (label, errs[:2])
                 # Esc 关得掉
                 pg.keyboard.press('Escape')
                 pg.wait_for_timeout(400)
@@ -3424,7 +3574,7 @@ def t_stockpop():
             b.close()
     finally:
         httpd.shutdown()
-    return '；'.join(notes)
+    return '；'.join(notes + _navn)
 
 
 @case('涨跌配色：0 走中性色 / K 线阳线也实心 / 一处定义（playwright）', tag='web')

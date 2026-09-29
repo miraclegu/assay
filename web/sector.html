@@ -40,7 +40,17 @@
 let KIND = qs('kind') || 'sw', DATE = qs('date') || '';
 let PATH = [];
 try { PATH = JSON.parse(qs('path') || '[]') || []; } catch (e) { PATH = []; }
-let TAB = qs('tab') || 'sub';
+/* 🔴 默认落在【成分股】，不是子行业（用户 2026-09-29 第三轮）。
+   点一个行业，想看的先是"里面都有哪些票"；下钻看二级是第二步。
+   ★ 默认值改了，`nav()` 里"哪个值不写进 URL"也要跟着改 —— 两处是同一个
+     默认值的两种用法，改一处漏一处的话 URL 里会永远带着 `tab=mem`
+     （或者反过来：分享出去的链接落回子行业），而它不报错。 */
+/* 🔴 默认页签**只有这一处定义** —— 它出现在 5 个地方（初值、`nav()` 里
+   "哪个值不写进 URL"、切分类/点板块/点面包屑时的重置）。写死 5 份的话
+   改默认值必然漏掉其中一两处，而漏了不报错：表现是"点板块落在成分股、
+   点面包屑却落回子行业"，同一个页面两种行为。 */
+const TAB0 = 'mem';
+let TAB = qs('tab') || TAB0;
 /* 旧入口 `?code=` 反查失败时的说明（不静默落回全表） */
 let SEED_ERR = '';
 /* 排序：列 key + 方向。默认按加权涨幅降序（与后端一致，换列才重排） */
@@ -149,13 +159,13 @@ function onClick(ev) {
   const t = ev.target.closest('.kd,.pick,.cbk,.tb,.sortc');
   if (!t) return;
   ev.preventDefault();
-  if (t.classList.contains('kd')) { KIND = t.dataset.k; PATH = []; TAB = 'sub'; }
+  if (t.classList.contains('kd')) { KIND = t.dataset.k; PATH = []; TAB = TAB0; }
   else if (t.classList.contains('pick')) {
     const lv = Number(t.dataset.lv);
     PATH = PATH.slice(0, lv).concat(
       [{kind: t.dataset.k, code: t.dataset.c, name: t.dataset.n}]);
-    TAB = 'sub';
-  } else if (t.classList.contains('cbk')) { PATH = PATH.slice(0, Number(t.dataset.i)); TAB = 'sub'; }
+    TAB = TAB0;
+  } else if (t.classList.contains('cbk')) { PATH = PATH.slice(0, Number(t.dataset.i)); TAB = TAB0; }
   else if (t.classList.contains('tb')) { TAB = t.dataset.t; }
   else if (t.classList.contains('sortc')) {
     const k = t.dataset.s;
@@ -172,7 +182,7 @@ function nav() {
      下来的"，面包屑就断了（而页面看着正常）。 */
   if (PATH.length) u.searchParams.set('path', JSON.stringify(PATH));
   else u.searchParams.delete('path');
-  if (TAB !== 'sub') u.searchParams.set('tab', TAB); else u.searchParams.delete('tab');
+  if (TAB !== TAB0) u.searchParams.set('tab', TAB); else u.searchParams.delete('tab');
   if (SORT !== 'w_change') u.searchParams.set('sort', SORT); else u.searchParams.delete('sort');
   if (!DESC) u.searchParams.set('asc', '1'); else u.searchParams.delete('asc');
   if (DATE) u.searchParams.set('date', DATE); else u.searchParams.delete('date');
