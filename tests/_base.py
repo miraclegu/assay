@@ -337,6 +337,12 @@ def main():
     os.environ['ASSAY_PROGRESS_DIR'] = _prgtmp
     atexit.register(shutil.rmtree, _prgtmp, True)
 
+    # 🔴 交易时段保护整轮关掉。selftest 的 `lv.LIVE` 是临时目录，那里没有
+    #   "人正看着的待办"；而它跑在什么钟点不确定 —— 留着的话同一套用例
+    #   盘中红、盘后绿（2026-09-29 加保护当天就红了两条）。
+    #   偶发红与偶发绿一样糟：人会习惯"重跑一次就好了"。
+    os.environ['ASSAY_NO_SESSION_GUARD'] = '1'
+
     ap = argparse.ArgumentParser(description='assay 自检')
     g = ap.add_mutually_exclusive_group()
     g.add_argument('--fast', action='store_true', help='只跑 fast 层（约 18s，无浏览器）')

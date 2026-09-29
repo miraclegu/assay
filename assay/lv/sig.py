@@ -643,6 +643,35 @@ def load_signal(aid, for_date):
 _EXEC_AT = 'T09:30'
 
 
+# 收盘时刻。开盘用已有的 `_EXEC_AT`（'T09:30'），不写第二个常数。
+_CLOSE_AT = 'T15:00'
+
+
+def session_guard_on():
+    """交易时段保护开着吗。
+
+    🔴 selftest 整轮关掉（`ASSAY_NO_SESSION_GUARD`）—— 它的 `lv.LIVE` 本来
+      就是临时目录，那里没有"人正看着的待办"；而它**跑在什么钟点是不确定
+      的**，留着会让整套用例盘中红、盘后绿。偶发绿的用例比红的更危险，
+      偶发红的同理：人会习惯"重跑一次就好了"。
+    ★ 与 `ASSAY_LOG_DIR` / `ASSAY_RUNS` / `ASSAY_PROGRESS_DIR` 同一条路子：
+      整轮一把，将来新加的用例自动不受影响。
+    ★ 判据放在这里、不放进 `in_session()` —— 后者是**纯时间谓词**，
+      守卫按固定时刻逐点钉它，掺进环境变量就钉不住了。
+    """
+    return not os.environ.get('ASSAY_NO_SESSION_GUARD')
+
+
+def in_session(now=None):
+    """现在是不是【交易时段】（09:30~15:00，只看时钟不看日历）。
+
+    ★ 不判交易日：非交易日里本来就不会有人盯着待办下单，判了也没用，
+      而多引一个日历依赖就多一条会坏的路。
+    """
+    t = (now or _base._now())[11:16]
+    return _EXEC_AT[1:] <= t < _CLOSE_AT[1:]
+
+
 def signal_as_of(aid, for_date, at=None):
     """**你下单时手上是哪一版** —— 取 `built_at` 早于当天开盘的最后一版。
 
@@ -780,7 +809,7 @@ def signal_diff(old, new):
     return d
 
 
-def make_signal(aid, datalake=None, force=False):
+def make_signal(aid, datalake=None, force=False, session_force=False):
     """算并落盘。已经算过就直接返回，除非 force。
 
     🔴 **force 重算时，结果与旧版不同就必须留痕再覆盖。**
@@ -834,6 +863,31 @@ def make_signal(aid, datalake=None, force=False):
             sig['recomputed_at'] = list(old.get('recomputed_at') or []) \
                 + [_base._now()]
         sig['revisions'] = revs
+    # 🔴🔴 **交易时段默认只算不写。**
+    #
+    #   2026-09-29 实测：我在盘中（09:06 / 09:55 / 11:11）反复重算，把用户
+    #   正看着的待办覆盖了三次。系统本来就认「开盘后的版本不作数」——
+    #   `signal_as_of()` 取的是 `built_at` 早于当天开盘的最后一版，注释写着
+    #   「开盘后重算出来的那些**根本没机会被执行**」。既然不作数，就更没有
+    #   理由让它盖掉人手上那一份。
+    #
+    # ★ 窗口从 09:30 起（`_EXEC_AT`），所以 launchd 里 09:00 / 09:20 那两次
+    #   盘前重算**不受影响** —— 那是「信号在早上还要重算三次」要的。
+    # ★ 逃生口是 `force`：人显式要求重算时照写（页面的"立即重算"、
+    #   命令行 `--force`）。硬拒不配逃生口，最后会变成绕过整个入口。
+    # ★ 返回的是**算出来的新结果**，不是磁盘上那份旧的 —— 调用方要能看到
+    #   "现在算出来是什么"，只是不落盘。`session_skipped` 标出来，
+    #   页面/日志据此说明白，而不是静默地什么都没发生。
+    if session_guard_on() and not session_force and in_session():
+        sig['session_skipped'] = True
+        sig['session_note'] = (
+            '交易时段（09:30~15:00）默认不覆盖已发布的待办 —— 开盘后重算的'
+            '版本本来就不作为执行依据。要强制重算请显式指定 session_force '
+            '（命令行 `tick_daily.py --force`、页面的「立即重算」都会传）。')
+        # ★ 不能复用已有的 `force` —— 它的含义是「已经算过也重算覆盖」，
+        #   而 tick 本来就总传 True（它的活就是重算）。两件事塞一个开关，
+        #   保护当场形同虚设（第一版就是这么写的，实测被直接绕过）。
+        return sig
     _base._atomic_write(p, json.dumps(sig, ensure_ascii=False, indent=1, sort_keys=True))
     return sig
 
@@ -1024,7 +1078,7 @@ def due_now(acct, now=None):
 
 
 
-def tick(datalake=None, now=None, force=False):
+def tick(datalake=None, now=None, force=False, session_force=False):
     """守护线程每轮做的事：到点、且【下一个交易日】还没算过的账户，算一次。
 
     ★ 幂等：信号按 for_date 落盘，已存在就跳过 —— 所以重启服务不会重复跑，
@@ -1043,7 +1097,8 @@ def tick(datalake=None, now=None, force=False):
         if not force and os.path.exists(signal_path(a['id'], nxt.isoformat())):
             continue
         try:
-            out.append(make_signal(a['id'], datalake=datalake, force=force))
+            out.append(make_signal(a['id'], datalake=datalake, force=force,
+                                   session_force=session_force))
         except Exception as e:                              # noqa: BLE001
             out.append({'account': a['id'],
                         'error': '%s: %s' % (type(e).__name__, e),

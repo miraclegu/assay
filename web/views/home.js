@@ -150,10 +150,10 @@ function homeMarket(o){
     </div>
     <div class="lvwhy" style="margin-bottom:4px">行业 · 领涨领跌</div>
     ${(o.industries||[]).slice(0,3).map(x=>
-      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+      `<a class="chip" href="${sectorHref(x.code || '', 'sw', 'mem')}"
         >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}
     ${(o.industries||[]).slice(-2).map(x=>
-      `<a class="chip" href="/sector.html?kind=sw&code=${encodeURIComponent(x.code||'')}"
+      `<a class="chip" href="${sectorHref(x.code || '', 'sw', 'mem')}"
         >${esc(x.name)} <b style="color:${upc(x.avg_change)}">${pctv(x.avg_change)}</b></a>`).join('')}`);
 }
 

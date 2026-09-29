@@ -9652,3 +9652,109 @@ def t_pb_health_gate():
 
     return ('正常不拦 · 事故跳 68.4pp 拦下 · ETF 恒空不拦（钉住 09-29 那次'
             '误清仓）· 读不到/只有一天不拦 · 闸确实接在出信号那条路上')
+
+
+@case('交易时段默认不覆盖已发布的待办（盘中只算不写）', tag='fast')
+def t_session_write_guard():
+    """2026-09-29 实测：我在盘中（09:06 / 09:55 / 11:11）反复重算，把用户
+    正看着的待办覆盖了三次，用户当场问「进入当天 9:30 后，这个数据不应该
+    再变动才对」。
+
+    系统本来就认这件事 —— `signal_as_of()` 取的是 `built_at` 早于当天开盘
+    的最后一版，注释写着「开盘后重算出来的那些**根本没机会被执行**」。
+    既然不作数，就更没有理由让它盖掉人手上那一份。
+
+    🔴 窗口从 `_EXEC_AT`（09:30）起，**不是 09:15** —— launchd 里 09:00 与
+      09:20 那两次盘前重算是「信号在早上还要重算三次」要的，卡早了会把
+      它们一起废掉。
+    🔴 **不许复用已有的 `force`**：它的含义是「已经算过也重算覆盖」，
+      而 `tick_daily` 本来就总传 True（它的活就是重算）。两件事塞进一个
+      开关，保护当场形同虚设 —— 第一版就是这么写的，实测被直接绕过。
+    ★ 逃生口：`session_force`（命令行 `--force`、页面「立即重算」都传）。
+      硬拒不配逃生口，最后会变成绕过整个入口。
+    """
+    import importlib
+
+    from assay.lv import sig as _sig
+    importlib.reload(_sig)
+
+    # ---- ① 窗口边界：两头都要钉 ----
+    for t, want in (('09:19', False), ('09:29', False), ('09:30', True),
+                    ('11:29', True), ('13:00', True), ('14:59', True),
+                    ('15:00', False), ('20:00', False)):
+        got = _sig.in_session('2026-09-29T' + t)
+        assert got is want, (
+            '🔴 %s 判成 in_session=%s（应为 %s）—— 卡早了会废掉 09:20 那次'
+            '盘前重算，卡晚了保护不住开盘后' % (t, got, want))
+
+    # ---- ② 🔴 开盘线复用 `_EXEC_AT`，不许另写一个常数 ----
+    assert _sig._EXEC_AT == 'T09:30', _sig._EXEC_AT
+    import ast
+    import io
+    src = io.open(os.path.join(REPO, 'assay/lv/sig.py'), encoding='utf-8').read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == 'in_session')
+    names = [x.id for x in ast.walk(fn) if isinstance(x, ast.Name)]
+    assert '_EXEC_AT' in names, (
+        '🔴 in_session 没用 _EXEC_AT —— 开盘线写了第二份，迟早与 '
+        'signal_as_of 分叉，而分叉的那份看着完全正常')
+
+    # ---- ③ 🔴 `session_force` 必须是**独立参数**，不是复用 force ----
+    import inspect
+    ps = inspect.signature(_sig.make_signal).parameters
+    assert 'session_force' in ps and 'force' in ps, list(ps)
+    assert ps['session_force'].default is False, '默认必须是"保护开着"'
+
+    # ---- ③b 🔴🔴 **写盘那条路真的用了 session_force、且没用 force** ----
+    #   只查签名不够：把条件写回 `if not force and in_session()` 之后签名
+    #   一个字没变，而 tick 本来就总传 force=True，保护当场形同虚设
+    #   （变异 M3 实测从这个缺口漏过 —— 那正是我第一版写的样子）。
+    _mk = next(n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.FunctionDef) and n.name == 'make_signal')
+    _if = next((n for n in ast.walk(_mk) if isinstance(n, ast.If)
+                and any(isinstance(t, ast.Subscript)
+                        and isinstance(t.slice, ast.Constant)
+                        and t.slice.value == 'session_skipped'
+                        for st in n.body if isinstance(st, ast.Assign)
+                        for t in st.targets)), None)
+    assert _if is not None, '🔴 找不到那个设 session_skipped 的分支'
+    _cond = [x.id for x in ast.walk(_if.test) if isinstance(x, ast.Name)]
+    assert 'session_force' in _cond, (
+        '🔴 交易时段保护的条件里没有 session_force：%r' % (_cond,))
+    assert 'force' not in _cond, (
+        '🔴 保护条件里用了 `force` —— 它的含义是「已经算过也重算覆盖」，'
+        '而 tick 本来就总传 True，等于保护根本不生效：%r' % (_cond,))
+
+    # ---- ④ 🔴 定时点那条路（tick_daily）把 --force 透传给 session_force ----
+    tsrc = io.open(os.path.join(REPO, 'tick_daily.py'), encoding='utf-8').read()
+    call = next((n for n in ast.walk(ast.parse(tsrc))
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == 'make_signal'), None)
+    assert call is not None, 'tick_daily 里没有 make_signal 调用'
+    kw = {k.arg for k in call.keywords}
+    assert 'session_force' in kw, (
+        '🔴 tick_daily 没透传 session_force —— 那么定时点跑的时候保护不生效，'
+        '或者人加了 --force 也强制不了')
+
+    # ---- ④b 🔴 保护【默认开着】，只有显式设了 env 才关 ----
+    #   selftest 整轮设了 ASSAY_NO_SESSION_GUARD（它的 live/ 是临时目录、
+    #   而且跑在什么钟点不确定）。但默认必须是开的 —— 万一那个 env 漏进
+    #   生产环境，保护就没了，而它不报错。
+    _old = os.environ.pop('ASSAY_NO_SESSION_GUARD', None)
+    try:
+        assert _sig.session_guard_on() is True, \
+            '🔴 不设 env 时保护是关的 —— 生产上就没有保护了'
+        os.environ['ASSAY_NO_SESSION_GUARD'] = '1'
+        assert _sig.session_guard_on() is False, 'env 设了却没关掉'
+    finally:
+        os.environ.pop('ASSAY_NO_SESSION_GUARD', None)
+        if _old is not None:
+            os.environ['ASSAY_NO_SESSION_GUARD'] = _old
+
+    # ---- ⑤ 反向自证：非交易时段一定放行，否则上面几条可能是"全拦" ----
+    assert not _sig.in_session('2026-09-29T08:00'), '盘前被判成交易时段'
+    assert not _sig.in_session('2026-09-29T16:00'), '盘后被判成交易时段'
+
+    return ('窗口 09:30~15:00（09:20 盘前重算不受影响）· 开盘线复用 _EXEC_AT · '
+            'session_force 是独立参数且默认保护 · tick_daily 已透传')

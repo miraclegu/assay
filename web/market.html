@@ -152,6 +152,8 @@ function inds(o, ks) {
       + kinds.map(k => `<a class="chip" href="${sectorHref('', k.kind)}"
           title="${esc(k.note || '')}">${esc(k.name)} ${k.n || ''} ›</a>`).join('')
       : ''}</h3>
+    ${(!kinds.length && ks && ks.blocks_error)
+      ? `<div class="lvmsg bad">${esc(ks.blocks_error)}</div>` : ''}
     <div class="pw"><table class="pkt">
       <tr><th class="tx">行业</th><th class="rt">平均涨幅</th><th class="rt">中位</th>
         <th class="rt">家数</th><th class="rt">上涨</th><th class="rt">涨停</th>
@@ -165,7 +167,7 @@ function inds(o, ks) {
         <td class="rt">${r.up}</td>
         <td class="rt">${r.limit_up || ''}</td>
         <td class="rt">${yiv(r.amount)}</td>
-        <td class="tx"><a class="chip" href="${sectorHref(r.code || '', 'sw')}">看成分 ›</a></td>
+        <td class="tx"><a class="chip" href="${sectorHref(r.code || '', 'sw', 'mem')}">看成分 ›</a></td>
       </tr>`).join('')}
     </table></div>
   </div>`;

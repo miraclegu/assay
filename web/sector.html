@@ -14,107 +14,323 @@
 <script src="/shared/stockpop.js"></script>
 <script>
 /* ============ 行业 / 板块 ============
-   ★ 两个来源：申万一级（随面板每日同步、带 PIT）与通达信板块
-     （926 个：概念 269 / 风格 158 / 地区 32 / 研究 467，每日同步）。
-   🔴 **不用** raw/hf/ 那份同花顺概念 —— last_fetched 停在 2026-04-28、
-     没接进 sync_daily.sh，用它会给出四个月前的成分而页面上看着像今天的。 */
-let KIND = qs('kind') || 'sw', CODE = qs('code') || '', DATE = qs('date') || '';
+   ★ 两个来源：申万（随面板每日同步、带 PIT，2026-09-29 起有一/二/三级）
+     与通达信板块（概念 269 / 风格 158 / 地区 32 / 研究 467，每日同步）。
+   🔴 不用 raw/hf/ 那份同花顺概念 —— last_fetched 停在 2026-04-28、没接进
+     sync_daily.sh，用它会给出四个月前的成分而页面上看着像今天的。
 
-/* 🔴 顶栏点亮的是**父级「🌡 盘面」**（2026-09-14 顶栏合并）：板块已经不在
-   NAV 里了，传 'sector' 的话一个都不亮 —— 进来之后"我在哪"没有任何指示
-   （同「在首页时点亮站名，否则我在哪没有指示」那条）。
+   ## 布局：没选中就铺满，选中后列表退成左侧边栏
+   未选中 —— 板块榜**撑满视口**（宽表：加权/等权/中位/家数/涨跌/涨停/
+     成交额/领涨股），可排序，整屏滚动。
+   选中后 —— 左边变窄边栏，只留【板块名 + 涨跌幅】用来快速换板块；
+     右边是内容。这是行情站的经典做法：选之前要比较，选之后要看细节，
+     两种状态需要的信息密度不一样。
+   🔴 边栏列的是**同级兄弟**，不是子级 —— 这样"换一个行业看看"只要一次
+     点击。子级在右栏。
+
+   ## 层级
+   申万是三级树：停在一级 -> 右栏默认列下属二级排行；停在二级 -> 三级排行；
+   停在三级 -> 成分股。任何一级都能切「成分股」页签。
+   🔴 通达信那几类只有一层，不显示子行业页签（强行造两层只会多一次空点击）。
+
+   ## 口径
+   涨跌幅主列用【流通市值加权】（申万行业指数、外部行情站同口径）。
+   等权与中位并列：2026-09-28 石油石化加权 +1.66% 而等权 -0.62% ——
+   前者说"这个板块的钱涨没涨"，后者说"里面多数票怎么样"，常常不同向。 */
+let KIND = qs('kind') || 'sw', DATE = qs('date') || '';
+let PATH = [];
+try { PATH = JSON.parse(qs('path') || '[]') || []; } catch (e) { PATH = []; }
+let TAB = qs('tab') || 'sub';
+/* 旧入口 `?code=` 反查失败时的说明（不静默落回全表） */
+let SEED_ERR = '';
+/* 排序：列 key + 方向。默认按加权涨幅降序（与后端一致，换列才重排） */
+let SORT = qs('sort') || 'w_change', DESC = qs('asc') !== '1';
+
+const SW_NEXT = {sw: 'sw_l2', sw_l2: 'sw_l3', sw_l3: null};
+const isSw = k => k === 'sw' || k === 'sw_l2' || k === 'sw_l3';
+const cur = () => (PATH.length ? PATH[PATH.length - 1] : null);
+/* 选中项还能不能再往下钻 */
+const drillable = c => !!(c && isSw(c.kind) && SW_NEXT[c.kind]);
+
+/* 🔴 顶栏点亮的是父级「🌡 盘面」（2026-09-14 顶栏合并）：板块已经不在 NAV
+   里了，传 'sector' 的话一个都不亮 —— 进来之后"我在哪"没有任何指示。
    ★ 标题仍写「🏭 行业板块」：亮的是它属于哪一组，写的是它自己是什么。 */
 pageHead('market', '🏭 行业板块');
-load();
+/* 先把外框摆出来再去反查 —— 否则反查那一下页面是整片空白，
+   看着像卡死（而它没报错） */
+shell();
+seedFromCode().then(load);
 
-async function load() {
-  const pg = $('#pg');
-  pg.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+/* 🔴 **旧入口 `?code=` 必须还认得** —— 盘面的「看成分 ›」、个股的所属行业
+   chip、首页的领涨领跌 chip 全是这么跳过来的（还有书签与外部深链）。
+   2026-09-29 改版后选中状态搬进了 `path`（要带 name，面包屑用），`code`
+   一度被直接忽略 -> 点了行业却落回全表，用户原话「不是成分股，而是到了
+   另一个面板」。
+   ★ 调用方拿不到 name，所以这里按 code 去那一级的列表里**反查一次**。
+   ★ 反查不到**不静默落回全表** —— 那样"点了却什么都没选中"看着像功能
+     不全而不报错。把原因写在页面上（板块会被撤并，链接会过时）。 */
+async function seedFromCode() {
+  const c = qs('code');
+  if (!c || PATH.length) return;
   try {
-    const [ks, ls] = await Promise.all([
-      j('/api/sector/kinds'),
-      j('/api/sector/list?kind=' + encodeURIComponent(KIND)
-        + (DATE ? '&date=' + encodeURIComponent(DATE) : '')),
-    ]);
-    let mem = null;
-    if (CODE) {
-      mem = await j('/api/sector/members?kind=' + encodeURIComponent(KIND)
-        + '&code=' + encodeURIComponent(CODE)
-        + (DATE ? '&date=' + encodeURIComponent(DATE) : ''))
-        .catch(e => ({error: String(e)}));
-    }
-    pg.innerHTML = head(ls, ks) + list(ls) + members(mem);
-    wireStarsAll();
-    $$('.kd').forEach(e => e.onclick = ev => {
-      ev.preventDefault(); KIND = e.dataset.k; CODE = ''; nav(); });
-    $$('.pick').forEach(e => e.onclick = ev => {
-      ev.preventDefault(); CODE = e.dataset.c; nav(); });
-    if ($('#sdate')) $('#sdate').onchange = () => { DATE = $('#sdate').value; nav(); };
+    const ls = await j(listUrl(KIND, qs('parent') || ''));
+    const hit = (ls.rows || []).filter(r => r.code === c)[0];
+    if (hit) { PATH = [{kind: KIND, code: hit.code, name: hit.name}]; return; }
+    SEED_ERR = '链接里的 code=' + c + ' 在「' + (ls.kind_name || KIND)
+      + '」里查不到 —— 这个板块可能已被撤并，下面列的是全部板块';
   } catch (e) {
-    pg.innerHTML = errHtml(e, '板块');
+    SEED_ERR = '按 code=' + c + ' 反查板块失败：' + e;
   }
 }
+
+function listUrl(kind, parent) {
+  return '/api/sector/list?kind=' + encodeURIComponent(kind)
+    + (parent ? '&parent=' + encodeURIComponent(parent) : '')
+    + (DATE ? '&date=' + encodeURIComponent(DATE) : '');
+}
+
+async function load() {
+  shell();
+  const box = $('#secmain');
+  if (box && !box.innerHTML) box.innerHTML = '<div class="lvwhy" style="padding:20px">加载中…</div>';
+  try {
+    const c = cur();
+    const par = PATH.length > 1 ? PATH[PATH.length - 2] : null;
+    /* 边栏 = 当前选中项的【同级】列表；没选中时它就是主列表 */
+    const railKind = c ? c.kind : KIND;
+    const railParent = par ? par.code : null;
+    const reqs = [j('/api/sector/kinds'), j(listUrl(railKind, railParent))];
+    /* 右栏：能下钻且停在"子行业"页签 -> 子级排行；否则 -> 成分股 */
+    const wantSub = drillable(c) && TAB === 'sub';
+    if (c && wantSub) reqs.push(j(listUrl(SW_NEXT[c.kind], c.code)));
+    else if (c) reqs.push(j('/api/sector/members?kind=' + encodeURIComponent(c.kind)
+      + '&code=' + encodeURIComponent(c.code)
+      + (DATE ? '&date=' + encodeURIComponent(DATE) : '')).catch(e => ({error: String(e)})));
+    const [ks, rail, right] = await Promise.all(reqs);
+
+    /* 🔴 **只换内容，不重建外框。** 整块 innerHTML 重渲染会让滚动位置
+       归零、布局闪一下 —— 点一次板块整个页面跳一下（用户 2026-09-29）。
+       所以外框由 shell() 建一次，这里只更新各区块，并且**把边栏的滚动
+       位置存下来再还原**（换板块时人的眼睛停在原地才不晕）。 */
+    const sc = $('#secside') ? $('#secside').scrollTop : 0;
+    setHtml('#sechead', head(rail, ks));
+    setHtml('#seccrumb', crumb());
+    document.querySelector('.secwrap').classList.toggle('nosel', !c);
+    setHtml('#secside', c ? side(rail, c) : '');
+    setHtml('#secmain', c ? (wantSub ? sub(right, c) : members(right, c)) : full(rail));
+    if ($('#secside')) $('#secside').scrollTop = sc;
+    wireStarsAll();
+    if ($('#sdate')) $('#sdate').onchange = () => { DATE = $('#sdate').value; nav(); };
+  } catch (e) {
+    setHtml('#secmain', errHtml(e, '板块'));
+  }
+}
+
+/* 外框只建一次。之后各区块单独换内容 —— 这样滚动位置与布局都不会跳。 */
+function shell() {
+  const pg = $('#pg');
+  if ($('#secmain')) return;
+  pg.innerHTML = '<div id="sechead"></div><div id="seccrumb"></div>'
+    + '<div class="secwrap nosel"><div id="secside"></div>'
+    + '<div id="secmain"></div></div>';
+  /* 🔴 事件**委托在稳定容器上**：下面几块每次都换 innerHTML，绑在元素上
+     的 onclick 换一次就没了（同「innerHTML 填充之后才存在的元素要重新绑
+     事件，或委托在稳定容器上」）。委托只绑一次，永远不用重绑。 */
+  pg.addEventListener('click', onClick);
+}
+
+/* 只在内容真的变了时才写 DOM —— 没变就不写，连重排都省掉 */
+function setHtml(sel, html) {
+  const e = document.querySelector(sel);
+  if (e && e.innerHTML !== html) e.innerHTML = html;
+}
+
+function onClick(ev) {
+  const t = ev.target.closest('.kd,.pick,.cbk,.tb,.sortc');
+  if (!t) return;
+  ev.preventDefault();
+  if (t.classList.contains('kd')) { KIND = t.dataset.k; PATH = []; TAB = 'sub'; }
+  else if (t.classList.contains('pick')) {
+    const lv = Number(t.dataset.lv);
+    PATH = PATH.slice(0, lv).concat(
+      [{kind: t.dataset.k, code: t.dataset.c, name: t.dataset.n}]);
+    TAB = 'sub';
+  } else if (t.classList.contains('cbk')) { PATH = PATH.slice(0, Number(t.dataset.i)); TAB = 'sub'; }
+  else if (t.classList.contains('tb')) { TAB = t.dataset.t; }
+  else if (t.classList.contains('sortc')) {
+    const k = t.dataset.s;
+    /* 点同一列翻转方向，换列则回到降序（大的在前，符合看榜的习惯） */
+    if (SORT === k) DESC = !DESC; else { SORT = k; DESC = true; }
+  }
+  nav();
+}
+
 function nav() {
   const u = new URL(location.href);
   u.searchParams.set('kind', KIND);
-  if (CODE) u.searchParams.set('code', CODE); else u.searchParams.delete('code');
+  /* 🔴 整条路径都进 URL —— 只存最后一级的话，后退/分享会丢掉"我是从哪一级
+     下来的"，面包屑就断了（而页面看着正常）。 */
+  if (PATH.length) u.searchParams.set('path', JSON.stringify(PATH));
+  else u.searchParams.delete('path');
+  if (TAB !== 'sub') u.searchParams.set('tab', TAB); else u.searchParams.delete('tab');
+  if (SORT !== 'w_change') u.searchParams.set('sort', SORT); else u.searchParams.delete('sort');
+  if (!DESC) u.searchParams.set('asc', '1'); else u.searchParams.delete('asc');
   if (DATE) u.searchParams.set('date', DATE); else u.searchParams.delete('date');
+  u.searchParams.delete('code');       /* 旧参数，已由 path 取代 */
   history.replaceState(null, '', u); load();
+}
+
+/* 排序：数值列按 SORT/DESC 排，空值一律沉底（不猜一个 0 —— 那会让
+   "没有数据"的板块混进榜首/榜尾，看着像真的） */
+function sorted(rows) {
+  const k = SORT;
+  return rows.slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    const xn = (x === null || x === undefined), yn = (y === null || y === undefined);
+    if (xn && yn) return 0;
+    if (xn) return 1;
+    if (yn) return -1;
+    if (typeof x === 'string') return DESC ? String(y).localeCompare(x) : String(x).localeCompare(y);
+    return DESC ? y - x : x - y;
+  });
+}
+function th(label, key, cls) {
+  const on = SORT === key;
+  return `<th class="${cls || 'rt'}"><a href="#" class="sortc" data-s="${key}"
+    style="color:${on ? 'var(--accent)' : 'inherit'}">${label}${on ? (DESC ? ' ▾' : ' ▴') : ''}</a></th>`;
 }
 
 function head(ls, ks) {
   return `<div class="lvhead">
-    <h2 style="font-size:17px">${esc(ls.kind_name)}</h2>
+    <h2 style="font-size:17px">🏭 行业板块</h2>
     <span class="lvtag">${esc(ls.date)}</span>
     <span style="flex:1"></span>
     ${(ks.kinds || []).map(k => `<a href="#" class="lvtag kd${KIND === k.kind ? ' on' : ''}"
       data-k="${esc(k.kind)}" title="${esc(k.note || '')}">${esc(k.name)}${k.n ? ' ' + k.n : ''}</a>`).join('')}
+    ${ks.blocks_error ? `<span class="lvmsg bad">${esc(ks.blocks_error)}</span>` : ''}
     <input id="sdate" type="date" value="${esc(ls.date)}"
       style="background:var(--panel2);color:var(--fg);border:1px solid var(--line);
       border-radius:5px;padding:3px 6px;font-size:11px">
   </div>
   <div class="lvwhy" style="margin:2px 0 8px">
-    涨幅是成分股<b>等权平均</b>（不是市值加权，也不是板块指数点位 —— 本地没有
-    板块指数）。等权更能反映"这个板块里多数票怎么样"。
-    ${KIND === 'sw' ? '申万一级随面板每日同步，带 PIT。'
-      : '通达信板块每日同步 + PIT 快照。🔴 不用 raw/hf/ 那份同花顺概念（停在 2026-04-28）。'}
+    <b>涨跌幅</b>为成分股<b>流通市值加权</b>（与申万行业指数、外部行情站同口径）；
+    <b>等权</b>与<b>中位</b>并列 —— 加权说"这个板块的钱涨没涨"，等权说"里面
+    多数票怎么样"，两者常常不同向。点表头可排序。
+    ${isSw(KIND) ? '申万随面板每日同步，带 PIT，可逐级下钻到二级/三级。'
+      : '通达信板块每日同步 + PIT 快照，只有一层。'}
   </div>`;
 }
 
-function list(ls) {
-  const rows = ls.rows || [];
-  return `<div class="lvsec"><h3>板块涨幅榜 <span class="lvwhy">${rows.length} 个</span></h3>
-    <div class="pw" style="max-height:420px;overflow:auto"><table class="pkt">
-      <tr><th class="tx">板块</th><th class="rt">平均涨幅</th><th class="rt">中位</th>
-        <th class="rt">成分</th><th class="rt">上涨</th><th class="rt">涨停</th>
-        <th class="rt">成交额</th><th class="tx"></th></tr>
-      ${rows.map(r => `<tr${r.code === CODE ? ' style="background:var(--panel2)"' : ''}>
-        <td class="tx"><a href="#" class="pick" data-c="${esc(r.code)}"
-          style="color:${r.code === CODE ? 'var(--accent)' : 'inherit'}">${esc(r.name)}</a></td>
-        <td class="rt"><b style="color:${upc(r.avg_change)}">${pctv(r.avg_change)}</b></td>
+function crumb() {
+  const err = SEED_ERR ? `<div class="lvmsg bad">${esc(SEED_ERR)}</div>` : '';
+  if (!isSw(KIND) && !PATH.length) return err;
+  const parts = [`<a href="#" class="cbk chip${PATH.length ? '' : ' on'}" data-i="0">全部板块</a>`]
+    .concat(PATH.map((p, i) => '<span class="lvwhy">›</span>'
+      + `<a href="#" class="cbk chip${i === PATH.length - 1 ? ' on' : ''}" `
+      + `data-i="${i + 1}">${esc(p.name)}</a>`));
+  return err + `<div class="seccrumb">${parts.join('')}</div>`;
+}
+
+/* 未选中：铺满视口的宽表 */
+function full(ls) {
+  const rows = sorted(ls.rows || []);
+  return `<div class="lvsec secfull"><h3>${esc(ls.kind_name)}涨幅榜
+    <span class="lvwhy">${rows.length} 个</span></h3>
+    <div class="pw secscroll"><table class="pkt">
+      <thead><tr><th class="tx">板块</th>${th('涨跌幅', 'w_change')}${th('等权', 'avg_change')}
+        ${th('中位', 'median_change')}${th('成分', 'n')}
+        <th class="rt">涨/跌</th>${th('涨停', 'limit_up')}${th('成交额', 'amount')}
+        <th class="tx">领涨股</th><th class="tx"></th></tr></thead>
+      <tbody>${rows.map(r => row(r, ls, 0)).join('')}</tbody>
+    </table>
+    <div class="lvwhy secend">以上共 ${rows.length} 个，到底了。</div>
+    </div></div>`;
+}
+
+function row(r, ls, lv) {
+  return `<tr>
+    <td class="tx"><a href="#" class="pick" data-c="${esc(r.code)}" data-lv="${lv}"
+      data-k="${esc(ls.kind)}" data-n="${esc(r.name)}">${esc(r.name)}</a></td>
+    <td class="rt"><b style="color:${upc(r.w_change)}">${pctv(r.w_change)}</b></td>
+    <td class="rt" style="color:${upc(r.avg_change)}">${pctv(r.avg_change)}</td>
+    <td class="rt" style="color:${upc(r.median_change)}">${pctv(r.median_change)}</td>
+    <td class="rt">${r.n}</td>
+    <td class="rt"><span style="color:var(--up)">${r.up}</span>/<span
+      style="color:var(--down)">${r.down != null ? r.down : ''}</span></td>
+    <td class="rt">${r.limit_up || ''}</td><td class="rt">${yiv(r.amount)}</td>
+    <td class="tx">${r.top_code ? cnCell(r.top_code, r.top_name)
+      + ` <span style="color:${upc(r.top_change)}">${pctv(r.top_change)}</span>` : ''}</td>
+    <td class="tx"><a href="#" class="pick chip" data-c="${esc(r.code)}" data-lv="${lv}"
+      data-k="${esc(ls.kind)}" data-n="${esc(r.name)}">${ls.has_children ? '下钻 ›' : '看成分 ›'}</a></td>
+  </tr>`;
+}
+
+/* 选中后的左侧边栏：只留板块名 + 涨跌幅 */
+function side(ls, c) {
+  const rows = sorted(ls.rows || []);
+  const lv = PATH.length - 1;
+  return `<div class="secsidehd">${esc(ls.kind_name)}
+      <span class="lvwhy">${rows.length}</span></div>
+    <div class="secsidelist">
+      ${rows.map(r => `<a href="#" class="pick secitem${r.code === c.code ? ' on' : ''}"
+        data-c="${esc(r.code)}" data-lv="${lv}" data-k="${esc(ls.kind)}"
+        data-n="${esc(r.name)}"><span class="secnm">${esc(r.name)}</span>
+        <span style="color:${upc(r.w_change)}">${pctv(r.w_change)}</span></a>`).join('')}
+    </div>`;
+}
+
+/* 右栏 A：下属子行业排行 */
+function sub(ls, c) {
+  const rows = sorted(ls.rows || []);
+  return `<div class="lvsec"><h3>${esc(c.name)} 下属${esc(ls.kind_name)}
+    <span class="lvwhy">${rows.length} 个</span>${tabs(c)}</h3>
+    <div class="pw secscroll"><table class="pkt">
+      <thead><tr><th class="tx">板块</th>${th('涨跌幅', 'w_change')}${th('等权', 'avg_change')}
+        ${th('中位', 'median_change')}${th('成分', 'n')}
+        <th class="rt">涨/跌</th>${th('成交额', 'amount')}
+        <th class="tx">领涨股</th><th class="tx"></th></tr></thead>
+      ${rows.map(r => `<tr>
+        <td class="tx"><a href="#" class="pick" data-c="${esc(r.code)}" data-lv="${PATH.length}"
+          data-k="${esc(ls.kind)}" data-n="${esc(r.name)}">${esc(r.name)}</a></td>
+        <td class="rt"><b style="color:${upc(r.w_change)}">${pctv(r.w_change)}</b></td>
+        <td class="rt" style="color:${upc(r.avg_change)}">${pctv(r.avg_change)}</td>
         <td class="rt" style="color:${upc(r.median_change)}">${pctv(r.median_change)}</td>
-        <td class="rt">${r.n}</td><td class="rt">${r.up}</td>
-        <td class="rt">${r.limit_up || ''}</td><td class="rt">${yiv(r.amount)}</td>
-        <td class="tx"><a href="#" class="chip pick" data-c="${esc(r.code)}">看成分 ›</a></td>
+        <td class="rt">${r.n}</td>
+        <td class="rt"><span style="color:var(--up)">${r.up}</span>/<span
+          style="color:var(--down)">${r.down != null ? r.down : ''}</span></td>
+        <td class="rt">${yiv(r.amount)}</td>
+        <td class="tx">${r.top_code ? cnCell(r.top_code, r.top_name)
+          + ` <span style="color:${upc(r.top_change)}">${pctv(r.top_change)}</span>` : ''}</td>
+        <td class="tx"><a href="#" class="pick chip" data-c="${esc(r.code)}"
+          data-lv="${PATH.length}" data-k="${esc(ls.kind)}"
+          data-n="${esc(r.name)}">${ls.has_children ? '下钻 ›' : '看成分 ›'}</a></td>
       </tr>`).join('')}
-    </table></div>
-  </div>`;
+    </table>
+    <div class="lvwhy secend">以上共 ${rows.length} 个，到底了。</div>
+    </div></div>`;
 }
 
-function members(mem) {
-  if (!mem) return `<div class="none" style="margin-top:14px">点左边任一板块看成分股</div>`;
+function tabs(c) {
+  if (!drillable(c)) return '';
+  return `<span style="flex:1"></span>
+    <a href="#" class="chip tb${TAB === 'sub' ? ' on' : ''}" data-t="sub">子行业排行</a>
+    <a href="#" class="chip tb${TAB === 'mem' ? ' on' : ''}" data-t="mem">成分股</a>`;
+}
+
+/* 右栏 B：成分股 */
+function members(mem, c) {
+  if (!mem) return '<div class="none">点左边任一板块看成分股</div>';
   if (mem.error) return `<div class="lvmsg bad">${esc(mem.error)}</div>`;
   const rows = mem.rows || [];
-  return `<div class="lvsec" style="margin-top:14px"><h3>${esc(mem.name)} 成分
-    <span class="lvwhy">${mem.n} 只 · 等权涨幅 ${pctv(mem.avg_change)}</span>
-    <span style="flex:1"></span>
+  return `<div class="lvsec"><h3>${esc(mem.name)} 成分
+    <span class="lvwhy">${mem.n} 只${mem.truncated ? ' · 🔴 已截断' : ''}</span>${tabs(c)}
     <a class="chip" href="/compare.html?codes=${encodeURIComponent(rows.slice(0,6).map(x=>x.code).join(','))}"
       title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a></h3>
-    <div class="pw"><table class="pkt">
-      <tr><th class="tx"></th><th class="tx">名称</th>
+    <div class="pw secscroll"><table class="pkt">
+      <thead><tr><th class="tx"></th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
         <th class="rt">振幅</th><th class="rt">成交额</th><th class="rt">流通市值</th>
-        <th class="rt">PE</th><th class="rt">PB</th><th class="tx">行业</th></tr>
+        <th class="rt">PE</th><th class="rt">PB</th></tr></thead>
       ${rows.map(x => `<tr>
         <td class="tx">${starHtml(x.code, false)}</td>
         <td class="tx">${cnCell(x.code, x.name)}
@@ -125,9 +341,9 @@ function members(mem) {
         <td class="rt">${pctn(x.turnover)}</td><td class="rt">${pctn(x.amplitude)}</td>
         <td class="rt">${yiv(x.amount)}</td><td class="rt">${yiv(x.floatmv)}</td>
         <td class="rt">${fmtN(x.pe_ttm)}</td><td class="rt">${fmtN(x.pb)}</td>
-        <td class="tx lvwhy">${esc(x.industry || '')}</td>
       </tr>`).join('')}
-    </table></div>
-  </div>`;
+    </table>
+    <div class="lvwhy secend">以上共 ${rows.length} 只，到底了。</div>
+    </div></div>`;
 }
 </script>

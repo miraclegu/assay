@@ -607,8 +607,12 @@ function cnCell(code, name, opt) {
   return spLink(code, name || code, (opt || {}).cls || '',
                 Object.assign({}, opt || {}, {html: html}));
 }
-const sectorHref = (c, k) => '/sector.html?kind=' + encodeURIComponent(k || 'sw')
-  + '&code=' + encodeURIComponent(c);
+/* 板块页的入口。`tab='mem'` 直接落在【成分股】——
+   写着「看成分 ›」的链接就该到成分股，不是到下属二级排行
+   （一个链接的名字必须说得出它去哪）。 */
+const sectorHref = (c, k, tab) => '/sector.html?kind=' + encodeURIComponent(k || 'sw')
+  + (c ? '&code=' + encodeURIComponent(c) : '')
+  + (tab ? '&tab=' + encodeURIComponent(tab) : '');
 /* URL 参数 */
 const qs = k => new URLSearchParams(location.search).get(k);
 

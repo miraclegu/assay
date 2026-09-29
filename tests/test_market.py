@@ -1161,8 +1161,16 @@ def t_sector():
 
     sw = mk.sector_list(kind='sw')
     assert 25 <= len(sw['rows']) <= 40, '申万一级应是 31 个左右：%d' % len(sw['rows'])
-    av = [x['avg_change'] for x in sw['rows']]
-    assert av == sorted(av, reverse=True), '板块榜没按等权涨幅降序'
+    #   🔴 2026-09-29 起主列是**流通市值加权**（`w_change`，申万行业指数、
+    #     外部行情站同口径），服务端的正序跟着换了。原来这条钉「等权降序」
+    #     —— 属于被改动作废的断言：要保的东西没变（榜要有确定的正序，
+    #     不能每次不一样），只是答案从等权换成了加权，所以改成钉新规矩。
+    #   ★ 等权仍然逐个给（页面并列显示），只是不再决定排序。
+    wc = [x['w_change'] for x in sw['rows'] if x['w_change'] is not None]
+    assert wc == sorted(wc, reverse=True), \
+        '板块榜没按【流通市值加权】涨幅降序：%s' % [round(x, 3) for x in wc[:6]]
+    assert all(x.get('avg_change') is not None for x in sw['rows']), \
+        '等权涨幅不该缺 —— 它和加权并列显示，页面上要能对照着看'
 
     cc = mk.sector_list(kind='concept')
     assert len(cc['rows']) > 100, '通达信概念板块太少：%d' % len(cc['rows'])
@@ -1225,6 +1233,463 @@ def t_sector():
             % (len(sw['rows']), len(ks) - 1, len(cc['rows']),
                top['name'], top['avg_change'], calc))
 
+
+@case('板块库被占用时：说得出「读不到」，而不是「没有」', tag='fast')
+def t_blocks_locked():
+    """🔴 每天 18:00 的同步在写 `tdx.db`，那十几分钟里：
+
+    - 改之前：`ATTACH` 抛 duckdb 的 `IOException` -> 一路穿到 `do_GET`
+      -> **HTTP 500**，页面拿到一个裸报错，而那句 `Could not set lock on
+      file` 指不到"每日同步正在写它"这件事。
+    - 更糟的备选：返回空板块表 —— 个股页会显示「没有板块归属」、盘面的
+      「按别的分法看」整排消失，**看着像本来就这样，而且不报错**。
+      这正是「未知不是缺」要挡的。
+
+    ★ 真实数据碰不到这个分支（同步不跑的时候它永远是好的），所以这里
+      **构造**出来：造一个只有两张表的小 duckdb，另起一个进程把它以
+      读写方式占住，再走一遍。**不碰生产库**。
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    import time
+
+    import duckdb
+
+    from assay import market as mk
+    from assay.srv import market as sm
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, 'tdx.db')
+    c = duckdb.connect(db)
+    c.execute('CREATE TABLE raw_tdx_blocks_info'
+              '(block_code VARCHAR, block_name VARCHAR, block_type VARCHAR)')
+    c.execute("INSERT INTO raw_tdx_blocks_info VALUES ('880001','测试概念','concept')")
+    c.execute('CREATE TABLE raw_tdx_blocks_member'
+              '(block_code VARCHAR, stock_symbol VARCHAR)')
+    c.execute("INSERT INTO raw_tdx_blocks_member VALUES ('880001','sh601857')")
+    c.close()
+
+    old_db, old_blk = mk.tdx_db, dict(mk._BLK)
+    holder = None
+    try:
+        mk.tdx_db = lambda root=None: db
+        mk._BLK.update(at=None, data=None)
+        # ---- ① 没人占着时读得到（否则下面那条测的是"路径写错了"）----
+        ok = mk.blocks()
+        assert list(ok) == ['880001'] and ok['880001'][0] == '测试概念', \
+            '构造的小库自己都读不出来：%r' % ok
+
+        # ---- ② 另一个进程以读写占住它 ----
+        holder = subprocess.Popen(
+            [sys.executable, '-c',
+             'import duckdb,sys,time\n'
+             'c=duckdb.connect(%r)\n'
+             "c.execute('CREATE TABLE IF NOT EXISTS _hold(x INT)')\n"
+             "sys.stdout.write('held\\n'); sys.stdout.flush()\n"
+             'time.sleep(60)\n' % db],
+            stdout=subprocess.PIPE, text=True)
+        #   等条件，不等固定时间（机器忙时会读到半截）
+        assert holder.stdout.readline().strip() == 'held', '占锁的子进程没起来'
+
+        mk._BLK.update(at=None, data=None)
+        try:
+            mk.blocks()
+            raise AssertionError(
+                '库被另一个进程以读写占住了，`blocks()` 却照样返回 —— '
+                '这条用例的构造失效了（duckdb 没有真的上锁），后面几条'
+                '全部作废')
+        except mk.BlocksLocked as e:
+            msg = str(e)
+        assert '读不到' in msg and '没有' in msg, \
+            '报错没说清"是读不到、不是没有"：%s' % msg
+        assert 'lock' not in msg.lower() and 'IO Error' not in msg, \
+            '把 duckdb 的原话直接抛出来了 —— 它指不到真正的原因：%s' % msg
+
+        # ---- ③ 个股归属：申万那一半照给，通达信那一半带原因 ----
+        mk._BLK.update(at=None, data=None)
+        ss = mk.stock_sectors('601857.XSHG')
+        assert ss.get('sw') and ss['sw'].get('name'), \
+            ('板块库读不动就把申万归属也一起丢了 —— 那一半来自面板，'
+             '跟 tdx.db 没关系（未知不是缺：读不出来的不拦别的）')
+        assert ss.get('blocks_error') and '读不到' in ss['blocks_error'], \
+            ('`blocks_error` 没带出来 —— 页面只会显示「没有板块归属」，'
+             '替这只票下了一个它没资格下的结论：%r' % ss)
+        assert ss['blocks'] == [], '读不到却给了板块：%r' % ss['blocks']
+
+        # ---- ④ 分类清单：申万照列，缺的四类要说出来 ----
+        mk._BLK.update(at=None, data=None)
+        ks = sm.api_sector_kinds({})
+        kinds = [k['kind'] for k in ks.get('kinds') or []]
+        #   两头夹：多了说明"读不到却给了数"，少了说明"连申万也一起丢了"
+        assert 'sw' in kinds, \
+            ('申万一级也没给出来 —— 它来自面板，跟 tdx.db 没关系；'
+             '整个接口大概是报错了：%r' % str(ks)[:200])
+        assert kinds == ['sw'], '通达信那几类不该凭空出现：%s' % kinds
+        assert ks.get('blocks_error'), \
+            ('清单里只剩「申万一级」却一声不吭 —— 页面上看着像本来就只有'
+             '这一类：%r' % ks)
+        assert 'error' not in ks, \
+            '整个接口不该报错 —— 申万那一类是给得出来的'
+
+        # ---- ⑤ 明确要通达信板块时，报错就是答案（不许给空表当结果）----
+        mk._BLK.update(at=None, data=None)
+        r = sm._market_err(lambda: mk.sector_list(kind='concept'))
+        assert 'error' in r and '读不到' in r['error'], \
+            '要概念板块榜时该把原因当答案返回：%r' % str(r)[:200]
+
+        # ---- ⑥ 锁一解开就该恢复（失败不许被缓存住）----
+        holder.terminate(); holder.wait(timeout=20); holder = None
+        for _ in range(40):                     # 等条件
+            try:
+                back = mk.blocks()
+                break
+            except mk.BlocksLocked:
+                time.sleep(0.25)
+        else:
+            raise AssertionError(
+                '占锁的进程已经退了，`blocks()` 还在报被占用 —— '
+                '失败被写进缓存了（mtime 没变就永远不重读）')
+        assert list(back) == ['880001'], '恢复后读到的不对：%r' % back
+        return ('构造锁：占住时 blocks() 抛 BlocksLocked（原话不外泄）；'
+                '个股归属保住申万、带 blocks_error；分类清单只剩 sw 但说得出'
+                '原因且不整体报错；点名要概念板块时报错即答案；解锁后自动恢复')
+    finally:
+        mk.tdx_db = old_db
+        mk._BLK.update(old_blk)
+        if holder is not None:
+            holder.terminate()
+            try:
+                holder.wait(timeout=10)
+            except Exception:                               # noqa: BLE001
+                holder.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+@case('板块库被占用时：三个页面都说得出原因（playwright）', tag='web')
+def t_blocks_locked_ui():
+    """接口给了 `blocks_error`，页面**得真的把它显示出来** —— 否则
+
+    - 个股页：「所属板块 0 个」+ 空白
+    - 盘面：「按别的分法看」那一排整个消失
+    - 板块页：只剩一个「申万一级」页签
+
+    三处都**看着像本来就这样**，而且都不报错。这正是「未知不是缺」。
+
+    ★ 同 `t_blocks_locked`：**构造**一把锁（小 duckdb + 另起进程占住），
+      不碰生产库、不等每日同步。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    import duckdb
+
+    from assay import market as mk
+    from assay import server as sv
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, 'tdx.db')
+    c = duckdb.connect(db)
+    c.execute('CREATE TABLE raw_tdx_blocks_info'
+              '(block_code VARCHAR, block_name VARCHAR, block_type VARCHAR)')
+    c.execute('CREATE TABLE raw_tdx_blocks_member'
+              '(block_code VARCHAR, stock_symbol VARCHAR)')
+    c.close()
+    old_db, old_blk = mk.tdx_db, dict(mk._BLK)
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    holder = None
+    try:
+        mk.tdx_db = lambda root=None: db
+        mk._BLK.update(at=None, data=None)
+        holder = subprocess.Popen(
+            [sys.executable, '-c',
+             'import duckdb,sys,time\n'
+             'c=duckdb.connect(%r)\n'
+             "c.execute('CREATE TABLE IF NOT EXISTS _hold(x INT)')\n"
+             "sys.stdout.write('held\\n'); sys.stdout.flush()\n"
+             'time.sleep(120)\n' % db],
+            stdout=subprocess.PIPE, text=True)
+        assert holder.stdout.readline().strip() == 'held', '占锁的子进程没起来'
+        mk._BLK.update(at=None, data=None)
+        try:
+            mk.blocks()
+            raise AssertionError('构造的锁没生效 —— 下面三条全部作废')
+        except mk.BlocksLocked:
+            pass
+
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1400, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            seen = []
+            PAGES = [('/stock.html?code=601857.XSHG', '个股', '所属板块'),
+                     ('/market.html', '盘面', '行业涨幅'),
+                     ('/sector.html', '板块', '行业板块')]
+            for path, label, anchor in PAGES:
+                pg.goto(base + path, wait_until='networkidle')
+                try:
+                    pg.wait_for_function(
+                        "() => document.querySelectorAll('.lvmsg.bad').length > 0",
+                        timeout=25000)
+                except Exception:                           # noqa: BLE001
+                    raise AssertionError(
+                        '%s 页在板块库读不动时一声不吭 —— 少的那几块看着像'
+                        '本来就没有（页面文字：%r）'
+                        % (label, pg.locator('#pg').inner_text()[:200]))
+                msgs = pg.locator('.lvmsg.bad').all_inner_texts()
+                hit = [m for m in msgs if '读不到' in m]
+                assert hit, '%s 页的提示没说清"是读不到"：%s' % (label, msgs)
+                assert 'tdx.db' in hit[0], \
+                    ('%s 页把库名显示错了（CSS 的 text-transform 会把 tdx.db '
+                     '变成 TDX.DB —— 报错指错文件比不说更糟）：%r'
+                     % (label, hit[0]))
+                assert anchor in pg.locator('#pg').inner_text(), \
+                    '%s 页整块都没渲染出来，不只是缺板块' % label
+                seen.append(label)
+            # 🔴 申万那一半必须还在 —— 读不出来的不许拦别的
+            pg.goto(base + '/sector.html', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=25000)
+            n = pg.locator('#secmain tbody tr').count()
+            assert n >= 25, '板块库读不动把申万一级也一起丢了：%d 行' % n
+            kd = pg.locator('.lvhead .kd').all_inner_texts()
+            assert len(kd) == 1 and '申万' in kd[0], \
+                '通达信那几类不该凭空出现：%s' % kd
+            assert not errs, '页面有 JS 错误：%s' % errs[:3]
+            br.close()
+        return ('%s 三页都把原因显示出来（且库名没被 CSS 大写）；'
+                '板块页申万一级仍有 %d 行、分类只剩它一个'
+                % (' / '.join(seen), n))
+    finally:
+        mk.tdx_db = old_db
+        mk._BLK.update(old_blk)
+        httpd.shutdown()
+        if holder is not None:
+            holder.terminate()
+            try:
+                holder.wait(timeout=10)
+            except Exception:                               # noqa: BLE001
+                holder.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+@case('板块页：逐级下钻 / 不重建外框 / 表头排序', tag='web')
+def t_sector_drill():
+    """🔴 这一页栽过三个坑，每个都**不报错**，只是看着像功能不全：
+
+    ① 「只展示了 10 个」—— 31 个全在 DOM 里，是那个 420px 的小滚动框把
+       后面的截在视野外，边缘又没有任何"下面还有"的提示。判据因此不能是
+       "DOM 里有几行"（那一直是对的），要量**滚动区相对视口够不够高** +
+       **表尾有没有明确终点**。
+    ② 「点一下整页跳一下」—— 外框每次重建，滚动位置归零、布局闪。判据是
+       **同一个 DOM 节点还在不在**（`===` 比对），不是截图像不像。
+    ③ 层级：申万点一级该落在【二级排行】，通达信那几类只有一层不该有页签。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import market as mk
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = 'http://127.0.0.1:%d' % port
+    n_api = len(mk.sector_list(kind='sw')['rows'])
+    notes = []
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1400, 'height': 900})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.on('console', lambda m:
+                  errs.append('console: ' + m.text) if m.type == 'error' else None)
+            pg.goto(base + '/sector.html', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=40000)
+
+            # ---- ① 全都列出来，且看得出哪里是底 ----
+            n_dom = pg.locator('#secmain tbody tr').count()
+            assert n_dom == n_api, \
+                ('页面列了 %d 行，接口给了 %d 行 —— 页面自己截了一刀'
+                 % (n_dom, n_api))
+            h = pg.evaluate("() => { const e = document.querySelector('.secscroll');"
+                            " return e ? e.clientHeight : 0; }")
+            vh = pg.evaluate('() => innerHeight')
+            assert h >= vh * 0.6, \
+                ('板块榜的滚动区只有 %dpx（视口 %dpx）—— 一屏露不出几行，'
+                 '人会以为"就这些"（2026-09-29 用户：只展示了 10 个）'
+                 % (h, vh))
+            end = pg.locator('.secend').first.inner_text()
+            assert str(n_api) in end and '到底' in end, \
+                '表尾没写明「共 N 个，到底了」：%r' % end
+            # 表头要吸顶，否则滚到第 30 行时"这列是加权还是等权"没法回答
+            st = pg.evaluate("() => getComputedStyle("
+                             "document.querySelector('.secscroll thead th')).position")
+            assert st == 'sticky', '表头没吸顶：position=%s' % st
+
+            # ---- ② 点板块不重建外框 ----
+            pg.evaluate("() => { window.__w = document.querySelector('.secwrap');"
+                        " window.__m = document.querySelector('#secmain');"
+                        " document.querySelector('.secscroll').scrollTop = 9999; }")
+            y0 = pg.locator('.secwrap').bounding_box()['y']
+            pg.locator('#secmain tbody tr').nth(2).locator('a.pick').first.click()
+            pg.wait_for_selector('#secside .secitem', timeout=20000)
+            keep = pg.evaluate("() => [window.__w === document.querySelector('.secwrap'),"
+                               " window.__m === document.querySelector('#secmain')]")
+            assert keep == [True, True], \
+                ('点一下板块就把外框重建了（wrap/main 复用=%s）—— 滚动位置归零、'
+                 '整页闪一下，正是用户说的"页面跳动"' % keep)
+            y1 = pg.locator('.secwrap').bounding_box()['y']
+            assert abs(y1 - y0) < 1, '点完板块整个框挪了位置：%s -> %s' % (y0, y1)
+
+            # ---- ③ 边栏：同级兄弟全在，且只留名称 + 涨跌幅 ----
+            n_side = pg.locator('#secside .secitem').count()
+            assert n_side == n_api, \
+                '边栏该列同级全部 %d 个，实得 %d' % (n_api, n_side)
+            assert pg.locator('#secside .secitem.on').count() == 1, \
+                '边栏没标出当前选中的是哪个'
+            cols = pg.locator('#secside .secitem').first.locator('span').count()
+            assert cols == 2, \
+                ('边栏每项该只有【名称 + 涨跌幅】两块，实得 %d 块 —— '
+                 '变成侧栏之后信息密度要降下来' % cols)
+
+            # ---- ④ 层级：申万一级 -> 二级排行 -> 三级；切页签看成分 ----
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert '下属' in h3, '申万一级该先出下属二级排行：%s' % h3
+            crumb = pg.locator('.seccrumb a').all_inner_texts()
+            assert len(crumb) == 2 and crumb[0] == '全部板块', \
+                '面包屑不对：%s' % crumb
+            pg.locator('#secmain a.tb[data-t="mem"]').click()
+            try:
+                pg.wait_for_function(
+                    "() => { const h = document.querySelector('#secmain h3');"
+                    " return h && h.innerText.split('\\n')[0].indexOf('成分') >= 0; }",
+                    timeout=20000)
+            except Exception:                               # noqa: BLE001
+                raise AssertionError(
+                    '点了「成分股」页签，右栏标题仍是 %r —— 页签没生效'
+                    % pg.locator('#secmain h3').first.inner_text().split('\n')[0])
+            notes.append('申万一级 -> 二级排行 -> 成分股页签')
+
+            # ---- ⑤ 表头排序真的改了顺序，且空值沉底 ----
+            pg.goto(base + '/sector.html', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=40000)
+            first0 = pg.locator('#secmain tbody tr').first.inner_text().split('\t')[0]
+            pg.locator('#secmain th a[data-s="amount"]').first.click()
+            pg.wait_for_timeout(1200)
+            first1 = pg.locator('#secmain tbody tr').first.inner_text().split('\t')[0]
+            assert first0 != first1, \
+                '点「成交额」表头，榜首没变（%r）—— 排序没生效' % first0
+            # 🔴 期望从**另一条路**算：自己问一次接口再自己排，
+            #   不拿页面的输出当期望（那样"排错了"和"没排"长得一样）
+            rows = mk.sector_list(kind='sw')['rows']
+            want = max((x for x in rows if x['amount'] is not None),
+                       key=lambda x: x['amount'])['name']
+            assert first1 == want, \
+                '按成交额降序，榜首该是 %s，页面给的是 %s' % (want, first1)
+            assert pg.evaluate("() => location.search").find('sort=amount') >= 0, \
+                '排序状态没进 URL —— 刷新/分享就丢了'
+            # 反向：再点一次该翻成升序
+            pg.locator('#secmain th a[data-s="amount"]').first.click()
+            pg.wait_for_timeout(1200)
+            first2 = pg.locator('#secmain tbody tr').first.inner_text().split('\t')[0]
+            assert first2 != first1, '同一列点第二次没翻转方向'
+
+            # ---- ⑥ 通达信只有一层：点了直接出成分，不出页签 ----
+            pg.goto(base + '/sector.html?kind=concept', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=40000)
+            pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
+            pg.wait_for_selector('#secside .secitem', timeout=20000)
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert '成分' in h3, '只有一层的板块点了该直接出成分：%s' % h3
+            assert pg.locator('#secmain a.tb').count() == 0, \
+                '只有一层的板块不该出层级页签（强行造两层只会多一次空点击）'
+            assert not errs, '板块页有 JS 错误：%s' % errs[:3]
+
+            # ---- ⑦ 一路点下去，URL 要能把【整条路径】带住 ----
+            #   🔴 判据必须**先点再刷新**：直接拿一个手写 URL 进去，测的是
+            #     "页面读得懂 URL"，而漏掉的那一半是"nav() 有没有把整条路径
+            #     写进去" —— 只存最后一级时手写 URL 照样三节（2026-09-29
+            #     变异 M11 漏网，就是这么漏的）。
+            pg.goto(base + '/sector.html', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=40000)
+            pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
+            pg.wait_for_selector('#secside .secitem', timeout=20000)
+            pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
+            pg.wait_for_timeout(2500)
+            deep = pg.url
+            pg.goto(deep, wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=40000)
+            crumb = pg.locator('.seccrumb a').all_inner_texts()
+            assert len(crumb) == 3, \
+                ('点到二级再刷新，面包屑该有三节（全部/一级/二级），实得 %s'
+                 ' —— URL 里只存了最后一级，"我是从哪一级下来的"就丢了；'
+                 'URL=%s' % (crumb, deep))
+            # ---- ⑧ 旧入口 `?code=` 还认得，且「看成分 ›」真的到成分股 ----
+            #   🔴 这是用户 2026-09-29 报的原始毛病：盘面点「银行I」/「看成分」
+            #     跳过去却"到了另一个面板" —— 链接传的是 code，改版后的选中
+            #     状态在 path 里，code 被忽略 -> 静默落回全表。
+            code = mk.sector_list(kind='sw')['rows'][0]['code']
+            name = mk.sector_list(kind='sw')['rows'][0]['name']
+            pg.goto(base + '/sector.html?kind=sw&code=%s&tab=mem' % code,
+                    wait_until='networkidle')
+            try:
+                pg.wait_for_selector('#secside .secitem', timeout=20000)
+            except Exception:                               # noqa: BLE001
+                # 超时要翻译成原因 —— 裸 TimeoutError 指不到任何东西
+                raise AssertionError(
+                    '带 ?code=%s 进来，页面一个板块都没选中（左边栏没出来）'
+                    ' —— 旧入口被静默忽略了' % code)
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert name in h3 and '成分' in h3, \
+                ('旧入口 ?code=%s&tab=mem 没落到「%s 成分」，实得 %r —— '
+                 '链接被静默忽略了' % (code, name, h3))
+            # 盘面那两个链接确实带着 code（不然上面这条测的是个没人走的路）
+            pg.goto(base + '/market.html', wait_until='networkidle')
+            pg.wait_for_selector('table.pkt a[href*="sector.html"]', timeout=40000)
+            hrefs = pg.locator(
+                'a.chip:has-text("看成分")').first.get_attribute('href')
+            assert 'code=' in hrefs and 'tab=mem' in hrefs, \
+                '盘面的「看成分 ›」链接不对：%s' % hrefs
+
+            # ---- ⑨ 查不到的 code 要**说出来**，不静默落回全表 ----
+            pg.goto(base + '/sector.html?kind=sw&code=899999', wait_until='networkidle')
+            pg.wait_for_selector('#secmain tbody tr', timeout=20000)
+            msg = pg.locator('.lvmsg.bad')
+            assert msg.count() and '899999' in msg.inner_text(), \
+                ('code 查不到时页面一声不吭地列了全表 —— "点了却什么都没选中"'
+                 '看着像功能不全而不报错')
+            assert not errs, '板块页有 JS 错误：%s' % errs[:3]
+            br.close()
+    finally:
+        httpd.shutdown()
+    return ('%d 个全列出（滚动区 >= 0.6 视口、表尾写明到底、表头吸顶）；'
+            '点板块复用外框（wrap/main 同一节点、框不挪位）；边栏同级 %d 项'
+            '只留名称+涨跌幅；%s；表头排序生效且进 URL、二次点击翻向；'
+            '通达信单层不出页签；深链面包屑三节；旧入口 ?code= 落到成分股、'
+            '查不到时说得出来'
+            % (n_api, n_api, notes[0]))
 
 @case('副图指标 / 事件 / 同业 / 联动 / 对比', tag='fast')
 def t_stock_ext():
@@ -2235,20 +2700,46 @@ def t_new_pages_ui():
             n_sw = pg.locator('.lvsec table.pkt tr').count() - 1
             assert n_sw >= 25, '申万板块行数不对：%d' % n_sw
             clean()
-            # 点一个板块 → 出成分
-            pg.locator('a.pick').first.click()
+            #   🔴 2026-09-29 起申万是三级树：点一级默认落在【子行业排行】，
+            #     成分股在页签后面。原来这条直接断言"点了就出成分"，
+            #     改动作废之后要钉的是**新规矩**（点一级 -> 二级排行，
+            #     切页签 -> 成分），不是把保护删掉。
+            pg.locator('#secmain a.pick').first.click()
             pg.wait_for_timeout(2500)
-            secs = [x.split('\n')[0] for x in pg.locator('.lvsec h3').all_inner_texts()]
-            assert any('成分' in x for x in secs), '点板块没出成分表：%s' % secs
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert '下属' in h3, '点申万一级该先出下属二级排行：%s' % h3
+            assert pg.locator('#secside .secitem.on').count() == 1, \
+                '选中后左边该变成边栏、且当前项高亮'
+            pg.locator('#secmain a.tb[data-t="mem"]').click()
+            pg.wait_for_timeout(2500)
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert '成分' in h3, '切「成分股」页签没出成分表：%s' % h3
             clean()
             # 切到概念板块
             pg.locator('.lvhead .kd[data-k="concept"]').click()
             pg.wait_for_timeout(2500)
-            assert '概念' in pg.locator('.lvhead h2').inner_text(), '切概念没生效'
+            #   🔴 2026-09-29 改版后 h2 固定是「🏭 行业板块」，当前分类由
+            #     **chip 的高亮**和**榜单标题**说 —— 原来这条钉 h2 里出现
+            #     「概念」，属于被改动作废的断言。要保的东西没变（"现在看的
+            #     是哪一类"必须有指示），只是答案换了地方，所以改成钉新规矩。
+            on = pg.locator('.lvhead .kd.on')
+            assert on.count() == 1 and '概念' in on.inner_text(), \
+                ('切概念没生效：高亮的是 %s'
+                 % [x.strip() for x in pg.locator('.lvhead .kd.on').all_inner_texts()])
+            assert '概念' in pg.locator('#secmain h3').first.inner_text(), \
+                '榜单标题没说现在列的是概念板块：%s' \
+                % pg.locator('#secmain h3').first.inner_text()
             n_cc = pg.locator('.lvsec table.pkt tr').count() - 1
             assert n_cc > 100, '概念板块行数不对：%d' % n_cc
+            #   🔴 通达信那几类**只有一层**：点了直接出成分，不该冒出
+            #     一个空的"子行业"页签（强行造两层只会多一次空点击）
+            pg.locator('#secmain a.pick').first.click()
+            pg.wait_for_timeout(2500)
+            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            assert '成分' in h3, '点概念板块该直接出成分：%s' % h3
+            assert pg.locator('#secmain a.tb').count() == 0, \
+                '只有一层的板块不该出层级页签'
             # 板块 → 个股
-            pg.locator('.lvsec a.pick').first.click()
             pg.wait_for_timeout(2500)
             _via_pop(pg, pg.locator('a[data-sp]').first)
 
@@ -2643,7 +3134,9 @@ def t_stockpop():
             # ---- ① 每一类页面都不跳走 ----
             PAGES = [('/#/live', '实盘'), ('/market.html', '盘面'),
                      ('/watchlist.html', '自选'), ('/alerts.html', '买点'),
-                     ('/sector.html?kind=sw&code=801230', '板块成分'),
+                     ('/sector.html?kind=sw&path=%5B%7B%22kind%22%3A%22sw%22'
+                      '%2C%22code%22%3A%22801780%22%2C%22name%22%3A%22bank%22'
+                      '%7D%5D&tab=mem', '板块成分'),
                      ('/stock.html?code=601857.XSHG', '个股同行业')]
             for path, label in PAGES:
                 pg = b.new_page(viewport={'width': 1400, 'height': 900})

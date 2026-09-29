@@ -27,6 +27,19 @@ class MarketError(Exception):
     pass
 
 
+class BlocksLocked(MarketError):
+    """通达信板块库读不动（每日同步正在写它）。
+
+    🔴 **「未知不是缺」** —— 读不到和"本来就没有"是两回事。原来这里让
+      duckdb 的 `IOException` 一路穿到 `do_GET` -> HTTP 500，页面拿到的是
+      一个裸报错；更糟的是若改成"返回空板块表"，个股页会显示「没有板块
+      归属」、板块页会只剩申万一级 —— **看着像本来就这样，而且不报错**。
+    ★ 所以做成 `MarketError` 的子类：`_market_err` 已经会把它变成
+      `{'error': …}`（200），而**认得出它是哪一种**的调用方（个股归属、
+      板块分类清单）可以只降级这一块、把原因写出来，其余照常。
+    """
+
+
 def _root(root=None):
     r = _paths.datalake(root)
     if not os.path.isdir(r):
@@ -129,15 +142,21 @@ def overview(date=None, top=15, root=None):
     out['buckets'] = [{'label': lab, 'n': got.get(lab, 0)}
                       for _a, _b, lab in BUCKETS]
     # 行业榜（申万一级）：等权平均涨幅 + 家数 + 成交额
+    # 🔴 **必须带 `code`**：盘面上「银行I」与「看成分 ›」两个入口拼的都是
+    #   `sector.html?kind=sw&code=<code>`，而这里原来只 SELECT 了名字 ——
+    #   于是 `code` 是 None、链接拼成 `&code=`（空），点过去落在板块页却
+    #   一个板块都没选中，看起来就是"跳到了另一个面板"（2026-09-29 实测）。
+    #   名字能显示、链接也能点，所以**它不报错** —— 只是永远到不了成分股。
     out['industries'] = [
-        {'name': r[0], 'n': r[1], 'avg_change': r[2], 'median_change': r[3],
-         'amount': r[4], 'up': r[5], 'limit_up': r[6]}
+        {'code': r[0], 'name': r[1], 'n': r[2], 'avg_change': r[3],
+         'median_change': r[4], 'amount': r[5], 'up': r[6], 'limit_up': r[7]}
         for r in c.execute("""
-            SELECT sw_l1_name, count(*), avg(change_pct), median(change_pct),
-                   sum(amount), sum(CASE WHEN change_pct>0 THEN 1 ELSE 0 END),
+            SELECT sw_l1_code, sw_l1_name, count(*), avg(change_pct),
+                   median(change_pct), sum(amount),
+                   sum(CASE WHEN change_pct>0 THEN 1 ELSE 0 END),
                    sum(CASE WHEN is_limit_up THEN 1 ELSE 0 END)
             FROM %s AND sw_l1_name IS NOT NULL
-            GROUP BY 1 ORDER BY 3 DESC""" % base).fetchall()]
+            GROUP BY 1,2 ORDER BY 4 DESC""" % base).fetchall()]
     # 各类榜单
     out['ranks'] = {}
     for key, title, col, dirn, note in RANKS:
@@ -180,7 +199,18 @@ def _tdx_blocks(root=None):
     if not os.path.isfile(db):
         return {}
     c = con()
-    c.execute("ATTACH '%s' AS t (READ_ONLY)" % db)
+    try:
+        c.execute("ATTACH '%s' AS t (READ_ONLY)" % db)
+    except Exception as e:                                  # noqa: BLE001
+        # 🔴 **报错要指向真正的原因**：duckdb 给的是
+        #   `IO Error: Could not set lock on file …`，那句话指不到
+        #   "每日同步正在写这个库"这件事，而那正是唯一会发生的情况。
+        if 'lock' in str(e).lower():
+            raise BlocksLocked(
+                '通达信板块库正被另一个进程占用（每日同步在写 tdx.db），'
+                '这一刻读不到 —— 是「读不到」，不是「没有板块」；'
+                '同步跑完就恢复') from e
+        raise MarketError('打不开通达信板块库 %s：%s' % (db, e)) from e
     info = {r[0]: (r[1], r[2]) for r in c.execute(
         'SELECT block_code, block_name, block_type FROM t.raw_tdx_blocks_info'
     ).fetchall()}
@@ -201,39 +231,108 @@ def blocks(root=None):
     mt = os.path.getmtime(db) if os.path.isfile(db) else 0
     if _BLK['at'] == mt and _BLK['data'] is not None:
         return _BLK['data']
+    #   ★ `_tdx_blocks` 抛异常时**不写缓存** —— 写了的话锁解开之后
+    #     还会拿着那份空表，而 mtime 没变就永远不重读。
     data = _tdx_blocks(root)
     _BLK.update(at=mt, data=data)
     return data
 
 
-def sector_list(date=None, kind='sw', root=None):
-    """板块涨幅榜。`kind`：'sw' 申万一级 / 'concept' / 'style' / 'region'
-    / 'tdx_research'。"""
+# 申万三级的列名映射 —— 一处定义，list / members / kinds 共用。
+#   🔴 不许在三个函数里各写一份 `sw_l2_code` —— 加一级或改列名时必然漏掉
+#     其中一处，而漏了不报错（那一级只是查不出东西）。
+SW_LEVELS = {
+    'sw':    ('sw_l1_code', 'sw_l1_name', '申万一级', None),
+    'sw_l2': ('sw_l2_code', 'sw_l2_name', '申万二级', 'sw_l1_code'),
+    'sw_l3': ('sw_l3_code', 'sw_l3_name', '申万三级', 'sw_l2_code'),
+}
+
+def _sw_agg(c, base, code_col, name_col, parent_col=None, parent=None):
+    """某一级申万的板块涨幅榜。
+
+    🔴 **涨跌幅用流通市值加权**（`w_change`）—— 这是业内口径（申万行业指数、
+      东财/同花顺板块涨幅都是市值加权），本地对得上外面看到的数才有意义。
+      同时保留等权平均与中位：等权更能反映"这个板块里多数票怎么样"，
+      两个口径**一起给**，页面上并列，不用猜看的是哪个。
+    ★ 加权分母用 `floatmv`（流通市值），不是总市值 —— 与申万指数一致。
+      `floatmv` 为空/为 0 的票不进加权（但仍进等权与家数），否则整段变 NULL。
+    ★ 领涨股：业内标配的一列，直接给代码 + 名字 + 涨幅，省一次点击。
+    """
+    where = " AND %s IS NOT NULL" % name_col
+    if parent_col and parent:
+        where += " AND %s = '%s'" % (parent_col, str(parent).replace("'", "''"))
+    rows = c.execute("""
+        WITH d AS (SELECT * FROM %s %s),
+        g AS (
+          SELECT %s AS code, %s AS name, count(*) AS n,
+                 sum(CASE WHEN floatmv > 0 THEN change_pct * floatmv END)
+                   / nullif(sum(CASE WHEN floatmv > 0 THEN floatmv END), 0) AS w_change,
+                 avg(change_pct) AS avg_change,
+                 median(change_pct) AS median_change,
+                 sum(amount) AS amount,
+                 sum(CASE WHEN change_pct > 0 THEN 1 ELSE 0 END) AS up,
+                 sum(CASE WHEN change_pct < 0 THEN 1 ELSE 0 END) AS down,
+                 sum(CASE WHEN is_limit_up THEN 1 ELSE 0 END) AS limit_up,
+                 sum(CASE WHEN is_limit_down THEN 1 ELSE 0 END) AS limit_down
+          FROM d GROUP BY 1, 2),
+        t AS (          -- 领涨股：每个板块涨幅最大的那只
+          SELECT code, jq_code, sec_name, change_pct FROM (
+            SELECT %s AS code, jq_code, sec_name, change_pct,
+                   row_number() OVER (PARTITION BY %s ORDER BY change_pct DESC) rn
+            FROM d) WHERE rn = 1)
+        SELECT g.*, t.jq_code, t.sec_name, t.change_pct
+        FROM g LEFT JOIN t USING (code)
+        ORDER BY g.w_change DESC NULLS LAST
+    """ % (base, where, code_col, name_col, code_col, code_col)).fetchall()
+    return [{'code': r[0], 'name': r[1], 'n': r[2], 'w_change': r[3],
+             'avg_change': r[4], 'median_change': r[5], 'amount': r[6],
+             'up': r[7], 'down': r[8], 'limit_up': r[9], 'limit_down': r[10],
+             'top_code': r[11], 'top_name': r[12], 'top_change': r[13]}
+            for r in rows]
+
+
+def sector_list(date=None, kind='sw', root=None, parent=None):
+    """板块涨幅榜。
+
+    `kind`：`sw` 申万一级 / `sw_l2` 二级 / `sw_l3` 三级 /
+            `concept` / `style` / `region` / `tdx_research`。
+    `parent`：下钻用 —— `kind='sw_l2'` 时传一级的 code，只列它下属的二级。
+
+    🔴 申万三级走**同一条**聚合（`_sw_agg`），列名从 `SW_LEVELS` 取 ——
+      三处各写一份 SQL 的话，加一级或改口径时必然漏掉其中一处，
+      而漏了不报错（那一级只是数字悄悄不一致）。
+    ★ 通达信板块（概念/风格/地区/研究）天然只有一层，没有 parent。
+    """
     c = con()
     p = panel(root)
     d = _day(c, p, date)
     base = "%s WHERE date = DATE '%s' AND %s" % (p, d, TRADEABLE)
-    if kind == 'sw':
-        rows = c.execute("""
-            SELECT sw_l1_code, sw_l1_name, count(*), avg(change_pct),
-                   median(change_pct), sum(amount),
-                   sum(CASE WHEN change_pct>0 THEN 1 ELSE 0 END),
-                   sum(CASE WHEN is_limit_up THEN 1 ELSE 0 END)
-            FROM %s AND sw_l1_name IS NOT NULL
-            GROUP BY 1,2 ORDER BY 4 DESC""" % base).fetchall()
-        return {'date': str(d), 'kind': 'sw', 'kind_name': '申万一级',
-                'rows': [{'code': r[0], 'name': r[1], 'n': r[2],
-                          'avg_change': r[3], 'median_change': r[4],
-                          'amount': r[5], 'up': r[6], 'limit_up': r[7]}
-                         for r in rows]}
+    if kind in SW_LEVELS:
+        code_col, name_col, kname, parent_col = SW_LEVELS[kind]
+        rows = _sw_agg(c, base, code_col, name_col, parent_col, parent)
+        out = {'date': str(d), 'kind': kind, 'kind_name': kname,
+               'rows': rows, 'parent': parent, 'has_children': kind != 'sw_l3'}
+        if parent and parent_col:
+            # ★ 面包屑要显示父级的**名字**，不能只给 code —— 页面拿 code
+            #   去猜名字就是又抄了一份映射。
+            pn = c.execute(
+                "SELECT DISTINCT %s FROM %s AND %s = ? LIMIT 1"
+                % (name_col.replace('l2', 'l1').replace('l3', 'l2'),
+                   base, parent_col), [parent]).fetchone()
+            out['parent_name'] = pn[0] if pn else None
+        return out
     blk = blocks(root)
     want = [(k, v) for k, v in blk.items() if v[1] == kind]
     if not want:
         raise MarketError('没有 kind=%r 的板块（可选：sw / %s）'
                           % (kind, ' / '.join(sorted(BLOCK_TYPE))))
     # 用 symbol 关联（tdx 板块成分是 tdx symbol，如 sh601857）
+    # 🔴 与申万那条路**同一套口径**：流通市值加权为主、等权与中位并列、
+    #   带领涨股。两边给的字段名必须一样，否则页面要为两类板块各写一套
+    #   渲染（而那两套迟早分叉）。
     day = c.execute("""
-        SELECT symbol, change_pct, amount, is_limit_up FROM %s""" % base).fetchall()
+        SELECT symbol, change_pct, amount, is_limit_up, is_limit_down,
+               floatmv, jq_code, sec_name FROM %s""" % base).fetchall()
     px = {r[0]: r for r in day}
     out = []
     for code, (name, _t, syms) in want:
@@ -241,14 +340,21 @@ def sector_list(date=None, kind='sw', root=None):
         if not vals:
             continue
         cps = [v[1] for v in vals if v[1] is not None]
+        wv = [(v[1], v[5]) for v in vals if v[1] is not None and (v[5] or 0) > 0]
+        wsum = sum(w for _x, w in wv)
+        top = max(vals, key=lambda v: (v[1] if v[1] is not None else -99))
         out.append({'code': code, 'name': name, 'n': len(vals),
+                    'w_change': (sum(x * w for x, w in wv) / wsum) if wsum else None,
                     'avg_change': (sum(cps) / len(cps)) if cps else None,
                     'median_change': (sorted(cps)[len(cps) // 2] if cps else None),
                     'amount': sum(v[2] or 0 for v in vals),
                     'up': sum(1 for v in vals if (v[1] or 0) > 0),
-                    'limit_up': sum(1 for v in vals if v[3])})
-    out.sort(key=lambda x: -(x['avg_change'] if x['avg_change'] is not None else -99))
-    return {'date': str(d), 'kind': kind,
+                    'down': sum(1 for v in vals if (v[1] or 0) < 0),
+                    'limit_up': sum(1 for v in vals if v[3]),
+                    'limit_down': sum(1 for v in vals if v[4]),
+                    'top_code': top[6], 'top_name': top[7], 'top_change': top[1]})
+    out.sort(key=lambda x: -(x['w_change'] if x['w_change'] is not None else -99))
+    return {'date': str(d), 'kind': kind, 'parent': None, 'has_children': False,
             'kind_name': BLOCK_TYPE.get(kind, kind), 'rows': out}
 
 
@@ -280,16 +386,19 @@ def sector_members(code, date=None, kind='sw', limit=2000, root=None):
             'amplitude', 'floatmv', 'pe_ttm', 'pb', 'industry',
             'limit_up', 'limit_down']
     lim = max(1, min(int(limit or 300), 2000))
-    if kind == 'sw':
+    if kind in SW_LEVELS:
+        # 🔴 列名从 `SW_LEVELS` 取，不在这里再写一遍 `sw_l1_code` ——
+        #   加一级时漏掉这处的话，那一级点进去是空的，而且不报错。
+        code_col, name_col, _kn, _pc = SW_LEVELS[kind]
         rows = c.execute(
-            'SELECT %s FROM %s AND sw_l1_code = ? ORDER BY change_pct DESC '
-            'LIMIT %d' % (cols, base, lim), [str(code)]).fetchall()
-        nm = c.execute('SELECT DISTINCT sw_l1_name FROM %s AND sw_l1_code = ?'
-                       % (base,), [str(code)]).fetchone()
+            'SELECT %s FROM %s AND %s = ? ORDER BY change_pct DESC '
+            'LIMIT %d' % (cols, base, code_col, lim), [str(code)]).fetchall()
+        nm = c.execute('SELECT DISTINCT %s FROM %s AND %s = ?'
+                       % (name_col, base, code_col), [str(code)]).fetchone()
         name = nm[0] if nm else str(code)
         # ★ 总数**单独查**，不拿 len(rows) 充数 —— 那正是上面那个谎的来源。
-        total = c.execute('SELECT count(*) FROM %s AND sw_l1_code = ?'
-                          % (base,), [str(code)]).fetchone()[0]
+        total = c.execute('SELECT count(*) FROM %s AND %s = ?'
+                          % (base, code_col), [str(code)]).fetchone()[0]
     else:
         blk = blocks(root).get(str(code))
         if not blk:
@@ -343,10 +452,16 @@ def stock_sectors(code, root=None):
     out = {'code': jc, 'date': str(d),
            'sw': ({'code': row[1], 'name': row[2]} if row[2] else None),
            'blocks': []}
-    for bc, (name, kind, syms) in blocks(root).items():
-        if sym in syms:
-            out['blocks'].append({'code': bc, 'name': name, 'kind': kind,
-                                  'kind_name': BLOCK_TYPE.get(kind, kind),
-                                  'n': len(syms)})
+    # 🔴 通达信板块读不动时**不拦**：申万归属来自面板，照样给得出来。
+    #   但要把原因带上去（`blocks_error`），否则页面显示「没有板块归属」
+    #   —— 那是在替这只票下一个它没资格下的结论。
+    try:
+        for bc, (name, kind, syms) in blocks(root).items():
+            if sym in syms:
+                out['blocks'].append({'code': bc, 'name': name, 'kind': kind,
+                                      'kind_name': BLOCK_TYPE.get(kind, kind),
+                                      'n': len(syms)})
+    except BlocksLocked as e:
+        out['blocks_error'] = str(e)
     out['blocks'].sort(key=lambda x: (x['kind'] != 'concept', x['n']))
     return out

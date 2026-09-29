@@ -1112,3 +1112,45 @@ body.hasprog{padding-top:28px}
   #lg label{display:block;font-size:12px;color:var(--dim);margin-bottom:3px}
   #lg .btn{width:100%;text-align:center;padding:8px 0;margin-top:14px}
   #lgmsg{margin-top:10px;font-size:12px;min-height:16px}
+
+/* ===== 行业板块页（2026-09-29 重做）=====================================
+   🔴 列表**撑满视口**再滚动，不再用 420px 的小滚动框 —— 那个框把 31 个
+     行业只露出 12 行，边缘又没有任何"下面还有"的提示，人自然以为就这些
+     （用户 2026-09-29：「只展示了 10 个，没有展示全」，其实 DOM 里全在）。
+   ★ 两处一起改：高度跟着视口走 + 表尾写一行「以上共 N 个，到底了」——
+     有明确终点，就不会再把"滚动区"误读成"全部"。 */
+.secwrap{display:flex;gap:12px;align-items:flex-start}
+/* 没选中时边栏不占位，宽表铺满 */
+.secwrap.nosel #secside{display:none}
+.secwrap.nosel #secmain{width:100%}
+#secmain{flex:1;min-width:0}
+
+/* 选中后的左侧边栏：只留板块名 + 涨跌幅，用来快速换板块 */
+#secside{width:190px;flex:none;position:sticky;top:8px;
+  max-height:calc(100vh - 120px);display:flex;flex-direction:column;
+  border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+.secsidehd{padding:6px 9px;border-bottom:1px solid var(--line);
+  font-size:12px;color:var(--fg);display:flex;gap:6px;align-items:center}
+.secsidelist{overflow:auto;padding:3px}
+.secitem{display:flex;justify-content:space-between;gap:6px;
+  padding:4px 7px;border-radius:5px;font-size:12px;color:var(--fg);
+  text-decoration:none;white-space:nowrap}
+.secitem:hover{background:var(--panel2)}
+.secitem.on{background:var(--panel2);color:var(--accent)}
+.secitem .secnm{overflow:hidden;text-overflow:ellipsis}
+
+/* 未选中：整表跟着视口高度滚 */
+.secscroll{max-height:calc(100vh - 210px);overflow:auto}
+.secend{padding:7px 3px;text-align:center}
+.seccrumb{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
+
+/* 🔴 窄屏下边栏改成横排在上方 —— 190px 的侧栏在手机上会把主表挤没
+   （同「窄屏不许横向滚」那条守卫）。 */
+@media (max-width:900px){
+  .secwrap{flex-direction:column}
+  #secside{width:100%;position:static;max-height:190px}
+  .secsidelist{display:flex;flex-wrap:wrap;gap:4px}
+  .secitem{width:auto}
+}
+/* 整表跟着视口滚时，列名滚出屏幕就没法回答"这一列是加权还是等权" */
+.secscroll thead th{position:sticky;top:0;z-index:2;background:var(--panel)}

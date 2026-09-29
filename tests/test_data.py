@@ -7211,8 +7211,19 @@ def t_day_logs():
                  [sys.executable, os.path.join(REPO, 'serve.py'), '--status']),
                 ('tick', lg.KIND_DAILY,
                  [sys.executable, os.path.join(REPO, 'tick_daily.py'), '--dry']),
+                #   🔴 **用 `--dry` 不用 `--if-stale`**（2026-09-29 实测事故）。
+                #     `--if-stale` 在数据【不新】的那一刻会去跑**真的整条链**
+                #     —— selftest 当场变成生产同步：它写 lake.db、占住 tdx.db、
+                #     下载几百 MB，`timeout=180` 到点杀掉直接子进程后
+                #     `communicate()` 还卡在孙进程的管道上，整个 --fast **挂死**
+                #     （实测停在 56/112，0% CPU 十几分钟）。
+                #     「selftest 不许写生产数据」这条原来漏了这一处，
+                #     而它只在数据恰好不新时才发作 —— 平时全绿。
+                #   ★ `--dry` 走**同一条**日志路径（实测 day 日志里同样有
+                #     `[sync]`、stdout 同样有东西），只是不执行那 13 步。
+                #     这条用例要证的是"输出有没有进按天日志"，与跑不跑链无关。
                 ('sync', lg.KIND_DAILY,
-                 [sys.executable, os.path.join(DL, 'sync_daily.py'), '--if-stale'])):
+                 [sys.executable, os.path.join(DL, 'sync_daily.py'), '--dry'])):
             r = subprocess.run(cmd, capture_output=True, text=True, env=env,
                                encoding='utf-8', errors='replace', timeout=180)
             f = _kf(kind)
@@ -7845,3 +7856,221 @@ def t_sync_hold_gates():
     _sh.rmtree(td, ignore_errors=True)
     return ('A 腿落后 / 体检看旧库 各自拦下 · 正常不误拦 · 读不到不拦 · '
             '留痕端到端（体检写 09-28 -> sync_daily 读到 09-28）· 调用点传了 --stamp')
+
+
+@case('lake.db 的视图集：两个重建脚本都不许删库，库里必须是【并集】', tag='fast')
+def t_lake_views_union():
+    """🔴🔴 2026-09-29 事故：面板一整天没更新，而报错指不到原因。
+
+    `lake.db` 有**两个"删库重建"**，各自只知道自己那一半：
+
+    | 脚本 | 按什么重建 | 覆盖 |
+    |---|---|---|
+    | `build/load_jq_dimensions.py` | `raw/jq/` 与 `std/` 下每个 parquet | 31 个 |
+    | `build/rebuild_lake_db.py` | DDL 基线 `_backup/pit_rebuild.sql`（2026-08-25） | 30 个 |
+
+    谁后跑谁说了算，另一半被 `os.remove(lake.db)` 静默抹掉 —— **库还在、
+    视图少一半**。实测：跑完 dimensions 之后 `fin_core` 不见了，同步第 7 步
+    报 `Catalog Error: Table with name fin_core does not exist!`，
+    17:30 / 18:00 / 19:10 三轮连着失败。
+
+    ★ 两套重叠的 9 个视图定义**完全一样**（同一个 parquet 的 `SELECT *`），
+      所以正确答案是**并集**，改成 `CREATE OR REPLACE` 即可。
+    ★ 判据是「**现在库里是什么**」，不是"我记得跑过重建"。
+    """
+    import ast
+    import io
+    import os
+
+    from assay.srv import base as sbase
+    DL = sbase._datalake_dir()
+    DB = os.path.join(DL, 'lake.db')
+
+    # ---- ① 两个脚本都不许删 lake.db ----
+    #   走 ast 而不是查字符串 —— 注释里就写着 `os.remove(DB)`（踩过 7 次）
+    killers = []
+    for rel, var in (('build/load_jq_dimensions.py', 'DB'),
+                     ('build/rebuild_lake_db.py', 'TARGET')):
+        src = io.open(os.path.join(DL, rel), encoding='utf-8').read()
+        for n in ast.walk(ast.parse(src)):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            if getattr(f, 'attr', '') not in ('remove', 'unlink'):
+                continue
+            arg = n.args[0] if n.args else None
+            if isinstance(arg, ast.Name) and arg.id == var:
+                killers.append('%s:%d os.%s(%s)' % (rel, n.lineno, f.attr, var))
+    assert not killers, \
+        ('这些地方会把整个 lake.db 删掉重建，而它只认得自己那一半视图 —— '
+         '另一半被静默抹掉，库还在、报错指向"某张表不存在"：%s' % killers)
+
+    # ---- ② DDL 里每条 CREATE 都要是 CREATE OR REPLACE（不删库就得幂等）----
+    import importlib.util as _iu
+    _sp = _iu.spec_from_file_location(
+        '_rebuild_probe', os.path.join(DL, 'build', 'rebuild_lake_db.py'))
+    RB = _iu.module_from_spec(_sp)
+    _sp.loader.exec_module(RB)
+    raw = io.open(RB.DDL, encoding='utf-8').read()
+    import re as _re
+    bodies = []
+    for blk in _re.split(r'\n\s*\n', raw):
+        m = _re.search(r'--\s*=====\s*(VIEW|MACRO)\s+(\S+)\s*=====', blk)
+        if m:
+            body = _re.sub(r'--\s*=====.*?=====\s*', '', blk).strip().rstrip(';')
+            if body:
+                bodies.append((m.group(2), RB.replaceable(RB.remap(body))))
+    bad = [n for n, b in bodies
+           if not _re.match(r'\s*CREATE\s+OR\s+REPLACE\s', b, _re.I)]
+    assert bodies and not bad, \
+        ('DDL 里这几条不是 CREATE OR REPLACE —— 不删库之后第二次跑就撞 '
+         '"already exists"，而那个报错指不到"本来就该幂等"：%s' % bad[:6])
+    #   🔴 上面那条只证明 `replaceable()` 这个函数会干活，**没证明流水线
+    #     用了它** —— 2026-09-29 变异实测：把 `main()` 里的调用去掉，
+    #     上面那条照样绿（它自己又调了一次）。判据不能拿被测对象之外的
+    #     一条旁路来算。所以再钉一次调用点。
+    _main = [n for n in ast.walk(ast.parse(io.open(RB.__file__, encoding='utf-8').read()))
+             if isinstance(n, ast.FunctionDef) and n.name == 'main'][0]
+    _wrapped = any(
+        isinstance(n, ast.Call) and getattr(n.func, 'id', '') == 'replaceable'
+        for n in ast.walk(_main))
+    assert _wrapped, \
+        ('`rebuild_lake_db.main()` 没把 DDL 过一遍 `replaceable()` —— '
+         '不删库之后第二次跑必撞 "already exists"')
+
+    # ---- ③ 现在库里的视图集 == 两个正本的并集 ----
+    #   🔴 数字自己算，不写死；清单直接扫目录，不照着列表拼
+    #     （照清单拼会漏掉新加的 parquet，而漏了不报错）
+    import duckdb
+    try:
+        con = duckdb.connect(DB, read_only=True)
+    except Exception as e:                                  # noqa: BLE001
+        # 未知不是缺：库被占着时不拦
+        return '跳过（lake.db 读不动：%s）' % str(e)[:60]
+    try:
+        have = set(r[0] for r in con.execute(
+            'SELECT table_name FROM information_schema.tables').fetchall())
+    finally:
+        con.close()
+    want = set(n for n, _ in bodies) | {'_code_map'}
+    L0, L1 = os.path.join(DL, 'raw', 'jq'), os.path.join(DL, 'std')
+    want |= set('l0_' + f[:-8] for f in os.listdir(L0) if f.endswith('.parquet'))
+    want |= set(f[:-8] for f in os.listdir(L1) if f.endswith('.parquet'))
+    # 表宏不在 information_schema.tables 里，单独排掉
+    macros = set(n for n, b in bodies if _re.search(r'\bMACRO\b', b, _re.I))
+    want -= macros
+    miss = sorted(want - have)
+    assert not miss, \
+        ('lake.db 少了 %d 个视图 —— 上一个跑的 loader 把库删了，只重建了'
+         '自己那一半。缺的是：%s' % (len(miss), miss[:12]))
+    return ('两个重建脚本都不删库；DDL %d 条全是 CREATE OR REPLACE；'
+            'lake.db 现有 %d 个对象，覆盖两个正本的并集 %d 个（DDL %d + '
+            'std/raw 扫出来的 %d）'
+            % (len(bodies), len(have), len(want), len(bodies) - len(macros),
+               len(want) - (len(bodies) - len(macros)) - 1))
+
+@case('行业分级：申万一/二/三级 + 证监会，且【下级换挡必须单独开区间】', tag='fast')
+def t_industry_levels():
+    """2026-09-29 扩展：面板原来只有 `sw_l1`，而源数据 `dim_industry_asof`
+    里 `sw_l2` / `sw_l3` / `zjw` 一直都在、覆盖 100%。
+
+    🔴🔴 **最容易写错、且错了不报错的是区间切分的判据。**
+      `security_industry` 把季度快照压成 `valid_from/valid_to` 区间，
+      原来 `is_change` 只看 `sw_l1_code`。若只把 l2/l3 加进选列而不改这条：
+        · 一级没变、二/三级变了 -> **不开新区间**
+        · 那条区间里的 l2/l3 永远停在开区间那一刻的值，此后再不更新
+        · 而区间数、覆盖率、面板行数**全都正常** —— 没有任何地方会报
+      实测：只看 l1 = 8737 条区间；三级联合 = 12428 条。
+      差的 3680 条正是"一级没变而下级变了"的换挡。
+
+    ★ 判据直接落在这 3680 条上：库里必须**真的存在**这种相邻区间。
+      它为 0 就说明判据退回只看一级了，而那时加的列全是死的。
+    """
+    import duckdb
+
+    dl = os.path.join(os.path.dirname(REPO), 'datalake')
+    si = os.path.join(dl, 'std', 'security_industry.parquet')
+    if not os.path.exists(si):
+        return '跳过（没有 security_industry.parquet）'
+    c = duckdb.connect(':memory:')
+
+    # ---- ① 四套分类的列都在 ----
+    cols = [r[0] for r in c.execute(
+        "DESCRIBE SELECT * FROM read_parquet('%s')" % si).fetchall()]
+    for k in ('sw_l1_code', 'sw_l1_name', 'sw_l2_code', 'sw_l2_name',
+              'sw_l3_code', 'sw_l3_name', 'zjw_code', 'zjw_name'):
+        assert k in cols, '🔴 security_industry 缺列 %s：%r' % (k, cols)
+
+    # ---- ② 🔴 下级换挡必须单独开区间（这条错了不报错）----
+    n_sub = c.execute("""
+      SELECT count(*) FROM (
+        SELECT code, sw_l1_code, sw_l2_code, sw_l3_code,
+               lag(sw_l1_code) OVER w AS p1, lag(sw_l2_code) OVER w AS p2,
+               lag(sw_l3_code) OVER w AS p3
+        FROM read_parquet('%s')
+        WINDOW w AS (PARTITION BY code ORDER BY valid_from))
+      WHERE p1 IS NOT NULL AND sw_l1_code = p1
+        AND (sw_l2_code IS DISTINCT FROM p2 OR sw_l3_code IS DISTINCT FROM p3)
+    """ % si).fetchone()[0]
+    assert n_sub > 1000, (
+        '🔴 只有 %d 条「一级没变而下级变了」的相邻区间 —— `is_change` 多半'
+        '退回了只看 `sw_l1_code`，那样 l2/l3 会停在开区间那一刻的值再不更新，'
+        '而且不报错（实测正常值约 3680 条）' % n_sub)
+
+    # ---- ②b 🔴 **三级要单独钉一条**。只钉"下级变了"的话，把三级从判据里
+    #   去掉（只按 l1+l2）仍有 2000+ 条二级换挡顶着，测不出来
+    #   （变异 M2 实测漏过）。所以直接问：一、二级都没变、只有三级变的。
+    n_l3 = c.execute("""
+      SELECT count(*) FROM (
+        SELECT code, sw_l1_code, sw_l2_code, sw_l3_code,
+               lag(sw_l1_code) OVER w AS p1, lag(sw_l2_code) OVER w AS p2,
+               lag(sw_l3_code) OVER w AS p3
+        FROM read_parquet('%s')
+        WINDOW w AS (PARTITION BY code ORDER BY valid_from))
+      WHERE p1 IS NOT NULL AND sw_l1_code = p1
+        AND sw_l2_code IS NOT DISTINCT FROM p2
+        AND sw_l3_code IS DISTINCT FROM p3
+    """ % si).fetchone()[0]
+    assert n_l3 > 500, (
+        '🔴 只有 %d 条「一、二级都没变而三级变了」的相邻区间 —— 三级多半'
+        '没进 `is_change` 的判据，那样 l3 会停在开区间那一刻的值再不更新'
+        '（实测正常值约 1657 条）' % n_l3)
+
+    # ---- ③ 区间不许重叠（切分改了之后尤其要重验）----
+    ov = c.execute("""
+      SELECT count(*) FROM (
+        SELECT code, valid_from, valid_to,
+               lag(valid_to) OVER (PARTITION BY code ORDER BY valid_from) AS prev_to
+        FROM read_parquet('%s')) WHERE prev_to > valid_from""" % si).fetchone()[0]
+    assert ov == 0, '🔴 行业区间有 %d 处重叠' % ov
+
+    # ---- ④ 面板把四套都带出来了，且覆盖率不因加列而掉 ----
+    pg = os.path.join(dl, 'mart', 'panel_daily', 'panel_*.parquet')
+    pcols = [r[0] for r in c.execute(
+        "DESCRIBE SELECT * FROM read_parquet('%s')" % pg).fetchall()]
+    for k in ('sw_l2_name', 'sw_l3_name', 'zjw_name'):
+        assert k in pcols, '🔴 面板缺 %s —— 维度层有、面板没接出来' % k
+    r = c.execute("""SELECT
+         sum(CASE WHEN sw_l1_name IS NOT NULL THEN 1 ELSE 0 END),
+         sum(CASE WHEN sw_l2_name IS NOT NULL THEN 1 ELSE 0 END),
+         sum(CASE WHEN sw_l3_name IS NOT NULL THEN 1 ELSE 0 END),
+         count(*)
+       FROM read_parquet('%s')
+       WHERE date = (SELECT max(date) FROM read_parquet('%s'))""" % (pg, pg)).fetchone()
+    assert r[3] > 0, '面板最新一天是空的'
+    # ★ 判据是「与一级**一样**」，不是「> 某个绝对值」—— 前者的前提不会
+    #   随退市/新股漂移，后者会（同「守卫要钉和正本一不一样」）。
+    assert r[1] == r[0] and r[2] == r[0], (
+        '🔴 二/三级的覆盖与一级不一致（l1=%d l2=%d l3=%d）—— 多半是 JOIN '
+        '或选列写错了' % (r[0], r[1], r[2]))
+
+    # ---- ⑤ 取值个数要在量级上对得住（申万口径：37 / 175 / 449）----
+    n1, n2, n3 = c.execute(
+        "SELECT count(DISTINCT sw_l1_name), count(DISTINCT sw_l2_name),"
+        " count(DISTINCT sw_l3_name) FROM read_parquet('%s')" % si).fetchone()
+    assert n1 < n2 < n3, '🔴 分级的取值个数不是递增：%d / %d / %d' % (n1, n2, n3)
+    assert n3 > 300, '三级只有 %d 个取值 —— 多半取到了二级' % n3
+
+    return ('四套分类齐（申万一/二/三 + 证监会）· 下级换挡 %d 条（其中只变三级 '
+            '%d 条）· 区间无重叠 · 面板三级覆盖与一级一致 · 取值 %d/%d/%d 递增'
+            % (n_sub, n_l3, n1, n2, n3))

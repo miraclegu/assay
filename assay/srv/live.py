@@ -941,7 +941,9 @@ def api_live_tick(_q, body):
     b = body or {}
     aid = (b.get('id') or '').strip()
     if aid:
-        return _live_err(lambda: m.make_signal(aid, force=True))
+        # ★ 页面上的「立即重算」是人显式点的 -> session_force
+        return _live_err(lambda: m.make_signal(aid, force=True,
+                                               session_force=True))
     return {'results': m.tick(force=True)}
 
 

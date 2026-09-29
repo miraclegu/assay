@@ -254,7 +254,9 @@ def main():
     _say('')
     changed = 0
     for aid, _w in todo:
-        r = lv.make_signal(aid, force=True)
+        # ★ `session_force` 跟着命令行的 --force 走：人显式要求重算时，
+        #   盘中也照写；定时点自己跑的那些则受交易时段保护。
+        r = lv.make_signal(aid, force=True, session_force=a.force)
         if r.get('error'):
             _say('   [%s] 🔴 %s' % (aid, r['error']))
             continue

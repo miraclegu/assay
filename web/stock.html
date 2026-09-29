@@ -376,14 +376,17 @@ function sectorBox(sc, pe) {
   const blocks = (sc && !sc.error) ? (sc.blocks || []) : [];
   const peers = (pe && !pe.error) ? (pe.rows || []) : [];
   return `<div class="pgrid c2" style="margin-bottom:14px">
-    <div class="lvsec"><h3>所属板块 <span class="lvwhy">${blocks.length} 个（通达信，每日同步）</span></h3>
+    <div class="lvsec"><h3>所属板块 <span class="lvwhy">${sc && sc.blocks_error
+        ? '查不到（通达信，每日同步）' : blocks.length + ' 个（通达信，每日同步）'}</span></h3>
       ${sc && sc.sw ? `<div style="margin-bottom:6px">申万一级：
-        <a class="chip on" href="${sectorHref(sc.sw.code, 'sw')}">${esc(sc.sw.name)}</a></div>` : ''}
+        <a class="chip on" href="${sectorHref(sc.sw.code, 'sw', 'mem')}">${esc(sc.sw.name)}</a></div>` : ''}
       ${blocks.length ? blocks.map(x =>
-        `<a class="chip" href="${sectorHref(x.code, x.kind)}"
+        `<a class="chip" href="${sectorHref(x.code, x.kind, 'mem')}"
            title="${esc(x.kind_name)}　${x.n} 只成分">${esc(x.name)}
            <span class="lvwhy">${x.n}</span></a>`).join('')
-        : (naNote(sc) || '<div class="none">没有板块归属</div>')}
+        : (sc && sc.blocks_error
+            ? `<div class="lvmsg bad">${esc(sc.blocks_error)}</div>`
+            : (naNote(sc) || '<div class="none">没有板块归属</div>'))}
       <div class="lvwhy" style="margin-top:6px">
         🔴 用的是 <code>tdx.db</code> 的板块（每日同步 + PIT 快照），
         <b>不是</b> <code>raw/hf/</code> 那份同花顺概念 —— 后者
