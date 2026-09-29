@@ -9537,11 +9537,15 @@ def t_pb_health_gate():
       -> 出了一版【卖 8 买 8】的假信号。**每一栏都填得好好的**，
       是人看出"大面积调仓"才查出来的。
 
-    🔴 阈值不是拍的：面板每日该占比，2022~2026 五年最大 **4.39%**（2022），
-      近三年不超过 1.6%；事故当时 **69.6%**。取 10%，两头都不贴边。
-    🔴 判据钉在**后果**（pb 有多少票算不出来），不钉"净资产回退了多少行"
-      —— 后者换个实现就绕过去了。
-    ★ 「未知不是缺」：读不到面板时**不拦**，否则一次读文件失败就让实盘
+    🔴🔴 **判据是「比自己近期基线跳高多少」，不是绝对占比。**
+      第一版用绝对阈值 10%，当场把 ETF 轮动（a3/a4/a5）全拦死了 ——
+      ETF 面板里 pb 是 2120/2120 全空（ETF 本来就没有市净率），
+      100% > 10%。判据比要证的事宽，就会拦住它本不该管的东西。
+      更糟的是拦截动作：清空 `sells/buys` 之后目标持仓也成了空，
+      模拟盘把「目标为空」读成「清仓」，2026-09-29 开盘真的把
+      a3/a4/a5 清了仓（14 笔成交）。**这条用例的存在就是为了钉住
+      那个形状不再出现。**
+    ★ 「未知不是缺」：读不到面板时不拦，否则一次读文件失败就让实盘
       再也出不了信号。
     """
     import importlib
@@ -9550,43 +9554,77 @@ def t_pb_health_gate():
     importlib.reload(_sig)
 
     class _Feed(object):
-        """只实现 `query` —— 闸就是从这一个通道拿数的。"""
+        """只实现 `query` —— 闸就是从这一个通道拿数的。
 
-        def __init__(self, n, bad, boom=False):
-            self.n, self.bad, self.boom = n, bad, boom
+        `days` = [(n, bad), ...]，第 0 个是决策日，其余是它之前的日子。
+        """
+
+        def __init__(self, days, boom=False):
+            self.days, self.boom = days, boom
 
         def query(self, sql, **kw):
             import pandas as pd
             if self.boom:
                 raise RuntimeError('面板读不到')
-            return pd.DataFrame({'n': [self.n], 'bad': [self.bad]})
+            return pd.DataFrame({
+                'date': list(range(len(self.days))),
+                'n': [d[0] for d in self.days],
+                'bad': [d[1] for d in self.days]})
 
     day = '2026-09-28'
-    # ---- ① 正常水平（1.2%，与 2026 年实测中位一致）-> 不拦 ----
-    pct, n, bad = _sig.pb_health(_Feed(5206, 62), day)
-    assert n == 5206 and bad == 62 and abs(pct - 1.19) < 0.05, (pct, n, bad)
-    assert pct <= _sig.PB_NULL_MAX_PCT, '正常水平被判成异常，实盘会再也出不了信号'
+    # 🔴 构造要有**真实波动**：全都一模一样的话，阈值收紧到 0.1 也抓不到，
+    #   中位与均值也分不出来（变异 M3 / M4 实测都从这个缺口漏过）。
+    #   这一串取自 2026 年面板实测的区间（中位 1.19%，最大 1.56%）。
+    _wave = [(5206, int(5206 * p / 100.0)) for p in
+             (1.19, 0.95, 1.42, 1.05, 1.56, 0.88, 1.30, 1.12, 1.48, 0.92) * 4]
 
-    # ---- ② 🔴 事故当时的比例（69.6%）-> 必须超阈值 ----
-    pct, _n, _b = _sig.pb_health(_Feed(5206, 3621), day)
+    def _verdict(days):
+        """**问产品要判定**，不在用例里重算一遍比较式。
+
+        第一版就是自己算 `pct - base <= 阈值`，于是把调用点改回绝对阈值
+        （变异 M1）时用例毫无感觉 —— 而那正是把 a3/a4/a5 清仓的形状。
+        """
+        pct, base, n, bad = _sig.pb_health(_Feed(days), day)
+        return _sig.pb_block_reason(day, pct, base, n, bad), pct, base
+
+    # ---- ① 正常波动 -> 放行（反向自证：否则"全拦"也算过）----
+    #   🔴 今日取**实测最大那天**（1.56%，2026 年的上限），跳约 0.4pp。
+    #   拿中位当今日的话跳几乎是 0，阈值收到 0.1 也抓不到（变异 M3 漏过）。
+    r, pct, base = _verdict([(5206, int(5206 * 1.56 / 100.0))] + _wave)
+    assert abs(pct - 1.56) < 0.05 and abs(base - 1.155) < 0.05, (pct, base)
+    assert pct - base > 0.3, '构造不对：正常日的跳变只有 %.2fpp，测不出阈值松紧' % (pct - base)
+    assert r is None, '🔴 正常波动（跳 %.2fpp）被拦住了，实盘会出不了信号：%s' % (pct - base, r)
+
+    # ---- ② 🔴 事故当天：今日 69.6% / 基线约 1.2% -> 必须拦 ----
+    r, pct, base = _verdict([(5206, 3621)] + _wave)
     assert abs(pct - 69.55) < 0.1, pct
-    assert pct > _sig.PB_NULL_MAX_PCT, (
-        '🔴 事故当时 %.1f%% 都没超过上限 %.1f%% —— 这道闸拦不住它'
-        % (pct, _sig.PB_NULL_MAX_PCT))
+    assert r and '69.6' in r and '跳高' in r, (
+        '🔴 事故当天跳高 %.1f 个百分点没被拦：%r' % (pct - base, r))
 
-    # ---- ③ 历史最大值（2022 年的 4.39%）不许被误拦 ----
-    pct, _n, _b = _sig.pb_health(_Feed(10000, 439), day)
-    assert pct <= _sig.PB_NULL_MAX_PCT, (
-        '🔴 2022 年的历史最大 %.2f%% 会被拦下 —— 那几年的信号全出不来' % pct)
+    # ---- ③ 🔴🔴 ETF 面板：pb 恒为空、但**没有跳变** -> 绝不许拦 ----
+    r, pct, base = _verdict([(2120, 2120)] * 40)
+    assert abs(pct - 100.0) < 1e-6 and abs(base - 100.0) < 1e-6, (pct, base)
+    assert r is None, (
+        '🔴 ETF 面板（pb 恒为空）被拦住了 —— 第一版用绝对阈值就是这么把 '
+        'a3/a4/a5 在 2026-09-29 开盘清了仓的（14 笔成交）')
 
-    # ---- ④ 「未知不是缺」：读不到就放行 ----
-    assert _sig.pb_health(_Feed(0, 0, boom=True), day) == (None, 0, 0)
-    assert _sig.pb_health(_Feed(0, 0), day) == (None, 0, 0), \
-        '面板 0 行时应返回 None（不猜），而不是 0%%'
+    # ---- ④ 🔴 基线要用**中位**，不能被一天的异常拖走 ----
+    #   构造：基线里混进一天 60%。中位仍约 1.2%，均值会被拖到约 2.7%。
+    #   今日 12% 时：按中位跳 10.8 > 10 要拦；按均值跳 9.3 < 10 就漏了。
+    _out = [(5206, int(5206 * 0.60))] + _wave
+    r, pct, base = _verdict([(5206, int(5206 * 0.12))] + _out)
+    assert base < 3.0, '🔴 基线被那一天的异常拖走了（%.2f%%）—— 用中位不是均值' % base
+    assert r, '🔴 今日 12%% 对基线 %.2f%% 跳高 %.1f，没拦住' % (base, pct - base)
 
-    # ---- ⑤ 🔴 闸**真的接在**出信号那条路上（走 ast，不查字符串）----
-    #   只验 `pb_health` 的话，算出来却没人用也照样全绿 —— 那正是
-    #   2026-09-28 的原样（新鲜度打了"没跑成功"，汇总照写"成功"）。
+    # ---- ⑤ 「未知不是缺」：读不到 / 只有一天 -> 都放行 ----
+    assert _sig.pb_health(_Feed([], boom=True), day) == (None, None, 0, 0)
+    assert _sig.pb_health(_Feed([]), day) == (None, None, 0, 0)
+    _p, _b2, _n2, _bad2 = _sig.pb_health(_Feed([(5206, 3621)]), day)
+    assert _b2 is None, '只有一天就判不了跳变，基线必须是 None（不猜）：%r' % _b2
+    assert _sig.pb_block_reason(day, _p, _b2, _n2, _bad2) is None, \
+        '🔴 基线拿不到时拦住了 —— 一次读文件失败就让实盘再也出不了信号'
+
+    # ---- ⑥ 🔴 闸**真的接在**出信号那条路上，且【不许清空持仓目标】----
     import ast
     import io
     src = io.open(os.path.join(REPO, 'assay/lv/sig.py'), encoding='utf-8').read()
@@ -9595,10 +9633,15 @@ def t_pb_health_gate():
                and any(isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
                        and x.func.id == 'pb_health' for x in ast.walk(n))), None)
     assert fn is not None, '🔴 没有任何函数调用 pb_health —— 闸是悬空的'
+    # 🔴 光调 `pb_health` 不算 —— 把 `blocked = pb_block_reason(...)` 换成
+    #   `blocked = None`，`pb_health` 那行还在，闸却已经摘掉了（变异 M7 漏过）。
+    _calls = [x.func.id for x in ast.walk(fn)
+              if isinstance(x, ast.Call) and isinstance(x.func, ast.Name)]
+    assert 'pb_block_reason' in _calls, (
+        '🔴 出信号那条路没调 pb_block_reason —— 判定被绕过了，闸是摆设')
     names = [x.id for x in ast.walk(fn) if isinstance(x, ast.Name)]
     for _v in ('buys', 'sells', 'blocked'):
         assert names.count(_v) >= 1, '闸所在的函数里没提到 %r' % _v
-    # 清单必须被**清空**，不是只加一句警告
     assign = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Tuple) for t in n.targets)]
     tgt = [[e.id for e in t.elts if isinstance(e, ast.Name)]
@@ -9607,5 +9650,5 @@ def t_pb_health_gate():
         '🔴 超阈值时没有把 buys/sells 清空 —— 一份看着正常、其实是坏数据'
         '算出来的清单，比没有清单更危险')
 
-    return ('正常 1.19%% 放行 · 事故 69.6%% 拦下 · 历史最大 4.39%% 不误拦 · '
-            '读不到不拦（未知不是缺）· 闸确实接在出信号那条路上并清空清单')
+    return ('正常不拦 · 事故跳 68.4pp 拦下 · ETF 恒空不拦（钉住 09-29 那次'
+            '误清仓）· 读不到/只有一天不拦 · 闸确实接在出信号那条路上')

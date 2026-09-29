@@ -24,41 +24,78 @@ from assay import paths as _paths   # datalake 根 / 面板读法的唯一解析
 
 
 
-# 🔴🔴 决策日面板里【pb 算不出来】的票占比上限。超了就不出信号。
+# 🔴🔴 决策日面板里【pb 算不出来】的占比，比自己近期基线跳高多少就不出信号。
 #
 #   2026-09-28 实测事故：聚宽增量抽取漏了 `indicator`（净资产的来源），
-#   三大报表补到了 2026 中报而它还停在 8-24 那一版，面板取净资产是
-#   `(code, report_date)` 严格相等 -> 3622 只配不上 -> `equities` 为 NULL
-#   -> `pb` 为 NULL -> froec 的 `base` 里 `pb > 0` 把它们整片剔掉 ->
-#   候选池从 3273 塌到 1097 -> 当晚出了一版【卖 8 买 8】的假信号。
-#   全程零报错，是人看出"大面积调仓"才查出来的。
+#   面板 3622 只票的 pb 变 NULL -> froec 的 `base` 里 `pb > 0` 把它们整片
+#   剔掉 -> 候选池从 3273 塌到 1097 -> 出了一版「卖 8 买 8」的假信号。
+#   全程零报错，是人看出「大面积调仓」才查出来的。
 #
-# ★ **阈值是量出来的**：面板每日该占比，2022~2026 五年的**最大值 4.39%**
-#   （2022），近三年不超过 1.6%；而事故当时是 **69.6%**。取 10% ——
-#   比历史最大高一倍有余，比事故低得多，两头都不贴边。
-# ★ 判据钉在**后果**（pb 有多少票算不出来），不钉"净资产回退了多少行" ——
-#   后者换个实现就绕过去了，而前者正是候选池塌掉的直接原因。
-PB_NULL_MAX_PCT = 10.0
+# ★ **判据是「比自己昨天塌了多少」，不是绝对占比**。第一版用绝对阈值
+#   10%，当场把 ETF 轮动（a3/a4/a5）全拦死了 —— ETF 面板里 pb 是
+#   2120/2120 全空（ETF 本来就没有市净率），100% > 10%。
+#   判据比要证的事宽，就会拦住它本不该管的东西。
+#   自校准的写法对三种情形都对：
+#     · 股票面板正常     今日 1.2% / 基线 1.2%  -> 跳 0.0  放行
+#     · 股票面板塌了     今日 69.6% / 基线 1.2% -> 跳 68.4 拦住
+#     · ETF 面板         今日 100% / 基线 100%  -> 跳 0.0  放行
+# ★ 基线取**前 N 个有数据日的中位**（不含当日）：用中位而不是均值，
+#   免得基线被一两天的异常拖走；持续塌掉要 N/2 天以上才会毒化基线。
+PB_NULL_JUMP_PCT = 10.0     # 跳高超过这么多个百分点就拦
+PB_BASE_DAYS = 60           # 基线回看多少个有数据的日子
 
 
-def pb_health(feed, day):
-    """决策日面板的 pb 可算率 -> (占比%, 总行数, 算不出来的行数)。
+def pb_health(feed, day, lookback=PB_BASE_DAYS):
+    """-> (今日 bad%, 基线 bad%, 今日总行数, 今日 bad 行数)。
 
-    读不到就返回 (None, 0, 0) —— **未知不是缺**，拿不到判据时不拦
+    读不到就 (None, None, 0, 0) —— **未知不是缺**，拿不到判据时不拦
     （一次读文件失败不该让实盘从此再也出不了信号）。
     """
     try:
         df = feed.query(
-            "SELECT count(*) AS n,"
+            "SELECT date, count(*) AS n,"
             " sum(CASE WHEN pb IS NULL OR pb <= 0 THEN 1 ELSE 0 END) AS bad"
-            " FROM {panel} WHERE date = DATE '%s'" % day)
-        n = int(df['n'][0])
-        bad = int(df['bad'][0] or 0)
-        if n <= 0:
-            return None, 0, 0
-        return 100.0 * bad / n, n, bad
+            " FROM {panel} WHERE date <= DATE '%s'"
+            " GROUP BY date ORDER BY date DESC LIMIT %d" % (day, lookback + 1))
     except Exception:                                       # noqa: BLE001
-        return None, 0, 0
+        return None, None, 0, 0
+    if df is None or len(df) == 0:
+        return None, None, 0, 0
+    pct = [100.0 * int(b) / int(n) for n, b in zip(df['n'], df['bad']) if int(n) > 0]
+    if not pct:
+        return None, None, 0, 0
+    n0, b0 = int(df['n'][0]), int(df['bad'][0])
+    if n0 <= 0:
+        return None, None, 0, 0
+    today = 100.0 * b0 / n0
+    prev = sorted(pct[1:])
+    if not prev:
+        return today, None, n0, b0       # 只有一天，判不了跳变 -> 不拦
+    base = prev[len(prev) // 2] if len(prev) % 2 else \
+        0.5 * (prev[len(prev) // 2 - 1] + prev[len(prev) // 2])
+    return today, base, n0, b0
+
+def pb_block_reason(day, pct, base, n, bad):
+    """该不该因为 pb 塌了而不出信号 -> 理由（None = 放行）。
+
+    🔴 **判定只有这一份**：出信号那条路与守卫都调它。第一版把判定写在
+      调用点、而守卫在自己那边重算了一遍同样的比较 —— 于是把调用点的
+      条件改回"绝对阈值"，守卫**一点感觉都没有**（变异 M1 实测漏过），
+      而那正是 2026-09-29 开盘把 a3/a4/a5 清仓的那个形状。
+    ★ 拿不到 `base`（只有一天、或读不到面板）一律放行：「未知不是缺」。
+    """
+    if pct is None or base is None:
+        return None
+    if pct - base <= PB_NULL_JUMP_PCT:
+        return None
+    return ('决策日 %s 的面板里有 %d/%d（%.1f%%）只票算不出 pb，'
+            '而前 %d 个交易日的基线是 %.1f%% —— 跳高 %.1f 个百分点，'
+            '超过上限 %.1f。候选池会整片塌掉，这一版清单不作数。'
+            '多半是净资产（raw/jq/financials/indicator.parquet）'
+            '落后于三大报表：看数据页「财务指标(年度)」那一行，'
+            '去聚宽重抽一次增量即可。'
+            % (day, bad, n, pct, PB_BASE_DAYS, base, pct - base,
+               PB_NULL_JUMP_PCT))
 
 def _load_snapshot(aid, sha):
     """从版本快照加载策略模块。**不读磁盘当前文件** ——
@@ -488,16 +525,9 @@ def build_signal(aid, datalake=None, asof=None, code_sha=None, params=None):
     #   （2026-09-28 那版「卖 8 买 8」每一栏都填得好好的）。
     # ★ 与「同步有失败就不出信号」同一条纪律：宁可没有信号，
     #   也不要用半截数据算出来的信号。
-    _pb_pct, _pb_n, _pb_bad = pb_health(feed, t1)
-    blocked = None
-    if _pb_pct is not None and _pb_pct > PB_NULL_MAX_PCT:
-        blocked = ('决策日 %s 的面板里有 %d/%d（%.1f%%）只票算不出 pb，'
-                   '超过上限 %.1f%%（2022~2026 历年最大 4.39%%）—— '
-                   '候选池会整片塌掉，这一版清单不作数。'
-                   '多半是净资产（raw/jq/financials/indicator.parquet）'
-                   '落后于三大报表：看数据页「财务指标(年度)」那一行，'
-                   '去聚宽重抽一次增量即可。'
-                   % (t1, _pb_bad, _pb_n, _pb_pct, PB_NULL_MAX_PCT))
+    _pb_pct, _pb_base, _pb_n, _pb_bad = pb_health(feed, t1)
+    blocked = pb_block_reason(t1, _pb_pct, _pb_base, _pb_n, _pb_bad)
+    if blocked:
         warn.insert(0, '🔴 ' + blocked)
         # ★ 清空清单而不是照发 —— 「点了没反应的按钮比不给更糟」的反面：
         #   一份看着正常、其实是坏数据算出来的清单，比没有清单更危险。
