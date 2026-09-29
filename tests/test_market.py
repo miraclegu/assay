@@ -1543,6 +1543,17 @@ def t_sector_drill():
             end = pg.locator('.secend').first.inner_text()
             assert str(n_api) in end and '到底' in end, \
                 '表尾没写明「共 N 个，到底了」：%r' % end
+            #   🔴 2026-09-29 去掉了最右侧那列「下钻 ›」—— 点名称就能到下一级，
+            #     同一件事两个入口只是占一列宽度（用户原话：没有意义）。
+            #     ★ 去了之后**必须仍然点得下去**，否则就是把入口删没了
+            #       （「看不出能点的入口 = 没有入口」的反面：别把唯一的入口
+            #        当成多余的那个删掉）。下面 ② 会真的点一次。
+            assert pg.locator('#secmain a.pick.chip').count() == 0, \
+                '最右侧的「下钻 ›」列还在 —— 它和名称链接是同一件事'
+            _nth = pg.locator('#secmain thead th').count()
+            _ntd = pg.locator('#secmain tbody tr').first.locator('td').count()
+            assert _nth == _ntd, \
+                '表头 %d 列、数据行 %d 格 —— 删列时漏了一边' % (_nth, _ntd)
             # 表头要吸顶，否则滚到第 30 行时"这列是加权还是等权"没法回答
             st = pg.evaluate("() => getComputedStyle("
                              "document.querySelector('.secscroll thead th')).position")
@@ -1575,7 +1586,7 @@ def t_sector_drill():
                  '变成侧栏之后信息密度要降下来' % cols)
 
             # ---- ④ 层级：申万一级 -> 二级排行 -> 三级；切页签看成分 ----
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert '下属' in h3, '申万一级该先出下属二级排行：%s' % h3
             crumb = pg.locator('.seccrumb a').all_inner_texts()
             assert len(crumb) == 2 and crumb[0] == '全部板块', \
@@ -1584,13 +1595,44 @@ def t_sector_drill():
             try:
                 pg.wait_for_function(
                     "() => { const h = document.querySelector('#secmain h3');"
-                    " return h && h.innerText.split('\\n')[0].indexOf('成分') >= 0; }",
+                    # 🔴 排版改成「按钮在左、标题在右」之后，h3 的第一行是页签
+                    #   文案（里面就有「成分股」三个字）—— 按第一行判会**永远
+                    #   为真**，等于没等。改成看标题那一段：「… 成分 N 只」。
+                    " return h && /成分\\s+\\d+\\s*只/.test(h.innerText); }",
                     timeout=20000)
             except Exception:                               # noqa: BLE001
                 raise AssertionError(
                     '点了「成分股」页签，右栏标题仍是 %r —— 页签没生效'
-                    % pg.locator('#secmain h3').first.inner_text().split('\n')[0])
+                    % pg.locator('#secmain h3').first.inner_text().replace('\n', ' '))
             notes.append('申万一级 -> 二级排行 -> 成分股页签')
+
+            # ---- ④b 切页签时按钮**一个像素都不许动** ----
+            #   🔴 2026-09-29 用户：切到「成分股」右边会多出「⚖ 前 6 只去对比」，
+            #     原来的排版是 [标题][弹簧][子行业][成分股]，那个新按钮把两个
+            #     页签整体往左推 —— **页签自己在跳**，而它不报错。
+            #   ★ 判据落在**坐标**上（两次 boundingBox 的 x），不是"按钮还在"。
+            #     按钮一直都在，动的是位置。
+            def _tabx():
+                return [pg.locator('#secmain a.tb').nth(i).bounding_box()['x']
+                        for i in range(pg.locator('#secmain a.tb').count())]
+            x_mem = _tabx()
+            pg.locator('#secmain a.tb[data-t="sub"]').click()
+            pg.wait_for_function(
+                "() => { const h = document.querySelector('#secmain h3');"
+                " return h && h.innerText.indexOf('下属') >= 0; }", timeout=20000)
+            pg.wait_for_timeout(500)
+            x_sub = _tabx()
+            assert len(x_mem) == 2 and len(x_sub) == 2, \
+                '页签该是两个（子行业 / 成分股），实得 %d / %d' % (len(x_mem), len(x_sub))
+            _mv = [round(abs(a_ - b_), 1) for a_, b_ in zip(x_mem, x_sub)]
+            assert max(_mv) < 1.0, \
+                ('切页签把按钮挪了位置（位移 %s px）—— 「⚖ 前 6 只去对比」'
+                 '只在成分股页出现，它一出现就把页签推走了。按钮要锚在最左边，'
+                 '弹簧放在它们之后' % _mv)
+            _labels = [t.strip() for t in
+                       pg.locator('#secmain a.tb').all_inner_texts()]
+            assert _labels == ['子行业', '成分股'], \
+                '页签文案不对：%s' % _labels
 
             # ---- ⑤ 表头排序真的改了顺序，且空值沉底 ----
             pg.goto(base + '/sector.html', wait_until='networkidle')
@@ -1621,7 +1663,7 @@ def t_sector_drill():
             pg.wait_for_selector('#secmain tbody tr', timeout=40000)
             pg.locator('#secmain tbody tr').first.locator('a.pick').first.click()
             pg.wait_for_selector('#secside .secitem', timeout=20000)
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert '成分' in h3, '只有一层的板块点了该直接出成分：%s' % h3
             assert pg.locator('#secmain a.tb').count() == 0, \
                 '只有一层的板块不该出层级页签（强行造两层只会多一次空点击）'
@@ -1661,7 +1703,7 @@ def t_sector_drill():
                 raise AssertionError(
                     '带 ?code=%s 进来，页面一个板块都没选中（左边栏没出来）'
                     ' —— 旧入口被静默忽略了' % code)
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert name in h3 and '成分' in h3, \
                 ('旧入口 ?code=%s&tab=mem 没落到「%s 成分」，实得 %r —— '
                  '链接被静默忽略了' % (code, name, h3))
@@ -2706,13 +2748,13 @@ def t_new_pages_ui():
             #     切页签 -> 成分），不是把保护删掉。
             pg.locator('#secmain a.pick').first.click()
             pg.wait_for_timeout(2500)
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert '下属' in h3, '点申万一级该先出下属二级排行：%s' % h3
             assert pg.locator('#secside .secitem.on').count() == 1, \
                 '选中后左边该变成边栏、且当前项高亮'
             pg.locator('#secmain a.tb[data-t="mem"]').click()
             pg.wait_for_timeout(2500)
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert '成分' in h3, '切「成分股」页签没出成分表：%s' % h3
             clean()
             # 切到概念板块
@@ -2735,7 +2777,7 @@ def t_new_pages_ui():
             #     一个空的"子行业"页签（强行造两层只会多一次空点击）
             pg.locator('#secmain a.pick').first.click()
             pg.wait_for_timeout(2500)
-            h3 = pg.locator('#secmain h3').first.inner_text().split('\n')[0]
+            h3 = pg.locator('#secmain h3').first.inner_text().replace('\n', ' ')
             assert '成分' in h3, '点概念板块该直接出成分：%s' % h3
             assert pg.locator('#secmain a.tb').count() == 0, \
                 '只有一层的板块不该出层级页签'

@@ -240,7 +240,7 @@ function full(ls) {
       <thead><tr><th class="tx">板块</th>${th('涨跌幅', 'w_change')}${th('等权', 'avg_change')}
         ${th('中位', 'median_change')}${th('成分', 'n')}
         <th class="rt">涨/跌</th>${th('涨停', 'limit_up')}${th('成交额', 'amount')}
-        <th class="tx">领涨股</th><th class="tx"></th></tr></thead>
+        <th class="tx">领涨股</th></tr></thead>
       <tbody>${rows.map(r => row(r, ls, 0)).join('')}</tbody>
     </table>
     <div class="lvwhy secend">以上共 ${rows.length} 个，到底了。</div>
@@ -260,8 +260,6 @@ function row(r, ls, lv) {
     <td class="rt">${r.limit_up || ''}</td><td class="rt">${yiv(r.amount)}</td>
     <td class="tx">${r.top_code ? cnCell(r.top_code, r.top_name)
       + ` <span style="color:${upc(r.top_change)}">${pctv(r.top_change)}</span>` : ''}</td>
-    <td class="tx"><a href="#" class="pick chip" data-c="${esc(r.code)}" data-lv="${lv}"
-      data-k="${esc(ls.kind)}" data-n="${esc(r.name)}">${ls.has_children ? '下钻 ›' : '看成分 ›'}</a></td>
   </tr>`;
 }
 
@@ -282,13 +280,14 @@ function side(ls, c) {
 /* 右栏 A：下属子行业排行 */
 function sub(ls, c) {
   const rows = sorted(ls.rows || []);
-  return `<div class="lvsec"><h3>${esc(c.name)} 下属${esc(ls.kind_name)}
-    <span class="lvwhy">${rows.length} 个</span>${tabs(c)}</h3>
+  return `<div class="lvsec"><h3>${tabs(c)}<span style="flex:1"></span>
+    ${esc(c.name)} 下属${esc(ls.kind_name)}
+    <span class="lvwhy">${rows.length} 个</span></h3>
     <div class="pw secscroll"><table class="pkt">
       <thead><tr><th class="tx">板块</th>${th('涨跌幅', 'w_change')}${th('等权', 'avg_change')}
         ${th('中位', 'median_change')}${th('成分', 'n')}
         <th class="rt">涨/跌</th>${th('成交额', 'amount')}
-        <th class="tx">领涨股</th><th class="tx"></th></tr></thead>
+        <th class="tx">领涨股</th></tr></thead>
       ${rows.map(r => `<tr>
         <td class="tx"><a href="#" class="pick" data-c="${esc(r.code)}" data-lv="${PATH.length}"
           data-k="${esc(ls.kind)}" data-n="${esc(r.name)}">${esc(r.name)}</a></td>
@@ -301,19 +300,20 @@ function sub(ls, c) {
         <td class="rt">${yiv(r.amount)}</td>
         <td class="tx">${r.top_code ? cnCell(r.top_code, r.top_name)
           + ` <span style="color:${upc(r.top_change)}">${pctv(r.top_change)}</span>` : ''}</td>
-        <td class="tx"><a href="#" class="pick chip" data-c="${esc(r.code)}"
-          data-lv="${PATH.length}" data-k="${esc(ls.kind)}"
-          data-n="${esc(r.name)}">${ls.has_children ? '下钻 ›' : '看成分 ›'}</a></td>
       </tr>`).join('')}
     </table>
     <div class="lvwhy secend">以上共 ${rows.length} 个，到底了。</div>
     </div></div>`;
 }
 
+/* 🔴 **按钮锚在最左边，弹簧在它们之后。**（2026-09-29 用户）
+   原来是 [标题][弹簧][子行业][成分股]，切到「成分股」时右边又多出一个
+   「⚖ 前 6 只去对比」—— 它把两个页签整体往左推，**页签自己在跳**。
+   现在 [按钮…][弹簧][名称|数量]：右边再加多少东西都不动按钮的位置。
+   ★ 名称与数量跟着靠右 —— 它们是"我在看什么"的说明，不是操作。 */
 function tabs(c) {
   if (!drillable(c)) return '';
-  return `<span style="flex:1"></span>
-    <a href="#" class="chip tb${TAB === 'sub' ? ' on' : ''}" data-t="sub">子行业排行</a>
+  return `<a href="#" class="chip tb${TAB === 'sub' ? ' on' : ''}" data-t="sub">子行业</a>
     <a href="#" class="chip tb${TAB === 'mem' ? ' on' : ''}" data-t="mem">成分股</a>`;
 }
 
@@ -322,10 +322,11 @@ function members(mem, c) {
   if (!mem) return '<div class="none">点左边任一板块看成分股</div>';
   if (mem.error) return `<div class="lvmsg bad">${esc(mem.error)}</div>`;
   const rows = mem.rows || [];
-  return `<div class="lvsec"><h3>${esc(mem.name)} 成分
-    <span class="lvwhy">${mem.n} 只${mem.truncated ? ' · 🔴 已截断' : ''}</span>${tabs(c)}
+  return `<div class="lvsec"><h3>${tabs(c)}
     <a class="chip" href="/compare.html?codes=${encodeURIComponent(rows.slice(0,6).map(x=>x.code).join(','))}"
-      title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a></h3>
+      title="把前 6 只拉去对比后复权涨幅">⚖ 前 6 只去对比</a>
+    <span style="flex:1"></span>${esc(mem.name)} 成分
+    <span class="lvwhy">${mem.n} 只${mem.truncated ? ' · 🔴 已截断' : ''}</span></h3>
     <div class="pw secscroll"><table class="pkt">
       <thead><tr><th class="tx"></th><th class="tx">名称</th>
         <th class="rt">现价</th><th class="rt">涨跌</th><th class="rt">换手</th>
