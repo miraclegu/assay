@@ -160,20 +160,46 @@ async function spOpen(code, name, opt){
          所以改图要**当场**改它。 */
     + '  ·  K 线【前复权】看形态 · 成交价与份额【不复权】（对账单口径）';
   document.getElementById('spfull').href = spHref(code);
-  document.getElementById('spkpi').innerHTML = '<span class="spdim">载入中…</span>';
-  document.getElementById('spmine').innerHTML = '';
+  /* 🔴🔴 **只替换内容，不先清空。**（用户 2026-09-29：「点下一只的时候
+     弹窗会先崩一下」）
+     原来这里把 KPI 清成「载入中…」、把「我的成交」清空 —— 于是每跳一只
+     内容**先塌再填**：KPI 那一行从 6 个格子变成 4 个字、成交表整块消失，
+     画布还停在旧图上。人看到的就是"闪一下"。
+     ★ 做法与板块页同一条：**外框与各区块都不重建，等新数据到了再整块换掉**。
+       载入期间保留旧内容，但给 `.spbody` 加一个 `sploading` ——
+       它只改透明度，**不改布局**（所以什么都不动）。
+     🔴 保留旧内容就必须**说清它还不是新的那只**：标题已经换成新票了，
+       身子还是上一只的数 —— 不标出来的话那半秒里两边对不上，
+       而人一定会拿它们互相比（同「两种口径并存，必须分开说」）。
+     ★ 第一次打开时身子本来就是空的，这时给「载入中…」是对的 ——
+       那不是"塌"，那是从无到有。 */
+  const _body = document.querySelector('#spwrap .spbody');
+  const _first = !document.getElementById('spkpi').innerHTML;
+  if(_first) document.getElementById('spkpi').innerHTML =
+    '<span class="spdim">载入中…</span>';
+  if(_body) _body.classList.add('sploading');
   spNsBar();
   spNavBar();
-  await spLoad();
+  try { await spLoad(); }
+  finally { if(_body) _body.classList.remove('sploading'); }
+}
+
+/* 内容真的变了才写 DOM —— 没变就不写，连重排都省掉（同板块页的 setHtml） */
+function spSet(id, html){
+  const e = document.getElementById(id);
+  if(e && e.innerHTML !== html) e.innerHTML = html;
 }
 
 function spNsBar(){
   const el = document.getElementById('spns');
   if(!el) return;
-  el.innerHTML = SP_NS.map(n =>
+  const _h = SP_NS.map(n =>
     `<a href="#" data-n="${n}" class="${n === SP.n ? 'on' : ''}">${n}日</a>`).join('')
     + `<a href="#" data-lg="1" class="${SPLOG ? 'on' : ''}"
         title="对数坐标：等百分比涨幅 = 等高度 —— 线性轴会把低价那一段的波动压平">对数</a>`;
+  /* ★ 相同就不写 —— 跳下一只时这一排（60/120/250 + 对数）几乎总是一样的，
+     照写一遍等于每跳一只把它重建一次，而重建就会闪。 */
+  spSet('spns', _h);
   /* ★ `<a href="#">` 当按钮**必须 preventDefault** —— 不拦的话会把
      location.hash 改成 '#'，在 index.html 上直接触发路由跳回目录页，
      表现是"点了没反应又好像回到了首页"，且没有任何报错。 */

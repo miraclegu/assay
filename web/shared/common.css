@@ -1179,3 +1179,6 @@ body.hasprog{padding-top:28px}
 /* 数字等宽：不然「第 1 / 15」-> 「第 2 / 15」这一下字形宽度就变了，
    居中的这句话会左右抖 1~2px */
 #spwrap .spnav .spdim{font-variant-numeric:tabular-nums}
+/* 载入中：**只改透明度，不改布局** —— 旧内容留在原地（不塌），
+   但明确标出"这还不是标题上那只"。清空重填才是"崩一下"的来源。 */
+#spwrap .spbody.sploading{opacity:.45;transition:opacity .1s}

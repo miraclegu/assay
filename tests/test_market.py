@@ -3304,6 +3304,29 @@ def t_stockpop():
                         ('%s 页算出来该点 data-d=%d，页面上却没有这个按钮 —— '
                          '导航条是 %r，探针说 第 %d / %d 只'
                          % (label, _d, _nav.inner_text(), _pos['i'], _pos['n']))
+                    #   🔴🔴 **翻一只不许"先崩一下"**（用户 2026-09-29）：
+                    #     原来 `spOpen` 每次都把 KPI 清成「载入中…」、把
+                    #     「我的成交」清空，于是内容**先塌再填** ——
+                    #     实测 KPI 从 62px 塌到 17px（7 个格子变 1 个）、
+                    #     成交块 18px 塌到 0。
+                    #   ★ 判据落在**中间态**上：装一个 MutationObserver，
+                    #     把载入期间每一次变化时的格子数与高度都记下来。
+                    #     只看首尾是看不出来的 —— 首尾一直都是对的，
+                    #     塌的是中间那一帧（同「等固定时间会读到半截」的反面：
+                    #     这里要的正是把每一"半截"都抓住）。
+                    pg.evaluate(
+                        "() => { window.__flash = [];"
+                        " const k = document.getElementById('spkpi'),"
+                        "       m = document.getElementById('spmine');"
+                        " const snap = () => window.__flash.push(["
+                        "   k.children.length,"
+                        "   Math.round(k.getBoundingClientRect().height),"
+                        "   Math.round(m.getBoundingClientRect().height)]);"
+                        " snap();"
+                        " window.__mo = new MutationObserver(snap);"
+                        " window.__mo.observe("
+                        "   document.querySelector('#spwrap .spbody'),"
+                        "   {childList: true, subtree: true}); }")
                     _t1 = pg.locator('#sptitle').inner_text()
                     #   ★ 位置钉在**两个槽位**上 —— 到头时按钮换成
                     #     「已是第一只/最后一只」，那个占位符同样带 `.spnb`
@@ -3339,6 +3362,21 @@ def t_stockpop():
                         ('%s 页翻一只之后按钮移了位（位移 %s px）；'
                          '浮层框 %s -> %s；导航条 %s -> %s'
                          % (label, _mv, _box1, _box2, _b1, _b2))
+                    _fl = pg.evaluate(
+                        "() => { if (window.__mo) window.__mo.disconnect();"
+                        " return window.__flash || []; }")
+                    assert len(_fl) >= 2, \
+                        '%s 页翻一只之后 DOM 一次都没变 —— 观察器没装上' % label
+                    _cells = [x[0] for x in _fl]
+                    _mine = [x[2] for x in _fl]
+                    assert min(_cells) >= 2, \
+                        ('%s 页翻一只时 KPI 塌成了 %d 个格子（全程 %s）—— '
+                         '内容被先清空再填，那就是"崩一下"。只替换内容，别先清空'
+                         % (label, min(_cells), _cells))
+                    if _mine[0] > 0:
+                        assert min(_mine) > 0, \
+                            ('%s 页翻一只时「我的成交」被清空过（高度全程 %s）'
+                             % (label, _mine))
                     # 回得去
                     pg.locator('#spnav .spnb[data-d="%d"]' % (-_d)).click()
                     pg.wait_for_function(
