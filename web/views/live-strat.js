@@ -129,6 +129,9 @@ async function openStrat(aid, sha){
         「一段时间用策略 A、之后换 B」不需要新建账户。</div>
     </div>
     <div class="lvsec" style="margin-top:12px;${o._unbound?'display:none':''}">
+      <h3>生效参数 <span class="lvwhy">绑定值 ≠ 实际在跑的值</span></h3>
+      ${paramsBlock(o, v)}</div>
+    <div class="lvsec" style="margin-top:12px;${o._unbound?'display:none':''}">
       <h3>源码快照（${(o.files||[]).join(' + ')}）</h3>
       <pre class="stcode">${esc(o.code||'')}</pre></div>
   </div>`;
@@ -251,3 +254,36 @@ async function openStrat(aid, sha){
      data_asof：两者不等说明信号是用更早的数据算的（该重算了）。
      🔴 不在前端判"落后几个交易日" —— 那要交易日历，而前端硬编码过
      一次判据就误报过一整页假告警。 */
+
+/* 生效参数：绑定值 ≠ 实际在跑的值。
+   🔴 原来这里只在 params 为空时写两个字「默认」—— 而"默认"是什么一个字
+     都没说。实测 a2：默认让 stop_loss 从 0.35 变成 0（止损关闭）、
+     lu_since_start 从 1 变成 0（涨停回溯跨到建仓日之前），20 个交易日后
+     与同参对照组差 2.00pp，**而页面上看不出来**。
+   ★ 拿不到（还没算过信号）要说「查不到」，不是装作"没有走默认的"。 */
+function paramsBlock(o, v) {
+  const bound = v.params || {};
+  const eff = o.params_effective, dflt = o.params_defaulted;
+  const nb = Object.keys(bound).length;
+  if (!eff) {
+    return `<div class="lvwhy" style="margin:6px 0">绑定值 ${nb ? nb + ' 个' : '空（走策略默认）'}
+      · <b>生效值查不到</b> —— 这个账户还没算过信号（生效值由引擎在算信号时给出）。</div>`;
+  }
+  const keys = Object.keys(eff).sort();
+  const nd = (dflt || []).length;
+  return `<div class="lvwhy" style="margin:6px 0">
+      绑定 <b>${nb}</b> 个，实际生效 <b>${keys.length}</b> 个，其中
+      <b style="color:${nd ? 'var(--up)' : 'inherit'}">${nd}</b> 个走策略默认。
+      ${nd ? '走默认的那些标了 <span class="lvkv lvdflt">默认</span> —— 默认值与别的账户显式绑的可能差很远。' : ''}
+    </div>
+    <div class="pw" style="max-height:220px;overflow:auto"><table class="pkt">
+      <tr><th class="tx">参数</th><th class="rt">生效值</th><th class="tx">来源</th></tr>
+      ${keys.map(k => {
+        const isd = (dflt || []).indexOf(k) >= 0;
+        return `<tr><td class="tx">${esc(k)}</td>
+          <td class="rt"><b>${esc(String(eff[k]))}</b></td>
+          <td class="tx">${isd ? '<span class="lvkv lvdflt">策略默认</span>'
+            : '<span class="lvkv">绑定 ' + esc(String(bound[k])) + '</span>'}</td></tr>`;
+      }).join('')}
+    </table></div>`;
+}

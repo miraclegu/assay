@@ -1154,3 +1154,5 @@ body.hasprog{padding-top:28px}
 }
 /* 整表跟着视口滚时，列名滚出屏幕就没法回答"这一列是加权还是等权" */
 .secscroll thead th{position:sticky;top:0;z-index:2;background:var(--panel)}
+/* 走策略默认的参数：与显式绑定的区分开 —— 「默认」两个字看不出危险 */
+.lvkv.lvdflt{background:var(--panel2);color:var(--up);border:1px dashed var(--line)}

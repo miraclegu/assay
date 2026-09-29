@@ -574,6 +574,28 @@ def api_live_strategy(q):
                'main_sha256': main_sha,
                'params_declared': _parse_params(code),
                'note': _parse_note(code)[0]}
+        # 🔴🔴 **绑定值 ≠ 生效值** —— 同 `fee_default` / `fee_effective` 那一对。
+        #
+        #   2026-09-29 实测：a2 绑的是 `{}`，页面上只写了两个字「默认」。
+        #   而"默认"是什么，页面一个字都没说 —— 实际是
+        #   `stop_loss` 0.35 -> **0（止损关闭）**、`lu_since_start` 1 -> 0
+        #   （涨停回溯跨到建仓日之前）。于是 09-08 调仓多卖了两只，
+        #   20 个交易日后与同参对照组差 **2.00pp**，而页面上看不出来。
+        #
+        # 🔴 **生效值不能靠静态解析源码**：`params_declared` 走
+        #   `_parse_params(code)`，只看得到主文件 `initialize` 里那几个 ——
+        #   froec_traded 的 initialize 转调 froec，实测只解析出 3 个，
+        #   **漏掉的正是**上面那四个。解析不到就等于没写，而它不报错。
+        # ★ 取**引擎自己算的那份**：`Engine._declared`（initialize 期间真被
+        #   写过的名字）+ `g` 上的值，由 `lv/explain.py:g_state` 落进信号的
+        #   `explain.params`。同一个口径，不会漂。
+        # ★ 拿不到就给 `None`（查不到），不是 `{}`（真的一个都没有）——
+        #   两者在页面上要说不同的话。
+        _bound = dict(v.get('params') or {})
+        _eff = ((m.latest_signal(aid) or {}).get('explain') or {}).get('params')
+        out['params_effective'] = _eff or None
+        out['params_defaulted'] = (
+            sorted(k for k in _eff if k not in _bound) if _eff else None)
         # 归档里同一主文件版本跑过的回测
         same, other = [], []
         for rid, d in _scan().items():

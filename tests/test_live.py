@@ -9741,6 +9741,101 @@ def t_px_source_rule():
         lv.LIVE = old_live
         shutil.rmtree(tmp, ignore_errors=True)
 
+@case('生效参数：绑定值 ≠ 实际在跑的值，且静态解析看不全', tag='fast')
+def t_params_effective():
+    """🔴🔴 2026-09-29 实测事故：a2 绑的是 `{}`，页面上只写两个字「默认」。
+
+    而"默认"是什么，页面一个字都没说 —— 实际是 `stop_loss` 0.35 -> **0
+    （止损关闭）**、`lu_since_start` 1 -> 0（涨停回溯跨到建仓日之前）。
+    于是 09-08 调仓多卖了两只，20 个交易日后与同参对照组差 **2.00pp**，
+    而账户页上看不出来。
+
+    🔴 **生效值不能靠静态解析源码**：froec_traded 的 `initialize` 转调
+      froec，`_parse_params(froec_traded.py)` 只看得到 3 个 —— 漏掉的
+      正是上面那四个。解析不到就等于没写，而它不报错。
+      这条用例**先把这个缺口量出来**，否则"用引擎那份"这个决定就没有依据。
+    """
+    import io
+    import os
+
+    from assay.srv import live as sl
+    from assay.srv.base import _parse_params
+
+    # ---- ① 静态解析确实看不全（这是整个功能存在的理由）----
+    base = os.path.join(REPO, 'strategies', '小市值')
+    ft = os.path.join(base, 'froec_traded.py')
+    fb = os.path.join(base, 'froec.py')
+    if not (os.path.isfile(ft) and os.path.isfile(fb)):
+        return '跳过（策略文件不在）'
+    st = {p['name'] for p in _parse_params(io.open(ft, encoding='utf-8').read())}
+    sb = {p['name'] for p in _parse_params(io.open(fb, encoding='utf-8').read())}
+    DANGER = {'stop_loss', 'lu_since_start', 'lu_buy_only', 'stop_intraday'}
+    assert DANGER & sb == DANGER, \
+        '这四个参数该声明在 froec.py 里，实得 %s' % sorted(DANGER & sb)
+    assert not (DANGER & st), \
+        ('froec_traded.py 自己也声明了 %s —— 那这条用例要钉的缺口就不存在了，'
+         '判据作废，得重新想（别留一条测不到东西的断言）' % sorted(DANGER & st))
+    assert len(st) < len(sb), \
+        '主文件解析出 %d 个、基类 %d 个 —— 缺口没了' % (len(st), len(sb))
+
+    # ---- ② 端点：绑定 {} 时，生效值要全量给出、且全部标成走默认 ----
+    #   打桩两个数据源，不依赖生产账户当时的状态（那会让判据跟着账本漂）
+    EFF = {'stop_loss': 0.0, 'lu_since_start': 0, 'weekday': 2, 'stock_num': 10}
+    m = sl._live()
+    keep = (m.latest_signal, m._version_row, m.version_code, m._main_sha)
+    try:
+        m.latest_signal = lambda aid: {'explain': {'params': dict(EFF)}}
+        m.version_code = lambda *a, **k: ('', 'deadbeef', ['x.py'])
+        m._main_sha = lambda *a, **k: 'deadbeef'
+
+        m._version_row = lambda aid, sha: {'code_sha256': 'deadbeef', 'params': {}}
+        r = sl.api_live_strategy({'id': 'zz'})
+        assert r.get('params_effective') == EFF, \
+            '生效值没给全：%r' % r.get('params_effective')
+        assert r.get('params_defaulted') == sorted(EFF), \
+            ('绑定是空的，%d 个参数**全部**都该标成走默认，实得 %r'
+             % (len(EFF), r.get('params_defaulted')))
+
+        # ---- ③ 显式绑过的那些**不许**标成走默认 ----
+        m._version_row = lambda aid, sha: {
+            'code_sha256': 'deadbeef', 'params': {'stop_loss': 0.35, 'weekday': 2}}
+        r = sl.api_live_strategy({'id': 'zz'})
+        assert r.get('params_defaulted') == ['lu_since_start', 'stock_num'], \
+            ('绑过的不该算走默认，实得 %r' % r.get('params_defaulted'))
+
+        # ---- ④ 拿不到要给 None（查不到），不是 {}（真的一个都没有）----
+        m.latest_signal = lambda aid: None
+        r = sl.api_live_strategy({'id': 'zz'})
+        assert r.get('params_effective') is None \
+            and r.get('params_defaulted') is None, \
+            ('还没算过信号时该给 None（查不到），实得 effective=%r defaulted=%r'
+             ' —— 给 {} / [] 的话页面会说成"没有走默认的"，那是编的'
+             % (r.get('params_effective'), r.get('params_defaulted')))
+    finally:
+        (m.latest_signal, m._version_row, m.version_code, m._main_sha) = keep
+
+    # ---- ⑤ 页面真把它渲染出来（不是只在接口里躺着）----
+    js = io.open(os.path.join(REPO, 'web', 'views', 'live-strat.js'),
+                 encoding='utf-8').read()
+    code = '\n'.join(l for l in js.split('\n') if not l.strip().startswith('//'))
+    for must in ('params_effective', 'params_defaulted'):
+        assert must in code, '页面没用上 %s' % must
+    #   🔴 钉**调用**，不是钉名字出现过 —— `'paramsBlock(o, v)' in code`
+    #     会命中 `function paramsBlock(o, v) {` 这个**定义本身**，
+    #     于是把调用点删掉照样绿（2026-09-29 变异 E5 就是这么漏网的）。
+    #     同「断言查字符串会命中自己写的注释」：判据要落在可证的事实上。
+    import re as _re
+    _def = len(_re.findall(r'function\s+paramsBlock\s*\(', code))
+    _call = len(_re.findall(r'\$\{\s*paramsBlock\s*\(', code))
+    assert _def == 1, 'paramsBlock 该只有一个定义，实得 %d' % _def
+    assert _call >= 1, \
+        ('paramsBlock 定义了却没在模板里调用（定义 %d 处、调用 %d 处）'
+         ' —— 生效参数块不会出现在页面上，而它不报错' % (_def, _call))
+    return ('静态解析缺口：主文件 %d 个 / 基类 %d 个，四个危险参数全在基类里；'
+            '绑定 {} -> %d 个全标走默认；绑过 2 个 -> 只剩 2 个走默认；'
+            '没信号时给 None 不是 {}；页面调了 paramsBlock'
+            % (len(st), len(sb), len(EFF)))
+
 @case('交易时段默认不覆盖已发布的待办（盘中只算不写）', tag='fast')
 def t_session_write_guard():
     """2026-09-29 实测：我在盘中（09:06 / 09:55 / 11:11）反复重算，把用户
