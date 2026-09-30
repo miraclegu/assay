@@ -104,24 +104,37 @@ function lineChart(el,series,opt){
       if(iMin<0||v<s.v[iMin]) iMin=i; }
     if(iLast<0) return '';
     const want=[];
-    const add=(i,tag,pos)=>{ if(i<0) return;
-      if(want.some(w=>w.i===i)){ /* 同一个点身兼两职：合并标签，别叠着画 */
-        const w=want.find(w=>w.i===i); if(w.tag.indexOf(tag)<0) w.tag+='/'+tag; return; }
-      want.push({i:i,tag:tag,pos:pos}); };
-    add(iMax,'最高','up'); add(iMin,'最低','dn'); add(iLast,'当前','now');
+    /* 🔴 **只给百分比，不写「最高/最低/当前」**（用户 2026-09-30 第二轮：
+       「上面的最高、最低、当前这些字去掉，只需要一个百分比。风格要简约」）。
+       位置本身已经说清是哪个：顶上那个是最高、底下那个是最低、最右那个是
+       当前 —— 再写一遍字是重复，而三处各两个汉字压在曲线上就成了噪声。
+       ★ 同一个点身兼两职时只画一次（不叠着画）。 */
+    /* ★ 方向是**意图**不是标签：最高点的数往上放、最低点往下放 ——
+       不给意图的话"离上边太近就翻下面"这条会在**最高点**把它翻到曲线
+       下面去，正好压在线上（实测第一版就是这样）。 */
+    const add=(i,dir)=>{ if(i<0||want.some(w=>w.i===i)) return; want.push({i:i,d:dir}); };
+    add(iMax,'up'); add(iMin,'dn'); add(iLast,'up');
     return want.map(w=>{
       const x=X(w.i), y=Y(tf(s.v[w.i])!==undefined?s.v[w.i]:s.v[w.i]);
-      /* 顶/底翻转：离上边 < 18px 就把标签放到点下面，反之放上面 */
-      const above = y > T+18;
-      const ty = above ? y-9 : y+15;
+      /* 按意图放；**只有真的放不下才翻**（放不下 = 会顶出画布）。 */
+      let above = (w.d !== 'dn');
+      if(above && y - 9 < T + 4) above = false;        // 上面塞不下
+      if(!above && y + 15 > H - B - 2) above = true;   // 下面塞不下
+      const ty = above ? y-8 : y+14;
       /* 右边翻转：离右边 < 70px 就右对齐，免得数字被裁掉 */
       const near = x > W-R-70;
       const anchor = near ? 'end' : (w.i===0 ? 'start' : 'middle');
       const tx = Math.max(L+2, Math.min(W-R-2, x));
-      return '<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="3" fill="'+s.c+'"/>'
+      /* 🔴 **读数不跟曲线同色**：同色时它读起来像曲线的一部分，而且
+         在曲线密的地方直接糊在一起。点用曲线色（它标的就是那条线上的点），
+         字用中性色 —— 分工清楚，也不跟基准线抢颜色。
+         ⚠ 字的颜色由 `.mkt` 那条 CSS 管，这里**不写** `fill` ——
+           SVG 里 CSS 优先于 presentation attribute，写了也不生效，
+           而留着会让人以为它在起作用（变异实测：加回内联 fill 毫无变化）。 */
+      return '<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="2.6" '
+        + 'fill="'+s.c+'"/>'
         + '<text class="mkt" x="'+tx.toFixed(1)+'" y="'+ty.toFixed(1)+'" '
-        + 'text-anchor="'+anchor+'" fill="'+s.c+'">'
-        + w.tag+' '+yl(s.v[w.i])+'</text>';
+        + 'text-anchor="'+anchor+'">' + yl(s.v[w.i])+'</text>';
     }).join('');
   }
 

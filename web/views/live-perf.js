@@ -732,6 +732,9 @@ function renderChart(aid){
       + '<span id="lp_bfind"></span>'
       + (LPB.length ? '<a href="#" class="lpb" id="lp_bclr">不比</a>' : '')
       + '</div>';
+    /* 对比指标在折线图**上方** —— 放下面会把折线图与回撤曲线劈开。
+       ★ `lineChart` 会 innerHTML 覆盖 `el`，所以先画图、再把对比块
+         `afterbegin` 插到最前面（顺序上在图之前，代码上在图之后）。 */
     lineChart(el, series,
       /* 🔴 `zero: 1` —— 收益曲线的「0 线」就是**净值 1.0**（成本线）。
          用户 2026-09-30：「中间需要一个细线标出 0 线的位置，以便方便看出
@@ -766,7 +769,13 @@ function renderChart(aid){
          就是**第二份窗口实现**，迟早分叉。所以指标先按全程算，并在标题上
          **把自己的窗口写出来** —— 与上方图的区间不一致时人看得见，
          而不是悄悄拿两个窗口的数放在一起。 */
-    el.insertAdjacentHTML('beforeend', lpCmpRow(LPD, LPS ? lprSpan(LPD.dates) : null));
+    el.insertAdjacentHTML('afterbegin', lpCmpRow(LPD, LPS ? lprSpan(LPD.dates) : null));
+    /* ⓘ 口径：点开才看 —— 常驻一段说明会把图挤下去（同 KPI 的 hlp） */
+    const _ch = el.querySelector('#lpcmph'), _cb = el.querySelector('#lpcmpb');
+    if(_ch && _cb) _ch.onclick = ev => {
+      ev.preventDefault();
+      _cb.style.display = _cb.style.display === 'block' ? 'none' : 'block';
+    };
     /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
     /* 自定义 chip 上那个 × —— 从**清单**里去掉它（不是取消选中）。
@@ -1558,10 +1567,12 @@ async function renderTrips(aid) {
 }
 
 /* 策略 vs 基准的对比指标（用户 2026-09-30）。
-   ★ 只在**选了基准**时出现 —— 没选基准时摆一排"—"等于教人忽略这个位置。
-   ★ 口径由服务端随数一起给（`note`），页面照写不自己编一套：
-     超额是算术差还是几何差、夏普的无风险利率取多少，两种都有人用，
-     而差出来的数不一样。 */
+   🔴 **放在折线图【上方】**（第二轮）：放下面会把折线图和它下面的回撤曲线
+     劈开，两张本来该连着看的图中间横着一块表。
+   🔴 **不用宽表格**：4 列横跨整屏时眼睛要左右扫，而每一行其实只有三个数。
+     改成**窄卡片**（与 KPI 板同一套视觉语言，自动换列）——
+     每格纵向读：口径 -> 超额 -> 两边各是多少，视线距离短。
+   ★ 只在选了基准时出现 —— 没选时摆一排"—"等于教人忽略这个位置。 */
 function lpCmpRow(o, span){
   const m = o.bench_cmp || {};
   /* 当前选中的那一个基准（单选槽 `LPB`；策略曲线那一项没有指数对比） */
@@ -1569,45 +1580,44 @@ function lpCmpRow(o, span){
   const v = k && m[k];
   if(!v) return '';
   const nm = (LPB_META[k] && LPB_META[k].name) || k;
-  const pp = x => x == null ? '—'
-    : '<b style="color:' + upc(x) + '">' + (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + 'pp</b>';
-  const pc2 = x => x == null ? '—' : ((x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%');
-  /* 🔴 回撤是**量值**不是涨跌 —— 带 `+` 读起来像赚了 7.7%（实测第一版
-     印成 `+7.70%`）。正负号只给收益那几行。 */
+  const sgn = x => (x >= 0 ? '+' : '');
+  const pc2 = x => x == null ? '—' : sgn(x) + (x * 100).toFixed(2) + '%';
+  /* 回撤是**量值**不是涨跌 —— 带 + 读起来像赚了 */
   const md = x => x == null ? '—' : (x * 100).toFixed(2) + '%';
   const n2 = x => x == null ? '—' : x.toFixed(2);
-  /* 回撤比：**小于 1 才是回撤更小** —— 只给数字的话方向要人自己想 */
+  /* 一格 = 标签 + 主数（超额/比值）+ 两边各是多少。★ 主数上色，其余中性 */
+  const cell = (label, main, mainCol, sub) =>
+    '<div><div class="k">' + label + '</div>'
+    + '<div class="v"' + (mainCol ? ' style="color:' + mainCol + '"' : '') + '>'
+    + main + '</div><div class="s">' + sub + '</div></div>';
   const rt = v.mdd_ratio;
-  const rtTxt = rt == null ? '—'
-    : '<b style="color:' + (rt < 1 ? 'var(--down)' : 'var(--up)') + '">' + rt.toFixed(2) + '</b>'
-      + '<span class="lvwhy"> ' + (rt < 1 ? '回撤更小' : '回撤更大') + '</span>';
-  return '<div class="lvsec" style="margin:8px 0">'
-    + '<h3>相对 ' + esc(nm) + '<span class="lvwhy">'
-    + esc(v.from || '') + ' ~ ' + esc(v.to || '') + ' · ' + v.n_days + ' 个交易日'
-    + (v.rebased ? ' · 基准前面缺天，已重新定基' : '')
+  const cells = [
+    cell('区间超额', pc2(v.excess).replace('%', 'pp'), upc(v.excess),
+         pc2(v.ret) + ' vs ' + pc2(v.bench_ret)),
+    (v.ann_excess == null ? '' :
+      cell('年化超额', pc2(v.ann_excess).replace('%', 'pp'), upc(v.ann_excess),
+           pc2(v.ann) + ' vs ' + pc2(v.bench_ann))),
+    cell('回撤比', rt == null ? '—' : rt.toFixed(2),
+         rt == null ? '' : (rt < 1 ? 'var(--down)' : 'var(--up)'),
+         md(v.mdd) + ' vs ' + md(v.bench_mdd)
+           + (rt == null ? '' : ' · ' + (rt < 1 ? '更小' : '更大'))),
+    cell('信息比率', n2(v.info_ratio), '',
+         '夏普 ' + n2(v.sharpe) + ' vs ' + n2(v.bench_sharpe)),
+    cell('跑赢天数', v.win_days == null ? '—' : (v.win_days * 100).toFixed(0) + '%', '',
+         v.win_days == null ? '' :
+           Math.round(v.win_days * (v.n_days - 1)) + ' / ' + (v.n_days - 1) + ' 天'),
+  ].join('');
+  const mismatch = span && (span[0] !== v.from || span[1] !== v.to);
+  return '<div class="lpcmp">'
+    + '<div class="lpcmph">相对 <b>' + esc(nm) + '</b>'
+    + '<span class="lvwhy">' + esc(v.from || '') + ' ~ ' + esc(v.to || '')
+    + ' · ' + v.n_days + ' 个交易日'
+    + (v.rebased ? ' · 基准前面缺天，已重新定基' : '') + '</span>'
     /* 上方图选了别的区间时**说出来** —— 两个窗口的数摆在一起而不标，
        就是本项目最怕的那种"看着正常的不一致" */
-    + ((span && (span[0] !== v.from || span[1] !== v.to))
-       ? '</span><span class="warn" style="font-size:11px;margin-left:8px">'
-         + '全程口径 · 与上方图的区间（' + esc(span[0]) + ' ~ ' + esc(span[1]) + '）不同'
-       : '') + '</span></h3>'
-    + '<div class="pw"><table class="pkt"><thead><tr>'
-    + '<th class="tx">口径</th><th class="rt">账户</th><th class="rt">基准</th>'
-    + '<th class="rt">超额 / 比值</th></tr></thead><tbody>'
-    + '<tr><td class="tx">区间收益</td><td class="rt">' + pc2(v.ret) + '</td>'
-    +   '<td class="rt">' + pc2(v.bench_ret) + '</td><td class="rt">' + pp(v.excess) + '</td></tr>'
-    + (v.ann == null ? '' :
-       '<tr><td class="tx">年化</td><td class="rt">' + pc2(v.ann) + '</td>'
-     + '<td class="rt">' + pc2(v.bench_ann) + '</td><td class="rt">' + pp(v.ann_excess) + '</td></tr>')
-    + '<tr><td class="tx">最大回撤</td><td class="rt">' + md(v.mdd) + '</td>'
-    +   '<td class="rt">' + md(v.bench_mdd) + '</td><td class="rt">' + rtTxt + '</td></tr>'
-    + '<tr><td class="tx">夏普</td><td class="rt">' + n2(v.sharpe) + '</td>'
-    +   '<td class="rt">' + n2(v.bench_sharpe) + '</td>'
-    +   '<td class="rt"><span class="lvwhy">信息比率 </span><b>' + n2(v.info_ratio) + '</b></td></tr>'
-    + '<tr><td class="tx">跑赢天数</td><td class="rt" colspan="3">'
-    +   (v.win_days == null ? '—' : (v.win_days * 100).toFixed(0) + '%'
-        + '<span class="lvwhy"> · ' + Math.round(v.win_days * (v.n_days - 1))
-        + ' / ' + (v.n_days - 1) + ' 天日收益高于基准</span>') + '</td></tr>'
-    + '</tbody></table></div>'
-    + '<div class="lvwhy" style="margin-top:4px">' + esc(v.note || '') + '</div></div>';
+    + (mismatch ? '<span class="warn" style="font-size:11px">全程口径 · 与下方图的区间（'
+        + esc(span[0]) + ' ~ ' + esc(span[1]) + '）不同</span>' : '')
+    + '<a href="#" class="hlp" id="lpcmph" title="口径">ⓘ</a>'
+    + '<div class="hlpbox" id="lpcmpb">' + esc(v.note || '') + '</div></div>'
+    + '<div class="kpi" style="margin-bottom:0">' + cells + '</div></div>';
 }

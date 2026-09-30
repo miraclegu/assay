@@ -1183,5 +1183,16 @@ body.hasprog{padding-top:28px}
    但明确标出"这还不是标题上那只"。清空重填才是"崩一下"的来源。 */
 #spwrap .spbody.sploading{opacity:.45;transition:opacity .1s}
 /* 曲线上「最高 / 最低 / 当前」三个读数 —— 比轴标签小半号，不抢曲线 */
-.mkt{font-size:10.5px;font-weight:600;paint-order:stroke;
-  stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
+/* 曲线上的三个读数。🔴 **中性色、不跟曲线同色** —— 同色读起来像曲线的
+   一部分；描边压住底下的网格与曲线，保证在任何背景上都读得清。
+   ★ 只有数字，没有「最高/最低/当前」那几个字：位置本身已经说清是哪个。 */
+.mkt{font-size:10px;font-weight:500;fill:var(--fg);opacity:.75;
+  font-family:"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums;
+  paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}
+/* 策略 vs 基准：窄卡片，不是横跨整屏的 4 列表格（眼睛左右扫太累） */
+.lpcmp{margin:0 0 12px}
+.lpcmph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  font-size:12px;margin:0 0 5px;position:relative}
+.lpcmph .lvwhy{font-size:11px}
+.lpcmp .kpi{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.lpcmp .kpi .v{font-size:16px}

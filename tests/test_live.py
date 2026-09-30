@@ -10094,13 +10094,51 @@ def t_perf_marks_ui():
                 ".map(e => e.textContent)")
             assert len(labs) == 3, \
                 '曲线上该有【最高/最低/当前】三个读数，实得 %d 个：%s' % (len(labs), labs)
-            kinds = ''.join(labs)
-            for w in ('最高', '最低', '当前'):
-                assert w in kinds, '缺「%s」那个读数：%s' % (w, labs)
+            #   🔴 **只给百分比，不写「最高/最低/当前」**（用户 2026-09-30
+            #     第二轮：「这些字去掉，只需要一个百分比。风格要简约」）。
+            #     位置本身已经说清是哪个 —— 再写一遍字是重复，而三处各两个
+            #     汉字压在曲线上就是噪声。原来这条钉的正是那几个字，
+            #     属于被改动作废的断言：要保的东西没变（三个读数要在、
+            #     要带百分比），只是答案里不再有标签。
             import re as _re
             for t in labs:
-                assert _re.search(r'-?\d+(\.\d+)?%', t), \
-                    '读数里没有百分比：%r' % t
+                assert _re.fullmatch(r'\s*[+-]?\d+(\.\d+)?%\s*', t), \
+                    '读数该**只有**一个百分比，实得 %r' % t
+            #   🔴 读数**不许与曲线同色** —— 同色读起来像曲线的一部分，
+            #     曲线密的地方直接糊在一起
+            _cf, _lf = pg.evaluate(
+                "() => [getComputedStyle(document.querySelector('text.mkt')).fill,"
+                " document.querySelector('#lp_chart svg path[stroke]')"
+                ".getAttribute('stroke')]")
+            def _rgb(x):
+                m = _re.findall(r'\d+', x or '')
+                if len(m) >= 3:
+                    return tuple(int(v) for v in m[:3])
+                x = (x or '').lstrip('#')
+                return tuple(int(x[i:i + 2], 16) for i in (0, 2, 4)) if len(x) == 6 else None
+            _a, _b = _rgb(_cf), _rgb(_lf)
+            assert _a and _b, '取不到颜色：%r / %r' % (_cf, _lf)
+            _dist = sum((p - q) ** 2 for p, q in zip(_a, _b)) ** 0.5
+            assert _dist > 60, \
+                ('读数颜色与曲线太近（色距 %.0f，阈值 60）：%s vs %s —— '
+                 '同色时它读起来像曲线的一部分' % (_dist, _cf, _lf))
+            #   ★ 读数与它的点**必须错开**（不压在点上）。
+            #     ⚠ 第一版钉的是"最高在上、最低在下" —— 那是**意图**不是
+            #       不变量：量程窄时最低点下面本来就没地方，规则按设计翻到
+            #       上面，于是判据在没选基准时当场误报（实得 [T,T,T]）。
+            #       判据比要证的事窄，同样会空转/误报。
+            _ov = pg.evaluate(
+                "() => [...document.querySelectorAll('text.mkt')].map(e => {"
+                " const r = e.getBoundingClientRect();"
+                " const c = e.previousElementSibling;"
+                " const cr = c ? c.getBoundingClientRect() : null;"
+                " if (!cr) return null;"
+                " const gap = (r.y > cr.y) ? (r.y - (cr.y + cr.height))"
+                "                          : (cr.y - (r.y + r.height));"
+                " return Math.round(gap); })")
+            assert all(g is not None and g > -2 for g in _ov), \
+                ('读数压在自己的点上（与点的间距 %s px）—— 数字盖住标记，'
+                 '两个都看不清' % _ov)
             #   ★ 读数必须落在**画布里** —— 顶出去的部分 svg 不报错，
             #     只是看不见，而"看不见"与"没标"在屏幕上一模一样
             box = pg.locator('#lp_chart svg').bounding_box()
@@ -10119,16 +10157,35 @@ def t_perf_marks_ui():
 
             # ---- ③ 选个基准 -> 对比表出现，且与 KPI 同源 ----
             pg.locator('a.lpb:has-text("沪深300")').first.click()
-            pg.wait_for_function(
-                "() => [...document.querySelectorAll('h3')]"
-                ".some(h => h.textContent.indexOf('相对') >= 0)", timeout=30000)
+            try:
+                pg.wait_for_selector('.lpcmp', timeout=30000)
+            except Exception:                               # noqa: BLE001
+                # 超时要翻译成原因 —— 裸 TimeoutError 指不到任何东西
+                raise AssertionError(
+                    '选了基准之后对比块没出来（`.lpcmp`）—— 图区文字：%r'
+                    % pg.inner_text('#lp_chart')[:200])
             pg.wait_for_timeout(1200)
             txt = pg.evaluate(
-                "() => { const h = [...document.querySelectorAll('h3')]"
-                ".find(x => x.textContent.indexOf('相对') >= 0);"
-                " return h ? h.closest('.lvsec').innerText : ''; }")
-            for w in ('区间收益', '最大回撤', '夏普', '超额', '跑赢天数'):
-                assert w in txt, '对比表里缺「%s」：%s' % (w, txt[:200])
+                "() => { const c = document.querySelector('.lpcmp');"
+                " return c ? c.innerText : ''; }")
+            for w in ('区间超额', '回撤比', '信息比率', '跑赢天数'):
+                assert w in txt, '对比块里缺「%s」：%s' % (w, txt[:200])
+            #   🔴 **在折线图上方**（用户第二轮：放下面把折线图与回撤曲线劈开了）
+            _yy = pg.evaluate(
+                "() => { const c = document.querySelector('.lpcmp'),"
+                " s = document.querySelector('#lp_chart svg');"
+                " return (c && s) ? [c.getBoundingClientRect().y,"
+                " s.getBoundingClientRect().y] : null; }")
+            assert _yy and _yy[0] < _yy[1], \
+                '对比块该在折线图**上方**，实得 y=%s vs 图 y=%s' % (_yy[0], _yy[1])
+            #   🔴 **不许是横跨整屏的 4 列表格**（眼睛左右扫太累）——
+            #     改成窄卡片，每格纵向读
+            assert pg.locator('.lpcmp table').count() == 0, \
+                '对比块又变回表格了'
+            _n = pg.locator('.lpcmp .kpi > div').count()
+            assert _n >= 4, '对比块该是几张窄卡片，实得 %d 个' % _n
+            _w = pg.locator('.lpcmp .kpi > div').first.bounding_box()['width']
+            assert _w < 400, '单张卡片宽 %.0fpx —— 太宽就又成了横着扫' % _w
             #   🔴 **与 KPI 板同源**：对比表的"账户区间收益"必须等于上面那格
             #     累计收益（TWR）。两处各算一份的话迟早分叉，而分叉不报错。
             kpi = pg.evaluate(
@@ -10136,15 +10193,15 @@ def t_perf_marks_ui():
                 ".find(x => x.textContent.indexOf('累计收益') >= 0);"
                 " return e ? e.parentElement.innerText : ''; }")
             m1 = _re.search(r'([+-]?\d+\.\d+)%', kpi or '')
-            m2 = _re.search(r'区间收益\s*([+-]?\d+\.\d+)%', txt)
+            m2 = _re.search(r'区间超额[^\n]*\n[^\n]*\n\s*([+-]?\d+\.\d+)%', txt)
             assert m1 and m2, 'KPI 或对比表里读不出百分比：%r / %r' % (kpi[:60], txt[:80])
             assert abs(float(m1.group(1)) - float(m2.group(1))) < 0.02, \
                 ('对比表的账户区间收益 %s%% 与 KPI 的累计收益 %s%% 对不上 —— '
                  '两处口径分家了' % (m2.group(1), m1.group(1)))
             #   ★ 回撤那一行不许带 + 号（它是量值不是涨跌）
-            _mdd = _re.search(r'最大回撤\s*([^\n]*)', txt)
+            _mdd = _re.search(r'回撤比[^\n]*\n[^\n]*\n([^\n]*)', txt)
             assert _mdd and '+' not in _mdd.group(1), \
-                '最大回撤带了 + 号，读起来像赚的：%r' % (_mdd.group(1) if _mdd else '')
+                '回撤带了 + 号，读起来像赚的：%r' % (_mdd.group(1) if _mdd else '')
             assert not errs, '业绩页有 JS 错误：%s' % errs[:2]
             br.close()
         return ('三个读数（%s）都在画布内；0 线在；对比表五项齐全且账户'
