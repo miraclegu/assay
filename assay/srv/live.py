@@ -313,17 +313,38 @@ def api_live_equity(q):
     m = _live()
     aid = (q.get('id') or '').strip()
     codes = [x.strip() for x in (q.get('bench') or '').split(',') if x.strip()]
+    # 🔴 `*` = **预设那一批全部**，由服务端展开。
+    #   页面原来把 9 个代码写死在 `LPB_ALL` 里（颜色也按它的下标取），
+    #   于是服务端加了第 10 个（沪深300）**请求里根本没带上** ——
+    #   清单里看得见、选了却没有线，而它**不报错**。
+    #   同「清单在服务端，页面不写死 —— 加一个它自动就有」。
+    if '*' in codes:
+        from ..lv import perf as _p0
+        codes = [b['code'] for b in _p0.BENCHMARKS] + [c for c in codes if c != '*']
+        seen, uniq = set(), []
+        for c in codes:
+            if c not in seen:
+                seen.add(c); uniq.append(c)
+        codes = uniq
 
     def _go():
         out = m.equity_curve(aid)
         from ..lv import perf as _perf
         out['benchmarks'] = _perf.BENCHMARKS
         if codes and out.get('dates'):
-            out['bench'] = _perf.bench_curves(out['dates'], codes)
+            # ★ 账户曲线有盘中点时，基准也要补一个 —— 两条线终点不在同一天
+            #   的话「跑赢没跑赢」那一眼直接失真（用户 2026-09-30）。
+            out['bench'] = _perf.bench_curves(
+                out['dates'], codes,
+                intraday=bool((out.get('stats') or {}).get('intraday')))
             # ★ 自定义基准的**名字由服务端给**：页面只存一个 symbol
             #   （一个 localStorage 槽），名字存在前端的话，改过名的标的
             #   会一直显示旧名，而它不报错。
             out['bench_meta'] = _perf.bench_meta(codes)
+            # ★ 对比指标与曲线**同一次请求**给：日期轴是同一条，前端不用
+            #   再对齐一次（对齐分两处写就一定会差一天，而那种错不报错）。
+            out['bench_cmp'] = _perf.bench_compare(
+                out['dates'], out.get('nav') or [], out['bench'])
         return out
     return _live_err(_go)
 

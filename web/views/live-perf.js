@@ -95,8 +95,11 @@ function lpbSet(code){
 /* 请求时一次取全部（见 showPerf 里的注释）。真正可选哪些由**服务端**给
    （`o.benchmarks`）—— 本地缺哪个指数只有服务端知道，前端硬编码清单的话
    会列出取不到数据的选项，而"点了什么都不出来"比不给这个选项更糟。 */
-const LPB_ALL = ['sh000001','sz399006','sh000688','sh000905','sh000852',
-                 'sz399303','sz399101','sz399316','sz399634'].join(',');
+/* 🔴 **不写死清单**：`*` 让服务端展开成"预设那一批全部"。
+   原来这里硬编码 9 个代码，服务端加了沪深300 之后请求里带不上 ——
+   清单里看得见、选了却没有线，**而它不报错**
+   （同「清单在服务端，页面不写死 —— 加一个它自动就有」）。 */
+const LPB_ALL = '*';
 const LPB_COL = ['#7ec8a0','#c88ad0','#d0a05b','#6fa8d8','#d07a7a',
                  '#9db85b','#5bb0b8','#b89d6f','#8f9bd8'];
 /* 手填基准的颜色。🔴 **判据是色距，不是"看着不一样"**：我第一版挑了
@@ -608,7 +611,7 @@ function renderChart(aid){
 
   if(LPC === 'eq'){
     lineChart(el, [{n: '总资产', v: o.equity, c: '#5b9cf0'}],
-      {dates: o.dates, h: 300, moneyAxis: true,
+      {dates: o.dates, h: 300, moneyAxis: true, mark: true,
        ctl: rgNote(o) + '<div class="note">总资产 = 现金 + 持仓市值（按当日收盘）。'
           + '<b>含入金</b> —— 入金那天会跳一截，那不是收益。'
           + '净入金 ' + num(st.net_deposit || 0, 2) + ' 元。</div>'});
@@ -675,7 +678,9 @@ function renderChart(aid){
       /* ★ 基准只进 `series` —— lineChart 的 tooltip 会自动列出所有
          series，再放进 `extra` 就是**同一行读数出现两次**（实测踩到）。
          `extra` 只放不共轴的那个量（累计金额）。 */
-      const ci = LPB_ALL.split(',').indexOf(c);
+      /* 颜色按**服务端清单的顺序**取 —— 原来按前端那份硬编码的下标，
+         清单一变颜色就跟着错位（而错位不报错，只是"上证突然变成紫色"）。 */
+      const ci = BM.findIndex(x => x.code === c);
       series.push({n: b.name, v: BD[c],
                    c: ci >= 0 ? LPB_COL[ci % LPB_COL.length] : LPB_CUSTOM_COL,
                    w: 1.2});
@@ -728,7 +733,14 @@ function renderChart(aid){
       + (LPB.length ? '<a href="#" class="lpb" id="lp_bclr">不比</a>' : '')
       + '</div>';
     lineChart(el, series,
-      {dates: o.dates, h: 300, pctAxis: true, extra: extra,
+      /* 🔴 `zero: 1` —— 收益曲线的「0 线」就是**净值 1.0**（成本线）。
+         用户 2026-09-30：「中间需要一个细线标出 0 线的位置，以便方便看出
+         成本线」。不画的话，账户在水上还是水下只能靠读 y 轴刻度算，
+         而那正是这张图第一眼要回答的问题。
+         ★ 复用 `lineChart` 已有的 `opt.zero`（回撤图在用）—— 它会先把这
+           条线纳入量程再留白，所以净值一直 > 1 时这条线也画得出来
+           （参考线落在量程外会**静默不画**，那条坑已经踩过）。 */
+      {dates: o.dates, h: 300, pctAxis: true, extra: extra, zero: 1, mark: true,
        ctl: bsel + rgNote(o) + '<div class="note">时间加权净值：每个有外部现金流的日子'
           + '切开再连乘 —— <b>入金不算收益</b>，这也是能和回测年化直接比的'
           + '口径。　鼠标移到曲线上同时给<b>收益率与累计金额</b>（当前 '
@@ -736,11 +748,25 @@ function renderChart(aid){
           + (cum.length ? money(cum[cum.length - 1]) : '—') + '）。'
           + (picks.length
              ? '<br>基准与账户<b>同一起点</b>（基点取第一天的前一交易日收盘）；'
-               + '指数是<b>日线收盘</b>，所以盘中的今天基准还没有点，曲线断在'
-               + '昨天 —— 那不是缺数据。'
+               /* 🔴 这句原来写着「盘中的今天基准还没有点，曲线断在昨天」
+                  —— 那是**在为缺陷解释**。现在账户有盘中点时基准也补一个
+                  （昨日净值 × 现价/昨收，与复权因子无关，除权日也对），
+                  两条线终点落在同一天。 */
+               + '账户有盘中点时基准也<b>补一个实时点</b>（按现价/昨收推，'
+               + '与复权因子无关），两条线终点在同一天。'
              : '')
           + (LPBCH_NOTE ? '<br>' + LPBCH_NOTE : '')
           + '</div>'});
+    /* 对比指标接在曲线**下面** —— 它回答的是"跑赢了没有、代价是什么"，
+       是看完曲线之后的下一个问题，不该插在曲线上方把图推下去。 */
+    /* 🔴 指标用 **LPD（全程）**，不是 `o`（区间切片）—— `o` 上没有
+       `bench_cmp`，传它进去只会静默返回空（实测：函数被调到了、返回长度 0，
+       而页面上什么都没有，看着像功能没做）。
+       ⚠ 区间规则（今年以来/近一月/…）只在前端有一份，让服务端也切一遍
+         就是**第二份窗口实现**，迟早分叉。所以指标先按全程算，并在标题上
+         **把自己的窗口写出来** —— 与上方图的区间不一致时人看得见，
+         而不是悄悄拿两个窗口的数放在一起。 */
+    el.insertAdjacentHTML('beforeend', lpCmpRow(LPD, LPS ? lprSpan(LPD.dates) : null));
     /* 🔴 选择器是 lineChart 用 innerHTML 塞进去的，事件必须**在那之后**绑
        —— 在之前绑的话点了没反应且不报错（对比页「移除」栽过）。 */
     /* 自定义 chip 上那个 × —— 从**清单**里去掉它（不是取消选中）。
@@ -1529,4 +1555,59 @@ async function renderTrips(aid) {
     {k: 'reason', t: '备注', l: 1},
   ]);
   lpBind('#lp_trip', 't', LPT, np, () => renderTrips(aid));
+}
+
+/* 策略 vs 基准的对比指标（用户 2026-09-30）。
+   ★ 只在**选了基准**时出现 —— 没选基准时摆一排"—"等于教人忽略这个位置。
+   ★ 口径由服务端随数一起给（`note`），页面照写不自己编一套：
+     超额是算术差还是几何差、夏普的无风险利率取多少，两种都有人用，
+     而差出来的数不一样。 */
+function lpCmpRow(o, span){
+  const m = o.bench_cmp || {};
+  /* 当前选中的那一个基准（单选槽 `LPB`；策略曲线那一项没有指数对比） */
+  const k = (LPB && LPB.length && LPB[0] !== LPB_STRAT) ? LPB[0] : null;
+  const v = k && m[k];
+  if(!v) return '';
+  const nm = (LPB_META[k] && LPB_META[k].name) || k;
+  const pp = x => x == null ? '—'
+    : '<b style="color:' + upc(x) + '">' + (x >= 0 ? '+' : '') + (x * 100).toFixed(2) + 'pp</b>';
+  const pc2 = x => x == null ? '—' : ((x >= 0 ? '+' : '') + (x * 100).toFixed(2) + '%');
+  /* 🔴 回撤是**量值**不是涨跌 —— 带 `+` 读起来像赚了 7.7%（实测第一版
+     印成 `+7.70%`）。正负号只给收益那几行。 */
+  const md = x => x == null ? '—' : (x * 100).toFixed(2) + '%';
+  const n2 = x => x == null ? '—' : x.toFixed(2);
+  /* 回撤比：**小于 1 才是回撤更小** —— 只给数字的话方向要人自己想 */
+  const rt = v.mdd_ratio;
+  const rtTxt = rt == null ? '—'
+    : '<b style="color:' + (rt < 1 ? 'var(--down)' : 'var(--up)') + '">' + rt.toFixed(2) + '</b>'
+      + '<span class="lvwhy"> ' + (rt < 1 ? '回撤更小' : '回撤更大') + '</span>';
+  return '<div class="lvsec" style="margin:8px 0">'
+    + '<h3>相对 ' + esc(nm) + '<span class="lvwhy">'
+    + esc(v.from || '') + ' ~ ' + esc(v.to || '') + ' · ' + v.n_days + ' 个交易日'
+    + (v.rebased ? ' · 基准前面缺天，已重新定基' : '')
+    /* 上方图选了别的区间时**说出来** —— 两个窗口的数摆在一起而不标，
+       就是本项目最怕的那种"看着正常的不一致" */
+    + ((span && (span[0] !== v.from || span[1] !== v.to))
+       ? '</span><span class="warn" style="font-size:11px;margin-left:8px">'
+         + '全程口径 · 与上方图的区间（' + esc(span[0]) + ' ~ ' + esc(span[1]) + '）不同'
+       : '') + '</span></h3>'
+    + '<div class="pw"><table class="pkt"><thead><tr>'
+    + '<th class="tx">口径</th><th class="rt">账户</th><th class="rt">基准</th>'
+    + '<th class="rt">超额 / 比值</th></tr></thead><tbody>'
+    + '<tr><td class="tx">区间收益</td><td class="rt">' + pc2(v.ret) + '</td>'
+    +   '<td class="rt">' + pc2(v.bench_ret) + '</td><td class="rt">' + pp(v.excess) + '</td></tr>'
+    + (v.ann == null ? '' :
+       '<tr><td class="tx">年化</td><td class="rt">' + pc2(v.ann) + '</td>'
+     + '<td class="rt">' + pc2(v.bench_ann) + '</td><td class="rt">' + pp(v.ann_excess) + '</td></tr>')
+    + '<tr><td class="tx">最大回撤</td><td class="rt">' + md(v.mdd) + '</td>'
+    +   '<td class="rt">' + md(v.bench_mdd) + '</td><td class="rt">' + rtTxt + '</td></tr>'
+    + '<tr><td class="tx">夏普</td><td class="rt">' + n2(v.sharpe) + '</td>'
+    +   '<td class="rt">' + n2(v.bench_sharpe) + '</td>'
+    +   '<td class="rt"><span class="lvwhy">信息比率 </span><b>' + n2(v.info_ratio) + '</b></td></tr>'
+    + '<tr><td class="tx">跑赢天数</td><td class="rt" colspan="3">'
+    +   (v.win_days == null ? '—' : (v.win_days * 100).toFixed(0) + '%'
+        + '<span class="lvwhy"> · ' + Math.round(v.win_days * (v.n_days - 1))
+        + ' / ' + (v.n_days - 1) + ' 天日收益高于基准</span>') + '</td></tr>'
+    + '</tbody></table></div>'
+    + '<div class="lvwhy" style="margin-top:4px">' + esc(v.note || '') + '</div></div>';
 }

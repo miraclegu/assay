@@ -1182,3 +1182,6 @@ body.hasprog{padding-top:28px}
 /* 载入中：**只改透明度，不改布局** —— 旧内容留在原地（不塌），
    但明确标出"这还不是标题上那只"。清空重填才是"崩一下"的来源。 */
 #spwrap .spbody.sploading{opacity:.45;transition:opacity .1s}
+/* 曲线上「最高 / 最低 / 当前」三个读数 —— 比轴标签小半号，不抢曲线 */
+.mkt{font-size:10.5px;font-weight:600;paint-order:stroke;
+  stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}

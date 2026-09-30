@@ -3466,11 +3466,18 @@ def t_live_perf_ui():
                  '（lineChart 会自动列出），再放进 extra 就出现两次' % names)
             assert '中证500' in (pg.locator('#tip').text_content() or ''), \
                 'tooltip 该列出勾选的基准'
-            #   说明里要讲清两件事：同一起点、指数是日线（今天还没有点）
+            #   说明里要讲清基准的口径。
+            #   ⚠ 这条原来钉的是「指数是**日线收盘**，所以盘中的今天基准
+            #     断在昨天」—— 2026-09-30 起账户有盘中点时基准也补一个
+            #     实时点（昨日净值 × 现价/昨收），两条线终点在同一天，
+            #     那句话已经不成立。属于**被改动作废的断言**：要保的东西
+            #     没变（基准的口径必须说清，否则人不知道两条线可不可比），
+            #     只是答案换了，所以改成钉新规矩，不是删掉保护。
             _ct = pg.inner_text('#lp_chart')
-            assert '同一起点' in _ct and '日线收盘' in _ct, \
-                ('要说明基准与账户同一起点、且指数是日线收盘（所以盘中的'
-                 '今天基准断在昨天，那不是缺数据）')
+            assert '同一起点' in _ct, '要说明基准与账户同一起点'
+            assert '实时点' in _ct and '复权因子' in _ct, \
+                ('要说明账户有盘中点时基准也补一个实时点、且补法与复权因子'
+                 '无关 —— 不说的话人不知道今天这一段可不可比：%s' % _ct[:160])
             pg.locator('#lp_bclr').click()
             pg.wait_for_timeout(300)
             assert pg.locator('#lp_chart svg path[stroke]').count() == 1, \
@@ -9941,6 +9948,210 @@ def t_cash_alert():
     finally:
         lv.LIVE = old
         shutil.rmtree(tmp, ignore_errors=True)
+
+@case('策略 vs 基准：盘中对齐 / 对比指标 / 清单在服务端', tag='fast')
+def t_bench_compare():
+    """用户 2026-09-30 四条：基准也要能拿实时、盘中实时比对；要有超额收益、
+    超额回撤、最大回撤比、夏普等对比信息；曲线要有 0 线；基准清单加沪深300。
+
+    ★ 指标公式**只有一份**（`lv/perf.py:bench_compare`）。这里逐条用**另一条
+      独立的路**算期望 —— 不拿被测对象的输出当期望。
+    """
+    import os
+
+    from assay.lv import perf as P
+
+    # ---- ① 构造两条净值，手算每一个指标 ----
+    #   真实数据上算不出"期望"（那就成了拿输出当期望），所以构造。
+    #   🔴 基准收益**不能是 0** —— 那样算术差与几何差恰好相等，
+    #     "超额用哪种口径"这条就**区分不出来**（第一版基准末值取 1.00，
+    #     变异成几何差当场漏网）。所以让它收在 1.05。
+    dates = ['2026-01-%02d' % (i + 1) for i in range(5)]
+    nav = [1.10, 1.21, 1.00, 1.10, 1.20]        # 账户：+20%
+    bch = {'sh000300': [1.00, 1.10, 1.00, 1.02, 1.05]}   # 基准：+5%
+    r = P.bench_compare(dates, nav, bch)['sh000300']
+    #   区间收益：基点是 1.0（两条线都已归一化过），所以就是末值 − 1
+    assert abs(r['ret'] - 0.20) < 1e-6, '账户区间收益该是 +20%%，实得 %s' % r['ret']
+    assert abs(r['bench_ret'] - 0.05) < 1e-6, '基准区间收益该是 +5%%，实得 %s' % r['bench_ret']
+    #   算术差 0.15 ；几何差 (1.20/1.05−1)=0.142857 —— 两个数不同，分得开
+    assert abs(r['excess'] - 0.15) < 1e-6, \
+        ('超额该是**算术差** 15pp（几何差是 14.29pp，两种都有人用，'
+         '不说清就会被拿去跟别处的"超额"比）：实得 %s' % r['excess'])
+    #   最大回撤：账户 1.21 -> 1.00 = 17.3554%；基准 1.10 -> 1.00 = 9.0909%
+    assert abs(r['mdd'] - (1 - 1.00 / 1.21)) < 1e-6, '账户 MDD 算错：%s' % r['mdd']
+    assert abs(r['bench_mdd'] - (1 - 1.00 / 1.10)) < 1e-6, '基准 MDD 算错：%s' % r['bench_mdd']
+    assert abs(r['mdd_ratio'] - round((1 - 1 / 1.21) / (1 - 1 / 1.10), 4)) < 1e-4, \
+        '回撤比该是 账户/基准：%s' % r['mdd_ratio']
+    assert r['mdd_ratio'] > 1, '这组构造里账户回撤更大，比值该 > 1'
+    #   跑赢天数：4 个日收益里账户高于基准的天数
+    _ar = [nav[i] / nav[i - 1] - 1 for i in range(1, 5)]
+    _br = [bch['sh000300'][i] / bch['sh000300'][i - 1] - 1 for i in range(1, 5)]
+    assert abs(r['win_days'] - sum(1 for a, b in zip(_ar, _br) if a > b) / 4.0) < 1e-6, \
+        '跑赢天数算错：%s' % r['win_days']
+    assert r['n_days'] == 5 and r['from'] == dates[0] and r['to'] == dates[-1]
+    assert r['rebased'] is False, '首日两边都有值，不该重新定基'
+    #   天数不足不给年化（20 个交易日以下外推一年是假数）
+    assert 'ann' not in r, '只有 5 天却给了年化：%s' % r.get('ann')
+    #   口径要跟着数一起走
+    for w in ('算术差', '无风险利率 0', '回撤比'):
+        assert w in (r.get('note') or ''), '口径说明里缺「%s」：%s' % (w, r.get('note'))
+
+    # ---- ② 只用**两边都有值**的日子；基准前面缺天要重新定基并说出来 ----
+    r2 = P.bench_compare(dates, nav, {'x': [None, 1.10, 1.00, 1.05, 1.00]})['x']
+    assert r2['n_days'] == 4 and r2['from'] == dates[1], \
+        '缺的那天该跳过：n=%s from=%s' % (r2['n_days'], r2['from'])
+    assert r2['rebased'] is True, '首个共同日不是第 0 天，该标 rebased'
+    #   ★ 容差 1e-6 不是 1e-9 —— 返回值是 `round(…, 6)`，卡 1e-9 是拿
+    #     **断言的精度**去要求一个已经取整过的数（第一版就这么写，
+    #     差 4.6e-7 当场打挂，而产品是对的）。
+    assert abs(r2['ret'] - (1.20 / 1.21 - 1)) < 1e-6, \
+        '重新定基后账户收益该按 1.21 起算：%s' % r2['ret']
+
+    # ---- ③ 基准 MDD 为 0 时**不猜一个数** ----
+    r3 = P.bench_compare(dates, nav, {'y': [1.0, 1.0, 1.0, 1.0, 1.0]})['y']
+    assert r3['bench_mdd'] == 0 and r3['mdd_ratio'] is None, \
+        '基准零回撤时比值该给 None（不写成 999 也不给 0）：%s' % r3['mdd_ratio']
+
+    # ---- ④ 沪深300 在清单里，且清单由**服务端**说了算 ----
+    codes = [b['code'] for b in P.BENCHMARKS]
+    assert 'sh000300' in codes, '基准清单里没有沪深300：%s' % codes
+    import io as _io
+    js = _io.open(os.path.join(REPO, 'web', 'views', 'live-perf.js'),
+                  encoding='utf-8').read()
+    body = '\n'.join(l for l in js.split('\n')
+                     if not l.strip().startswith(('*', '/*', '//')))
+    #   🔴 页面**不许**把清单写死：写死的话服务端加一个，请求里带不上 ——
+    #     清单里看得见、选了却没有线，而它不报错。
+    import re as _re
+    hard = _re.findall(r"LPB_ALL\s*=\s*\[", body)
+    assert not hard, 'LPB_ALL 又被写成前端硬编码的清单了'
+    assert "LPB_ALL = '*'" in body, "LPB_ALL 该是 '*'（由服务端展开）"
+    assert 'BM.findIndex' in body, '基准颜色该按服务端清单的顺序取，不是前端那份'
+
+    # ---- ⑤ 曲线要有 0 线与三个读数 ----
+    assert 'zero: 1' in body, '收益曲线没画净值 1.0 那条 0 线（成本线）'
+    assert body.count('mark: true') >= 2, '收益/资金曲线没开最高最低当前的读数'
+    #   ⚠ 原来这里查 chart.js 里有没有「最高/最低/当前」这几个字 ——
+    #     那是**字符串出现过**：把 `add(iMax,'最高','up')` 包一层 `if(0)`，
+    #     字符串还在、标记不画了，照样绿（2026-09-30 变异 B10 漏网）。
+    #     真正该验的是**页面上有没有那三个读数**，那要浏览器 ——
+    #     已移到 web 层（见「业绩页：0 线 / 三个读数 / 对比表」）。
+
+    # ---- ⑥ 盘中补点的判据是「账户有没有盘中点」，不是「现在几点」 ----
+    #   ⚠ 第一版写的是 `in_session()` —— 午休时它为假、而账户那个 11:27 的
+    #     盘中点还在，两条线又错开一天。
+    pf = _io.open(os.path.join(REPO, 'assay', 'lv', 'perf.py'), encoding='utf-8').read()
+    pbody = '\n'.join(l for l in pf.split('\n') if not l.strip().startswith('#'))
+    assert 'def bench_curves(dates, codes, datalake=None, intraday=False)' in pbody, \
+        'bench_curves 没有 intraday 开关'
+    assert 'in_session()' not in pbody.split('def _bench_intraday')[1][:1200], \
+        '_bench_intraday 又按 in_session() 判了 —— 午休会错开一天'
+    sv = _io.open(os.path.join(REPO, 'assay', 'srv', 'live.py'), encoding='utf-8').read()
+    assert "intraday=bool((out.get('stats') or {}).get('intraday'))" in sv, \
+        '调用方没按 stats.intraday 传 —— 两条线终点会不在同一天'
+    return ('指标逐个手算对上（超额 %.0fpp / 回撤比 %.2f / 跑赢 %.0f%%）；'
+            '缺天跳过并重新定基；基准零回撤给 None；沪深300 在清单里且清单'
+            '由服务端展开（LPB_ALL=*，颜色按服务端顺序）；0 线与三个读数都在；'
+            '盘中补点按 stats.intraday 判'
+            % (r['excess'] * 100, r['mdd_ratio'], r['win_days'] * 100))
+
+@case('业绩页：0 线 / 三个读数 / 对比表（playwright）', tag='web')
+def t_perf_marks_ui():
+    """用户 2026-09-30 的三条，判据都落在**页面上真有没有**，不是源码里有没有那几个字。
+
+    ⚠ 这条是从 fast 层挪过来的：原来在那边查 `chart.js` 里有没有「最高」
+      两个字 —— 那是**字符串出现过**，把 `add(iMax,…)` 包一层 `if(0)`，
+      字符串还在、标记不画了，照样绿（变异 B10 漏网）。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return '跳过（无 playwright）'
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from assay import server as sv
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), sv.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    aid = 'froec'
+    try:
+        with sync_playwright() as p:
+            try:
+                br = p.chromium.launch()
+            except Exception as e:                          # noqa: BLE001
+                return '跳过（浏览器不可用: %s）' % type(e).__name__
+            pg = br.new_page(viewport={'width': 1500, 'height': 1400})
+            errs = []
+            pg.on('pageerror', lambda e: errs.append(str(e)))
+            pg.goto('http://127.0.0.1:%d/#/live/%s/perf' % (port, aid))
+            pg.wait_for_selector('#lp_chart svg', timeout=40000)
+            pg.wait_for_timeout(3000)
+
+            # ---- ① 三个读数就在节点旁边 ----
+            labs = pg.evaluate(
+                "() => [...document.querySelectorAll('text.mkt')]"
+                ".map(e => e.textContent)")
+            assert len(labs) == 3, \
+                '曲线上该有【最高/最低/当前】三个读数，实得 %d 个：%s' % (len(labs), labs)
+            kinds = ''.join(labs)
+            for w in ('最高', '最低', '当前'):
+                assert w in kinds, '缺「%s」那个读数：%s' % (w, labs)
+            import re as _re
+            for t in labs:
+                assert _re.search(r'-?\d+(\.\d+)?%', t), \
+                    '读数里没有百分比：%r' % t
+            #   ★ 读数必须落在**画布里** —— 顶出去的部分 svg 不报错，
+            #     只是看不见，而"看不见"与"没标"在屏幕上一模一样
+            box = pg.locator('#lp_chart svg').bounding_box()
+            for i in range(3):
+                b = pg.locator('text.mkt').nth(i).bounding_box()
+                assert b and b['x'] >= box['x'] - 1 and \
+                    b['x'] + b['width'] <= box['x'] + box['width'] + 1, \
+                    '第 %d 个读数顶出画布了：%s vs %s' % (i, b, box)
+
+            # ---- ② 0 线（净值 1.0 = 成本线）----
+            nz = pg.evaluate(
+                "() => [...document.querySelectorAll('#lp_chart svg line')]"
+                ".filter(l => (l.getAttribute('stroke') || '')"
+                ".indexOf('91,156,240') >= 0).length")
+            assert nz >= 1, '收益曲线上没有那条 0 线（成本线）'
+
+            # ---- ③ 选个基准 -> 对比表出现，且与 KPI 同源 ----
+            pg.locator('a.lpb:has-text("沪深300")').first.click()
+            pg.wait_for_function(
+                "() => [...document.querySelectorAll('h3')]"
+                ".some(h => h.textContent.indexOf('相对') >= 0)", timeout=30000)
+            pg.wait_for_timeout(1200)
+            txt = pg.evaluate(
+                "() => { const h = [...document.querySelectorAll('h3')]"
+                ".find(x => x.textContent.indexOf('相对') >= 0);"
+                " return h ? h.closest('.lvsec').innerText : ''; }")
+            for w in ('区间收益', '最大回撤', '夏普', '超额', '跑赢天数'):
+                assert w in txt, '对比表里缺「%s」：%s' % (w, txt[:200])
+            #   🔴 **与 KPI 板同源**：对比表的"账户区间收益"必须等于上面那格
+            #     累计收益（TWR）。两处各算一份的话迟早分叉，而分叉不报错。
+            kpi = pg.evaluate(
+                "() => { const e = [...document.querySelectorAll('.kpi .k')]"
+                ".find(x => x.textContent.indexOf('累计收益') >= 0);"
+                " return e ? e.parentElement.innerText : ''; }")
+            m1 = _re.search(r'([+-]?\d+\.\d+)%', kpi or '')
+            m2 = _re.search(r'区间收益\s*([+-]?\d+\.\d+)%', txt)
+            assert m1 and m2, 'KPI 或对比表里读不出百分比：%r / %r' % (kpi[:60], txt[:80])
+            assert abs(float(m1.group(1)) - float(m2.group(1))) < 0.02, \
+                ('对比表的账户区间收益 %s%% 与 KPI 的累计收益 %s%% 对不上 —— '
+                 '两处口径分家了' % (m2.group(1), m1.group(1)))
+            #   ★ 回撤那一行不许带 + 号（它是量值不是涨跌）
+            _mdd = _re.search(r'最大回撤\s*([^\n]*)', txt)
+            assert _mdd and '+' not in _mdd.group(1), \
+                '最大回撤带了 + 号，读起来像赚的：%r' % (_mdd.group(1) if _mdd else '')
+            assert not errs, '业绩页有 JS 错误：%s' % errs[:2]
+            br.close()
+        return ('三个读数（%s）都在画布内；0 线在；对比表五项齐全且账户'
+                '区间收益与 KPI 累计收益同源；回撤不带 + 号'
+                % ' / '.join(x.strip() for x in labs))
+    finally:
+        httpd.shutdown()
 
 @case('交易时段默认不覆盖已发布的待办（盘中只算不写）', tag='fast')
 def t_session_write_guard():

@@ -662,6 +662,10 @@ def equity_curve(aid, datalake=None):
 #     拿它当基准会把跟踪误差算成策略的超额，而那不报错。
 BENCHMARKS = [
     {'code': 'sh000001', 'name': '上证指数', 'from': '2003'},
+    # 🔴 沪深300 是**大盘的默认参照**（用户 2026-09-30 要求加上）——
+    #   小市值策略与它的差正是"风格赚的那部分"，不给这个参照就没法说。
+    #   本地日线实测 2005-04-08 起、5232 天，够用。
+    {'code': 'sh000300', 'name': '沪深300', 'from': '2005-04'},
     {'code': 'sz399006', 'name': '创业板指', 'from': '2010-06'},
     {'code': 'sh000688', 'name': '科创50', 'from': '2019-12'},
     {'code': 'sh000905', 'name': '中证500', 'from': '2007'},
@@ -781,7 +785,7 @@ def bench_search(q, datalake=None, limit=12):
     return out
 
 
-def bench_curves(dates, codes, datalake=None):
+def bench_curves(dates, codes, datalake=None, intraday=False):
     """把基准对齐到给定的交易日轴 -> {code: [归一化净值]}。
 
     🔴 **基点取第一天的【前一交易日】收盘**，不是第一天收盘 ——
@@ -847,4 +851,179 @@ def bench_curves(dates, codes, datalake=None):
                 break
     finally:
         con.close()
+    if intraday:
+        _bench_intraday(out, dates)
     return out
+
+
+def _mdd(nav):
+    """最大回撤（正数）。None 跳过，不做前值填充。"""
+    peak, mdd = None, 0.0
+    for v in nav:
+        if v is None:
+            continue
+        peak = v if peak is None or v > peak else peak
+        if peak > 0:
+            mdd = max(mdd, 1.0 - v / peak)
+    return round(mdd, 6)
+
+
+def _rets(nav):
+    """净值序列 -> 逐日收益率。两端都要有值才算一天（缺就跳过那一段）。"""
+    out, prev = [], None
+    for v in nav:
+        if v is None:
+            prev = None
+            continue
+        if prev is not None and prev > 0:
+            out.append(v / prev - 1.0)
+        prev = v
+    return out
+
+
+def _std(xs):
+    if len(xs) < 2:
+        return None
+    m = sum(xs) / len(xs)
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+
+def bench_compare(dates, nav, bench):
+    """账户 vs 每个基准的**对比指标**。
+
+    用户 2026-09-30：「策略和基准应该也有一些比对信息，比如时间范围相对基准
+    超额收益率 xxpp，超额回撤，最大回撤小比，夏普比等等，按照一般的回测和
+    基准相对比较一下。」
+
+    🔴 **口径必须写在返回里**，不能只给数：
+      · 超额收益是**算术差**（账户区间收益 − 基准区间收益），单位 pp。
+        不用几何差（(1+a)/(1+b)−1）—— 两种都有人用，而差出来的数不一样，
+        不说清楚就会被拿去跟别处的"超额"比。
+      · 夏普 / 信息比率的**无风险利率取 0**，并按 244 个交易日年化。
+        取 0 是因为这套系统里没有一份可信的无风险利率序列 ——
+        **宁可口径简单且说出来，也不引一个来路不明的数**。
+      · 回撤比 = 账户 MDD / 基准 MDD。**小于 1 才是"回撤更小"**。
+        基准 MDD 为 0 时给 None（不猜一个数，也不写成 999）。
+
+    ★ 只用**两边都有值**的那些天算：基准停牌/缺失那天两边都跳过，
+      否则账户多算一天、基准少算一天，超额就凭空多出一截。
+    ★ 天数不足**不给年化**（同 `twr_annual` 那条：20 个交易日以下外推
+      一年会给出一个会被拿去跟回测比的假数）。
+    """
+    out = {}
+    if not nav or not bench:
+        return out
+    for sym, bv in (bench or {}).items():
+        if not bv or len(bv) != len(nav):
+            continue
+        # 两边都有值的日子才算
+        idx = [i for i in range(len(nav))
+               if nav[i] is not None and bv[i] is not None]
+        if len(idx) < 2:
+            continue
+        pair = [(nav[i], bv[i]) for i in idx]
+        an = [a for a, _ in pair]
+        bn = [b for _, b in pair]
+        # 🔴🔴 **基点是 1.0，不是"第一个共同日的值"。**
+        #   两条线本来就都以「第一天的前一交易日收盘」为基点归一化过了
+        #   （见 `bench_curves` 的注释：用首日收盘做基点等于把首日涨跌排除
+        #   在外，实测差 9.5pp）。再除一次 `an[0]`，就把**建仓当天**也排除
+        #   了 —— 实测账户区间收益给出 0.33%，而页面 KPI 写着 +1.16%，
+        #   同一个东西两个数，看着像算错了。
+        # ★ 只有当基准前面**缺了几天**（首个共同日不是第 0 天）时才需要
+        #   重新定基，那时窗口也跟着变，所以把它一起返回，页面照着写
+        #   「这一段」而不是含糊地说"区间"。
+        _off = idx[0]
+        a_ret = (an[-1] - 1.0) if _off == 0 else (an[-1] / an[0] - 1.0)
+        b_ret = (bn[-1] - 1.0) if _off == 0 else (bn[-1] / bn[0] - 1.0)
+        ar, br = _rets(an), _rets(bn)
+        n = min(len(ar), len(br))
+        ar, br = ar[:n], br[:n]
+        ex = [x - y for x, y in zip(ar, br)]
+        a_mdd, b_mdd = _mdd(an), _mdd(bn)
+        sa, sb, se = _std(ar), _std(br), _std(ex)
+        ANN = 244.0
+
+        def _sharpe(rs, sd):
+            if not rs or not sd:
+                return None
+            return round((sum(rs) / len(rs)) * ANN / (sd * (ANN ** 0.5)), 4)
+
+        row = {
+            'ret': round(a_ret, 6), 'bench_ret': round(b_ret, 6),
+            'excess': round(a_ret - b_ret, 6),
+            'mdd': a_mdd, 'bench_mdd': b_mdd,
+            'mdd_excess': round(a_mdd - b_mdd, 6),
+            'mdd_ratio': (round(a_mdd / b_mdd, 4) if b_mdd > 0 else None),
+            'sharpe': _sharpe(ar, sa), 'bench_sharpe': _sharpe(br, sb),
+            'info_ratio': _sharpe(ex, se),
+            'win_days': round(sum(1 for x in ex if x > 0) / len(ex), 4) if ex else None,
+            'n_days': len(pair),
+            'from': dates[idx[0]] if dates and idx[0] < len(dates) else None,
+            'to': dates[idx[-1]] if dates and idx[-1] < len(dates) else None,
+            'rebased': _off != 0,      # 基准前面缺天、重新定过基
+            #   ★ 口径跟着数一起走 —— 页面照它写说明，不自己编一套
+            'note': ('超额 = 账户区间收益 − 基准区间收益（算术差，单位 pp）；'
+                     '夏普与信息比率按无风险利率 0、244 个交易日年化；'
+                     '回撤比 = 账户最大回撤 / 基准最大回撤，小于 1 才是回撤更小；'
+                     '只用两边都有值的 %d 个交易日算。' % len(pair)),
+        }
+        # 天数不足不给年化（20 个交易日以下外推一年是假数）
+        if len(pair) >= 20:
+            yrs = len(pair) / ANN
+            row['ann'] = round((1 + a_ret) ** (1 / yrs) - 1, 6)
+            row['bench_ann'] = round((1 + b_ret) ** (1 / yrs) - 1, 6) \
+                if b_ret > -1 else None
+            row['ann_excess'] = (round(row['ann'] - row['bench_ann'], 6)
+                                 if row['bench_ann'] is not None else None)
+        out[sym] = row
+    return out
+
+def _bench_intraday(out, dates):
+    """盘中给最后一天补一个**实时点** —— 否则基准断在昨天，没法比。
+
+    🔴 用户 2026-09-30：「策略的业绩比对，其基准也是可以拿到实时数据的，
+      也可以在盘中实时比对。」页面上原来那句「指数是日线收盘，所以盘中的
+      今天基准还没有点，曲线断在昨天 —— 那不是缺数据」是**在为缺陷解释**：
+      账户曲线**有**盘中点（实测 09-30 11:27，10 只实时），基准没有，
+      两条线终点不在同一天 —— 「跑赢没跑赢」那一眼直接失真。
+
+    🔴🔴 **补点用「昨日净值 × 现价/昨收」，不是「现价 × 因子 / 基点」。**
+      后者要今天的复权因子，而因子表由当晚同步才写 —— 盘中根本没有。
+      拿昨天的因子凑，除权当天就会错一大截，**而它不报错**（那条线只是
+      悄悄跳一下）。而腾讯快照的 `preclose` 本来就是**除权调整后**的昨收，
+      所以 `现价/昨收` 就是今天的真实日收益，乘上去与因子无关 —— 除权日
+      也对。
+    ★ 取不到就**保持 None**（不猜）：那天的点断开画，与原来一样。
+    ★ 只补**最后一天**，且只在它本来是空的时候 —— 已经有收盘价了就别覆盖
+      （收盘后同步完，日线才是正本）。
+    """
+    if not out or not dates:
+        return
+    try:
+        from assay import realtime as _rt
+    except Exception:                                       # noqa: BLE001
+        return
+    # 🔴 **判据是「账户曲线有没有盘中点」，不是「现在是不是交易时段」。**
+    #   第一版写的是 `in_session()` —— 结果**午休**（11:30~13:00）时它为假、
+    #   而账户那个 11:27 的盘中点还在，两条线又错开一天。
+    #   同「判据永远是【现在的状态】」：要对齐的是那个点存不存在，跟现在
+    #   几点无关（腾讯午休照样给得出最后成交价，实测 4351.88 拿得到）。
+    #   调用方按 `stats['intraday']` 传 `intraday=`。
+    want = [k for k, v in out.items() if v and v[-1] is None]
+    if not want:
+        return
+    try:
+        snap = _rt.snapshot_syms(want)
+    except Exception:                                       # noqa: BLE001
+        return                      # 取不到就算了 —— 未知不是缺，别把已有的弄坏
+    for sym in want:
+        d = snap.get(sym) or {}
+        px, pc = d.get('price'), d.get('preclose')
+        if not px or not pc or pc <= 0:
+            continue
+        # 最后一个有值的点 = 昨天的净值
+        prev = next((x for x in reversed(out[sym][:-1]) if x is not None), None)
+        if prev is None:
+            continue
+        out[sym][-1] = round(prev * (px / pc), 8)

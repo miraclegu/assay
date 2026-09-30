@@ -84,6 +84,47 @@ function lineChart(el,series,opt){
     :opt.moneyAxis?_money(v)
     :opt.ratioAxis?(v*100).toFixed(1)+'%'
     :(v>=10?v.toFixed(0)+'x':v.toFixed(2)+'x');
+  /* 最高 / 最低 / 当前 三个点的读数（用户 2026-09-30：「曲线上，需标出
+     最高点、最低点、当前位置的收益率，直接在节点旁边显示百分比收益率」）。
+     ★ 只标**第一条**序列（账户自己）—— 每条基准都标三个就成了一片数字，
+       而那三个数回答的是"我最好/最差/现在是多少"，基准的极值不在其中。
+     ★ 标签用与 y 轴**同一个 `yl()`** 格式化 —— 另写一份格式化必然与轴
+       对不上（轴上 `+2.0%` 而标签 `+1.95%`，读的人以为图错了）。
+     🔴 标签会**顶出画布**：最高点贴着上边、最低点贴着下边、当前点贴着右边。
+       所以三处都按位置翻转（上/下、左/右），并把 x 钳在绘图区内。
+       顶出去的部分 svg 不报错，只是**看不见** —— 而"看不见"与"没标"
+       在屏幕上一模一样。 */
+  function _marks(){
+    if(!opt.mark) return '';
+    const s=series[0]; if(!s||!s.v) return '';
+    let iMax=-1,iMin=-1,iLast=-1;
+    for(let i=0;i<s.v.length;i++){ const v=s.v[i]; if(v==null) continue;
+      iLast=i;
+      if(iMax<0||v>s.v[iMax]) iMax=i;
+      if(iMin<0||v<s.v[iMin]) iMin=i; }
+    if(iLast<0) return '';
+    const want=[];
+    const add=(i,tag,pos)=>{ if(i<0) return;
+      if(want.some(w=>w.i===i)){ /* 同一个点身兼两职：合并标签，别叠着画 */
+        const w=want.find(w=>w.i===i); if(w.tag.indexOf(tag)<0) w.tag+='/'+tag; return; }
+      want.push({i:i,tag:tag,pos:pos}); };
+    add(iMax,'最高','up'); add(iMin,'最低','dn'); add(iLast,'当前','now');
+    return want.map(w=>{
+      const x=X(w.i), y=Y(tf(s.v[w.i])!==undefined?s.v[w.i]:s.v[w.i]);
+      /* 顶/底翻转：离上边 < 18px 就把标签放到点下面，反之放上面 */
+      const above = y > T+18;
+      const ty = above ? y-9 : y+15;
+      /* 右边翻转：离右边 < 70px 就右对齐，免得数字被裁掉 */
+      const near = x > W-R-70;
+      const anchor = near ? 'end' : (w.i===0 ? 'start' : 'middle');
+      const tx = Math.max(L+2, Math.min(W-R-2, x));
+      return '<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="3" fill="'+s.c+'"/>'
+        + '<text class="mkt" x="'+tx.toFixed(1)+'" y="'+ty.toFixed(1)+'" '
+        + 'text-anchor="'+anchor+'" fill="'+s.c+'">'
+        + w.tag+' '+yl(s.v[w.i])+'</text>';
+    }).join('');
+  }
+
   // x 轴：取 6 个日期
   const _gid = "g" + (++_gidN);
   const xs=[]; for(let k=0;k<6;k++){const i=Math.round((n-1)*k/5); xs.push([i,opt.dates[i]]);}
@@ -127,6 +168,7 @@ function lineChart(el,series,opt){
         stroke="rgba(91,156,240,.55)" stroke-width="1"/>`}
      ${series.map(s=>`<path d="${path(s)}" fill="none" stroke="${s.c}"
         stroke-width="${s.w||1.6}" stroke-linejoin="round"/>`).join('')}
+     ${_marks()}
      <!-- hover 高亮：一条竖线 + 每条线上一个圆点 + 顶部日期。
           🔴 光有 tooltip 不够：鼠标在图上时**看不出读的是哪一天** ——
             折线密的时候差一两个像素就是差一天，而 tooltip 只在鼠标旁边，
