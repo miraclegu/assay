@@ -425,7 +425,7 @@ def sector_members(code, date=None, kind='sw', limit=2000, root=None):
 
 
 def stock_sectors(code, root=None):
-    """这只票属于哪些板块（通达信）+ 申万一级。个股页「所属板块」用。
+    """这只票属于哪些板块（通达信）+ 申万**三级**。个股页「所属板块」用。
 
     ★ 代码先归一化 —— 页面可能传 `601857` / `601857.SH`，不归一就直接
       `WHERE jq_code = '601857'` 查不到，而报的是"面板里没有 601857"，
@@ -436,22 +436,30 @@ def stock_sectors(code, root=None):
     # 静默的空（空会被读成"数据没取到"，同 `_na` 那条）。
     alt = stk.alt_kind(code, root)
     if alt:
-        return stk._na(alt, {'sw': None, 'blocks': []})
+        return stk._na(alt, {'sw_levels': [], 'blocks': []})
     jc = stk.norm_code(code)
     if not jc:
         raise MarketError('认不出代码：%r' % code)
     c = con()
     p = panel(root)
     d = _day(c, p, None)
+    # 🔴 三级申万一起给：列名从 `SW_LEVELS` 取，**不在这里再手写一遍**
+    #   `sw_l1_code` —— 那就是第二份实现（板块页的下钻已经在用它，两边
+    #   分叉的话是「看着完全正常、只是某天开始给错答案」）。
+    lv = [(k,) + SW_LEVELS[k] for k in ('sw', 'sw_l2', 'sw_l3')]
+    sel = ', '.join('%s, %s' % (cc, nc) for _k, cc, nc, _kn, _pc in lv)
     row = c.execute(
-        'SELECT symbol, sw_l1_code, sw_l1_name FROM %s '
-        "WHERE jq_code = ? ORDER BY date DESC LIMIT 1" % p, [jc]).fetchone()
+        'SELECT symbol, %s FROM %s '
+        "WHERE jq_code = ? ORDER BY date DESC LIMIT 1" % (sel, p), [jc]).fetchone()
     if not row:
         raise MarketError('面板里没有 %s' % jc)
     sym = row[0]
-    out = {'code': jc, 'date': str(d),
-           'sw': ({'code': row[1], 'name': row[2]} if row[2] else None),
-           'blocks': []}
+    # ★ 某一级为空就**不给这一行**（而不是给一个空 chip）——「未知不是缺」
+    #   的另一面：面板里 5211 只有 5200 只三级齐全，剩下那些是真的没有分类。
+    sw_levels = [{'kind': k, 'kind_name': kn, 'code': row[1 + i * 2],
+                  'name': row[2 + i * 2]}
+                 for i, (k, _cc, _nc, kn, _pc) in enumerate(lv) if row[2 + i * 2]]
+    out = {'code': jc, 'date': str(d), 'sw_levels': sw_levels, 'blocks': []}
     # 🔴 通达信板块读不动时**不拦**：申万归属来自面板，照样给得出来。
     #   但要把原因带上去（`blocks_error`），否则页面显示「没有板块归属」
     #   —— 那是在替这只票下一个它没资格下的结论。

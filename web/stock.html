@@ -372,23 +372,46 @@ function naNote(o) {
     ? `<div class="none">${esc(o.why || '这一项不适用')}</div>` : null;
 }
 
+/* 🔴 一行一类：申万一/二/三级 + 概念 / 研究 / 风格 / 地区。
+   原来除了申万一级，其余 21 个 chip 摊成**一排没有类别的链接**，
+   类别只藏在 tooltip 里 —— 用户 2026-09-30：「只展示了申万一级行业，
+   我希望把申万二级、三级、概念、研究、风格、地区都展示出来」。
+   数据一直都在（中国石油 21 个：概念 6 / 风格 12 / 研究 2 / 地区 1），
+   **看不出分类 = 等于没展示**。
+   ★ 类别清单**不在前端写死**：组名取每个 block 自己带的 `kind_name`，
+     顺序按服务端给的先后（同「清单在服务端」—— tdx 那边加一类，
+     这里自动就有，写死的话新的那类不会出现、且不报错）。 */
+function secRow(label, chips) {
+  return '<div class="secln"><span class="seclb">' + esc(label) + '</span>'
+       + '<span class="secch">' + chips.join('') + '</span></div>';
+}
+
 function sectorBox(sc, pe) {
   const blocks = (sc && !sc.error) ? (sc.blocks || []) : [];
+  const swl = (sc && !sc.error) ? (sc.sw_levels || []) : [];
   const peers = (pe && !pe.error) ? (pe.rows || []) : [];
+  const chip = (x, on) => `<a class="chip${on ? ' on' : ''}"
+      href="${sectorHref(x.code, x.kind, 'mem')}"
+      title="${esc(x.kind_name)}${x.n ? '　' + x.n + ' 只成分' : ''}">${esc(x.name)}${
+      x.n ? ` <span class="lvwhy">${x.n}</span>` : ''}</a>`;
+  const rows = swl.map(x => secRow(x.kind_name, [chip(x, true)]));
+  const seen = [];
+  blocks.forEach(b => { if (seen.indexOf(b.kind) < 0) seen.push(b.kind); });
+  seen.forEach(k => {
+    const g = blocks.filter(b => b.kind === k);
+    rows.push(secRow(g[0].kind_name || k, g.map(x => chip(x, false))));
+  });
   return `<div class="pgrid c2" style="margin-bottom:14px">
     <div class="lvsec"><h3>所属板块 <span class="lvwhy">${sc && sc.blocks_error
-        ? '查不到（通达信，每日同步）' : blocks.length + ' 个（通达信，每日同步）'}</span></h3>
-      ${sc && sc.sw ? `<div style="margin-bottom:6px">申万一级：
-        <a class="chip on" href="${sectorHref(sc.sw.code, 'sw', 'mem')}">${esc(sc.sw.name)}</a></div>` : ''}
-      ${blocks.length ? blocks.map(x =>
-        `<a class="chip" href="${sectorHref(x.code, x.kind, 'mem')}"
-           title="${esc(x.kind_name)}　${x.n} 只成分">${esc(x.name)}
-           <span class="lvwhy">${x.n}</span></a>`).join('')
-        : (sc && sc.blocks_error
-            ? `<div class="lvmsg bad">${esc(sc.blocks_error)}</div>`
-            : (naNote(sc) || '<div class="none">没有板块归属</div>'))}
+        ? '申万 ' + swl.length + ' 级 · 通达信查不到'
+        : swl.length + ' 级申万 + ' + blocks.length + ' 个通达信板块（每日同步）'}</span></h3>
+      ${rows.length ? rows.join('') : ''}
+      ${blocks.length ? '' : (sc && sc.blocks_error
+          ? `<div class="lvmsg bad">${esc(sc.blocks_error)}</div>`
+          : (naNote(sc) || (swl.length ? '' : '<div class="none">没有板块归属</div>')))}
       <div class="lvwhy" style="margin-top:6px">
-        🔴 用的是 <code>tdx.db</code> 的板块（每日同步 + PIT 快照），
+        🔴 申万三级来自面板（聚宽），概念 / 研究 / 风格 / 地区来自
+        <code>tdx.db</code>（每日同步 + PIT 快照），
         <b>不是</b> <code>raw/hf/</code> 那份同花顺概念 —— 后者
         <code>last_fetched</code> 停在 2026-04-28、没接进每日同步，
         用它会给出四个月前的成分而页面上看着像今天的。

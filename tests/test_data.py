@@ -5921,6 +5921,38 @@ def t_load_progress_bar():
                 "()=>getComputedStyle(document.querySelector"
                 "('#prgbar .pgmore')).cursor") == 'pointer', \
                 '「明细」看不出能点 —— 看不出能点的入口 = 没有入口'
+            # ②c 🔴 动作链接要**跟着标题**，不是被顶到屏幕最右
+            #   用户 2026-09-30：「每日数据同步这个框框在左上角，但是收起、
+            #   看日志在右上角，离的太远了」。横条通栏铺满整屏，原来
+            #   `#prgbar a{margin-left:auto}` 把它们推到最右 —— 1280 宽屏上
+            #   标题与链接相隔一整屏，眼睛要横跨过去才找得到。
+            #   ★ 判据是**两者之间的距离**（可证的事实），不是"改了没改"；
+            #     并且**两头夹**：既要贴着标题，也要证明它确实**没有**
+            #     贴在右边缘（只验前者的话，一个居中的排布也能蒙混过去）。
+            lay = pg.evaluate(
+                "()=>{const r=document.querySelector('#prgbar .pgrow');"
+                "const b=r.querySelector('b'),"
+                " m=r.querySelector('.pgmore'),"
+                " g=[...r.querySelectorAll('a')].pop(),"
+                " s=r.querySelector('.pgs');"
+                "const R=e=>e.getBoundingClientRect();"
+                "return {gapTitle:R(m).left-R(b).right,"
+                " gapRight:R(r).right-R(g).right,"
+                " barW:R(r).width, sLeft:R(s).left, mLeft:R(m).left};}")
+            assert lay['gapTitle'] < 40, (
+                '「明细」离标题 %.0fpx（整条宽 %.0fpx）—— 动作跟这一行的任务'
+                '是一件事，隔一整屏就读不出它属于谁'
+                % (lay['gapTitle'], lay['barW']))
+            assert lay['gapRight'] > lay['barW'] * 0.3, (
+                '最后一个链接右边只剩 %.0fpx —— 还是贴在右边缘上'
+                % lay['gapRight'])
+            #   状态文字排在动作**后面**：不这么钉的话，把链接塞回标题与
+            #   状态之间、再给状态一个 margin-left:auto 也能骗过上面两条
+            assert lay['sLeft'] > lay['mLeft'], (
+                '状态文字排在动作前面（%.0f < %.0f）—— 那会把动作又推远'
+                % (lay['sLeft'], lay['mLeft']))
+            out.append('动作贴标题 %.0fpx / 右侧余 %.0fpx'
+                       % (lay['gapTitle'], lay['gapRight']))
             _h0 = pg.evaluate(
                 "()=>[document.querySelector('#prgbar').getBoundingClientRect()"
                 ".height, parseFloat(getComputedStyle(document.body).paddingTop),"
@@ -7968,6 +8000,154 @@ def t_lake_views_union():
             'std/raw 扫出来的 %d）'
             % (len(bodies), len(have), len(want), len(bodies) - len(macros),
                len(want) - (len(bodies) - len(macros)) - 1))
+
+@case('进度横条：失败要说清那是【什么时候】的那一轮', tag='fast')
+def t_prg_failed_age():
+    """🔴🔴 用户 2026-09-30：「现在 web 的最上方，还显示每日同步数据失败，
+    停在 7/13，检查是什么情况」。
+
+    查出来：那一轮是 **09-29 19:10** 跑的（因 `fin_core` 缺失停在第 7 步），
+    **当晚就修好了** —— 第 7 步现在单跑 ✅ 全部通过。但横条照旧挂着，
+    而它**从不说那是什么时候的事**：17 小时前的失败与一分钟前的失败
+    **长得一模一样**，人只能读成"现在有问题"。
+
+    ★ 横条报的是**上一轮的记录**，它没法自己重跑去确认现在怎么样 ——
+      那就**老实说自己讲的是记录**，把时间摆出来
+      （同「判据永远是【现在的状态】，不是记录」的另一面：
+       给不出现在的状态时，至少要说清给的是哪一刻的）。
+    ★ 相对 + 绝对**都给**：相对的一眼读得出新旧，绝对的才对得上日志
+      文件名（`logs/runs/20260929-191005.log`）。
+    """
+    import io
+    import os
+    import re
+    import subprocess
+    import tempfile
+
+    js = io.open(os.path.join(REPO, 'web', 'shared', 'common.js'),
+                 encoding='utf-8').read()
+    body = '\n'.join(l for l in js.split('\n')
+                     if not l.strip().startswith(('*', '/*', '//')))
+    assert 'function prgAgo' in body, '没有把"那是什么时候"这件事做出来'
+    #   🔴 钉**调用**，不是名字出现过 —— 定义在、没接上的话，
+    #     横条照旧不说时间（同 `paramsBlock` 那次）
+    assert re.search(r'prgAgo\(j\.ended\)', body), \
+        '失败那一支没调 prgAgo(j.ended) —— 时间不会出现在横条上'
+
+    # ---- 用 node 直接跑这个函数，逐个时段对期望 ----
+    #   ★ 期望从**另一条路**算（自己按秒数推），不拿函数的输出当期望
+    src = body[body.index('function prgAgo'):]
+    src = src[:src.index('\nfunction ')]
+    cases = [(30, '刚刚'), (5 * 60, '5 分钟前'), (3 * 3600, '3 小时前'),
+             (2 * 86400, '2 天前')]
+    probe = (src + '\nconst now = Date.now()/1000;\n'
+             + '\n'.join("console.log(prgAgo(now - %d));" % s for s, _ in cases))
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False,
+                                     encoding='utf-8') as f:
+        f.write(probe)
+        fp = f.name
+    try:
+        out = subprocess.run(['node', fp], capture_output=True, text=True,
+                             timeout=30)
+        assert out.returncode == 0, 'prgAgo 跑不起来：%s' % out.stderr[-200:]
+        got = [x for x in out.stdout.split('\n') if x.strip()]
+    finally:
+        os.unlink(fp)
+    assert len(got) == len(cases), '输出行数不对：%s' % got
+    for (sec, want), line in zip(cases, got):
+        assert want in line, \
+            '%d 秒前该说「%s」，实得 %r' % (sec, want, line)
+        #   绝对时间也要给 —— 只有"17 小时前"对不上日志文件名
+        assert re.search(r'\d\d-\d\d \d\d:\d\d', line), \
+            '没给绝对时间（对不上 logs/runs 的文件名）：%r' % line
+    return ('失败那一支会带上「N 分钟/小时/天前（月-日 时:分）那一轮」；'
+            '四个时段逐个对上（%s）；prgAgo 定义了且真的被调用'
+            % ' / '.join(x.split('（')[0] for x in got))
+
+@case('ETF 平行 lake：`<root>/raw/tdx` 那一棵必须【整个】挂过去', tag='fast')
+def t_etf_lake_tdx_mount():
+    """🔴🔴 原来 `build_etf_lake.py` 只挂了 `raw/tdx/kline` **一个子目录**。
+
+    assay 从 `<root>/raw/tdx/` 下读的是**四样**，另外三样在 etf_lake 下
+    根本不存在：复权因子（`symbols.alt_panel`）、公司行动（`lv/corp.py`）、
+    名称快照（`symbols.name_snap`）。
+
+    症状（2026-09-30 从 `--web` 里查出来）：ETF 回测的交易记录点名称 ->
+    浮层 **K 线 0 根**，而报的是「本地还没有这份数据（…/etf_lake/raw/tdx/
+    adjust_factor.parquet）」—— 那句话把人指向"数据没建好"，
+    真相却是**这个 lake 从来没挂过它**（同「报错必须指向真正的原因」
+    与「指了一条走不通的路比不说更糟」）。
+
+    ★ 判据**扫源码里的路径字面量**，不照清单拼 —— 手写清单的话，
+      assay 下次多读一样，这里不会有、而且**不报错**
+      （同「断言直接扫目录，不照清单拼」）。
+    ★ etf_lake 没建时**不拦**（未知不是缺）。
+    """
+    import glob
+    import io
+    import os
+    import re
+
+    from assay import server as sv
+    root = sv._datalake_dir()
+    etf = os.path.join(root, 'etf_lake')
+    if not os.path.isdir(etf):
+        return 'etf_lake 没建 —— 不拦（未知不是缺）'
+
+    # ---- ① 扫 assay 包里所有 `raw/tdx/...` 字面量 ----
+    pats = set()
+    for d, _sub, fs in os.walk(os.path.join(REPO, 'assay')):
+        if '__pycache__' in d:
+            continue
+        for f in fs:
+            if not f.endswith('.py'):
+                continue
+            src = io.open(os.path.join(d, f), encoding='utf-8').read()
+            #   只取代码里的，不取注释里的（注释会命中一堆说明文字）
+            code = '\n'.join(l for l in src.split('\n')
+                             if not l.strip().startswith('#'))
+            for m in re.finditer(r"raw/tdx/([A-Za-z0-9_./*%{}\[\]']+)", code):
+                x = m.group(1).rstrip("'\"),")
+                if '%' in x or '{' in x:          # 带格式符的另外处理
+                    continue
+                pats.add(x)
+    assert len(pats) >= 3, '一个路径字面量都没扫到，扫描器自己坏了：%s' % pats
+
+    # ---- ② 每一个在 etf_lake 下都要**真的能命中** ----
+    miss = []
+    for x in sorted(pats):
+        p = os.path.join(etf, 'raw', 'tdx', x)
+        if not (glob.glob(p) or os.path.exists(p)):
+            miss.append(x)
+    assert not miss, (
+        'etf_lake 下这几样读不到：%s —— ETF 那条路上会静默少东西'
+        % '、'.join(miss))
+
+    # ---- ③ 反向自证：换一个没挂过的根，同样的检查必须全部落空 ----
+    bad = [x for x in sorted(pats)
+           if glob.glob(os.path.join(etf, 'nope', 'raw', 'tdx', x))]
+    assert not bad, '反向自证失败：不存在的根也"命中"了 %s' % bad
+
+    # ---- ④ 挂的必须是**整棵**，不是某个子目录 ----
+    #   守卫**只报不写**：这里不替人建链接
+    link = os.path.join(etf, 'raw', 'tdx')
+    assert os.path.realpath(link) == os.path.realpath(
+        os.path.join(root, 'raw', 'tdx')), (
+        '%s 没有整棵挂到主 lake（realpath=%s）—— 只挂子目录的话，'
+        '主 lake 下次多一个文件这里不会有，而且不报错'
+        % (link, os.path.realpath(link)))
+
+    # ---- ⑤ 建库脚本也得是这么写的（不然下次重建又退回去）----
+    bl = io.open(os.path.join(root, 'build', 'build_etf_lake.py'),
+                 encoding='utf-8').read()
+    blc = '\n'.join(l for l in bl.split('\n') if not l.strip().startswith('#'))
+    assert "os.path.join(OUT, 'raw', 'tdx')" in blc, \
+        'build_etf_lake.py 没有把 raw/tdx 整棵挂上'
+    assert "'raw', 'tdx', 'kline'" not in blc, \
+        'build_etf_lake.py 还在只挂 kline 子目录'
+    return ('%d 个路径字面量在 etf_lake 下全命中（%s）；反向自证落空；'
+            'raw/tdx 整棵挂到主 lake；建库脚本同步'
+            % (len(pats), '、'.join(sorted(pats))))
 
 @case('行业分级：申万一/二/三级 + 证监会，且【下级换挡必须单独开区间】', tag='fast')
 def t_industry_levels():

@@ -898,6 +898,40 @@ def t_stock_ui():
             # 所属板块要能点去板块页
             assert pg.locator('#body a.chip[href*="/sector.html"]').count() >= 1, \
                 '板块 chip 没链到板块页'
+            # ---- 🔴 所属板块：**每一类各自成行**，不是一排没分类的 chip ----
+            #   用户 2026-09-30：「只展示了申万一级行业，我希望把申万二级、
+            #   三级、概念、研究、风格、地区都展示出来」。那些数据一直都在
+            #   （中国石油 21 个通达信板块），只是类别藏在 tooltip 里 ——
+            #   **看不出分类等于没展示**。
+            lbs = [x.strip() for x in
+                   pg.locator('#body .secln .seclb').all_inner_texts()]
+            for kk in ('申万一级', '申万二级', '申万三级', '概念', '研究',
+                       '风格', '地区'):
+                assert kk in lbs, '所属板块里没有「%s」这一行：%s' % (kk, lbs)
+            #   ★ 标签不许重复：同一类摊成好几行 = 又回到没分类
+            assert len(lbs) == len(set(lbs)), '类别标签有重复：%s' % lbs
+            #   ★ 每一行都得**真有 chip**（有标签没内容比不给更糟）
+            empt = pg.evaluate(
+                "()=>[...document.querySelectorAll('#body .secln')]"
+                ".filter(e=>!e.querySelector('.secch a')).map"
+                "(e=>e.querySelector('.seclb').textContent.trim())")
+            assert not empt, '这几行只有标签、没有 chip：%s' % empt
+            #   ★ 申万二/三级要链到**对应那一级**的板块页 —— 全指到
+            #     kind=sw 的话，点进去看到的是一级，而它不报错
+            for lb, want in (('申万二级', 'kind=sw_l2'), ('申万三级', 'kind=sw_l3')):
+                h = pg.evaluate(
+                    "(lb)=>{const r=[...document.querySelectorAll"
+                    "('#body .secln')].find(e=>e.querySelector('.seclb')"
+                    ".textContent.trim()===lb);"
+                    "return r?r.querySelector('.secch a').getAttribute('href'):null;}",
+                    lb)
+                assert h and want in h, '「%s」没链到 %s：%s' % (lb, want, h)
+            #   ★ 标签列**对齐**：定宽才能让各行 chip 从同一个 x 起步
+            xs = pg.evaluate(
+                "()=>[...document.querySelectorAll('#body .secln .secch')]"
+                ".map(e=>Math.round(e.getBoundingClientRect().left))")
+            assert len(set(xs)) == 1, \
+                '各行 chip 起始位置不齐（标签列没定宽）：%s' % sorted(set(xs))
 
             # ---- K 线真的画出来了（含 MACD 副图）----
             nz1 = pg.evaluate(NZ)
@@ -1211,7 +1245,12 @@ def t_sector():
     for raw in ('601857', '601857.SH', 'sh601857', '601857.XSHG'):
         ss = mk.stock_sectors(raw)
         assert ss['code'] == '601857.XSHG', '%r 没归一：%s' % (raw, ss['code'])
-        assert ss['sw'] and ss['sw']['name'], '没给申万归属'
+        # 申万**三级全给**：原来只断言了一级，于是"二三级根本没返回"
+        # 这种坏法一直绿着（用户 2026-09-30 才发现页面上只有一级）
+        assert [x['kind'] for x in ss['sw_levels']] == ['sw', 'sw_l2', 'sw_l3'], \
+            '申万没给满三级：%s' % ss['sw_levels']
+        assert all(x['name'] and x['code'] for x in ss['sw_levels']), \
+            '申万某一级缺代码或名字：%s' % ss['sw_levels']
         assert ss['blocks'], '一只大盘股不可能不属于任何板块'
     try:
         mk.stock_sectors('99')
@@ -1311,7 +1350,7 @@ def t_blocks_locked():
         # ---- ③ 个股归属：申万那一半照给，通达信那一半带原因 ----
         mk._BLK.update(at=None, data=None)
         ss = mk.stock_sectors('601857.XSHG')
-        assert ss.get('sw') and ss['sw'].get('name'), \
+        assert ss.get('sw_levels') and ss['sw_levels'][0].get('name'), \
             ('板块库读不动就把申万归属也一起丢了 —— 那一半来自面板，'
              '跟 tdx.db 没关系（未知不是缺：读不出来的不拦别的）')
         assert ss.get('blocks_error') and '读不到' in ss['blocks_error'], \

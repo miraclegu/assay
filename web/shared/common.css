@@ -1024,6 +1024,13 @@ tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
   font-size:13px;line-height:1}
 .mdel:hover{color:var(--up)}
 
+/* 所属板块：一行一类（申万一/二/三级 · 概念 · 研究 · 风格 · 地区）。
+   🔴 标签列**定宽**（`flex:0 0`）—— 用 min-width 的话它只是个下限，
+   长短标签会各占各的宽度，chip 起始位置逐行错开（同 `.spnb` 那次）。 */
+.secln{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}
+.secln .seclb{flex:0 0 56px;color:var(--dim);font-size:11px;text-align:right}
+.secln .secch{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:4px}
+
 /* ---- 数据加载进度：页面最上侧那条横条（common.js 的 prgScan 挂上） ----
    🔴 **不作用域化**（不写 `#main #prgbar`）—— 它挂在 6 个独立 .html 与
      index.html 的 <body> 第一个子节点上，而 `#main` 只有 index.html 有。
@@ -1046,13 +1053,18 @@ tr.grp .gwhy{display:block;margin-top:3px;font-weight:400;font-size:11px;
   padding:4px 10px;white-space:nowrap}
 #prgbar b{font-weight:600;color:var(--fg)}
 #prgbar .pgi{font-size:13px}
-#prgbar .pgs{overflow:hidden;text-overflow:ellipsis;min-width:0;
+/* 状态文字是【最后】一项，也是唯一会收缩的那一项（ellipsis 在它身上）。
+   `flex:1` 让它吃掉剩余宽度 —— 否则窄屏上它会被动作链接挤到换行。 */
+#prgbar .pgs{flex:1;overflow:hidden;text-overflow:ellipsis;min-width:0;
   font-variant-numeric:tabular-nums}
-#prgbar a{margin-left:auto;padding-left:10px;color:var(--accent);
+/* 🔴 动作（明细 / 看日志 / 按钮）跟在**标题后面**，不推到最右。
+   原来是 `#prgbar a{margin-left:auto}` —— 横条通栏铺满整个屏幕，于是
+   「🔴 每日数据同步」在最左、「收起 / 看日志」在最右，中间隔着一整屏，
+   宽屏上眼睛要横跨过去才找得到（用户 2026-09-30 提）。
+   ★ 这是「同一件事的东西要待在一起」：那两个链接**属于这一行这个任务**，
+     离标题越远越像页面级的导航。 */
+#prgbar a{padding-left:2px;color:var(--accent);
   text-decoration:none;flex:none}
-/* 「明细」与「看日志」并排：只有第一个吃 margin-left:auto，
-   否则两个各推一次、中间裂一道大缝 */
-#prgbar a ~ a{margin-left:0}
 #prgbar .pgmore{cursor:pointer}
 /* 进度条本身是铺在横条底下的一层，不占布局高度 —— 文字不会被它挤动 */
 #prgbar .pgfill{position:absolute;left:0;top:0;bottom:0;z-index:0;

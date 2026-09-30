@@ -996,6 +996,24 @@ const PRG_RUN = 2000, PRG_IDLE = 10000;
      （同「待办折叠状态不持久化」）。 */
 let PRGOPEN = {};
 
+/* 「那是什么时候的事」。★ 相对 + 绝对**都给**：相对的一眼读得出新旧，
+   绝对的才对得上日志文件名（`logs/runs/20260929-191005.log`）。 */
+function prgAgo(ts){
+  if(!ts || !isFinite(ts)) return '';
+  const d = new Date(ts * 1000);
+  const p2 = v => String(v).padStart(2, '0');
+  const when = p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+    + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+  const sec = Date.now() / 1000 - ts;
+  let rel;
+  if(sec < 90) rel = '刚刚';
+  else if(sec < 3600) rel = Math.round(sec / 60) + ' 分钟前';
+  else if(sec < 86400) rel = Math.round(sec / 3600) + ' 小时前';
+  else rel = Math.round(sec / 86400) + ' 天前';
+  return rel === '刚刚' ? ('刚刚（' + when + '）那一轮')
+                        : (rel + '（' + when + '）那一轮');
+}
+
 function fmtDur(s){
   if(s == null || !isFinite(s)) return null;
   s = Math.max(0, Math.round(s));
@@ -1088,10 +1106,10 @@ function prgHtml(j){
     }
     return '<span class="pgi">' + (lf ? '🔴' : '📦') + '</span>' +
       '<b>' + esc(j.title) + '</b>' +
-      '<span class="pgs">' + bits.join(' · ') + '</span>' +
       '<a href="#" class="btn" id="prgsetup">' +
       (lf ? '↻ 再试一次（从失败那步接着跑）' : '▷ 开始建本地数据') + '</a>' +
-      '<a href="/#/sync">看清单 ›</a>';
+      '<a href="/#/sync">看清单 ›</a>' +
+      '<span class="pgs">' + bits.join(' · ') + '</span>';
   }
   /* 数据齐了，但定时任务没装 —— 新机器上最容易漏掉的一步。
      用户问「新下载的项目会在什么时候启用定时任务」，查下来是
@@ -1115,9 +1133,9 @@ function prgHtml(j){
     return '<div class="pgrow" data-job="' + esc(j.job) + '">' +
       '<span class="pgi">⟳</span>' +
       '<b>' + esc(j.title) + '</b>' +
-      '<span class="pgs">' + bits.join(' · ') + '</span>' +
       '<a href="#" class="btn" id="prgauto">▷ 开启自动同步</a>' +
-      '<a href="/#/sync">看定时窗口 ›</a></div>';
+      '<a href="/#/sync">看定时窗口 ›</a>' +
+      '<span class="pgs">' + bits.join(' · ') + '</span></div>';
   }
   const run = j.state === 'running', bad = j.state === 'stale' || j.rc;
   const ico = run ? '⟳' : (bad ? '🔴' : '✅');
@@ -1164,9 +1182,19 @@ function prgHtml(j){
     for(let i = 0; i < dn.length; i++)
       if(dn[i] && dn[i].state && dn[i].state !== 'ok') k = i;
     const nm = k >= 0 ? (dn[k].name || '') : '';
+    /* 🔴🔴 **要说清这是【什么时候】的那一轮。**（用户 2026-09-30 问
+         「现在 web 最上方还显示每日同步失败，停在 7/13，检查是什么情况」）
+       横条报的是**上一轮的记录**，而记录不说时间的话，17 小时前的失败
+       与一分钟前的失败**长得一模一样** —— 人只能读成"现在有问题"。
+       实测就是这么问出来的：那一轮是 09-29 19:10 跑的，当晚已经修好
+       （第 7 步现在单跑 ✅ 全部通过），但横条照旧挂着，没有任何线索说明
+       它讲的是昨天。
+       ★ 同「判据永远是【现在的状态】，不是记录」—— 横条没法自己重跑去
+         确认，那就**老实说自己讲的是记录**，把时间摆出来。 */
     bits.push('失败' + (k >= 0
       ? '（停在第 ' + (k + 1) + ' / ' + (j.total || dn.length) + ' 步「'
-        + esc(nm) + '」）' : '') + '，rc=' + esc(String(j.rc)));
+        + esc(nm) + '」）' : '') + '，rc=' + esc(String(j.rc))
+      + (j.ended ? ' · ' + prgAgo(j.ended) : ''));
     /* 🔴🔴 **为什么失败**：原来这里只有 rc 与一个日志路径 —— 而 rc=1
          说不出任何事，人得去翻日志。服务端现在把原因跟着那一步落了盘
          （认得出缺哪张表就翻成"要先做哪一步"，认不出就给日志里那行原始
@@ -1199,11 +1227,11 @@ function prgHtml(j){
          (pct * 100).toFixed(1) + '%"></i>' +
          '<span class="pgi">' + ico + '</span>' +
          '<b>' + esc(j.title || j.job) + '</b>' +
-         '<span class="pgs"' + (badNote ? ' title="' + esc(badNote) + '"' : '')
-         + '>' + bits.join(' · ') + '</span>' +
          '<a href="#" class="pgmore" data-job="' + esc(j.job) + '">' +
          (open ? '收起 ▴' : '明细 ▾') + '</a>' +
          '<a href="/#/sync">看日志 ›</a>' +
+         '<span class="pgs"' + (badNote ? ' title="' + esc(badNote) + '"' : '')
+         + '>' + bits.join(' · ') + '</span>' +
          (open ? prgSteps(j) : '') + '</div>';
 }
 
