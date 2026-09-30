@@ -9836,6 +9836,112 @@ def t_params_effective():
             '没信号时给 None 不是 {}；页面调了 paramsBlock'
             % (len(st), len(sb), len(EFF)))
 
+@case('现金透支：报得出差多少，补一笔入金就平；入金不算收益', tag='fast')
+def t_cash_alert():
+    """🔴🔴 2026-09-29 实测：FROEC-TRADE 账户「持仓市值 407,001 > 总资产
+    406,214」。差额 787.05 正好是现金余额（负的）。
+
+    倒查：09-29 那笔买入 300165 录了 **8400 股** @4.92 = 41,333，而当时可用
+    现金只有 40,545.95 —— 下单时手上那版信号建议的是 **7800 股**，
+    按成交价现金上限是 8200 股。
+
+    ⚠ 它**怎么被发现的**才是重点：页面上只剩「持仓市值 > 总资产」这一个
+      症状，而那句话**指不到任何原因** —— 得把成交逐笔重放一遍才看得出是
+      哪天多买了多少。所以这条守卫要的不是"有问题"，是**差多少、哪天起**。
+
+    用户的判断（也是账务上唯一说得通的解释）：券商不会让资金不足的委托
+    成交，所以那是**先入金再买入** —— 补一笔入金即可，且
+    「收益率等等也要按照这个最新的本金来计算」。
+
+    ★ 真账户已经补平了，这个分支**真实数据碰不到** —— 必须构造，
+      否则这段是空转而看着全绿。
+    """
+    import importlib
+    import shutil
+    import tempfile
+
+    lv = importlib.import_module('assay.live')
+    from assay.lv import pos as _P
+
+    tmp = tempfile.mkdtemp()
+    old = lv.LIVE
+    try:
+        lv.LIVE = tmp
+        lv.upsert_account('zz', name='zz', init_cash=10000)
+        lv.add_fill('zz', '2026-09-01', '601857.XSHG', 'buy', 1000, 9.0,
+                    fee=5, force_price=True)
+        # ---- ① 没透支时**不许**报 —— 常驻一条"一切正常"等于教人忽略这里 ----
+        assert lv.cash('zz') > 0 and _P.cash_alert('zz') is None, \
+            '还没透支就报了：cash=%.2f' % lv.cash('zz')
+
+        # ---- ② 透支：差多少、哪天起，都要说出来 ----
+        lv.add_fill('zz', '2026-09-02', '601857.XSHG', 'buy', 200, 9.0,
+                    fee=5, force_price=True)
+        c = lv.cash('zz')
+        assert c < 0, '构造失败，现金没变负：%.2f' % c
+        al = _P.cash_alert('zz')
+        assert al, '现金 %.2f 是负的却一声不吭 —— 页面上就只剩"持仓市值 > 总资产"' % c
+        assert abs(al['need'] + c) < 0.01, \
+            '要补的金额该是 %.2f，实得 %s' % (-c, al['need'])
+        assert al['since'] == '2026-09-02', \
+            ('该说清从哪天起变负（只说"现在是负的"等于让人自己去翻流水）：'
+             '实得 %r' % al['since'])
+        assert str(al['need']) in al['why'] or ('%.2f' % al['need']) in al['why'], \
+            '说明里没写出要补多少：%r' % al['why']
+        #   ★ 还要钉**接口真的把它带出去了** —— 函数自己对、而页面拿到的
+        #     那份没有这个字段，症状与"根本没做"一模一样
+        #     （2026-09-29 变异 C8 就是这么漏网的）
+        _pvd = lv.positions_valued('zz').get('cash_alert')
+        assert _pvd and abs(_pvd['need'] - al['need']) < 0.01, \
+            'positions_valued 没把 cash_alert 带出去：%r' % _pvd
+
+        # ---- ③ 它**不拦**下单 —— 信用账户本来就能透支 ----
+        #   硬拒会逼人绕过整个入口（同「硬拒必须配一个显式的逃生口」）
+        lv.add_fill('zz', '2026-09-03', '601857.XSHG', 'buy', 100, 9.0,
+                    fee=5, force_price=True)
+        assert lv.cash('zz') < c, '透支之后还能继续录 —— 这条不该拦'
+
+        # ---- ④ 补一笔入金就平，且【入金不算收益】----
+        #   这是用户要的口径：「收益率等等也要按照这个最新的本金来计算」
+        st0 = lv.equity_curve('zz')['stats']
+        need = _P.cash_alert('zz')['need']
+        lv.add_cashflow('zz', '2026-09-03', need, kind='deposit', note='补')
+        assert abs(lv.cash('zz')) < 0.01, \
+            '补了 %.2f 还没平：%.2f' % (need, lv.cash('zz'))
+        assert _P.cash_alert('zz') is None, '补平了还在报'
+        st1 = lv.equity_curve('zz')['stats']
+        assert abs(st1['net_deposit'] - need) < 0.01, \
+            '净入金没记上：%s' % st1['net_deposit']
+        assert st1['init_cash'] == st0['init_cash'], \
+            ('init_cash 被改了（%.2f -> %.2f）—— 入金是个「事件」，改 init_cash '
+             '会把它追溯到开户日，过去每一天的权益都变，而回看历史时没有任何'
+             '痕迹说明它变过' % (st0['init_cash'], st1['init_cash']))
+        #   🔴 最硬的那条：入金**一分钱都不许**算成收益
+        assert abs(st1['pnl_total'] - st0['pnl_total']) < 0.02, \
+            ('补了 %.2f 入金，累计收益金额从 %.2f 变成了 %.2f —— '
+             '入金被当成赚的了' % (need, st0['pnl_total'], st1['pnl_total']))
+        assert abs(st1['pnl_total']
+                   - (st1['equity_end'] - st1['init_cash'] - st1['net_deposit'])
+                   ) < 0.02, '累计收益 != 期末 − 开户资金 − 净入金'
+
+        # ---- ⑤ 页面真把它显示出来（不显示等于没有）----
+        import io as _io
+        import os as _os
+        js = _io.open(_os.path.join(REPO, 'web', 'views', 'live.js'),
+                      encoding='utf-8').read()
+        code = '\n'.join(l for l in js.split('\n')
+                         if not l.strip().startswith(('*', '/*', '//')))
+        assert 'cash_alert' in code, '页面没读 cash_alert'
+        assert code.count('CA.why') >= 1 and code.count('CA.need') >= 1, \
+            '页面拿到了 cash_alert 却没把「差多少」和「为什么」显示出来'
+        return ('没透支不报；透支时给出 need=%.2f / since=%s；不拦继续录；'
+                '补一笔入金就平，init_cash 不动、净入金 +%.2f、'
+                '累计收益一分没变（%.2f）'
+                % (need, al['since'], need, st1['pnl_total']))
+    finally:
+        lv.LIVE = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
 @case('交易时段默认不覆盖已发布的待办（盘中只算不写）', tag='fast')
 def t_session_write_guard():
     """2026-09-29 实测：我在盘中（09:06 / 09:55 / 11:11）反复重算，把用户

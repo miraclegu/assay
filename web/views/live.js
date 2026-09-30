@@ -777,12 +777,18 @@ function kpiHtml(o){
   const P=o.pos||{}, sgn=x=>x==null?'':(x>=0?'+':'');
   const col = upc;
   const wt=(P.equity&&P.market_value!=null)?P.market_value/P.equity:null;
+  /* 🔴 现金变负要**当场说清差多少** —— 2026-09-29 实测：账上只剩
+     「持仓市值 407,001 > 总资产 406,214」这一个症状，而那句话指不到任何
+     原因，得把成交逐笔重放才看得出是哪天多买了多少。
+     ★ 这一条只在真的透支时出现 —— 常驻一条"一切正常"等于教人忽略这个位置。 */
+  const CA = P.cash_alert;
   return `<div class="kpi">
     ${cell('总资产', num(P.equity,2), '现金 + 持仓市值', 'big')}
     ${cell('持仓市值', num(P.market_value,2),
            (P.items||[]).length+' 只 · 成本 '+num(P.cost,2))}
-    ${cell('可用现金', num(P.cash,2),
-           wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%')}
+    ${cell('可用现金'+(CA?' <span class="warn">透支</span>':''), num(P.cash,2),
+           CA?('差 '+num(CA.need,2)+' —— 多半是漏了一笔入金')
+             :(wt==null?'':'仓位 '+(wt*100).toFixed(1)+'%'))}
     ${cell('持仓浮盈'+pnlHelp(P),
            `<span style="color:${col(P.pnl)}">${sgn(P.pnl)}${num(P.pnl,2)}</span>`,
            (P.pnl_pct!=null?sgn(P.pnl_pct)+(P.pnl_pct*100).toFixed(2)+'%':''))}
@@ -801,6 +807,7 @@ function kpiHtml(o){
            lvDayPct(P), '', lvDayTitle(P))}
     <div id="kperf" style="display:none"></div>
   </div>
+  ${CA?`<div class="lvmsg bad" style="margin:6px 0">${esc(CA.why)}</div>`:''}
   <div class="kpi" id="kperf2">
     ${cell('累计收益','…','时间加权 TWR')}
     ${cell('加权年化','…','')}${cell('最大回撤','…','')}

@@ -391,6 +391,9 @@ def positions_valued(aid, datalake=None):
     #   不写回账本 —— gbbq 会被修正（tdx 数据修过好几轮），存一份下来就会
     #   过期，而它看着仍然像个正常数字（同「每档只存你填的那个，另一个现算」）。
     out['corp'] = corp_summary(aid, datalake=datalake)
+    # ★ 现金变负要**当场说清差多少**，不能只留下「持仓市值 > 总资产」
+    #   这个指不到原因的症状（2026-09-29 实测：用户就是这么发现的）。
+    out['cash_alert'] = _pos.cash_alert(aid)
     # ★ 合计 = 持仓 + 今日实现 − 今日费用。三块都给出去，页面必须能说清
     #   构成 —— 否则"合计 != 各行之和"看着像算错了（本项目最怕的静默错值）。
     out['pnl_day'] = (round(out['pnl_day_hold'] + realized - fee_day, 2)
