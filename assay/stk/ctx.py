@@ -28,7 +28,7 @@ def _wan(v):
     return '%.0f' % v
 
 # ================================ 事件 ================================
-def events(code, since=None, root=None):
+def events(code, since=None, root=None, kind=None):
     """打到 K 线上的事件：除权除息 / 财报公告 / 解禁 / 股本变动。
 
     ★ 分红用 **`a_xr_date`（除权日）** 定位到 K 线上 —— 那天价格才跳。
@@ -45,7 +45,7 @@ def events(code, since=None, root=None):
       `round(None or 0, 2)` 会显示成"占 0%" —— 那不是"占比很小"，
       是**根本没有这个数**。缺值必须显示"—"。
     """
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt:
         return _na(alt, {'events': [], 'kinds': _EVENT_KINDS})
     jc = norm_code(code)
@@ -116,9 +116,9 @@ def events(code, since=None, root=None):
     return {'code': jc, 'events': out, 'kinds': _EVENT_KINDS}
 
 # ================================ 同业 ================================
-def peers(code, n=20, root=None):
+def peers(code, n=20, root=None, kind=None):
     """同申万一级行业的票，按流通市值降序，并标出这只在其中的位置。"""
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt:
         return _na(alt, {'industry': None, 'rows': []})
     jc = norm_code(code)

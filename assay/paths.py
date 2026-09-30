@@ -93,10 +93,17 @@ TDX_KLINE = {'index': 'index_*', 'etf': 'etf_*',
              'stock': 'stock_*', 'block': 'block_*'}
 
 
+def tdx_kline_glob(kind, root=None):
+    """tdx 日线文件的 glob。**路径只在这里拼一次** —— SQL 读法与
+    "这些文件现在有多新"（`symbols._kind_map` 的缓存键要用）都走它。
+    """
+    pat = TDX_KLINE.get(kind, kind)
+    return '%s/raw/tdx/kline/%s.parquet' % (datalake(root), pat)
+
+
 def tdx_kline_sql(kind, root=None):
     """tdx 日线的 duckdb 读法。`kind` 是类别名或直接给 glob（`etf_*`）。"""
-    pat = TDX_KLINE.get(kind, kind)
-    return "read_parquet('%s/raw/tdx/kline/%s.parquet')" % (datalake(root), pat)
+    return "read_parquet('%s')" % tdx_kline_glob(kind, root)
 
 
 # 公司行动（除权除息 / 送转 / 配股）。由 `datalake/build/load_tdx_gbbq.py`

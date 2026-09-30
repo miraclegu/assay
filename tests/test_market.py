@@ -5503,6 +5503,171 @@ def t_micro_cache_key():
         rt._MICRO.update(old)
         shutil.rmtree(tmp, ignore_errors=True)
 
+@case('代码路由：ETF 与股票代码同形，入口自动判；指定了就不许回落', tag='fast')
+def t_code_route():
+    """用户 2026-09-30：「etf 和股票的代码既然完全一样，那应该在调用入口处
+    统一一下，比如做一个编码的路由表，自动根据编码识别是 etf 还是股票，
+    调用对应的数据。只要指定传入是 ETF 还是股票时，才只从对应的池里面获取数据。」
+
+    ★ 前提先量：两个池的代码**格式完全一样**（`510300.XSHG` 与
+      `600000.XSHG` 肉眼无法区分），而**交集是 0** —— 所以
+      「代码 -> 属于哪个池」是**唯一确定**的，自动路由不是启发式。
+    ★ 判类别按**快照里的 class**，不按代码前缀猜 —— 前缀规则是会变的
+      （科创 688、北交 8 开头都出现过），而快照是事实。
+    """
+    import duckdb
+    import os
+
+    from assay import symbols as S
+    from assay.srv import base as sbase
+    DL = sbase._datalake_dir()
+    A = "read_parquet('%s/mart/panel_daily/panel_*.parquet')" % DL
+    B = "read_parquet('%s/etf_lake/mart/panel_daily/panel_*.parquet')" % DL
+    if not os.path.isdir(os.path.join(DL, 'etf_lake', 'mart')):
+        return '跳过（没有 etf_lake）'
+
+    # ---- ① 前提：两个池的代码**不许重叠** ----
+    #   重叠了的话"代码唯一确定池"就不成立，整套路由的依据没了 ——
+    #   所以这是**前提**，不是附带检查。
+    c = duckdb.connect()
+    na, nb, both = c.execute(
+        'WITH a AS (SELECT DISTINCT jq_code FROM %s), '
+        '     b AS (SELECT DISTINCT jq_code FROM %s) '
+        'SELECT (SELECT count(*) FROM a), (SELECT count(*) FROM b),'
+        '       (SELECT count(*) FROM a JOIN b USING (jq_code))' % (A, B)).fetchone()
+    assert na > 1000 and nb > 500, '两个池的规模不对：股票 %d / ETF %d' % (na, nb)
+    assert both == 0, \
+        ('两个池有 %d 个代码重叠 —— "代码唯一确定池"这个前提不成立了，'
+         '自动路由会给出其中一个而看着完全正常' % both)
+
+    # ---- ①b 路由表要**盖得住整个 etf_lake 面板** ----
+    #   🔴 2026-09-30 实测：路由表原来只读 `symbol_name` 快照的 class，
+    #     而快照只收**当前在市**的标的 —— etf_lake 特意保留了已清盘的
+    #     1796 只（保留它们才没有幸存者偏差）。于是 3430 只里有 **1104 只**
+    #     被判成"股票"-> 去主面板找 -> 主面板一行都没有 ->「取不到日线」，
+    #     而它明明有完整历史。那 1104 只全部都在 tdx 的 etf 日线文件里。
+    #   ★ 现在的来源是「快照的 class ∪ 日线文件里实际有的 symbol」。
+    etf_codes = [r[0] for r in c.execute(
+        'SELECT DISTINCT jq_code FROM %s' % B).fetchall()]
+    _unk = [x for x in etf_codes if S.kind_of(x) is None]
+    assert not _unk, \
+        ('etf_lake 面板里有 %d 只路由判不出来（会被当成股票去主面板找，'
+         '而主面板一行都没有）：%s' % (len(_unk), _unk[:6]))
+    # 🔴 反向：扩充来源**不许把股票误判成 ETF/指数**
+    stk_codes = [r[0] for r in c.execute(
+        'SELECT DISTINCT jq_code FROM %s' % A).fetchall()]
+    _mis = [(x, S.kind_of(x)) for x in stk_codes if S.kind_of(x) is not None]
+    assert not _mis, \
+        '主面板里的股票被判成了 etf/index（%d 只）：%s' % (len(_mis), _mis[:6])
+
+    # ---- ② 自动路由：不传 kind 时必须自己判出来 ----
+    #   靠调用方每次记得传的都会漏（同「策略要自己声明数据源与费率」）
+    etf = c.execute('SELECT jq_code FROM %s ORDER BY jq_code LIMIT 1' % B).fetchone()[0]
+    stk = c.execute("SELECT jq_code FROM %s WHERE jq_code LIKE '6%%' "
+                    'ORDER BY jq_code LIMIT 1' % A).fetchone()[0]
+    assert S.route(etf) == 'etf', '%s 该自动判成 etf，实得 %r' % (etf, S.route(etf))
+    assert S.route(stk) is None, '%s 该自动判成股票（None），实得 %r' % (stk, S.route(stk))
+
+    # ---- ③ 显式指定对得上时放行 ----
+    assert S.route(etf, kind='etf') == 'etf'
+    assert S.route(stk, kind='stock') is None
+
+    # ---- ④ 🔴 指定了对不上就**报错，不回落** ----
+    #   回落等于"指定了却没生效"，拿到的是另一个池的数而看着完全正常
+    for code, kind in ((etf, 'stock'), (stk, 'etf'), (stk, 'index')):
+        try:
+            got = S.route(code, kind=kind)
+            raise AssertionError(
+                '指定 kind=%r 而 %s 不在那个池里，却没报错（返回 %r）—— '
+                '回落到另一个池的话拿到的是别的数，而它不报错' % (kind, code, got))
+        except S.KindMismatch as e:
+            assert kind in str(e) and code in str(e), \
+                '报错没说清是谁对不上：%s' % e
+
+    # ---- ⑤ 不认识的 kind 要当场拒，不是当成"没传" ----
+    try:
+        S.route(stk, kind='fund')
+        raise AssertionError('kind 写错了却当成没传 —— 那是静默忽略')
+    except S.KindMismatch as e:
+        assert 'stock/etf/index' in str(e), '没列出可选值：%s' % e
+
+    # ---- ⑥ HTTP 入口：六个都收 kind 且透传 ----
+    import ast
+    import io as _io
+    src = _io.open(os.path.join(REPO, 'assay', 'srv', 'stock.py'),
+                   encoding='utf-8').read()
+    body = '\n'.join(l for l in src.split('\n') if not l.strip().startswith('#'))
+    miss = [f for f in ('profile', 'kline', 'finance', 'events', 'peers', 'links')
+            if ('m.%s(' % f) in body and 'kind=_kind(q)' not in
+            body[body.index('m.%s(' % f):body.index('m.%s(' % f) + 400]]
+    assert not miss, '这几个入口没把 kind 透传下去：%s' % miss
+    #   🔴 `KindMismatch` 不是 `StockError`，接不住就会变成 HTTP 500 ——
+    #     而 500 指不到"你指定的池和这个代码对不上"。
+    #     ⚠ 这条原来写成「`'KindMismatch' in body`」—— 那是「字符串出现过」，
+    #       把 `except` 里那一项删掉、import 行还留着，它照样绿
+    #       （2026-09-30 变异 R6 就是这么漏网的）。改成**真调一次**。
+    from assay.srv import stock as _ss
+    _r = _ss.api_stock_profile({'code': etf, 'kind': 'stock'})
+    assert isinstance(_r, dict) and _r.get('error'), \
+        ('指定的池对不上时该返回 {"error": …}，实得 %r —— 没接住就会是 '
+         'HTTP 500，而 500 指不到真正的原因' % str(_r)[:120])
+    assert 'etf' in _r['error'], '报错没说清它实际是什么：%s' % _r['error']
+
+    # ---- ⑥b 两个来源**不许分歧** ----
+    #   快照说它是 index、日线把它放在 etf_* 里 —— 这种时候"谁优先"怎么定
+    #   都是猜。实测当前零分歧，所以把它钉住：真分歧了要报出来让人决定，
+    #   而不是让某一边悄悄赢（同「对账不一致要报出来、不改写」）。
+    import glob as _glob
+    from assay import paths as _P
+    _snapc = {}
+    _fp = S.name_snap(S.default_root(None))
+    if _fp:
+        _snapc = {r[0]: r[1] for r in c.execute(
+            "SELECT symbol, class FROM read_parquet('%s') "
+            "WHERE class IN ('index','etf')" % _fp).fetchall()}
+    _dis = []
+    for _k in S.KIND_FILE:
+        _g = _P.tdx_kline_glob(_k, None)
+        if not _glob.glob(_g):
+            continue
+        for (_sym,) in c.execute(
+                "SELECT DISTINCT symbol FROM read_parquet('%s')" % _g).fetchall():
+            if _sym in _snapc and _snapc[_sym] != _k:
+                _dis.append((_sym, _snapc[_sym], _k))
+    assert not _dis, \
+        ('快照与日线对这些 symbol 的类别有分歧（%d 个）—— "谁优先"怎么定'
+         '都是猜，先弄清哪边错了：%s' % (len(_dis), _dis[:6]))
+
+    # ---- ⑦ 「用了 kind 却没收」会当场 NameError，而它只在传了 kind 时才犯 ----
+    #   ⚠ 实测踩过：改签名时正则漏了 `finance(code, n=16, root=None)`，
+    #     函数体已经用上 `kind` 了。不传 kind 时一切正常，传了才炸。
+    import glob
+    bad = []
+    for f in glob.glob(os.path.join(REPO, 'assay', '**', '*.py'), recursive=True):
+        try:
+            t = ast.parse(_io.open(f, encoding='utf-8').read())
+        except SyntaxError:
+            continue
+        for n in ast.walk(t):
+            if not isinstance(n, ast.FunctionDef):
+                continue
+            names = {x.arg for x in n.args.args} | {x.arg for x in n.args.kwonlyargs}
+            reads = any(isinstance(x, ast.Name) and x.id == 'kind'
+                        and isinstance(x.ctx, ast.Load) for x in ast.walk(n))
+            writes = any(isinstance(x, ast.Name) and x.id == 'kind'
+                         and isinstance(x.ctx, ast.Store) for x in ast.walk(n))
+            if reads and 'kind' not in names and not writes:
+                bad.append('%s:%d %s' % (os.path.relpath(f, REPO), n.lineno, n.name))
+    assert not bad, \
+        ('这些函数体里用了 `kind` 却没在参数里收 —— 传 kind 时当场 NameError，'
+         '不传时一切正常：%s' % bad)
+    return ('两池代码 %d / %d 交集 0（前提成立）；路由表盖住 etf_lake 全部 '
+            '%d 只、且 %d 只股票 0 误判；不传 kind 自动判对；'
+            '指定对得上放行、对不上报错不回落（3 组）；kind 写错当场拒；'
+            '6 个 HTTP 入口都透传且 KindMismatch 接得住；'
+            '全仓无「用了 kind 却没收」的函数'
+            % (na, nb, len(etf_codes), len(stk_codes)))
+
 @case('主要指数常驻带子：每个页面都有 / 清单来自服务端 / 收盘不轮（playwright）',
       tag='web')
 def t_index_bar():

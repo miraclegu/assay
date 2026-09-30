@@ -26,6 +26,7 @@
     to_symbol(code)        聚宽/symbol -> tdx symbol        `513120.XSHG` -> `sh513120`
     to_jq(symbol)          反向                              `sh513120` -> `513120.XSHG`
     kind_of(code, root)    'etf' / 'index' / None（None = 当股票走原路）
+    route(code, root, kind) 同上，但可**显式指定**只要某一个池（不许回落）
     clean_name(s)          **唯一**一处名称清洗（U+FFFD + strip）
     names(codes, ...)      面板优先 + tdx 回落 + 统一清洗
     last_close / day_ohlc / daily_close / name_snap          （从 lv/tdx 原样搬）
@@ -257,19 +258,69 @@ def as_symbol(code):
 
 
 def _kind_map(root=None):
-    """{symbol: class}，只收 etf / index。按快照文件缓存。"""
-    fp = name_snap(default_root(root))
-    if not fp:
-        return {}
-    if _KMAP['at'] == fp and _KMAP['map'] is not None:
+    """{symbol: class}，只收 etf / index。
+
+    来源有**两处，快照优先、日线补齐**：
+
+        ① `symbol_name` 快照的 `class` —— 显式分类，最权威
+        ② `KIND_FILE` 那几张日线文件里**实际存在**的 symbol
+
+    🔴 **只用①会漏掉已停止交易的**（2026-09-30 实测）：快照只收当前在市的
+      标的，而 `etf_lake` 特意保留了已清盘的 1796 只（保留它们才没有幸存者
+      偏差）。实测 etf_lake 面板 3430 只里，只有 ①能认出 2326 只 ——
+      **1104 只被判成"股票"**，于是去主面板找、主面板一行都没有 ->
+      「取不到日线」，而它明明有完整历史。那 1104 只**全部**都在 ②里。
+    ★ 两张日线文件实测**零重叠**（etf 3974 / index 786 / 交集 0），
+      所以"②里出现在哪张表"就是它的类别，没有歧义。
+    ★ ①优先：快照是显式分类；②只补①没有的（快照说它是什么就是什么）。
+    ⚠ 缓存键要**同时**带上两处的状态 —— 只按快照缓存的话，新上市的 ETF
+      要等到快照换文件才认得出（而快照是随 tdx 每天换的，日线也是，
+      但两者不保证同一刻）。
+    """
+    import glob
+    root = default_root(root)
+    fp = name_snap(root)
+    pats = {k: _paths.tdx_kline_glob(k, root) for k in KIND_FILE}
+    key = (fp,) + tuple(
+        max([os.path.getmtime(f) for f in glob.glob(g)] or [0]) for g in pats.values())
+    if _KMAP['at'] == key and _KMAP['map'] is not None:
         return _KMAP['map']
     import duckdb
-    rows = duckdb.connect(':memory:').execute(
-        "SELECT symbol, class FROM read_parquet('%s') "
-        "WHERE class IN ('index','etf')" % fp).fetchall()
-    m = {r[0]: r[1] for r in rows}
-    _KMAP['at'], _KMAP['map'] = fp, m
+    con = duckdb.connect(':memory:')
+    m = {}
+    # ② 先铺日线（补齐已停止交易的），① 后盖（显式分类优先）
+    for kind, g in pats.items():
+        if not glob.glob(g):
+            continue
+        try:
+            for (sym,) in con.execute(
+                    "SELECT DISTINCT symbol FROM read_parquet('%s')" % g).fetchall():
+                if sym:
+                    m[sym] = kind
+        except Exception:                                   # noqa: BLE001
+            pass            # 读不动就当没有这一路 —— 未知不是缺，别拦住①
+    if fp:
+        try:
+            for sym, cls in con.execute(
+                    "SELECT symbol, class FROM read_parquet('%s') "
+                    "WHERE class IN ('index','etf')" % fp).fetchall():
+                m[sym] = cls
+        except Exception:                                   # noqa: BLE001
+            pass
+    _KMAP['at'], _KMAP['map'] = key, m
     return m
+
+
+# 显式指定时能填的值。`'stock'` 对应自动路由里的 `None`（走股票面板）。
+#   ★ 对外用 `'stock'` 而不是 `None`：URL 上 `kind=` 空着与"没传"分不开，
+#     而这两件事完全不同（一个是"只要股票"，一个是"自动判"）。
+KIND_ANY = None
+KIND_STOCK = 'stock'
+KINDS_EXPLICIT = (KIND_STOCK,) + ALT_KINDS      # stock / etf / index
+
+
+class KindMismatch(Exception):
+    """显式指定了池，而这个代码不在那个池里。"""
 
 
 def kind_of(code, root=None):
@@ -280,6 +331,41 @@ def kind_of(code, root=None):
     """
     sym = as_symbol(code)
     return _kind_map(root).get(sym) if sym else None
+
+
+def route(code, root=None, kind=None):
+    """**代码 -> 走哪个池** 的唯一入口。返回 `'etf'` / `'index'` / `None`。
+
+    ETF 与股票的代码**长得一模一样**（`510300.XSHG` vs `600000.XSHG`），
+    所以调用方无法从字面判断。实测两个池的代码**交集是 0**
+    （股票 5546 只 / ETF 3430 只），因此"代码 -> 属于哪个池"是**唯一确定**的
+    —— 自动路由站得住，不是启发式。
+
+    `kind`：
+        `None`（默认）自动路由 —— 按快照里的 class 判
+        `'stock'`     只当股票；这个代码要是 ETF/指数就**抛 KindMismatch**
+        `'etf'` / `'index'`  只从那个池取；不在那个池里同样抛
+
+    🔴 **显式指定了就不许回落。** 回落等于"指定了却没生效"，而它**不报错**
+      —— 拿到的是另一个池的数，看着完全正常。这正是本项目最怕的那类
+      （同「未知下游错误码必须返回失败 + 告警，禁止映射为成功」）。
+    ★ 反过来，不指定时**必须**自动判 —— 靠调用方每次记得传的都会漏
+      （同「策略要自己声明数据源与费率」那条）。
+    """
+    auto = kind_of(code, root)
+    if kind in (None, ''):
+        return auto
+    if kind not in KINDS_EXPLICIT:
+        raise KindMismatch('kind 只能是 %s（或不传 = 自动判），收到 %r'
+                           % ('/'.join(KINDS_EXPLICIT), kind))
+    want = None if kind == KIND_STOCK else kind
+    if want != auto:
+        raise KindMismatch(
+            '指定了只要「%s」，但 %s 实际是「%s」—— 没有回落到另一个池，'
+            '因为那样拿到的是别的池的数而看着完全正常。'
+            '不确定就别传 kind（默认自动判）。'
+            % (kind, code, auto or KIND_STOCK))
+    return auto
 
 
 def resolve(code, root=None):

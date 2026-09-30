@@ -46,10 +46,10 @@ _ALT_PROFILE_NULL = [c for c in _PROFILE_COLS if c not in (
     'preclose', 'change_pct', 'amplitude', 'volume_shares', 'amount',
     'hfq_factor')]
 
-def profile(code, root=None):
+def profile(code, root=None, kind=None):
     """最新一天的全部关键字段 + 几个区间统计。"""
     c = con()
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt:
         return _alt_profile(alt[0], alt[1], c, root)
     jc = norm_code(code)
@@ -142,7 +142,7 @@ def _alt_name(sym, root=None):
     return _SYM.alt_name(sym, _lake(root))
 
 # ---------------------------------------------------------------- K 线
-def kline(code, n=250, fq=None, end=None, off=0, root=None):
+def kline(code, n=250, fq=None, end=None, off=0, root=None, kind=None):
     """日 K。`fq`：'bfq' 不复权 / 'qfq' 前复权 / 'hfq' 后复权。
 
     **不给 `fq` = 让服务端按标的类别定**：ETF 前复权、其余不复权（见下）。
@@ -181,7 +181,7 @@ def kline(code, n=250, fq=None, end=None, off=0, root=None):
     off = max(0, int(off or 0))
     c = con()
     # ETF / 指数不在面板里 —— 换一张**同形**的表，下面一个字都不用改。
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt:
         jc, p = alt[1], alt_panel(alt[0], root)
     else:
@@ -295,7 +295,7 @@ def _ma(bars, w):
         b[k] = round(s / w, 3) if i >= w - 1 else None
 
 # ---------------------------------------------------------------- 财务时序
-def finance(code, n=16, root=None):
+def finance(code, n=16, root=None, kind=None):
     """按报告期的财务时序，一个报告期一行。
 
     ★ 同时给 `pub_date` —— 报告期 ≠ 公告日，而"用报告期当可见日"
@@ -306,7 +306,7 @@ def finance(code, n=16, root=None):
       （财报重述改了某个值）就会给出两行同报告期的记录，页面上看着像
       重复渲染。取最新那行还顺带拿到**重述后**的值。
     """
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt:
         return _na(alt, {'rows': []})
     jc = norm_code(code)

@@ -16,9 +16,14 @@ def _root(q):
     🔴 **只接受 run_id，绝不接受路径。** `_dl_root` 里的 `_dir()` 会把 run_id
       过 `RUN_ID_RE` 并要求它在归档索引里 —— 那是唯一的路径来源，杜绝目录穿越。
       直接收一个 `root=` 查询参数等于给了任意文件读。
-    ★ 存在的理由：ETF 回测跑在**平行的 `etf_lake`** 上，那些代码在主面板里
-      一行都没有（实测 `510300.XSHG` 直接抛 StockError）。不带 lake 的话，
-      从 ETF 回测页点开浮层就是一片空白 —— 而"点了没反应"是最难查的那种坏。
+    ★ 存在的理由：ETF 回测跑在**平行的 `etf_lake`** 上，而那次回测的口径
+      （成分、复权、费率）只有它自己的 lake 说得准。
+    ⚠ 这里原来写着「实测 `510300.XSHG` 直接抛 StockError」—— **那句已经
+      过期**：2026-09-21 起 `symbols.kind_of` 会按快照里的 class 自动把
+      ETF/指数路由到 `KIND_FILE` 那几张同形表，主 lake 上照样读得到
+      （实测 `profile/kline/links/sectors/peers/events` 六个入口全通）。
+      留着会让人以为"不带 run 就一定坏"，而那是**代码和注释打架**
+      —— 以站得住的那个为准。
     """
     rid = q.get('run') or ''
     if not rid:
@@ -28,11 +33,27 @@ def _root(q):
 
 
 
+def _kind(q):
+    """`?kind=stock|etf|index` —— **显式指定只从那个池取**，不传就自动判。
+
+    🔴 ETF 与股票的代码长得一模一样（`510300.XSHG` vs `600000.XSHG`），
+      所以默认**必须**自动路由 —— 靠调用方每次记得传的都会漏。
+    🔴 而指定了就**不许回落**：回落等于"指定了却没生效"，拿到的是另一个池
+      的数，**看着完全正常**。对不上时 `symbols.route` 抛 `KindMismatch`，
+      由 `_stock_err` 变成 `{'error': …}` 说清楚。
+    """
+    return (q.get('kind') or '').strip().lower() or None
+
+
 def _stock_err(fn):
     m = _stock()
+    #   🔴 `KindMismatch` 不是 `StockError`（`symbols` 在 `stk` 之下，继承会
+    #     绕成环），接不住的话它会变成 HTTP 500 —— 而 500 指不到"你指定的
+    #     池和这个代码对不上"这件事，正是这条要说清的内容。
+    from assay import symbols as _SYM
     try:
         return fn()
-    except m.StockError as e:
+    except (m.StockError, _SYM.KindMismatch) as e:
         return {'error': str(e)}
 
 
@@ -49,7 +70,7 @@ def api_stock_profile(q):
     """GET /api/stock/profile?code= —— 最新一天的全部关键字段 + 区间涨幅。"""
     m = _stock()
     return _stock_err(lambda: dict(m.profile(q.get('code') or '',
-                                             root=_root(q)),
+                                             root=_root(q), kind=_kind(q)),
                                    units=m.FIELD_UNIT))
 
 
@@ -66,7 +87,7 @@ def api_stock_kline(q):
                                       fq=q.get('fq'),
                                       end=q.get('end'),
                                       off=q.get('off') or 0,
-                                      root=_root(q)))
+                                      root=_root(q), kind=_kind(q)))
 
 
 
@@ -74,7 +95,7 @@ def api_stock_finance(q):
     """GET /api/stock/finance?code=&n= —— 按报告期的财务时序。"""
     m = _stock()
     return _stock_err(lambda: m.finance(q.get('code') or '',
-                                        n=q.get('n') or 16))
+                                        n=q.get('n') or 16, kind=_kind(q)))
 
 
 
@@ -109,21 +130,23 @@ def api_indicator_defs(q):
 def api_stock_events(q):
     """GET /api/stock/events?code=&since= —— 除权/财报/解禁/股本变动。"""
     m = _stock()
-    return _stock_err(lambda: m.events(q.get('code') or '', q.get('since')))
+    return _stock_err(lambda: m.events(q.get('code') or '', q.get('since'),
+                                       kind=_kind(q)))
 
 
 
 def api_stock_peers(q):
     """GET /api/stock/peers?code=&n= —— 同申万一级行业。"""
     m = _stock()
-    return _stock_err(lambda: m.peers(q.get('code') or '', n=q.get('n') or 20))
+    return _stock_err(lambda: m.peers(q.get('code') or '', n=q.get('n') or 20,
+                                      kind=_kind(q)))
 
 
 
 def api_stock_links(q):
     """GET /api/stock/links?code= —— 实盘持仓 / 自选 / 回测选过它。"""
     m = _stock()
-    return _stock_err(lambda: m.links(q.get('code') or ''))
+    return _stock_err(lambda: m.links(q.get('code') or '', kind=_kind(q)))
 
 
 

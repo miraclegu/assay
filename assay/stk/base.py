@@ -32,8 +32,12 @@ def _snap_path(root=None):
     """`symbol_name` 快照里 snap_date 最大的那一份。**只转发**给正本。"""
     return _SYM.name_snap(_lake(root))
 
-def alt_kind(code, root=None):
+def alt_kind(code, root=None, kind=None):
     """这个 code 是 ETF / 指数吗？是就返回 `(kind, symbol)`，否则 None。
+
+    `kind`：**显式指定只要某一个池**（`'stock'` / `'etf'` / `'index'`），
+      不传就是自动判。指定了而对不上时 `symbols.route` 会抛 `KindMismatch`
+      —— **不回落**（回落等于"指定了却没生效"，而它不报错）。
 
     🔴 **聚宽口径也要认**（2026-09-21 修）。原来这里写的是"只认 tdx symbol
       形状（`sh510880`）；别的写法一律当股票走原路" —— 而**实盘账本与自选
@@ -45,7 +49,7 @@ def alt_kind(code, root=None):
       （科创 688、北交 8 开头都出现过），而快照是事实。
     ★ 判据与取名统一在 `assay/symbols.py`，本函数只转发（别在这里再写一份）。
     """
-    k = _SYM.kind_of(code, root)
+    k = _SYM.route(code, root, kind)
     return (k, _SYM.as_symbol(code)) if k in _SYM.KIND_FILE else None
 
 # ---------------------------------------------------------------- 代码归一

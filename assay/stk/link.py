@@ -14,7 +14,7 @@ from .base import StockError, _na, alt_kind, con, norm_code
 
 
 # ========================= 与实盘 / 回测联动 =========================
-def links(code, root=None):
+def links(code, root=None, kind=None):
     """这只票和我的实盘、回测有什么关系。
 
     ★ 数据全是现成的，只是原来没连起来：看个股时最想知道的两件事就是
@@ -24,7 +24,7 @@ def links(code, root=None):
     # 🔴 **只有指数**标不适用：ETF 是**能买的**（项目里就有 ETF 轮动策略），
     #   实盘持有过、回测选过它都讲得通，这一块对它有意义。
     #   指数买不了，查"我持有多少上证指数"本身就没有意义。
-    alt = alt_kind(code, root)
+    alt = alt_kind(code, root, kind)
     if alt and alt[0] == 'index':
         return _na(alt, {'positions': [], 'runs': [], 'watch': None})
     jc = norm_code(code)
